@@ -1059,7 +1059,9 @@ def test_c3_readback_failure_records_completed_false(vol, capsys):
     assert rc == 9
     assert "FLY_ANALYZER_READBACK_FAILED" in capsys.readouterr().out
     receipt = json.loads(next((vol / "runtime" / frna.RECEIPTS_DIRNAME).glob("*/receipt-complete.json")).read_text())
-    assert receipt["completed"] is False and receipt["fly_analyzer_readback"]["leftover_count"] == 6
+    rb = receipt["fly_analyzer_readback"]
+    assert receipt["completed"] is False and rb["leftover_file_count"] == 6
+    assert rb["leftover_count"] == 6 + rb["leftover_kinds"]["dir"] and rb["leftover_kinds"]["dir"] >= 1
     assert frna.completed_receipt(vol / "runtime" / frna.RECEIPTS_DIRNAME, receipt["plan_sha256"]) is None
 
 
@@ -1077,3 +1079,77 @@ def test_c3_fly_scope_rules_change_the_plan_sha(vol, monkeypatch):
     before = _plan(vol)["plan_sha256"]
     monkeypatch.setattr(frna, "FLY_ANALYZER_MIRROR_DIRS", ("analyzer_mirror",))
     assert _plan(vol)["plan_sha256"] != before
+
+
+# ---- HM #850 R2 C3b: read-back fails on a symlinked scope root or ANY leftover entry; '..' never in scope
+
+
+def test_c3b_readback_ok_only_when_the_scopes_are_truly_empty(vol):
+    for d in frna.FLY_ANALYZER_MIRROR_DIRS:
+        (vol / d).mkdir(parents=True, exist_ok=True)
+    rb = frna.fly_analyzer_readback(vol)
+    assert rb["ok"] is True and rb["leftover_count"] == 0 and rb["problems"] == [] and rb["pointer_present"] == []
+    assert frna.fly_analyzer_readback(vol / "absent")["ok"] is True  # no scopes at all is also clean
+
+
+def test_c3b_readback_fails_on_a_leftover_empty_directory(vol):
+    (vol / "analyzer_generations" / "generation-x" / "reports").mkdir(parents=True)
+    rb = frna.fly_analyzer_readback(vol)
+    assert rb["ok"] is False and rb["leftover_file_count"] == 0
+    assert {e["rel"] for e in rb["leftover_entries"]} == {"@data/analyzer_generations/generation-x",
+                                                          "@data/analyzer_generations/generation-x/reports"}
+    assert rb["leftover_kinds"] == {"dir": 2}
+
+
+def test_c3b_readback_fails_on_leftover_symlinks_without_following_them(vol, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside-c3b")
+    _w(outside / "precious.json", "{}")
+    (vol / "analyzer_mirror").mkdir(parents=True)
+    os.symlink(outside, vol / "analyzer_mirror" / "dir_link")
+    os.symlink(outside / "gone.json", vol / "analyzer_mirror" / "dangling.json")
+    rb = frna.fly_analyzer_readback(vol)
+    assert rb["ok"] is False and rb["leftover_kinds"] == {"symlink": 2}
+    assert "@data/analyzer_mirror/dir_link/precious.json" not in {e["rel"] for e in rb["leftover_entries"]}
+    assert (outside / "precious.json").exists()
+
+
+def test_c3b_readback_fails_on_a_leftover_fifo(vol):
+    (vol / "analyzer_mirror").mkdir(parents=True)
+    os.mkfifo(vol / "analyzer_mirror" / "pipe")
+    rb = frna.fly_analyzer_readback(vol)
+    assert rb["ok"] is False and rb["leftover_kinds"] == {"other": 1}
+
+
+def test_c3b_readback_fails_on_a_symlinked_scope_root_and_execute_records_completed_false(vol, tmp_path_factory,
+                                                                                          capsys):
+    outside = tmp_path_factory.mktemp("outside-root")
+    os.symlink(outside, vol / "analyzer_generations")  # even pointing at an EMPTY dir: never trusted
+    rb = frna.fly_analyzer_readback(vol)
+    assert rb["ok"] is False and rb["problems"] == ["SYMLINKED_SCOPE_ROOT:@data/analyzer_generations"]
+    assert rb["leftover_entries"] == [{"rel": "@data/analyzer_generations", "kind": "symlink"}]
+    rc = frna.run_cli(_good(vol), fetch=lambda url: dict(HEALTH), env=ENV, unlink=os.unlink)
+    assert rc == 9
+    assert "FLY_ANALYZER_READBACK_FAILED" in capsys.readouterr().out
+    receipt = json.loads(next((vol / "runtime" / frna.RECEIPTS_DIRNAME).glob("*/receipt-complete.json")).read_text())
+    assert receipt["completed"] is False
+    assert os.path.islink(vol / "analyzer_generations") and outside.exists()
+
+
+def test_c3b_readback_fails_on_a_non_directory_scope_root_and_a_dangling_pointer(vol, tmp_path):
+    _w(vol / "analyzer_mirror", "not a dir")
+    os.symlink(tmp_path / "nope.json", vol / "analyzer_current.json")
+    rb = frna.fly_analyzer_readback(vol)
+    assert rb["ok"] is False
+    assert rb["problems"] == ["SCOPE_ROOT_NOT_A_DIRECTORY:@data/analyzer_mirror"]
+    assert rb["pointer_present"] == ["analyzer_current.json"]
+
+
+def test_c3b_classify_fly_scope_rejects_traversal_and_empty_segments():
+    for rel in ("@data/analyzer_mirror/../runtime/state.json", "@data/analyzer_generations/../../etc/passwd",
+                "@data/analyzer_mirror/a/../../segment-store/x.jsonl", "@data/../analyzer_current.json",
+                "@data/analyzer_mirror//x.json", "@data/analyzer_mirror/./x.json", "@data/analyzer_mirror\\..\\x",
+                "@data/.."):
+        assert frna.classify_fly_scope(rel) == (frna.UNCLASSIFIED, "FLY_SCOPE_PATH_TRAVERSAL"), rel
+        assert frna.classify_candidate(rel)[0] != frna.DELETE, rel
+    assert frna.classify_fly_scope("@data/analyzer_mirror/x.json") == (frna.DELETE, "FLY_ANALYZER_MIRROR")
+    assert frna.classify_fly_scope("@data/analyzer_current.json") == (frna.DELETE, "FLY_ANALYZER_CURRENT_POINTER")

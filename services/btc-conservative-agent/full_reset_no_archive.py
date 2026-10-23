@@ -56,6 +56,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -254,6 +255,8 @@ def classify(relpath: str) -> tuple[str, str]:
 def classify_fly_scope(relpath: str) -> tuple[str, str]:
     """``@data/<rel>`` paths (relative to the data root, outside runtime/): only the Fly analyzer mirror scopes."""
     parts = relpath.replace("\\", "/")[len(FLY_SCOPE_PREFIX):].split("/")
+    if any(p in ("", ".", "..") for p in parts):  # HM #850 R2 C3b: no traversal / empty segments, ever
+        return UNCLASSIFIED, "FLY_SCOPE_PATH_TRAVERSAL"
     if len(parts) >= 2 and parts[0] == "analyzer_mirror":
         return DELETE, "FLY_ANALYZER_MIRROR"
     if len(parts) >= 2 and parts[0] == "analyzer_generations":
@@ -289,13 +292,65 @@ def _fly_scope_files(data_root: Path) -> Iterable[tuple[str, str, os.stat_result
             yield str(path), f"{FLY_SCOPE_PREFIX}{f}", os.lstat(path)
 
 
+def _scandir_kind(entry: os.DirEntry) -> str:
+    if entry.is_symlink():
+        return "symlink"
+    if entry.is_dir(follow_symlinks=False):
+        return "dir"
+    if entry.is_file(follow_symlinks=False):
+        return "file"
+    return "other"
+
+
+def _fly_scope_leftovers(data_root: Path) -> tuple[list[dict], list[str]]:
+    """HM #850 R2 C3b: every entry of ANY kind (file, dir, symlink, fifo, ...) still inside the Fly analyzer scopes,
+    found with lexists / scandir without ever following a symlink. A symlinked (or non-directory) scope root is
+    itself a leftover. Returns (entries, problems) where problems are hard failures (symlink root, unreadable dir)."""
+    entries: list[dict] = []
+    problems: list[str] = []
+    for d in FLY_ANALYZER_MIRROR_DIRS:
+        root = data_root / d
+        rel_root = f"{FLY_SCOPE_PREFIX}{d}"
+        if not os.path.lexists(root):
+            continue
+        if os.path.islink(root):
+            entries.append({"rel": rel_root, "kind": "symlink"})
+            problems.append(f"SYMLINKED_SCOPE_ROOT:{rel_root}")
+            continue
+        if not stat.S_ISDIR(os.lstat(root).st_mode):
+            entries.append({"rel": rel_root, "kind": "other"})
+            problems.append(f"SCOPE_ROOT_NOT_A_DIRECTORY:{rel_root}")
+            continue
+        stack = [(str(root), rel_root)]
+        while stack:
+            path, rel = stack.pop()
+            try:
+                with os.scandir(path) as it:
+                    children = sorted(it, key=lambda e: e.name)
+            except OSError as exc:
+                problems.append(f"UNREADABLE:{rel}:{type(exc).__name__}")
+                continue
+            for e in children:
+                kind = _scandir_kind(e)
+                child_rel = f"{rel}/{e.name}"
+                entries.append({"rel": child_rel, "kind": kind})
+                if kind == "dir":
+                    stack.append((e.path, child_rel))
+    return entries, problems
+
+
 def fly_analyzer_readback(data_root: Path | str) -> dict:
-    """Post-execute read-back: no file may remain in the mirror / generations dirs and the pointer must be gone."""
+    """Post-execute read-back (HM #850 R2 C3b): ok only when the mirror / generations scope roots are real (not
+    symlinked) directories with NO entry of any kind left inside (files, dirs, symlinks, ...) and the pointer is gone
+    (``lexists``: a dangling pointer symlink also fails)."""
     root = Path(data_root)
-    left = [rel for _p, rel, _st in _fly_scope_files(root)]
+    entries, problems = _fly_scope_leftovers(root)
+    files = [e["rel"] for e in entries if e["kind"] == "file"]
     pointer = [f for f in FLY_ANALYZER_POINTER_FILES if os.path.lexists(root / f)]
-    return {"ok": not left and not pointer, "leftover_files": left[:50], "leftover_count": len(left),
-            "pointer_present": pointer, "scopes": fly_scope_paths(root)}
+    return {"ok": not entries and not problems and not pointer, "leftover_entries": entries[:50],
+            "leftover_count": len(entries), "leftover_files": files[:50], "leftover_file_count": len(files),
+            "leftover_kinds": {k: sum(1 for e in entries if e["kind"] == k) for k in sorted({e["kind"] for e in entries})},
+            "problems": problems, "pointer_present": pointer, "scopes": fly_scope_paths(root)}
 
 
 def _prune_empty_fly_dirs(data_root: Path) -> None:
@@ -705,7 +760,8 @@ def execute(plan: dict, *, receipts_dir: Path | str, git_rev: str, reason: str, 
     if changed:
         raise FullResetRefused(f"LIVE_FLAGS_CHANGED: {changed} (receipt {rdir / COMPLETE_NAME} records completed=false)")
     if not readback["ok"]:
-        raise FullResetRefused(f"FLY_ANALYZER_READBACK_FAILED: {readback['leftover_count']} file(s) left, pointer "
+        raise FullResetRefused(f"FLY_ANALYZER_READBACK_FAILED: {readback['leftover_count']} entr(ies) left "
+                               f"({readback['leftover_kinds']}), problems {readback['problems']}, pointer "
                                f"{readback['pointer_present']} (receipt {rdir / COMPLETE_NAME} records completed=false)")
     return complete
 
