@@ -8,6 +8,10 @@ import numpy as np
 from research_v3_contract import validate_policy_spec
 
 
+class ExitFillUnavailable(Exception):
+    """A book-walk path could not price an exit on a complete book row (never priced any other way)."""
+
+
 def prepare_replay_price_path(
     prices: Iterable[Mapping[str, Any]], *, fill_ts: float,
 ) -> dict[str, Any]:
@@ -316,6 +320,8 @@ def _replay_exit(path: PreparedReplayArrays, plan: ReplayPlan, atr_pct_at_fill: 
     """Exit index, reason, realised margin, partial count, remaining fraction, floor."""
     n = path.n
     cur, mfe = path.cur, path.mfe
+    # Book-walk paths trigger on ``cur``/``neg_mae`` but realise on the book fill (``exit_cur``).
+    exit_cur = cur if getattr(path, "exit_cur", None) is None else path.exit_cur
     atr_margin_pct = float(atr_pct_at_fill) * float(leverage)
     # Precedence order of the scalar replay; a later rule wins only strictly
     # earlier. Every rule except the floor is the first crossing of a running
@@ -363,10 +369,10 @@ def _replay_exit(path: PreparedReplayArrays, plan: ReplayPlan, atr_pct_at_fill: 
         if remaining_fraction <= 0:
             continue
         close_fraction = min(fraction, remaining_fraction)
-        realized_margin_weighted += close_fraction * float(cur[hit])
+        realized_margin_weighted += close_fraction * float(exit_cur[hit])
         remaining_fraction -= close_fraction
         partials_taken += 1
-    realized_margin_weighted += remaining_fraction * float(cur[exit_index])
+    realized_margin_weighted += remaining_fraction * float(exit_cur[exit_index])
     segment = int(np.searchsorted(path.seg_start, exit_index, side="right")) - 1
     active_floor = float(active[segment]) if armed[segment] else None
     return exit_index, exit_reason, realized_margin_weighted, partials_taken, remaining_fraction, active_floor
@@ -380,8 +386,14 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
         return {"status": "CENSORED", "exit_reason": None, "net_pnl_usd": None,
                 "profit_retention_ratio": None, "profit_giveback_pct": None,
                 "underwater_observation_ratio": None}
-    exit_index, exit_reason, realized, _partials, _remaining, _floor = _replay_exit(
-        path, plan, atr_pct_at_fill, leverage)
+    try:
+        exit_index, exit_reason, realized, _partials, _remaining, _floor = _replay_exit(
+            path, plan, atr_pct_at_fill, leverage)
+        exit_margin = float((path.cur if getattr(path, "exit_cur", None) is None else path.exit_cur)[exit_index])
+    except ExitFillUnavailable as exc:
+        return {"status": "DATA_ERROR", "reasons": [str(exc)], "exit_reason": None, "net_pnl_usd": None,
+                "profit_retention_ratio": None, "profit_giveback_pct": None,
+                "underwater_observation_ratio": None}
     terminal_mfe = float(path.mfe[exit_index])
     gross_usd = margin_usd * realized / 100.0
     return {
@@ -389,7 +401,7 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
         "exit_reason": exit_reason,
         "net_pnl_usd": round(gross_usd - 0.0 - 0.0, 8),
         "profit_retention_ratio": round(max(0.0, realized) / terminal_mfe, 8) if terminal_mfe > 0 else None,
-        "profit_giveback_pct": round(max(0.0, terminal_mfe - float(path.cur[exit_index])), 8),
+        "profit_giveback_pct": round(max(0.0, terminal_mfe - exit_margin), 8),
         "underwater_observation_ratio": round(int(path.underwater[exit_index]) / n, 8),
     }
 
