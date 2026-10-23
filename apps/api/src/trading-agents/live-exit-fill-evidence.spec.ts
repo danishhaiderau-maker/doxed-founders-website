@@ -21,13 +21,16 @@ const ENTRY = 60_000;
 // The relay's EXIT payload shapes per path (signal-subscriber-execution.service.ts):
 const CASES: Record<string, { pl: Record<string, unknown>; source: string; price: number | null }> = {
   // normal close with authenticated close-order trades (resolveNormalCloseExchangeEvidence ok)
-  exchange_fill: { pl: { exit_price: 60_120, exit_exchange_fill_price: 60_110, pnl_source: 'exchange_fill' }, source: 'exchange_fill', price: 60_110 },
+  exchange_fill: { pl: { exit_price: 60_120, exit_exchange_fill_price: 60_110, pnl_source: 'exchange_fill', exit_fill_status: 'REAL_FILL' }, source: 'exchange_fill', price: 60_110 },
   // resident stop fired, its own order trades read at the exact lot qty
-  stop_fill: { pl: { exit_price: 59_790, pnl_source: 'bitfinex_order_trades', exit_reason: 'EXCHANGE_STOP', exchange_exit_fill_ids: ['9'], exchange_exit_filled_qty: 0.0004 }, source: 'stop_fill', price: 59_790 },
+  stop_fill: { pl: { exit_price: 59_790, pnl_source: 'bitfinex_order_trades', exit_reason: 'EXCHANGE_STOP', exchange_exit_fill_ids: ['9'], exchange_exit_filled_qty: 0.0004, exit_fill_status: 'REAL_FILL' }, source: 'stop_fill', price: 59_790 },
+  // HM R6 B2: the same fill-looking fields WITHOUT the shared helper's REAL_FILL stamp (caller-supplied) => not a fill
+  forged_exchange_fill: { pl: { exit_price: 60_120, exit_exchange_fill_price: 60_110, pnl_source: 'exchange_fill' }, source: 'mark', price: null },
+  forged_stop_fill: { pl: { exit_price: 59_790, pnl_source: 'bitfinex_order_trades', exit_reason: 'EXCHANGE_STOP', exchange_exit_fill_ids: ['9'], exchange_exit_filled_qty: 0.0004 }, source: 'mark', price: null },
   // resident stop fired but no stop order id / its trades unreadable => mark-priced MANUAL_OR_EXCHANGE_CLOSE
   stop_fired_no_fill_read: { pl: { exit_price: 59_812.5, pnl_source: 'reconstructed', exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE' }, source: 'mark', price: null },
   // EXCHANGE_STOP claimed but the fill ids are missing (no order id) => not a real fill
-  stop_no_order_id: { pl: { exit_price: 59_790, pnl_source: 'bitfinex_order_trades', exit_reason: 'EXCHANGE_STOP' }, source: 'mark', price: null },
+  stop_no_order_id: { pl: { exit_price: 59_790, pnl_source: 'bitfinex_order_trades', exit_reason: 'EXCHANGE_STOP', exit_fill_status: 'REAL_FILL' }, source: 'mark', price: null },
   // fill read failed or refused by the shared read budget => evidence {} => quote/mark price only
   fill_read_failed_or_budget_refused: { pl: { exit_price: 60_130, pnl_source: 'reconstructed', exit_reason: 'TP' }, source: 'mark', price: null },
   // partial close: qty mismatch => evidence {} (never a fill price)

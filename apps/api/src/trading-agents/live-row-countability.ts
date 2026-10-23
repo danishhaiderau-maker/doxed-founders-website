@@ -129,6 +129,17 @@ const finitePos = (v: unknown): number | null => {
 export function liveExitFillEvidence(exitPayload: unknown, entryFillPrice?: unknown): LiveExitFillEvidence {
   const pl = exitPayload && typeof exitPayload === 'object' ? (exitPayload as Record<string, unknown>) : {};
   const reported = finitePos(pl.exit_price);
+  // HM R6 B2 / RK 10:26: only an exit priced by the shared real-fill helper (exit_fill_status REAL_FILL) is a fill; the
+  // reporter (closeReport) and countability never forward / count anything else, whatever price fields it carries.
+  if (pl.exit_fill_status !== EXIT_FILL_REAL) {
+    const stamped = String(pl.exit_price_source ?? '');
+    if (reported == null) {
+      const source: LiveExitPriceSource = stamped === 'mark' || stamped === 'entry_fallback' ? stamped : 'none';
+      return { price: null, source, reportedPrice: null };
+    }
+    const entry0 = finitePos(entryFillPrice ?? pl.entry_exchange_fill_price ?? pl.fill_price);
+    return { price: null, source: entry0 != null && Math.abs(entry0 - reported) < 1e-9 ? 'entry_fallback' : 'mark', reportedPrice: reported };
+  }
   const fill = finitePos(pl.exit_exchange_fill_price);
   if (fill != null) return { price: fill, source: 'exchange_fill', reportedPrice: reported ?? fill };
   const stopIds = Array.isArray(pl.exchange_exit_fill_ids) ? pl.exchange_exit_fill_ids : [];
@@ -432,4 +443,36 @@ export function liveRowCountabilityWithLegs(
   // HM R4 B1 / RK 08:03 (R17): a closed row counts only with a REAL Bitfinex exit fill (shared liveExitFillEvidence).
   if (exit && exitFill !== undefined) return liveRowExitFillCountability(exitFill);
   return COUNTABLE;
+}
+
+/**
+ * HM R6 B2 / RK 10:26 (binding): THE exit price a terminal event may store, on EVERY route. Only the shared real-fill
+ * helper (liveOrderExitFill: exit_fill_status REAL_FILL + exit_fill_vwap == exit_price + the exit order ids) prices an
+ * EXIT. Anything else (a caller-supplied exit_price, a mark, an entry fallback, a forged partial stamp) is discarded:
+ * exit_price null and the payload stamped EXIT_FILL_UNREADABLE (EXPIRED only when it carried a price, i.e. a close
+ * claimed without a fill read). The caller's number is never stored, not even for audit.
+ */
+export const EXIT_PRICE_NOT_HELPER_PRICED = 'NOT_HELPER_PRICED';
+export function terminalExitPriceFromHelper(
+  event: string,
+  body: Record<string, unknown>,
+): { exitPrice: number | null; payload: Record<string, unknown> } {
+  const vwap = finitePos(body.exit_fill_vwap);
+  const ids = Array.isArray(body.exit_fill_order_ids) ? body.exit_fill_order_ids.filter((x) => finitePos(x) != null) : [];
+  const real = body.exit_fill_status === EXIT_FILL_REAL && vwap != null && finitePos(body.exit_price) === vwap && ids.length > 0;
+  if (real) return { exitPrice: vwap, payload: body };
+  const claimed = body.exit_price != null || body.exit_exchange_fill_price != null || body.exit_fill_vwap != null
+    || body.exit_fill_status === EXIT_FILL_REAL;
+  const payload: Record<string, unknown> = { ...body };
+  for (const k of ['exit_price', 'exit_exchange_fill_price', 'exit_fill_vwap', 'exchange_exit_fill_ids', 'exchange_exit_filled_qty']) {
+    if (k in payload) payload[k] = null;
+  }
+  if (event === 'EXIT' || claimed) {
+    payload.exit_price = null;
+    payload.exit_fill_status = EXIT_FILL_UNREADABLE;
+    payload.exit_fill_unreadable_reason = typeof body.exit_fill_unreadable_reason === 'string' && body.exit_fill_status === EXIT_FILL_UNREADABLE
+      ? body.exit_fill_unreadable_reason : EXIT_PRICE_NOT_HELPER_PRICED;
+    if (payload.pnl_source === 'bitfinex_order_trades') payload.pnl_source = null;
+  }
+  return { exitPrice: null, payload };
 }

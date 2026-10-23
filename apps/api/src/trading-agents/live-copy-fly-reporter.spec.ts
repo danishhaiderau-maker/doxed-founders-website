@@ -156,7 +156,7 @@ test('website receive uses the earliest receive, not the envelope value overwrit
 });
 
 test('POSITION_CLOSED reports the authenticated exchange close fill, not the quote side', () => {
-  const r = build([...events, ev('x1', 'EXIT', 9_000, { exit_price: 83084, exit_exchange_fill_price: 83071, showcase_exit_price: 83071, close_exchange_order_id: 246232327680 })]);
+  const r = build([...events, ev('x1', 'EXIT', 9_000, { exit_price: 83084, exit_exchange_fill_price: 83071, exit_fill_status: 'REAL_FILL', showcase_exit_price: 83071, close_exchange_order_id: 246232327680 })]);
   const close = r.find((x) => x.type === 'POSITION_CLOSED') as unknown as { close: { price: number; paper_exit_price: number } };
   assert.equal(close.close.price, 83071);
   assert.equal(close.close.paper_exit_price, 83071);

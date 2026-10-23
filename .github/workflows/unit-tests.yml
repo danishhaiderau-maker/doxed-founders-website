@@ -49,7 +49,8 @@ jobs:
             src/trading-agents/live-exit-fill-evidence.spec.ts \
             src/trading-agents/live-boot-reconcile.spec.ts \
             src/trading-agents/live-exit-fill-c1.spec.ts \
-            src/trading-agents/live-report-contract.spec.ts
+            src/trading-agents/live-report-contract.spec.ts \
+            src/trading-agents/live-exit-b2.spec.ts
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

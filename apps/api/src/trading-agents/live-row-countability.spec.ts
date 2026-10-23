@@ -126,7 +126,7 @@ test('HM 01:43 item 3: the export row fails closed when the exit Fly-send legs a
       events: [placed, { eventType: 'FILLED', payload: { fill_price: 100_000, fill_price_source: 'exchange_trades' }, createdAt: now },
         { eventType: 'STOP_LOSS_ARMED', payload: {}, createdAt: now },
         { eventType: 'EXIT', payload: { exit_reason: 'TP', exit_trigger_ts: 49.9, fly_send_started_at: iso(50.01),
-        platform_received_at: iso(50.08), close_exchange_ack_at: iso(50.4), exit_exchange_fill_price: 100_100 }, createdAt: now }],
+        platform_received_at: iso(50.08), close_exchange_ack_at: iso(50.4), exit_exchange_fill_price: 100_100, exit_fill_status: 'REAL_FILL' }, createdAt: now }],
     },
     cycle,
   });
