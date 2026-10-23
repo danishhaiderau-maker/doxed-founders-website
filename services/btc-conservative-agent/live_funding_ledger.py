@@ -259,7 +259,6 @@ def read_settlement_rate(t: float, get=_get_public) -> dict:
 # disagreement (no further proposals until RK/HM clear it with ``sign-pin reject --ref``).
 POSITION_FUNDING_SIGN = None   # unproven; the effective sign is only ever an ACTIVE persisted pin (+1 / -1)
 SIGNED_MATCH_TOL_USD = 1e-8
-SIGN_PIN_ENV = "LIVE_FUNDING_SIGN_PIN_PATH"
 SIGN_PIN_FILENAME = "live_funding_sign_pin.json"
 SIGN_PIN_STATUSES = ("NONE", "PROPOSED", "ACTIVE", "DISAGREEMENT", "UNREADABLE")
 SIGN_PIN_DISAGREEMENT = "SIGN_PIN_DISAGREEMENT"
@@ -271,21 +270,24 @@ class SignPinError(Exception):
     """An HM admin step on the sign pin was refused (wrong state / missing confirmation ref)."""
 
 
-def sign_pin_path() -> str:
-    """The persisted pin state. Lives on the data volume root (BOT_DATA_DIR, the same root as platform_health_state.json),
-    NOT under runtime/ or research/: research / fresh-collection resets delete only ``all_research_wipe_paths`` and the
-    epoch quarantine, never this file - a reset must not drop an RK+HM-confirmed sign. Override: LIVE_FUNDING_SIGN_PIN_PATH."""
-    raw = (os.getenv(SIGN_PIN_ENV) or "").strip()
-    if raw:
-        return os.path.abspath(raw)
-    root = (os.getenv("BOT_DATA_DIR") or "").strip() or os.getcwd()
+def sign_pin_path() -> str | None:
+    """THE one pin path, shared by the HM CLI and the job (HM R5 nit: no override env, no --path, no job argument).
+    Lives on the data volume root (BOT_DATA_DIR, the same root as platform_health_state.json), NOT under runtime/ or
+    research/: research / fresh-collection resets delete only ``all_research_wipe_paths`` and the epoch quarantine,
+    never this file - a reset must not drop an RK+HM-confirmed sign. BOT_DATA_DIR unset -> None: fail closed (no cwd
+    fallback; the state reads UNREADABLE and nothing can be written or activated)."""
+    root = (os.getenv("BOT_DATA_DIR") or "").strip()
+    if not root:
+        return None
     return os.path.abspath(os.path.join(root, SIGN_PIN_FILENAME))
 
 
-def load_sign_pin(path: str | None = None) -> dict:
-    """The pin state (a local file read, never network). Missing -> NONE; corrupt / unknown -> UNREADABLE (no active
-    sign and no new proposal: an unreadable state is never overwritten automatically)."""
-    path = path or sign_pin_path()
+def load_sign_pin() -> dict:
+    """The pin state (a local file read, never network). Missing -> NONE; corrupt / unknown / no BOT_DATA_DIR ->
+    UNREADABLE (no active sign and no new proposal: an unreadable state is never overwritten automatically)."""
+    path = sign_pin_path()
+    if path is None:
+        return {"status": "UNREADABLE", "reason": "BOT_DATA_DIR_UNSET"}
     try:
         with open(path, encoding="utf-8") as fh:
             st = json.load(fh)
@@ -298,8 +300,10 @@ def load_sign_pin(path: str | None = None) -> dict:
     return st
 
 
-def _write_sign_pin(state: dict, path: str | None = None) -> None:
-    path = path or sign_pin_path()
+def _write_sign_pin(state: dict) -> None:
+    path = sign_pin_path()
+    if path is None:
+        raise SignPinError("BOT_DATA_DIR_UNSET")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -347,12 +351,12 @@ def position_funding_sign(pin=None):
     return POSITION_FUNDING_SIGN
 
 
-def activate_sign_pin(rk_ref: str, hm_ref: str, path: str | None = None, now: float | None = None) -> dict:
+def activate_sign_pin(rk_ref: str, hm_ref: str, now: float | None = None) -> dict:
     """The explicit RK+HM step: PROPOSED -> ACTIVE, recording both confirmation refs. The only way a sign is set."""
     rk, hm = str(rk_ref or "").strip(), str(hm_ref or "").strip()
     if not rk or not hm:
         raise SignPinError("RK_AND_HM_CONFIRMATION_REFS_REQUIRED")
-    st = load_sign_pin(path)
+    st = load_sign_pin()
     if st.get("status") != "PROPOSED":
         raise SignPinError(f"NOT_PROPOSED:{st.get('status')}")
     bad = sign_pin_evidence_problem(st)      # HM R5 G3: the evidence is re-checked here, never trusted from the file
@@ -360,24 +364,24 @@ def activate_sign_pin(rk_ref: str, hm_ref: str, path: str | None = None, now: fl
         raise SignPinError(f"PIN_EVIDENCE_INVALID:{bad}")
     st.update(status="ACTIVE", confirmed_by_rk_ref=rk, confirmed_by_hm_ref=hm,
               confirmed_at_ts=time.time() if now is None else now)
-    _write_sign_pin(st, path)
+    _write_sign_pin(st)
     log.warning("[LIVE FUNDING SIGN PIN ACTIVE] position_funding_sign=%s trade_id=%s pid=%s ledger_id=%s rk_ref=%s hm_ref=%s",
                 st.get("position_funding_sign"), st.get("trade_id"), st.get("pid"), st.get("ledger_id"), rk, hm)
     return st
 
 
-def reject_sign_pin(hm_ref: str, path: str | None = None, now: float | None = None) -> dict:
+def reject_sign_pin(hm_ref: str, now: float | None = None) -> dict:
     """RK/HM admin step: clear a PROPOSED / ACTIVE / DISAGREEMENT state (kept in ``history``) so a new proposal can run."""
     ref = str(hm_ref or "").strip()
     if not ref:
         raise SignPinError("HM_CONFIRMATION_REF_REQUIRED")
-    st = load_sign_pin(path)
+    st = load_sign_pin()
     if st.get("status") in ("NONE", "UNREADABLE"):
         raise SignPinError(f"NOTHING_TO_REJECT:{st.get('status')}")
     hist = list(st.pop("history", []) or [])
     hist.append(dict(st, rejected_by_ref=ref, rejected_at_ts=time.time() if now is None else now))
     new = {"status": "NONE", "history": hist}
-    _write_sign_pin(new, path)
+    _write_sign_pin(new)
     return new
 
 
@@ -801,8 +805,7 @@ class FundingReadbackJob:
     MAX_PENDING = 5000
 
     def __init__(self, creds_status_fn: Callable = credential_status, post=_post, clock=time.time,
-                 budget: RateBudget | None = None, chains_fn: Callable | None = None, get=_get_public,
-                 sign_pin_path: str | None = None):
+                 budget: RateBudget | None = None, chains_fn: Callable | None = None, get=_get_public):
         self._creds_status_fn, self._raw_post, self._clock, self._raw_get = creds_status_fn, post, clock, get
         self._budget_rl = budget or GLOBAL_BUDGET
         self.chains_fn = chains_fn
@@ -813,7 +816,6 @@ class FundingReadbackJob:
         self._backoff_until, self._backoff_n = 0.0, 0
         self._thread, self._owner, self._stop = None, None, threading.Event()
         self.requests_made = 0
-        self._sign_pin_path = sign_pin_path      # None -> sign_pin_path() (resolved when the owner thread loads it)
         self._pin: dict = {"status": "NONE"}     # in-memory copy; the owner thread reloads the file every tick
 
     # ---- GET side: pure cache reads, never any I/O -------------------------------------------------------------
@@ -852,8 +854,8 @@ class FundingReadbackJob:
     def sign_pin_state(self) -> dict:
         return dict(self._pin)
 
-    def _pin_file(self) -> str:
-        return self._sign_pin_path or sign_pin_path()
+    def _pin_file(self):
+        return sign_pin_path()     # HM R5 nit: the same single resolver the CLI uses
 
     def _stale_locked(self, hit, now) -> bool:
         if hit is None:
@@ -937,7 +939,7 @@ class FundingReadbackJob:
         now = self._clock()
         if now < self._backoff_until:
             return
-        self._pin = load_sign_pin(self._pin_file())   # local file only; picks up an HM confirm / reject between ticks
+        self._pin = load_sign_pin()   # local file only; picks up an HM confirm / reject between ticks
         try:
             if not self._startup(now):
                 return      # HM R4 F3: no chain polling at all while the key gate is closed
@@ -1058,7 +1060,7 @@ class FundingReadbackJob:
                      check.get("trade_id"), check.get("missing"))
             return
         path = self._pin_file()
-        cur = load_sign_pin(path)
+        cur = load_sign_pin()
         if cur.get("status") != "NONE":      # never overwrite an existing / HM-edited / unreadable state
             self._pin = cur
             return
@@ -1085,16 +1087,16 @@ class FundingReadbackJob:
                      "history": cur.get("history") or []}
             tag = "[LIVE FUNDING SIGN_PIN_DISAGREEMENT] nothing pinned; HM review"
         try:
-            _write_sign_pin(state, path)
-        except OSError as exc:
+            _write_sign_pin(state)
+        except (OSError, SignPinError) as exc:
             log.warning("[LIVE FUNDING SIGN PIN] state write failed (%s); nothing pinned", type(exc).__name__)
             return
         self._pin = state
+        # HM R5 nit: no wallet balance in the log line (it stays in the pin file for the RK/HM record only)
         log.warning("%s position_funding_sign=%s trade_id=%s pid=%s ledger_id=%s pf_raw=%s ledger_amount_raw=%s "
-                    "ledger_balance=%s rate=%s side=%s disagree=%s path=%s", tag, state.get("position_funding_sign"),
+                    "rate=%s side=%s disagree=%s path=%s", tag, state.get("position_funding_sign"),
                     keep["trade_id"], keep["pid"], keep["ledger_id"], keep["position_funding_raw"],
-                    keep["ledger_amount_raw"], keep["ledger_balance"], keep["rate"], keep["side"],
-                    check.get("disagree"), path)
+                    keep["ledger_amount_raw"], keep["rate"], keep["side"], check.get("disagree"), path)
 
     def _finish(self, key, work, error):
         rates = None if error else (work.get("rates") or {})
@@ -1127,19 +1129,18 @@ def main(argv=None) -> int:
     sp.add_argument("--ref", default="")
     sp.add_argument("--rk-ref", default="")
     sp.add_argument("--hm-ref", default="")
-    sp.add_argument("--path", default=None)
     args = ap.parse_args(argv)
     try:
         if args.action == "show":
-            st = load_sign_pin(args.path)
+            st = load_sign_pin()
         elif args.action == "confirm":
-            st = activate_sign_pin(args.rk_ref, args.hm_ref, path=args.path)
+            st = activate_sign_pin(args.rk_ref, args.hm_ref)
         else:
-            st = reject_sign_pin(args.ref, path=args.path)
+            st = reject_sign_pin(args.ref)
     except SignPinError as exc:
-        print(json.dumps({"error": str(exc)}))
+        print(json.dumps({"error": str(exc), "path": sign_pin_path()}))
         return 2
-    print(json.dumps({"path": args.path or sign_pin_path(), "state": st}, indent=2, sort_keys=True, default=str))
+    print(json.dumps({"path": sign_pin_path(), "state": st}, indent=2, sort_keys=True, default=str))
     return 0
 
 

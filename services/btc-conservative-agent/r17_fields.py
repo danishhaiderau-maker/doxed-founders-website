@@ -143,7 +143,8 @@ LIVE_FUNDING_CONTRACT = {
                                      "the pin sign, ledger_id and pid present, sign an int in {-1, +1} (bool / JSON true "
                                      "rejected); anything else is null (unproven) / refused",
     "funding_sign_pin_status": "NONE | PROPOSED | ACTIVE | DISAGREEMENT | UNREADABLE (persisted live_funding_sign_pin.json "
-                               "on the BOT_DATA_DIR root, outside every reset path; LIVE_FUNDING_SIGN_PIN_PATH overrides)",
+                               "on the BOT_DATA_DIR root, outside every reset path; the ONE path for the CLI and the job, no override; "
+                               "BOT_DATA_DIR unset -> UNREADABLE, fail closed, no cwd fallback)",
     "funding_sign_pin_refs": "{rk, hm} confirmation refs of the ACTIVE pin, else null",
     "funding_sign_pin_flag": "SIGN_PIN_DISAGREEMENT when checks (a)/(b)/(c) disagreed (nothing pinned, row UNVERIFIED), "
                              "else null",

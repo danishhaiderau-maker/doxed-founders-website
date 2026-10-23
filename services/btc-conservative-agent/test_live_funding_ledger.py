@@ -29,9 +29,8 @@ ACTIVE = dict(EVIDENCE, status="ACTIVE", position_funding_sign=1, confirmed_by_r
 @pytest.fixture(autouse=True)
 def _pin_file(tmp_path, monkeypatch):
     """Every test gets its own (empty -> NONE) persisted pin state; never the real data volume."""
-    path = str(tmp_path / "live_funding_sign_pin.json")
-    monkeypatch.setenv(lfl.SIGN_PIN_ENV, path)
-    return path
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))      # HM R5 nit: the ONE resolver, BOT_DATA_DIR root only
+    return str(tmp_path / "live_funding_sign_pin.json")
 
 
 def _activate():
@@ -888,23 +887,25 @@ def test_F1_job_proposes_never_activates_and_cli_needs_rk_and_hm_refs(_pin_file,
     job = _job(post=_pin_post(), get=lambda p, q: gets.append(q) or _dhist(Decimal("0.0001")))
     out = _read(job, PIN_CHAIN)
     assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN" and out["funding_verified"] is False
-    st = lfl.load_sign_pin(_pin_file)
+    st = lfl.load_sign_pin()
     assert st["status"] == "PROPOSED" and st["position_funding_sign"] == 1 and st["pid"] == 5
     assert st["ledger_id"] == 1 and st["position_funding_raw"] == -0.025 and st["ledger_amount_raw"] == -0.025
     assert st["ledger_balance"] == 249.975 and st["ledger_prev_balance"] == 250.0 and st["side"] == "LONG"
     assert st["rate"] == "0.0001" and st["trade_id"] == "c1" and st["settlement_ts"] == [S]
     assert "[LIVE FUNDING SIGN PIN PROPOSED]" in caplog.text and len(gets) == 1
+    line = [r.getMessage() for r in caplog.records if "SIGN PIN PROPOSED" in r.getMessage()][0]
+    assert "balance" not in line and "249.975" not in line and "250.0" not in line   # HM R5 nit: no wallet balance logged
     for _ in range(3):                                            # never auto-activated
         job._cache.clear()
         job.submit(PIN_CHAIN)
         job.run_once()
-    assert lfl.load_sign_pin(_pin_file)["status"] == "PROPOSED"
+    assert lfl.load_sign_pin()["status"] == "PROPOSED"
     assert job.lookup(PIN_CHAIN, None)["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"
     assert lfl.main(["sign-pin", "confirm", "--rk-ref", "RK 04:12"]) == 2                  # HM ref missing
     assert lfl.main(["sign-pin", "confirm", "--hm-ref", "HM R5"]) == 2                     # RK ref missing
-    assert lfl.load_sign_pin(_pin_file)["status"] == "PROPOSED"
+    assert lfl.load_sign_pin()["status"] == "PROPOSED"
     assert lfl.main(["sign-pin", "confirm", "--rk-ref", "RK 04:12", "--hm-ref", "HM R5"]) == 0
-    st = lfl.load_sign_pin(_pin_file)
+    st = lfl.load_sign_pin()
     assert st["status"] == "ACTIVE" and st["confirmed_by_rk_ref"] == "RK 04:12" and st["confirmed_by_hm_ref"] == "HM R5"
     job._cache.clear()
     out = _read(job, PIN_CHAIN)
@@ -912,7 +913,7 @@ def test_F1_job_proposes_never_activates_and_cli_needs_rk_and_hm_refs(_pin_file,
     with pytest.raises(lfl.SignPinError):
         lfl.activate_sign_pin("x", "y")                                                     # only PROPOSED activates
     assert lfl.main(["sign-pin", "reject", "--ref", "HM undo"]) == 0
-    assert lfl.load_sign_pin(_pin_file)["status"] == "NONE" and lfl.load_sign_pin(_pin_file)["history"]
+    assert lfl.load_sign_pin()["status"] == "NONE" and lfl.load_sign_pin()["history"]
 
 
 def test_F1_job_disagreement_pins_nothing_and_flags(_pin_file, caplog):
@@ -921,7 +922,7 @@ def test_F1_job_disagreement_pins_nothing_and_flags(_pin_file, caplog):
     out = _read(job, PIN_CHAIN)
     assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"
     assert out["funding_sign_pin_flag"] == lfl.SIGN_PIN_DISAGREEMENT
-    st = lfl.load_sign_pin(_pin_file)
+    st = lfl.load_sign_pin()
     assert st["status"] == "DISAGREEMENT" and st["position_funding_sign"] is None
     assert st["disagreements"][0]["disagree"] == ["a"] and "SIGN_PIN_DISAGREEMENT" in caplog.text
     with pytest.raises(lfl.SignPinError):
@@ -946,12 +947,11 @@ def test_F1_job_multi_entry_row_spends_no_pin_read(_pin_file):
     ch = dict(PIN_CHAIN, exit_fill_record_at_ts=S2 + 60)
     out = _read(_job(post=post, get=_no_get, clock=lambda: S2 + 500), ch)
     assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"
-    assert lfl.load_sign_pin(_pin_file)["status"] == "NONE"
+    assert lfl.load_sign_pin()["status"] == "NONE"
     assert [b for p, b in sent if p == lfl.LEDGER_PATH and "category" not in b] == []
 
 
 def test_F1_pin_state_lives_outside_reset_paths(monkeypatch, tmp_path):
-    monkeypatch.delenv(lfl.SIGN_PIN_ENV, raising=False)
     monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
     assert lfl.sign_pin_path() == str(tmp_path / "live_funding_sign_pin.json")
     (tmp_path / "live_funding_sign_pin.json").write_text("{not json")
@@ -1210,3 +1210,41 @@ def test_G3_active_pin_with_refs_but_no_evidence_is_unproven(_pin_file):
         fh.write(json.dumps({"status": "ACTIVE", "position_funding_sign": 1, "confirmed_by_rk_ref": "RK",
                              "confirmed_by_hm_ref": "HM"}))
     assert lfl.position_funding_sign(lfl.load_sign_pin()) is None
+
+
+# ---- HM R5 nits: one pin path for CLI + job, BOT_DATA_DIR required (fail closed, no cwd fallback) --------------------
+def test_R5_no_bot_data_dir_fails_closed_without_cwd_fallback(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("BOT_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / lfl.SIGN_PIN_FILENAME).write_text(json.dumps(ACTIVE))      # a pin in cwd is never picked up
+    assert lfl.sign_pin_path() is None
+    st = lfl.load_sign_pin()
+    assert st["status"] == "UNREADABLE" and st["reason"] == "BOT_DATA_DIR_UNSET" and lfl.position_funding_sign(st) is None
+    with pytest.raises(lfl.SignPinError, match="BOT_DATA_DIR_UNSET"):
+        lfl._write_sign_pin({"status": "NONE"})
+    with pytest.raises(lfl.SignPinError):
+        lfl.activate_sign_pin("RK", "HM")
+    assert lfl.main(["sign-pin", "confirm", "--rk-ref", "RK", "--hm-ref", "HM"]) == 2
+    assert json.loads(capsys.readouterr().out.strip())["path"] is None
+    job = _job(post=_pin_post(), get=lambda p, q: _dhist(Decimal("0.0001")))
+    job.submit(PIN_CHAIN)
+    job.run_once()
+    assert job.sign_pin_state()["status"] == "UNREADABLE"                  # no proposal, no write anywhere
+    assert sorted(x.name for x in tmp_path.iterdir()) == [lfl.SIGN_PIN_FILENAME]
+    assert json.loads((tmp_path / lfl.SIGN_PIN_FILENAME).read_text()) == json.loads(json.dumps(ACTIVE))
+
+
+def test_R5_cli_and_job_resolve_the_one_pin_path(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path / "vol"))
+    monkeypatch.setenv("LIVE_FUNDING_SIGN_PIN_PATH", str(tmp_path / "elsewhere.json"))   # the removed override: ignored
+    want = str(tmp_path / "vol" / lfl.SIGN_PIN_FILENAME)
+    assert lfl.sign_pin_path() == want and _job()._pin_file() == want
+    assert not hasattr(lfl, "SIGN_PIN_ENV")
+    assert lfl.main(["sign-pin", "show"]) == 0
+    assert json.loads(capsys.readouterr().out)["path"] == want
+    with pytest.raises(SystemExit):
+        lfl.main(["sign-pin", "show", "--path", str(tmp_path / "x.json")])  # no per-call override either
+    job = _job(post=_pin_post(), get=lambda p, q: _dhist(Decimal("0.0001")))
+    _read(job, PIN_CHAIN)                                                    # the job proposes into that one file
+    assert lfl.load_sign_pin()["status"] == "PROPOSED" and (tmp_path / "vol" / lfl.SIGN_PIN_FILENAME).exists()
+    assert not (tmp_path / "elsewhere.json").exists()
