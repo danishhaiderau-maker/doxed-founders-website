@@ -1,6 +1,6 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
-import { liveRowCountabilityWithLegs, type LiveLegStamps } from './live-row-countability';
+import { liveRowCountabilityWithLegs, type LiveExitSide, type LiveLegStamps } from './live-row-countability';
 
 type IntentEnvelope = {
   direction?: string;
@@ -130,15 +130,17 @@ const recOf = (v: unknown): Record<string, unknown> =>
 
 /**
  * HM 01:43 item 3: the measured per-leg stamps a Railway live row has. Entry: Fly signal + intent from the signed
- * approval, Railway receive from the envelope, exchange ack from the order/fill payload. Exit (closed rows not
- * closed by an exchange-resident stop): exit trigger, Fly send and Railway receive must be on the EXIT payload;
- * today they are not, so closed rows fail closed (LIVE_LEG_MISSING:exit.*) until they are carried (R17).
+ * approval, Railway receive from the envelope, exchange ack from the order/fill payload. Exit, bot-sent (RK (1)):
+ * exit trigger, Fly send and Railway receive are carried on the EXIT payload by railwayExitLegStamps (signed
+ * POSITION_CLOSED exit_trigger_ts, HMAC-verified X-Fly-Send-Started-At, platform receipt); exit,
+ * EXCHANGE_RESIDENT: trade-print trigger -> Bitfinex fill record (residentExitLegStamps). Any missing stamp fails
+ * closed (LIVE_LEG_MISSING:<side>.*) (R17).
  */
 export function liveLegStamps(
   intentEnvelope: unknown,
   events: Array<{ eventType: string; payload: unknown }>,
   closed: boolean,
-): [LiveLegStamps, LiveLegStamps | null] {
+): [LiveLegStamps, LiveLegStamps | null, LiveExitSide] {
   const ctx = recOf(recOf(intentEnvelope).context);
   const approval = recOf(ctx.fly_live_approval);
   const pl = (type: string) => recOf(events.find((e) => e.eventType === type)?.payload);
@@ -151,7 +153,14 @@ export function liveLegStamps(
     railway_received_at_ts: secOf(ctx.platform_received_at),
     exchange_ack_at_ts: secOf(placed.entry_exchange_ack_at ?? placed.exchange_ack_at ?? filled.entry_exchange_ack_at),
   };
-  if (!closed || String(exitPl.exit_order_class ?? '') === 'EXCHANGE_RESIDENT') return [entry, null];
+  if (!closed) return [entry, null, 'exit'];
+  if (String(exitPl.exit_order_class ?? '') === 'EXCHANGE_RESIDENT') {
+    // RK (1): no send leg; trigger = real trade print, fill = Bitfinex's own fill record.
+    return [entry, {
+      exit_trigger_print_at_ts: secOf(exitPl.exit_trigger_print_at),
+      exit_fill_record_at_ts: secOf(exitPl.exit_fill_record_at ?? exitPl.exchange_exit_fill_first_at),
+    }, 'exit_resident'];
+  }
   const exit: LiveLegStamps = {
     exit_signal_at_ts: secOf(exitPl.exit_trigger_ts ?? exitPl.exit_signal_at),
     fly_send_started_at_ts: secOf(exitPl.fly_send_started_at),
@@ -159,7 +168,7 @@ export function liveLegStamps(
     exit_ack_at_ts: secOf(exitPl.close_exchange_ack_at),
     exit_confirmed_at_ts: secOf(exitPl.close_confirmed_at),
   };
-  return [entry, exit];
+  return [entry, exit, 'exit'];
 }
 
 export function mapParticipantToExportRow(input: {

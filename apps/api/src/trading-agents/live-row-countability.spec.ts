@@ -55,7 +55,9 @@ test('B4: website live book rows carry non_countable for force-flattened closes'
   assert.equal(by.ff?.nonCountable, true);
   assert.equal(by.ff?.nonCountableReason, 'FORCED_CLOSE:DEPLOY_FORCE_FLAT');
   assert.equal(by.mt?.nonCountable, true);
-  assert.equal(by.tp?.nonCountable, false);
+  // RK (1)/R17: an unforced close with no measured legs is non-countable (rk1-live-exit-stamps.spec.ts covers full legs).
+  assert.equal(by.tp?.nonCountable, true);
+  assert.equal(by.tp?.nonCountableReason, 'LIVE_LEG_MISSING:entry.signal');
 });
 
 test('B4: unlinked ledger rows are stamped (countable unless forced)', () => {

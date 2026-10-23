@@ -64,7 +64,15 @@ export const LIVE_LEGS = {
     ['relay_receive', ['railway_received_at_ts']],
     ['ack_fill', ['exit_ack_at_ts', 'exit_confirmed_at_ts']],
   ],
+  // RK (1) 24 Oct: exchange-resident stop exit: no Fly send leg; trigger = the real trade print that crossed the
+  // stop, fill = Bitfinex's own fill record. Both required (missing -> non-countable).
+  exit_resident: [
+    ['signal', ['exit_trigger_print_at_ts']],
+    ['ack_fill', ['exit_fill_record_at_ts']],
+  ],
 } as const;
+
+export type LiveExitSide = 'exit' | 'exit_resident';
 
 export const LIVE_LEG_CLOCK_SLACK_S = 0.05;
 
@@ -75,11 +83,15 @@ export type LiveLegCheck = LiveRowCountability & { legReasons: string[] };
 
 const posNum = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
 
-/** `exit` null = no exit legs required (row still open, or closed by an exchange-resident stop: no Fly send). */
-export function liveRowLegCheck(entry: LiveLegStamps, exit: LiveLegStamps | null): LiveLegCheck {
+/** `exit` null = no exit legs required (row still open). `exitSide` picks the bot-sent or exchange-resident legs. */
+export function liveRowLegCheck(
+  entry: LiveLegStamps,
+  exit: LiveLegStamps | null,
+  exitSide: LiveExitSide = 'exit',
+): LiveLegCheck {
   const reasons: string[] = [];
-  const sides: Array<['entry' | 'exit', LiveLegStamps]> = [['entry', entry ?? {}]];
-  if (exit) sides.push(['exit', exit]);
+  const sides: Array<['entry' | LiveExitSide, LiveLegStamps]> = [['entry', entry ?? {}]];
+  if (exit) sides.push([exitSide, exit]);
   for (const [side, src] of sides) {
     const spec: ReadonlyArray<readonly [string, ReadonlyArray<string>]> = LIVE_LEGS[side];
     const stamps = spec.map(([name, keys]) => {
@@ -101,9 +113,10 @@ export function liveRowCountabilityWithLegs(
   reasons: Array<string | null | undefined>,
   entry: LiveLegStamps,
   exit: LiveLegStamps | null,
+  exitSide: LiveExitSide = 'exit',
 ): LiveRowCountability {
   const forced = liveRowCountability(...reasons);
   if (forced.nonCountable) return forced;
-  const legs = liveRowLegCheck(entry, exit);
+  const legs = liveRowLegCheck(entry, exit, exitSide);
   return { nonCountable: legs.nonCountable, nonCountableReason: legs.nonCountableReason };
 }

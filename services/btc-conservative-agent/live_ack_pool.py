@@ -106,6 +106,9 @@ LIVE_LEGS = {
               ("relay_receive", ("railway_received_at_ts",)), ("ack_fill", ("exchange_ack_at_ts", "fill_at_ts"))),
     "exit": (("signal", ("exit_signal_at_ts",)), ("fly_send", ("fly_send_started_at_ts",)),
              ("relay_receive", ("railway_received_at_ts",)), ("ack_fill", ("exit_ack_at_ts", "exit_confirmed_at_ts"))),
+    # RK (1) 24 Oct: an exchange-resident stop exit has no Fly send leg: trigger = the real trade print that crossed
+    # the stop, fill = Bitfinex's own fill record. Both are required (missing -> non-countable).
+    "exit_resident": (("signal", ("exit_trigger_print_at_ts",)), ("ack_fill", ("exit_fill_record_at_ts",))),
 }
 
 
@@ -115,13 +118,15 @@ def live_legs(tl: Optional[Mapping[str, Any]], fly_exit_send: Optional[Mapping[s
     ack/fill, for the entry and (when closed) the exit. Entry stamps come from the live chain; exit Fly send and
     Railway receive come from this bot's relay-outbox ack row (``fly_exit_send``) and the exit ack from the chain.
     A missing stamp or a leg whose end precedes its start (beyond CLOCK_SLACK_S) makes the row non-countable.
-    An exchange-resident stop exit has no Fly send leg (the exchange fills it): its exit legs are not required."""
+    An exchange-resident stop exit has no Fly send leg (RK (1)): its exit legs are trade-print trigger -> Bitfinex
+    fill record (LIVE_LEGS["exit_resident"]), both required."""
     tl, fs = tl or {}, fly_exit_send if isinstance(fly_exit_send, Mapping) else {}
     out: dict = {"legs": {}, "non_countable": False, "non_countable_reasons": None}
     reasons = []
-    sides = ["entry"] + (["exit"] if closed and not exit_resident else [])
+    sides = ["entry"] + ([("exit_resident" if exit_resident else "exit")] if closed else [])
     for side in sides:
-        src = tl if side == "entry" else {**{k: fs.get(k) for k in ("fly_send_started_at_ts", "railway_received_at_ts")},
+        src = tl if side == "entry" else {k: tl.get(k) for k in ("exit_trigger_print_at_ts", "exit_fill_record_at_ts")} \
+            if side == "exit_resident" else {**{k: fs.get(k) for k in ("fly_send_started_at_ts", "railway_received_at_ts")},
                                           "exit_signal_at_ts": fs.get("exit_signal_at_ts") or tl.get("exit_signal_at_ts"),
                                           "exit_ack_at_ts": tl.get("exit_ack_at_ts"),
                                           "exit_confirmed_at_ts": tl.get("exit_confirmed_at_ts")}

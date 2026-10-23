@@ -71,7 +71,7 @@ from raw_generation_cleanup_owner import RawGenerationCleanupOwner
 from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
-from relay_event_outbox import RelayEventOutbox
+from relay_event_outbox import RelayEventOutbox, fly_send_stamp_headers as _fly_send_stamp_headers
 import relay_stack_mode as _relay_stack_mode
 import live_copy_control as _live_copy
 import thread_health as _thread_health
@@ -11311,6 +11311,21 @@ def _commit_marketable_relay_payload(payload: dict) -> bool:
         return True
 
 
+def _relay_close_exit_stamps(pos, exit_reason) -> dict:
+    """RK (1) 24 Oct: the exit trigger instant (epoch s, as measured on this row) and its order class for the signed
+    POSITION_CLOSED body. Additive only: an unmeasured trigger is omitted, never invented."""
+    import order_model as _om
+    pos = pos if isinstance(pos, dict) else {}
+    out = {"exit_order_class": str(pos.get("exit_order_class") or _om.exit_order_class(exit_reason))}
+    try:
+        trig = float(pos.get("exit_trigger_ts") or 0)
+    except (TypeError, ValueError):
+        trig = 0.0
+    if trig > 0 and math.isfinite(trig):
+        out["exit_trigger_ts"] = round(trig, 6)
+    return out
+
+
 def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     """POST one already-durable event and remove it only on an exact DB ACK."""
     if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
@@ -11337,6 +11352,9 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
         headers["X-Bot-Control-Secret"] = legacy_secret
     started = time.perf_counter()
     send_wall = time.time()  # HM 01:43 blocker 1: Fly send stamp (wall, Fly chrony clock) of THIS POST
+    # RK (1): the same stamp travels to Railway in HMAC-signed headers (not the body: retries stay hash-identical).
+    headers.update(_fly_send_stamp_headers(
+        webhook_secret, str(payload.get("event_id") or event_id), send_wall))
     try:
         response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
         response.raise_for_status()
@@ -33072,6 +33090,9 @@ def close_position(pos: dict, exit_reason: str):
             "exit_reason": exit_reason, "direction": pos.get("dir"),
             "exit_price": price,
             "research_lane": pos.get("research_lane") or (master or {}).get("research_lane"),
+            # RK (1): measured exit trigger + order class on the signed POSITION_CLOSED (static, so retries stay
+            # hash-identical); absent when unmeasured -> the live row stays non-countable.
+            **_relay_close_exit_stamps(pos, exit_reason),
         },
         target_mutator=target_mutator, live_mutator=live_mutator,
         canonical_lock=position_close_lock,

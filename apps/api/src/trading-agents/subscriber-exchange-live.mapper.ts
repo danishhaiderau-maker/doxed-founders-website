@@ -6,7 +6,8 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
-import { liveRowCountability } from './live-row-countability';
+import { liveRowCountability, liveRowCountabilityWithLegs } from './live-row-countability';
+import { liveLegStamps } from './live-trade-export.mapper';
 
 type IntentEnvelope = {
   direction?: 'LONG' | 'SHORT';
@@ -45,6 +46,8 @@ export type SubscriberCycleRow = {
   exchangeFillAt?: Date | null;
   exchangeExitAt?: Date | null;
   negativeEvidence?: string | null;
+  /** RK (1): the participant's execution events, read by the ONE shared liveLegStamps (R4); absent = no legs. */
+  events?: Array<{ eventType: string; payload: unknown }>;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -365,8 +368,13 @@ export function mapSubscriberExchangeLiveBook(input: {
           ? 'Exchange-linked participant lifecycle'
           : 'Neon lifecycle; exchange linkage incomplete',
         negativeEvidence: row.negativeEvidence ?? null,
-        // HM B4: forced closes carry non_countable on the website live row.
-        ...liveRowCountability(row.cycle.showcaseExitReason, row.terminalReason),
+        // HM B4: forced closes carry non_countable on the website live row; RK (1)/R17: otherwise every measured
+        // leg (bot-sent: trigger -> Fly send -> relay receive -> ack/fill; resident: trade print -> BFX fill record)
+        // must be present and ordered, via the same liveLegStamps the export uses.
+        ...liveRowCountabilityWithLegs(
+          [row.cycle.showcaseExitReason, row.terminalReason],
+          ...liveLegStamps(row.cycle.intentEnvelope, row.events ?? [], true),
+        ),
       });
     }
   }
