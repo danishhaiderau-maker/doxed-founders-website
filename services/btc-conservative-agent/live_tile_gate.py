@@ -794,16 +794,12 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
     return res
 
 
-def daily_cap_entry_block(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, book: Mapping[str, Any] | None,
-                          now: float, tile_key: str | None, registry: Mapping[str, Mapping] | None = None) -> tuple[list, dict]:
-    """AMEND4 E1 (L12): (blocks, info) for a NEW live entry of ``tile_key``. Realised trade (trade_realised_pnl_usd: real fills, no funding, no fees) UTC-day loss
-    plus the open mark-to-book loss of any live position (full-size exit-side book walk) vs $0.05/tile and $0.10 total.
-    Unreadable realised pnl, an unreadable open mark or a book > 2 s => block (AMBER). Never a close, never a disarm."""
-    chains = list(chains or [])
-    per, total, n = daily_realised_loss(chains, now, registry)
-    blocks = [{"code": v["code"], "tile": v.get("tile"), "detail": v.get("detail")} for v in daily_loss_violations(chains, now, registry)
-              if v.get("tile") in (None, tile_key) or v["code"] == VIOL_PNL_UNREADABLE]
-    open_loss = 0.0
+def d3_open_mark_loss(mirror: Mapping[str, Any] | None, book: Mapping[str, Any] | None, now: float) -> tuple[float, list]:
+    """RK D3 (24 Oct 06:26/07:57, R4): THE open-position term of the daily loss cap. (open_loss_usd, blocks): every open
+    position in a fresh mirror marked to the book by a full-size exit-side walk; an unreadable mark or a book > 2 s old =>
+    OPEN_MARK_UNREADABLE (BLOCK). No funding, no fees. Shared by daily_cap_entry_block (admit_entry) and d3_cap_violations
+    (live_guardian)."""
+    open_loss, blocks = 0.0, []
     m = mirror if isinstance(mirror, Mapping) else {}
     for p in (m.get("positions") or []) if m.get("ok") is True else []:
         if _f((p or {}).get("amount")) == 0.0:
@@ -813,6 +809,42 @@ def daily_cap_entry_block(chains: Iterable[Mapping[str, Any]], mirror: Mapping[s
             blocks.append({"code": "OPEN_MARK_UNREADABLE", "tile": None, "detail": f"open mark-to-book unreadable: {walk.get('error')} age {walk.get('book_age_s')}"})
             continue
         open_loss += loss
+    return open_loss, blocks
+
+
+def d3_cap_violations(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, book: Mapping[str, Any] | None,
+                      now: float, registry: Mapping[str, Mapping] | None = None) -> tuple[list, dict]:
+    """RK D3 (07:57): the ONE daily loss cap for the guardian = trade_realised_pnl_usd realised (UTC day) + d3_open_mark_loss.
+    Same codes as daily_loss_violations (entry blocks, AMBER); the open mark counts against every tile (one live position
+    account-wide, N1). (violations, info). No balance, no funding, no fees."""
+    chains = list(chains or [])
+    out = list(daily_loss_violations(chains, now, registry))
+    per, total, n = daily_realised_loss(chains, now, registry)
+    open_loss, blocks = d3_open_mark_loss(mirror, book, now)
+    out.extend(blocks)
+    have = {(v["code"], v.get("tile")) for v in out}
+    if open_loss:
+        for k in sorted({k for k in per if k is not None}, key=str):
+            if per[k] + open_loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9 and (VIOL_TILE_LOSS_CAP, k) not in have:
+                out.append({"code": VIOL_TILE_LOSS_CAP, "tile": k, "detail": f"{k} realised+open ${per[k] + open_loss:.4f} >= ${DAILY_LOSS_CAP_PER_TILE_USD:.2f}"})
+        if open_loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9 and (VIOL_TILE_LOSS_CAP, None) not in have:
+            out.append({"code": VIOL_TILE_LOSS_CAP, "tile": None, "detail": f"open mark-to-book ${open_loss:.4f} >= ${DAILY_LOSS_CAP_PER_TILE_USD:.2f} (every tile)"})
+        if total + open_loss >= DAILY_LOSS_CAP_TOTAL_USD - 1e-9 and (VIOL_TOTAL_LOSS_CAP, None) not in have:
+            out.append({"code": VIOL_TOTAL_LOSS_CAP, "tile": None, "detail": f"total realised+open ${total + open_loss:.4f} >= ${DAILY_LOSS_CAP_TOTAL_USD:.2f}"})
+    return out, {"realised_loss_total": round(total, 4), "open_mark_loss": round(open_loss, 4), "d3_loss_usd": round(total + open_loss, 4), "rows": n}
+
+
+def daily_cap_entry_block(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, book: Mapping[str, Any] | None,
+                          now: float, tile_key: str | None, registry: Mapping[str, Mapping] | None = None) -> tuple[list, dict]:
+    """AMEND4 E1 (L12): (blocks, info) for a NEW live entry of ``tile_key``. Realised trade (trade_realised_pnl_usd: real fills, no funding, no fees) UTC-day loss
+    plus the open mark-to-book loss of any live position (full-size exit-side book walk) vs $0.05/tile and $0.10 total.
+    Unreadable realised pnl, an unreadable open mark or a book > 2 s => block (AMBER). Never a close, never a disarm."""
+    chains = list(chains or [])
+    per, total, n = daily_realised_loss(chains, now, registry)
+    blocks = [{"code": v["code"], "tile": v.get("tile"), "detail": v.get("detail")} for v in daily_loss_violations(chains, now, registry)
+              if v.get("tile") in (None, tile_key) or v["code"] == VIOL_PNL_UNREADABLE]
+    open_loss, _mark_blocks = d3_open_mark_loss(mirror, book, now)   # RK D3 R4: the one open-mark term
+    blocks.extend(_mark_blocks)
     tile_loss = per.get(tile_key, 0.0) + open_loss   # one live position account-wide (N1): its loss counts against every tile
     if open_loss and tile_loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9 and not any(b["code"] == VIOL_TILE_LOSS_CAP for b in blocks):
         blocks.append({"code": VIOL_TILE_LOSS_CAP, "tile": tile_key, "detail": f"{tile_key} realised+open ${tile_loss:.4f} >= ${DAILY_LOSS_CAP_PER_TILE_USD:.2f}"})

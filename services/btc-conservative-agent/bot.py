@@ -50268,6 +50268,12 @@ def _live_guardian_tick(now=None) -> list:
     viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, lane_needle="", epoch_ts=_epoch or None,
                         book=_book, liq_events=_LIVE_GUARDIAN_STATE.get("liq_events") or ())
     _LIVE_GUARDIAN_STATE["last_violations"] = viol
+    # RK 07:57: balance-vs-D3 reconcile is LOGGED ONLY (never a violation, never gates); one warning per 5 min for HM
+    _rec = (_LIVE_GUARDIAN_STATE.get("calc") or {}).get("balance_reconcile") or {}
+    if _rec.get("warning") and _rec.get("ts") == now and now - float(_LIVE_GUARDIAN_STATE.get("reconcile_warn_ts") or 0) >= 300.0:
+        _LIVE_GUARDIAN_STATE["reconcile_warn_ts"] = now
+        logger.warning(f"[LIVE GUARDIAN] BALANCE_RECONCILE_GAP (non-gating) balance_loss=${_rec.get('balance_loss_usd')} "
+                       f"d3_loss=${_rec.get('d3_loss_usd')} gap=${_rec.get('gap_usd')} drift=${_rec.get('drift_usd')}")
     # AMEND5 G4(b) (L22): LIQ_CLAMP_FLATTEN => flatten THAT position only (relay ops/position-flatten: no pause, no disarm)
     _posf = _lg.position_flatten_violations(viol)
     # AMEND4 E1 (L12): cap / unreadable-PnL / stale-book codes are AMBER ENTRY BLOCKS only (never a disarm or force-flat);
@@ -50388,7 +50394,7 @@ def monitor_live_guardian_route():
     import live_tile_gate as _ltg
     _caps = _ltg.load_caps()
     body = {"schema": "live_guardian_v1", "limits": {"stop_missing_sec": _lg.STOP_MISSING_SEC, "daily_loss_cap_usd": _lg.DAILY_LOSS_CAP_USD,
-            "ledger_grace_sec": _lg.LEDGER_GRACE_SEC, "balance_drift_usd": _lg.BALANCE_DRIFT_USD,
+            "ledger_grace_sec": _lg.LEDGER_GRACE_SEC, "balance_drift_usd": _lg.BALANCE_DRIFT_USD, "balance_gating": False,
             "fill_to_stop_max_sec": _lg.FILL_TO_STOP_MAX_SEC, "lanes": "ALL_LIVE_TILES"},
             "tile_gate": {"tile_key_codes": dict(_ltg.TILE_KEY_CODES), "day_basis": _ltg.DAY_BASIS,
                           "max_entries_per_day": _caps["max_entries_per_day"],

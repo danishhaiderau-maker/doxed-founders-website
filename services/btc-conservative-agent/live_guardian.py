@@ -8,8 +8,8 @@ or ``None`` when it is account-wide. The disarm semantics are unchanged: any vio
 orphans) and its own small state, and returns violations. The bot calls ``_disarm_live_control`` on any violation, which
 turns Fly's live output OFF, resets every per-tile switch, cancels managed pending entries and marks open positions exit-only,
 and then (RK ruling 24 Oct) ``_live_guardian_force_flat``, which asks the relay to pause the instance and emergency-close
-every open copy lot (fire-and-forget; never waits for flat). This module itself places or closes nothing. No trading fees;
-funding only. HM G6 daily loss caps ($0.05/tile, $0.10 total, UTC day; prereg AMEND3 D3) come from live_tile_gate.
+every open copy lot (fire-and-forget; never waits for flat). This module itself places or closes nothing. No fee and no
+funding term gates anything (RK D3/R7, 24 Oct). HM G6 daily loss caps ($0.05/tile, $0.10 total, UTC day; prereg AMEND3 D3) come from live_tile_gate.
 """
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ import live_tile_gate as _ltg_caps  # noqa: E402
 
 # HM C1 (24 Oct): aligned with the G6 account-wide cap pinned in live_tile_gate (prereg AMEND3 line 22 (D3), sha256 632dcf34...
 # = live_tile_gate.CAP_PREREG_SHA256, $0.10). Was $1.00. FROZEN: changes only via a new frozen amendment (see live_tile_gate). This
-# rolling-24 h check runs on the ledger (live_tile_gate.trade_realised_pnl_usd) AND on the Derivatives balance; the UTC-day G6 checks
+# rolling-24 h check runs on the ledger (live_tile_gate.trade_realised_pnl_usd); the Derivatives balance is a non-gating reconcile (RK 07:57); the UTC-day G6 checks
 # (per tile $0.05, total $0.10) run on the ledger in live_tile_gate.daily_loss_violations.
 DAILY_LOSS_CAP_USD = _ltg_caps.DAILY_LOSS_CAP_TOTAL_USD
 LEDGER_GRACE_SEC = 10.0         # fill/close propagation grace before a position-count mismatch counts
-BALANCE_DRIFT_USD = 0.50        # unexplained balance change when flat beyond reported pnl; this $0.50 tolerance is the allowance for funding (the bot passes funding_usd_today=0)
+BALANCE_DRIFT_USD = 0.50        # RK 07:57: WARNING threshold only for the non-gating balance reconcile (balance-vs-D3 gap / flat drift); never a gate
 ORPHAN_GRACE_SEC = 3.0          # an orphan must persist across this long (two reads) to count
 LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only live tile)
 # RK 02:25: these violations also latch RED (bot._live_guardian_tick), on top of the disarm ALL + force-flat every disarming
@@ -152,7 +152,7 @@ _NO_BOOK = object()
 
 
 def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, state: dict, now: float,
-             lane_needle: str = LANE_NEEDLE, funding_usd_today: float = 0.0, epoch_ts: float | None = None,
+             lane_needle: str = LANE_NEEDLE, epoch_ts: float | None = None,
              book: Any = _NO_BOOK, liq_events: Iterable[Mapping[str, Any]] = ()) -> list:
     """Return [{code, detail}] violations; ``state`` is mutated (day baseline, orphan first-seen).
 
@@ -231,6 +231,12 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         out.extend(prot["disarm"])
         out.extend(prot["block"])
         out.extend(prot["flatten_position"])   # AMEND5 G4(b): position only, no disarm (split out by the bot)
+        # RK D3 (07:57, R4/R7): the ONE daily loss cap incl. the open position marked to the book (full-size walk, book <= 2 s,
+        # else OPEN_MARK_UNREADABLE BLOCK); realised part already added by 4b. Entry blocks (AMBER) only.
+        d3v, d3i = _ltg.d3_cap_violations(live, m, book, now)
+        have = {(v.get("code"), v.get("tile")) for v in out}
+        out.extend(v for v in d3v if (v.get("code"), v.get("tile")) not in have)
+        state["d3"] = d3i
     positions, orders = list(m.get("positions") or []), list(m.get("open_orders") or [])
     orphans = list(m.get("orphans") or [])
     # 2. orphan (persisting)
@@ -280,6 +286,9 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
                         "detail": f"{len(positions)} exchange position(s) with no tile-keyed open/pending live chain for {now - first:.0f}s"})
     else:
         state.pop("untagged_pos_since", None)
+    # RK ruling 07:57 (R7: funding can't gate; R4: one cap definition): the Derivatives balance is a LOGGED, NON-GATING
+    # reconciliation only. It records the balance-vs-D3 gap (and the flat drift) as a warning for HM; it NEVER appends a
+    # violation, so it can never block, disarm, force-flat or change countability. Every cap action comes from D3 above.
     bal = _f((m.get("balance") or {}).get("derivatives_available_usd"))
     flat = not positions and not orders and not open_filled
     if bal is not None and flat:
@@ -298,19 +307,18 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         peak_ts, peak = max([(h[0], h[1]) for h in hist] + [(now, bal)], key=lambda x: (x[1], x[0]))
         state["day_baseline"], state["day_baseline_ts"] = peak, peak_ts   # ts = when the peak was seen, so a later seed ages correctly
         state["sydney_day"] = day_key(now)
-        loss = float(state["day_baseline"]) - bal   # balance already includes funding: a funding debit is a real loss
+        loss = float(state["day_baseline"]) - bal   # includes funding/fees/transfers: reconciliation only, never a gate
         state["day_loss_usd"] = round(loss, 4)
-        if loss >= DAILY_LOSS_CAP_USD and not any(v["code"] == "DAILY_LOSS_CAP" for v in out):
-            out.append({"code": "DAILY_LOSS_CAP", "detail": f"balance loss ${loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} (baseline ${state['day_baseline']:.2f}, now ${bal:.2f})"})
-        # 5. balance drift while flat vs the last flat reading, explained only by reported realised pnl + funding
         last = state.get("last_flat_balance")
-        # drift check: ONLY rows with a real close time (a time-less row would be 'newer' on every tick; it stays in the loss cap via close_ts)
         since = [c for c in live if c.get("closed") and (_f(c.get("closed_at_ts") or c.get("exit_at_ts")) or 0) > state.get("last_flat_ts", now)]
-        explained = sum(_f(c.get("pnl_usd")) or 0.0 for c in since)
-        all_reported = all(_f(c.get("pnl_usd")) is not None for c in since)
-        if last is not None and all_reported:
-            drift = bal - float(last) - explained
-            if abs(drift) > BALANCE_DRIFT_USD + abs(float(funding_usd_today or 0.0)):
-                out.append({"code": "BALANCE_DRIFT", "detail": f"unexplained {drift:+.2f} USD while flat"})
+        explained = sum(_ltg.trade_realised_pnl_usd(c) or 0.0 for c in since)
+        drift = (bal - float(last) - explained) if last is not None else None
+        d3_loss = float(state.get("ledger_loss_usd") or 0.0)   # D3 realised (trade_realised_pnl_usd) on the same rolling 24 h window as the baseline; flat => no open term
+        gap = loss - d3_loss
+        state["balance_reconcile"] = {
+            "ts": now, "gating": False, "balance_loss_usd": round(loss, 4), "d3_loss_usd": round(d3_loss, 4),
+            "gap_usd": round(gap, 4), "drift_usd": (round(drift, 4) if drift is not None else None),
+            "warning": bool(abs(gap) > BALANCE_DRIFT_USD or (drift is not None and abs(drift) > BALANCE_DRIFT_USD)),
+        }
         state["last_flat_balance"], state["last_flat_ts"] = bal, now
     return out

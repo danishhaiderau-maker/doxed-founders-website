@@ -37,24 +37,88 @@ def test_orphan_must_persist_and_ledger_mismatch_respects_grace():
     assert "LEDGER_MISMATCH" not in codes(g.evaluate([ch(fill_at_ts=NOW - 2, stop_confirmed=True)], mp, {}, NOW))
 
 
-def test_daily_realised_loss_cap_ten_cents_and_new_day_resets_baseline():
+def test_balance_loss_is_reconcile_only_never_a_cap_and_stale_baseline_ages_out():
+    """RK ruling 07:57 (R7/R4): the balance-based daily cap is gone; the balance loss is recorded, never gated."""
     st = {}
     assert g.evaluate([], MIR, st, NOW) == []
     low = dict(MIR, balance={"derivatives_available_usd": 205.70})
-    assert "DAILY_LOSS_CAP" in codes(g.evaluate([], low, st, NOW + 60))
-    ok = dict(MIR, balance={"derivatives_available_usd": 206.74})    # $0.05 < the aligned $0.10 cap (HM C1)
-    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([], ok, {"day": g.day_key(NOW), "day_baseline": 206.79, "last_flat_balance": 206.74, "last_flat_ts": NOW}, NOW + 60))
+    assert g.evaluate([], low, st, NOW + 60) == []
+    rec = st["balance_reconcile"]
+    assert rec["gating"] is False and rec["balance_loss_usd"] == 1.09 and rec["d3_loss_usd"] == 0.0 and rec["warning"] is True
     st2 = {"day_baseline": 300.0, "day_baseline_ts": NOW - 90000}      # a baseline older than 24 h has aged out
-    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([], low, st2, NOW)) and st2["day_baseline"] == 205.70
+    assert g.evaluate([], low, st2, NOW) == [] and st2["day_baseline"] == 205.70
 
 
-def test_balance_drift_when_flat_beyond_reported_pnl():
+def test_balance_drift_when_flat_is_a_logged_warning_not_a_disarm():
     st = {"day": g.day_key(NOW), "day_baseline": 206.79, "last_flat_balance": 206.79, "last_flat_ts": NOW - 100}
     drift = dict(MIR, balance={"derivatives_available_usd": 206.10})
-    assert "BALANCE_DRIFT" in codes(g.evaluate([], drift, st, NOW))
+    assert g.evaluate([], drift, st, NOW) == []
+    assert st["balance_reconcile"]["drift_usd"] == -0.69 and st["balance_reconcile"]["warning"] is True
     st = {"day": g.day_key(NOW), "day_baseline": 206.79, "last_flat_balance": 206.79, "last_flat_ts": NOW - 100}
     explained = [ch(closed=True, pnl_usd=-0.69, closed_at_ts=NOW - 50)]
-    assert "BALANCE_DRIFT" not in codes(g.evaluate(explained, drift, st, NOW))
+    v = g.evaluate(explained, drift, st, NOW)
+    assert "BALANCE_DRIFT" not in codes(v) and abs(st["balance_reconcile"]["drift_usd"]) < 1e-9
+
+
+def test_large_balance_drop_alone_eg_funding_triggers_nothing():
+    """RK ruling 07:57: a large Derivatives balance drop with no trade (funding, transfer) must never block, disarm, force-flat
+    or change countability; it is only recorded as a non-gating balance-vs-D3 reconcile warning."""
+    def bk(t):   # a fresh full-depth book (age 0.5 s)
+        return {"s": t - 1.5, "b": [[100000.0, 1.0]], "a": [[100010.0, 1.0]]}
+    st = {}
+    assert g.evaluate([], MIR, st, NOW, book=bk(NOW)) == []
+    for i, bal in enumerate((150.0, 120.0, 50.0)):
+        t = NOW + 60 * (i + 1)
+        v = g.evaluate([], dict(MIR, balance={"derivatives_available_usd": bal}), st, t, book=bk(t))
+        assert v == [], v
+        dis, amber = g.split_violations(v)
+        assert dis == [] and amber == [] and g.position_flatten_violations(v) == []
+    rec = st["balance_reconcile"]
+    assert rec["gating"] is False and rec["warning"] is True and rec["balance_loss_usd"] == 156.79 and rec["gap_usd"] == 156.79
+    assert st["ledger_loss_usd"] == 0.0
+
+
+def test_guardian_daily_cap_counts_open_position_marked_to_book_via_shared_d3():
+    """RK D3 (07:57): the guardian's cap = trade_realised_pnl_usd + the open position marked to the book (full-size walk,
+    book <= 2 s, else OPEN_MARK_UNREADABLE); the same live_tile_gate.d3_open_mark_loss as admit_entry's daily_cap_entry_block."""
+    import live_tile_gate as ltg
+    pos = {"symbol": "tBTCF0:USTF0", "side": "LONG", "amount": 0.001, "base_price": 100000.0}
+    m = dict(MIR, positions=[pos])
+    open_c = ch(correlation_id="GS01-9", fill_at_ts=NOW - 60, stop_confirmed=True, tile="GS01")
+    calls = []
+    real = ltg.open_mark_to_book_loss
+
+    def fake(p, book, now):
+        calls.append(p)
+        return 0.20, {"book_age_s": 0.5}
+    ltg.open_mark_to_book_loss = fake
+    try:
+        st = {}
+        v = g.evaluate([open_c], m, st, NOW, book={"ts": NOW})
+        assert {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} <= codes(v), v
+        dis, amber = g.split_violations([x for x in v if x["code"] in (ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP)])
+        assert dis == [] and amber, "D3 cap is an AMBER entry block, never a disarm"
+        assert st["d3"]["open_mark_loss"] == 0.2 and calls
+        ltg.open_mark_to_book_loss = lambda p, book, now: (0.20, {"book_age_s": 3.0})   # book older than 2 s => block
+        v = g.evaluate([open_c], m, {}, NOW, book={"ts": NOW - 3})
+        assert "OPEN_MARK_UNREADABLE" in codes(v) and ltg.VIOL_TOTAL_LOSS_CAP not in codes(v)
+        ltg.open_mark_to_book_loss = lambda p, book, now: (None, {"error": "no book"})
+        assert "OPEN_MARK_UNREADABLE" in codes(g.evaluate([open_c], m, {}, NOW, book=None))
+        ltg.open_mark_to_book_loss = lambda p, book, now: (0.01, {"book_age_s": 0.5})    # under both caps
+        assert not ({ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP, "OPEN_MARK_UNREADABLE"} & codes(g.evaluate([open_c], m, {}, NOW, book={"ts": NOW})))
+    finally:
+        ltg.open_mark_to_book_loss = real
+    # real full-size walk: LONG 0.001 @ 100500 exits into bid 100000 => $0.50 open loss => tile + total cap (AMBER)
+    real_pos = dict(pos, base_price=100500.0)
+    st = {}
+    v = g.evaluate([open_c], dict(MIR, positions=[real_pos]), st, NOW, book={"s": NOW - 1.5, "b": [[100000.0, 1.0]], "a": [[100010.0, 1.0]]})
+    assert {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} <= codes(v) and st["d3"]["open_mark_loss"] == 0.5, (v, st.get("d3"))
+    import inspect
+    assert "d3_open_mark_loss(" in inspect.getsource(ltg.daily_cap_entry_block)
+    assert "d3_cap_violations(" in inspect.getsource(g.evaluate)
+    src = inspect.getsource(g.evaluate)
+    tail = src[src.index("RK ruling 07:57"):]
+    assert "out.append" not in tail and "out.extend" not in tail, "the balance reconcile must never append a violation"
 
 
 def test_blind_mirror_with_open_position_disarms_after_30s_only():
@@ -135,14 +199,11 @@ def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_co
         "STOP_MISSING_GT_5S": (lambda n: [ch(fill_at_ts=n - 9)], _mir(positions=P), None),
         "ORPHAN": (lambda n: [], _mir(orphans=["1"]), None),
         "LEDGER_MISMATCH": (lambda n: [], _mir(positions=P), None),
-        "BALANCE_DRIFT": (lambda n: [], _mir(balance={"derivatives_available_usd": 205.9}), None),
     }
     for code, (chains, mirror, epoch) in cases.items():
         ns, calls = _tick_ns(True, chains, mirror, epoch)
         if code == "ORPHAN":
             ns["_LIVE_GUARDIAN_STATE"]["calc"]["orphan_since"] = now - 10
-        if code == "BALANCE_DRIFT":
-            ns["_LIVE_GUARDIAN_STATE"]["calc"].update(day=g.day_key(now), day_baseline=206.79, last_flat_balance=206.79, last_flat_ts=now - 100)
         v = ns["_live_guardian_tick"](now)
         assert code in {x["code"] for x in v} and calls and code in calls[0], code
     # AMEND4 E1 (L12): a daily-loss-cap breach is an AMBER entry block only - never a disarm, never a force-flat
@@ -232,7 +293,7 @@ def test_rolling_window_does_not_reset_at_the_utc_or_sydney_day_boundary():
     assert g.evaluate([], MIR, st, ts) == []
     low = dict(MIR, balance={"derivatives_available_usd": 205.70})
     after = ts + 120                                                                       # two minutes later, new UTC day
-    assert "DAILY_LOSS_CAP" in codes(g.evaluate([], low, st, after)), "baseline must survive the UTC midnight"
+    assert g.evaluate([], low, st, after) == [] and st["balance_reconcile"]["balance_loss_usd"] == 1.09, "baseline must survive the UTC midnight (reconcile only, RK 07:57)"
     loss = [ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 900, closed_at_ts=ts - 30)]
     assert "DAILY_LOSS_CAP" in codes(g.evaluate(loss, MIR, {}, after)), "ledger loss must survive the UTC midnight"
     assert "DAILY_LOSS_CAP" not in codes(g.evaluate([ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 1000, closed_at_ts=ts - 90000)], MIR, {}, after)), "older than 24 h ages out"
@@ -328,9 +389,9 @@ def test_long_off_gap_drops_stale_baseline_no_false_loss_cap():
     st = {"flat_hist": [], "day_baseline": 210.0, "day_baseline_ts": NOW - 30 * 3600}
     v = g.evaluate([], dict(MIR, balance={"derivatives_available_usd": 205.0}), st, NOW)
     assert "DAILY_LOSS_CAP" not in codes(v) and st["day_baseline"] == 205.0 and st["day_baseline_ts"] == NOW
-    # a fresh (<24 h) baseline still counts
+    # a fresh (<24 h) baseline still counts in the (non-gating, RK 07:57) reconcile
     st2 = {"flat_hist": [], "day_baseline": 210.0, "day_baseline_ts": NOW - 3600}
-    assert "DAILY_LOSS_CAP" in codes(g.evaluate([], dict(MIR, balance={"derivatives_available_usd": 205.0}), st2, NOW))
+    assert g.evaluate([], dict(MIR, balance={"derivatives_available_usd": 205.0}), st2, NOW) == [] and st2["balance_reconcile"]["balance_loss_usd"] == 5.0
 
 
 def test_baseline_ts_written_with_peak_time():
@@ -346,7 +407,7 @@ def test_closed_row_without_close_time_does_not_create_false_drift():
     st = {"last_flat_balance": 206.79, "last_flat_ts": NOW - 30}
     for i in range(3):
         v = g.evaluate([c], dict(MIR, balance={"derivatives_available_usd": 206.79}), st, NOW + i * 30)
-        assert "BALANCE_DRIFT" not in codes(v), i
+        assert "BALANCE_DRIFT" not in codes(v) and not st["balance_reconcile"]["drift_usd"], i
     assert st["ledger_loss_usd"] == 0.3        # still counted in the loss cap
 
 
