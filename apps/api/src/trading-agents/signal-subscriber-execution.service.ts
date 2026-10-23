@@ -2,6 +2,7 @@ import {
   approvalBackedStopLossMarginPct,
   approvalPermitsRelayCopy,
   evaluateLiveCopyPlacement,
+  FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC,
   LIQUIDATION_SAFETY_BP,
   liveCopyAccountArmed,
   readEnvelopeFlyApproval,
@@ -3788,8 +3789,12 @@ export type EntryClaimResult = {
  * Two-tile live gate mutex (HM R2 C3 + RK 24 Oct): ONE Bitfinex position per symbol per ACCOUNT, unconditionally (any
  * agent, any tile). Counts this user's OTHER participants that are PENDING_ENTRY/OPEN, or INTENT claims younger than
  * LIVE_MUTEX_INTENT_WINDOW_MS (a racing entry that has claimed but not yet submitted).
+ * HM N4: the INTENT window covers the executor's placement bound (FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC = 180 s): an INTENT
+ * can still be placed until its Fly approval is 180 s old, so it must keep counting that long.
+ * HM N5: venue-scoped to the Bitfinex account ('bitfinex'); a row with NO venue (legacy) still counts (fail closed).
  */
-export const LIVE_MUTEX_INTENT_WINDOW_MS = 120_000;
+export const LIVE_MUTEX_INTENT_WINDOW_MS = FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC * 1000;
+export const LIVE_MUTEX_VENUE = 'bitfinex';
 export const liveMutexLockKey = (userId: string) => `live-mutex:${userId}`;
 export function liveMutexWhere(userId: string, excludeParticipantId: string | null | undefined, nowMs = Date.now()) {
   return {
@@ -3798,6 +3803,7 @@ export function liveMutexWhere(userId: string, excludeParticipantId: string | nu
       { status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] } },
       { status: SignalCycleStatus.INTENT, createdAt: { gte: new Date(nowMs - LIVE_MUTEX_INTENT_WINDOW_MS) } },
     ],
+    AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
     ...(excludeParticipantId ? { id: { not: excludeParticipantId } } : {}),
   };
 }
