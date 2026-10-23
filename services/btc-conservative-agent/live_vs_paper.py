@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
+import trigger_measure as _tm
+
 SCHEMA = "live_vs_paper_v1"
 _NOT_TRADED_REASONS = ("LIVE_BUSY_SKIPPED",)
 
@@ -72,6 +74,13 @@ def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] 
         # #807: the paper exit's trigger vs the 1 s book at the trigger second (+ = book better than the trigger) and the
         # ticker BBO age it fired on. Measurement only.
         "paper_trigger_vs_book_bp": _f(twin.get("trigger_vs_book_bp")), "paper_trigger_tape_age_s": _f(twin.get("trigger_tape_age_s")),
+        "paper_trigger_book_age_s": _f(twin.get("trigger_book_age_s")),
+        "paper_trigger_vs_book_reason": twin.get("trigger_vs_book_reason"),
+        "paper_trigger_tape_age_flag": twin.get("trigger_tape_age_flag"),
+        # #809: the paper entry decision quote vs the book stored at the entry signal (measurement only) and the limit
+        # price the live executor actually sent (LIMIT entries only, else null).
+        **{f"paper_{k}": twin.get(f"paper_{k}") for k in _tm.ENTRY_QUOTE_KEYS + _tm.ENTRY_BOOK_KEYS},
+        "live_limit_price_sent": _tm.live_limit_price_sent(chain),
         "closed": bool(chain.get("closed")),
     }
     row["missing"] = sorted(k for k in ("paper_fill_ts", "live_exit_price", "live_exit_ts", "funding_usd_paper", "funding_usd_live",
