@@ -20,7 +20,8 @@ KEY, SECRET = "k" * 43, "s" * 43
 # HM R4 F1: an RK+HM-confirmed sign (+1: positions/hist FUNDING == the signed ledger sum). Tests that price a non-zero
 # entry pass it explicitly; without it every non-zero row is UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN.
 # HM R5 G3: a pin is only read as a sign when it carries (a)/(b)/(c) evidence for that sign + a ledger id and pid.
-EVIDENCE = {"ledger_id": 10500585082, "pid": 194481758,
+EVIDENCE = {"ledger_id": 10500585082, "pid": 194481758, "ledger_ids": [10500585082],
+            "position_funding_raw": 0.025, "ledger_amount_raw": 0.025,        # HM R6 nit: raws re-checked under the sign
             "checks": {"a": [{"ok": True}], "b": [{"ok": True}], "c": {"ok": True, "sign": 1}}}
 ACTIVE = dict(EVIDENCE, status="ACTIVE", position_funding_sign=1, confirmed_by_rk_ref="RK-test",
               confirmed_by_hm_ref="HM-test")
@@ -777,7 +778,8 @@ def test_F1_wrong_sign_is_never_countable_inverts_the_old_size_only_test():
                      sign_pin=ACTIVE)                             # tied-only path, same signed rule
     assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
     # a -1 sign is the only way +0.025 can match -0.025
-    neg = dict(ACTIVE, position_funding_sign=-1, checks=dict(EVIDENCE["checks"], c={"ok": True, "sign": -1}))
+    neg = dict(ACTIVE, position_funding_sign=-1, checks=dict(EVIDENCE["checks"], c={"ok": True, "sign": -1}),
+               ledger_amount_raw=-0.025)
     assert _mixed(0.025, pin=neg)["funding_status"] == "PRICED"
     assert _mixed(-0.025, pin=neg)["funding_verified"] is False
 
@@ -1023,6 +1025,13 @@ import live_copy_monitor_api as lcma
 _BOT_SRC = os.path.join(os.path.dirname(os.path.abspath(lfl.__file__)), "bot.py")
 
 
+def _stamp(pid, side, status="STAMPED", source="POST_STOP_POSITIONS_READBACK"):
+    """The report ``position`` block exactly as PR #854's live-copy-fly-reporter.ts liveCopyPositionBlock writes it."""
+    return {"bitfinex_position_id": pid if status == "STAMPED" else None,
+            "position_side": side if status == "STAMPED" else None,
+            "read_at_ts": S - 56, "status": status, "source": source}
+
+
 def _feed_files(tmp_path):
     ap = lcc.ApprovalLedger(path=tmp_path / "approvals.jsonl", clock=lambda: S + 500)
     jr = lcc.ExecutionJournal(path=tmp_path / "reports.jsonl", clock=lambda: S + 500)
@@ -1032,7 +1041,8 @@ def _feed_files(tmp_path):
                "timeline": {"fill_at_ts": S - 60}, "fill": {"price": 100.0, "qty": 2.5, "side": "LONG"}})
     jr.append({"report_id": "r2", "type": "POSITION_CLOSED", "correlation_id": "c1", "account": "A",
                "timeline": {"exit_fill_record_at_ts": S + 60},
-               "close": {"price": 100.4, "ts": S + 60, "bitfinex_position_id": 5}})
+               "close": {"price": 100.4, "ts": S + 60},
+               "position": _stamp(5, "LONG")})
     jr.append({"report_id": "r3", "type": "POSITION_CLOSED", "correlation_id": "c2", "account": "A",
                "timeline": {"fill_at_ts": S - 60, "exit_fill_record_at_ts": S + 60}, "close": {"price": 1.0}})
     return ap, jr
@@ -1248,3 +1258,94 @@ def test_R5_cli_and_job_resolve_the_one_pin_path(monkeypatch, tmp_path, capsys):
     _read(job, PIN_CHAIN)                                                    # the job proposes into that one file
     assert lfl.load_sign_pin()["status"] == "PROPOSED" and (tmp_path / "vol" / lfl.SIGN_PIN_FILENAME).exists()
     assert not (tmp_path / "elsewhere.json").exists()
+
+
+# ---- HM pr854 Q6 / #849 condition: pid ONLY from a STAMPED #854 position block with the expected source ---------------
+def test_pid_only_from_a_stamped_position_block_with_the_expected_source():
+    ok = {"type": "POSITION_CLOSED", "position": _stamp(194481758, "SHORT")}
+    assert lcma.PID_STAMP_SOURCE == "POST_STOP_POSITIONS_READBACK" and lcma.PID_STAMP_STATUS_OK == "STAMPED"
+    assert lcma._report_pid_side(ok) == ("194481758", "SHORT")
+    assert lcma._report_pid_side({"position": dict(_stamp(7, "LONG"), bitfinex_position_id="7")}) == ("7", "LONG")
+    # every non-STAMPED #854 status carries no pid - even if a pid were (wrongly) present on the block
+    for st in ("MULTI_POSITION", "READ_FAILED", "AMOUNT_MISMATCH", "SIDE_MISMATCH", "SYMBOL_MISMATCH", "NO_POSITION",
+               "POSITION_ID_ABSENT", "CREATE_TIME_MISMATCH", "CREATE_TIME_ABSENT", None, "", "stamped"):
+        blk = dict(_stamp(5, "LONG"), status=st)                          # pid 5 left on the block on purpose
+        assert lcma._report_pid_side({"position": blk}) == (None, None), st
+        assert lcma._report_pid_side({"position": _stamp(5, "LONG", status=st or "X")}) == (None, None), st
+    # the expected source only
+    for src in (None, "", "POSITIONS_HIST", "post_stop_positions_readback", "hire"):
+        assert lcma._report_pid_side({"position": dict(_stamp(5, "LONG"), source=src)}) == (None, None), src
+    # a pid in any non-position block / the top level / a generic position_id key is never read
+    for rep in ({"bitfinex_position_id": 5, "position_side": "LONG"},
+                {"fill": {"bitfinex_position_id": 5, "side": "LONG"}},
+                {"close": {"bitfinex_position_id": 5}}, {"exit": {"position_id": 5}}, {"order": {"bitfinex_position_id": 5}},
+                {"position_id": 5}, {"position": {"position_id": 5, "status": "STAMPED",
+                                                   "source": "POST_STOP_POSITIONS_READBACK"}},
+                {"fill": {"bitfinex_position_id": 5}, "position": _stamp(None, "LONG", status="READ_FAILED")}):
+        assert lcma._report_pid_side(rep) == (None, None), rep
+    # malformed pids never pass
+    for bad in (True, 0, -5, 1.5, "5a", "", " 5", None, [5]):
+        assert lcma._report_pid_side({"position": dict(_stamp(5, "LONG"), bitfinex_position_id=bad)}) == (None, None), bad
+    assert lcma._report_pid_side({"position": "STAMPED"}) == (None, None) and lcma._report_pid_side(None) == (None, None)
+    # side comes from the stamped block only (a fill side never fills it in)
+    assert lcma._report_pid_side({"fill": {"side": "LONG"}, "position": dict(_stamp(5, None))}) == ("5", None)
+
+
+def test_pid_attach_carriers_end_to_end_and_conflicting_stamps_fail_closed(tmp_path, monkeypatch):
+    ap = lcc.ApprovalLedger(path=tmp_path / "approvals.jsonl", clock=lambda: S + 500)
+    jr = lcc.ExecutionJournal(path=tmp_path / "reports.jsonl", clock=lambda: S + 500)
+    carriers = {"multi": _stamp(None, None, status="MULTI_POSITION"), "mismatch": _stamp(None, None, status="AMOUNT_MISMATCH"),
+                "readfail": _stamp(None, None, status="READ_FAILED"), "ok": _stamp(9, "LONG"),
+                "conflict": _stamp(11, "LONG")}
+    for cid, blk in carriers.items():
+        ap.append({"correlation_id": cid, "trade_id": cid, "event": "ORDER_PLACED", "entry_allowed": True,
+                   "created_at_ts": S - 70, "signal_at_ts": S - 75})
+        jr.append({"report_id": cid + "-f", "type": "ORDER_FILLED", "correlation_id": cid, "account": "A",
+                   "timeline": {"fill_at_ts": S - 60}, "fill": {"price": 100.0, "qty": 2.5, "side": "LONG",
+                                                             "bitfinex_position_id": 77}})   # never read
+        jr.append({"report_id": cid + "-c", "type": "POSITION_CLOSED", "correlation_id": cid, "account": "A",
+                   "timeline": {"exit_fill_record_at_ts": S + 60}, "close": {"price": 100.4, "ts": S + 60},
+                   "position": blk})
+    jr.append({"report_id": "conflict-c2", "type": "POSITION_CLOSED", "correlation_id": "conflict", "account": "A",
+               "timeline": {"exit_fill_record_at_ts": S + 60}, "close": {"price": 100.4, "ts": S + 60},
+               "position": _stamp(12, "LONG")})                                 # a second, different stamped pid
+    monkeypatch.setitem(lcma._FUNDING_FEED, "approvals", ap.rows)
+    monkeypatch.setitem(lcma._FUNDING_FEED, "reports", jr.rows)
+    chains = {c["correlation_id"]: c for c in lcma._closed_live_chains()}
+    for cid in ("multi", "mismatch", "readfail", "conflict"):
+        assert chains[cid]["bitfinex_position_id"] is None and chains[cid]["position_side"] is None, cid
+        assert lfl._row_inputs(chains[cid])[5][3] == "", cid                      # -> UNVERIFIED_POSITION_ID_MISSING
+    assert chains["ok"]["bitfinex_position_id"] == "9" and chains["ok"]["position_side"] == "LONG"
+
+
+# ---- HM R6 nit: the pin evidence re-derives the raw signed match, one (a) + one (b), ledger_ids == [ledger_id] -----------
+def test_R6_pin_raw_values_and_single_checks_are_re_derived(_pin_file):
+    assert lfl.sign_pin_evidence_problem(dict(ACTIVE)) is None
+    neg = dict(ACTIVE, position_funding_sign=-1, checks=dict(EVIDENCE["checks"], c={"ok": True, "sign": -1}),
+               position_funding_raw=0.025, ledger_amount_raw=-0.025)
+    assert lfl.sign_pin_evidence_problem(neg) is None and lfl.position_funding_sign(neg) == -1
+    assert lfl.sign_pin_evidence_problem(dict(ACTIVE, position_funding_raw=0.025 + 5e-9)) is None   # within 1e-8
+    chk = EVIDENCE["checks"]
+    forged = {
+        "RAW_SIGNED_MISMATCH": dict(EVIDENCE, position_funding_raw=0.5, ledger_amount_raw=-0.025),   # HM probe case
+        "RAW_SIGNED_MISMATCH ": dict(EVIDENCE, position_funding_raw=0.025, ledger_amount_raw=-0.025),  # wrong sign
+        "RAW_SIGNED_MISMATCH  ": dict(EVIDENCE, position_funding_raw=0.025 + 2e-8),
+        "RAW_VALUES_MISSING": dict(EVIDENCE, position_funding_raw=None),
+        "RAW_VALUES_MISSING ": dict(EVIDENCE, ledger_amount_raw="x"),
+        "RAW_VALUES_MISSING  ": dict(EVIDENCE, ledger_amount_raw=True),
+        "RAW_VALUES_MISSING   ": dict(EVIDENCE, position_funding_raw=float("nan")),
+        "CHECK_COUNT_NOT_ONE": dict(EVIDENCE, checks=dict(chk, a=[{"ok": True}, {"ok": True}])),
+        "CHECK_COUNT_NOT_ONE ": dict(EVIDENCE, checks=dict(chk, b=[{"ok": True}, {"ok": True}])),
+        "LEDGER_IDS_MISMATCH": dict(EVIDENCE, ledger_ids=[10500585082, 1]),
+        "LEDGER_IDS_MISMATCH ": dict(EVIDENCE, ledger_ids=[1]),
+        "LEDGER_IDS_MISMATCH  ": dict(EVIDENCE, ledger_ids=None),
+        "LEDGER_IDS_MISMATCH   ": {k: v for k, v in EVIDENCE.items() if k != "ledger_ids"},
+    }
+    for want, ev in forged.items():
+        pin = dict(ev, status="ACTIVE", position_funding_sign=1, confirmed_by_rk_ref="RK", confirmed_by_hm_ref="HM")
+        assert lfl.sign_pin_evidence_problem(pin) == want.strip(), want
+        assert lfl.position_funding_sign(pin) is None, want                       # read path: unproven
+        lfl._write_sign_pin(dict(ev, status="PROPOSED", position_funding_sign=1))
+        with pytest.raises(lfl.SignPinError, match="PIN_EVIDENCE_INVALID:" + want.strip()):
+            lfl.activate_sign_pin("RK", "HM")                                     # activate path: refused
+        assert lfl.load_sign_pin()["status"] == "PROPOSED", want

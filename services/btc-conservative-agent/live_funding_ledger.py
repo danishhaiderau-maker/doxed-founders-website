@@ -29,6 +29,7 @@ import decimal
 import hashlib
 import hmac
 import json
+import math
 import logging
 import os
 import re
@@ -338,7 +339,30 @@ def sign_pin_evidence_problem(pin) -> str | None:
         return "CHECK_C_NOT_OK"
     if not _is_sign(c.get("sign")) or c.get("sign") != sign:
         return "C_SIGN_MISMATCH"
+    # HM R6 nit: re-derive, don't trust the stored ok flags - exactly one (a) and one (b) check, the one tied ledger id,
+    # and the raw values themselves satisfy the signed match |pf_raw - sign * ledger_raw| <= 1e-8.
+    if len(a) != 1 or len(b) != 1:
+        return "CHECK_COUNT_NOT_ONE"
+    ids = pin.get("ledger_ids")
+    if not isinstance(ids, list) or len(ids) != 1 or str(ids[0]) != str(pin.get("ledger_id")):
+        return "LEDGER_IDS_MISMATCH"
+    pf, led = _raw_num(pin.get("position_funding_raw")), _raw_num(pin.get("ledger_amount_raw"))
+    if pf is None or led is None:
+        return "RAW_VALUES_MISSING"
+    if not abs(pf - sign * led) <= SIGNED_MATCH_TOL_USD:
+        return "RAW_SIGNED_MISMATCH"
     return None
+
+
+def _raw_num(v):
+    """A finite real number (bool / non-numeric / NaN / inf -> None) for the pin raw-value re-check."""
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def position_funding_sign(pin=None):

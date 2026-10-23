@@ -8,6 +8,7 @@ HTTP 503 with verdict RED instead of a fabricated healthy answer.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Callable
 
 from flask import Blueprint, jsonify, request
@@ -397,23 +398,38 @@ def _live_funding_lookup():
 # calls the monitor context provider (bot.py _live_copy_monitor_context: relay fly-view on the shared relay HTTP session,
 # trade_lock via _live_copy_paper_twins, account-transition writes) - no network, no trade_lock, no writes.
 _FUNDING_FEED: dict = {"approvals": None, "reports": None}
-_PID_KEYS = ("bitfinex_position_id", "position_id")
+# HM pr854 Q6 / #849 condition: the ONLY pid carrier is the report ``position`` block PR #854's Fly reporter writes
+# (live-copy-fly-reporter.ts liveCopyPositionBlock <- bitfinex-position-id-stamp.ts), and only a STAMPED one read back
+# by the post-stop positions read. Every other status (MULTI_POSITION, READ_FAILED, *_MISMATCH, NO_POSITION, ...),
+# source, block or key carries no pid.
+PID_STAMP_STATUS_OK = "STAMPED"
+PID_STAMP_SOURCE = "POST_STOP_POSITIONS_READBACK"
+
+
+def _stamped_pid(v):
+    """A real Bitfinex POSITION_ID: positive int (bool rejected) or an all-digit string; else None."""
+    if type(v) is int:
+        return str(v) if v > 0 else None
+    if isinstance(v, str) and v.isdigit() and int(v) > 0:
+        return str(int(v))
+    return None
 
 
 def _report_pid_side(report) -> tuple:
-    """(position id, side) an executor report carries itself - top level or in its fill / close / exit / order /
-    position block. Never inferred: absent -> None (pid None -> UNVERIFIED_POSITION_ID_MISSING; side None -> no pin)."""
-    pid = side = None
-    blocks = [report] + [report.get(k) for k in ("fill", "close", "exit", "order", "position")
-                         if isinstance(report.get(k), dict)]
-    for b in blocks:
-        for k in _PID_KEYS:
-            if pid is None and b.get(k) not in (None, ""):
-                pid = str(b.get(k))
-        v = str(b.get("position_side") or b.get("side") or "").upper()
-        if side is None and v in ("LONG", "SHORT"):
-            side = v
-    return pid, side
+    """(position id, side) from the executor report's ``position`` block ONLY, and only when that block is a #854
+    stamp with status == STAMPED and source == POST_STOP_POSITIONS_READBACK. Never inferred and never taken from the
+    top level, fill / close / exit / order blocks or a generic ``position_id`` key: anything else -> (None, None)
+    (pid None -> UNVERIFIED_POSITION_ID_MISSING; side None -> no pin)."""
+    pos = report.get("position") if isinstance(report, Mapping) else None
+    if not isinstance(pos, Mapping):
+        return None, None
+    if pos.get("status") != PID_STAMP_STATUS_OK or pos.get("source") != PID_STAMP_SOURCE:
+        return None, None
+    pid = _stamped_pid(pos.get("bitfinex_position_id"))
+    if pid is None:
+        return None, None
+    v = str(pos.get("position_side") or "").upper()
+    return pid, (v if v in ("LONG", "SHORT") else None)
 
 
 def _closed_live_chains():
@@ -437,12 +453,17 @@ def _with_pid_side(chains, reports) -> list:
             continue
         key = (str(r.get("correlation_id") or ""), str(r.get("account") or "UNKNOWN"))
         pid, side = _report_pid_side(r)
-        cur = found.setdefault(key, {"pid": None, "side": None})
-        cur["pid"] = cur["pid"] or pid
+        if pid is None:
+            continue
+        cur = found.setdefault(key, {"pid": pid, "side": side, "conflict": False})
+        if cur["pid"] != pid or (side and cur["side"] and cur["side"] != side):
+            cur["conflict"] = True          # two different stamped pids/sides for one chain: never first-wins
         cur["side"] = cur["side"] or side
     out = []
     for key, c in chains["accounts"].items():
         f = found.get(key) or {}
+        if f.get("conflict"):
+            f = {}                          # conflicting stamps -> no pid (UNVERIFIED_POSITION_ID_MISSING), fail closed
         out.append(dict(c, bitfinex_position_id=f.get("pid"), position_side=f.get("side")))
     return out
 
