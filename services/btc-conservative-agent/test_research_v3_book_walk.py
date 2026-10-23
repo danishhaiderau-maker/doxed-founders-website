@@ -114,6 +114,7 @@ def test_load_reads_only_book_and_trade_files_inside_the_windows(tmp_path):
     assert int(tape.book_s.max()) < 9000
     assert tape.receipt["book_source_files"] == ["bfx_book_10l_1s.jsonl.1", "bfx_book_10l_1s.jsonl"]
     assert tape.receipt["trade_source_files"] == ["bfx_trades.jsonl"]
+    assert tape.receipt["symbol"] == "tBTCF0:USTF0"  # HM #847 N3
     assert "book_tape_1s" in tape.receipt["never_priced_from"]
     assert "market_microstructure_1s" in tape.receipt["never_priced_from"]
 
@@ -178,3 +179,9 @@ def test_coverage_summary_reports_unproven_cells_and_is_never_green():
                            unproven_cells={STOP_UNOBSERVABLE_REASON: 4})
     assert (out["alert_level"], out["reason"], out["r17_unproven_cells"]) == ("AMBER", "R17_UNPROVEN_CELLS_EXCLUDED", 4)
     assert out["r17_unproven_cell_reasons"] == {STOP_UNOBSERVABLE_REASON: 4}
+
+
+def test_coverage_summary_stamps_the_tape_symbol():
+    # HM #847 N3
+    out = coverage_summary({BASIS_BOOK_WALK: 1}, {BASIS_BOOK_WALK: 1}, {}, {"book_first_s": 1.0}, horizon_sec=7200)
+    assert out["symbol"] == "tBTCF0:USTF0"

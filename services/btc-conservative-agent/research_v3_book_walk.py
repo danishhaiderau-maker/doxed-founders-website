@@ -43,6 +43,8 @@ STOP_TRIGGER_LABEL = "LAST_TRADE_DOC_INFERRED"
 STOP_BASIS_UNVERIFIED = "STOP_BASIS_UNVERIFIED"
 MAX_BOOK_GAP_S = _pf.MAX_BOOK_AGE_S  # 2 s: a longer gap between book rows breaks coverage
 MAX_TRADE_GAP_S = 300.0  # no trade-print row for 5 min inside a window = trade collector outage
+# HM #847 N3: bfx_book_10l / bfx_trades are collected for the Bitfinex perp only (bfx_book_top.SYMBOL).
+TAPE_SYMBOL = "tBTCF0:USTF0"
 # HM #847 C2: bfx_trades has no heartbeat, so a quiet tape and a trade-WS outage look the same.  A
 # book row whose executable exit side sits inside a trade-print gap longer than this cannot prove
 # that a last-trade stop at that level did NOT trigger; if it touches a stop, the cell is R17_UNPROVEN.
@@ -270,6 +272,7 @@ def load_book_walk(data_dir: str | Path, intervals: Iterable[tuple[float, float]
     tape = BookWalkTape.from_rows(rows(BOOK_FILE, "book_lines_read"), rows(TRADES_FILE, "trade_lines_read"))
     tape.receipt.update(stats)
     tape.receipt.update({
+        "symbol": TAPE_SYMBOL,
         "windows": len(windows),
         "book_source_files": [p.name for p in rotation_paths(data_dir, BOOK_FILE)],
         "trade_source_files": [p.name for p in rotation_paths(data_dir, TRADES_FILE)],
@@ -402,6 +405,7 @@ def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapp
         "stop_trigger_label": STOP_TRIGGER_LABEL,
         "stop_basis_flag": STOP_BASIS_UNVERIFIED,
         "price_source": "BFX_BOOK_10L",
+        "symbol": receipt.get("symbol") or TAPE_SYMBOL,
         "never_priced_from": list(_pf.BANNED_SOURCES),
         "path_horizon_sec": horizon_sec,
         "events_by_basis": dict(sorted(events_by_basis.items())),
