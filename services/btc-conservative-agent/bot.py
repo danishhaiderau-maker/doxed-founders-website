@@ -8192,7 +8192,8 @@ def _delay_leg_unverified(sim) -> bool:
 
 def _non_countable_reasons(pos: dict, exit_reason) -> list:
     """Why a closed row must not count in any statistic: FORCE_FLATTENED (HM R8-live) and/or DEFAULT_DELAY_ENTRY /
-    DEFAULT_DELAY_EXIT (HM C2: priced with the 1.5 s default because the live-ack pool had n < 10)."""
+    DEFAULT_DELAY_EXIT (HM C2: priced with the 1.5 s default because the live-ack pool had n < 10) and/or the
+    shared r17_exclusion.liq_failure label (LIQ_UNVERIFIED / LIQ_CHECK_MISSING / ... ; RK/HM K1) on paper rows."""
     out = []
     if str(exit_reason or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS:
         out.append("FORCE_FLATTENED")
@@ -8201,6 +8202,10 @@ def _non_countable_reasons(pos: dict, exit_reason) -> list:
             out.append("DEFAULT_DELAY_ENTRY")
         if _delay_leg_unverified(pos.get("exit_fill_sim")):
             out.append("DEFAULT_DELAY_EXIT")
+        import r17_exclusion as _r17
+        lf = _r17.liq_failure(pos)  # RK/HM K1: the shared r17 liquidation proof (liq stamped before this call)
+        if lf:
+            out.append(lf)
     return out
 
 
@@ -32709,6 +32714,7 @@ def close_position(pos: dict, exit_reason: str):
             funding_total=funding_total,
             net_pnl=net_pnl,
         )
+        _liq_row = _terminal_liq_fields(pos, price)  # RK/HM K1: stamp liq before _non_countable_reasons reads it
         trade_row = {
             "ts": close_iso,
             "close_ts": close_iso,
@@ -32813,7 +32819,7 @@ def close_position(pos: dict, exit_reason: str):
             # leg is non_countable too (non_countable_reasons says why).
             "non_countable": bool(_non_countable_reasons(pos, exit_reason)),
             "non_countable_reasons": _non_countable_reasons(pos, exit_reason) or None,
-            **_terminal_liq_fields(pos, price),
+            **_liq_row,
             **_exit_evidence_fields(pos),
             **_r17_contract_fields(pos),  # R17 (#845): exact contract names on the closed row
             "exit_order_class": pos.get("exit_order_class"),

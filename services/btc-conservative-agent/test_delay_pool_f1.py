@@ -152,7 +152,8 @@ def _pos(entry_src, exit_src):
     lane = sorted(tf.MIGRATED_LANES)[0]
     efs = {"delay_source": entry_src, "fill_px": 100.0, **pf.delay_stamp(entry_src, 123.0)}
     xfs = {"delay_source": exit_src, **pf.delay_stamp(exit_src, 456.0)} if exit_src else None
-    return {"research_lane": lane, "fill_sim": efs, "entry_fill_sim": efs, "exit_fill_sim": xfs}
+    return {"research_lane": lane, "fill_sim": efs, "entry_fill_sim": efs, "exit_fill_sim": xfs,
+            "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None}  # RK/HM K1: liq proven clear
 
 
 def test_closed_row_carries_pool_stamps():
@@ -172,6 +173,9 @@ def test_default_delay_rows_are_non_countable():
     # an exchange-resident exit (stop/TP rests on the book) carries no delay and stays countable
     assert r(_pos("lane_max_n12", "EXCHANGE_RESIDENT_NO_DELAY"), "SL") == []
     assert r(_pos("lane_max_n12", None), "FORCE_FLATTENED") == ["FORCE_FLATTENED"]
+    # RK/HM K1: liquidation not proven clear (shared r17_exclusion.liq_failure)
+    assert r({**_pos("lane_max_n12", "lane_q90_n25"), "liq_unverified": True}, "TP") == ["LIQ_UNVERIFIED"]
+    assert r({**_pos("lane_max_n12", "lane_q90_n25"), "liq_unverified": None}, "TP") == ["LIQ_CHECK_MISSING"]
     # live rows (an exchange order id) are never re-judged on the paper delay pool
     live = {**_pos("default_until_n10", None), "bitfinex_order_id": 7}
     assert r(live, "TP") == []

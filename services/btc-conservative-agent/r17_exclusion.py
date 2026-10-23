@@ -156,6 +156,30 @@ def _nonneg(v) -> bool:
     return n is not None and n >= 0
 
 
+def _false(v) -> bool:
+    return v is False or (isinstance(v, str) and v.strip() in ("false", "False"))
+
+
+def liq_failure(row):
+    """RK/HM K1 (24 Oct): a row counts only when the hold path is PROVEN clear of the liquidation distance:
+    liq_unverified is a real False, the mark series was read (liq_mark_rows_n > 0) and nothing reached liq_px
+    (no liq_trigger_ts). liq_unverified=True (liquidation before the stop, stop slipped past liq, no mark) or a
+    missing check fails closed. Returns the failure label or None."""
+    if not isinstance(row, dict):
+        return "LIQ_CHECK_MISSING"
+    lu = row.get("liq_unverified")
+    if _truthy(lu):
+        return "LIQ_UNVERIFIED"
+    if not _false(lu):
+        return "LIQ_CHECK_MISSING"
+    n = _num(row.get("liq_mark_rows_n"))
+    if n is None or n <= 0:
+        return "LIQ_MARKS_MISSING"
+    if not _missing(row.get("liq_trigger_ts")) and str(row.get("liq_trigger_ts")).strip() not in ("None", "nan"):
+        return "LIQ_DISTANCE_REACHED"
+    return None
+
+
 def proof_failures(row) -> list:
     """Every failed countability check against the r17_fields contract (empty list = the row proves book realism)."""
     out = []
@@ -188,6 +212,9 @@ def proof_failures(row) -> list:
     sc = _exact(row.get("stop_coverage"))
     if sc not in F.STOP_COVERAGE_OK:
         out.append("STOP_COVERAGE_MISSING" if _missing(row.get("stop_coverage")) else "STOP_COVERAGE_UNKNOWN")
+    lf = liq_failure(row)
+    if lf:
+        out.append(lf)
     return out
 
 
