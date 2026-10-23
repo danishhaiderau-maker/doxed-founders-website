@@ -206,10 +206,13 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         if exposed:
             state.setdefault("blind_since", now)
             if now - state["blind_since"] > 30.0:
-                out.append({"code": "EXCHANGE_MIRROR_BLIND", "detail": str((m or {}).get("error") or "no mirror")})
+                out.append({"code": "EXCHANGE_MIRROR_BLIND", "cause": str((m or {}).get("error_code") or "EXCHANGE_READ_FAILED"),
+                            "detail": str((m or {}).get("error") or "no mirror")})
             elif open_filled and book is not _NO_BOOK and now - state["blind_since"] > _ltg.BOOK_HOLD_MAX_AGE_S:
                 # AMEND4 E7 (L31-32): a FILLED live position whose stop residency cannot be read back for > 10 s => RED
-                out.append({"code": _ltg.STOP_FAILURE_FLATTEN, "tile": tile_of(open_filled[0]), "cause": "EXCHANGE_READ_FAILED",
+                # RK binding ruling (3) (#852 R3): a relay evidence read that timed out is stamped E6_READ_TIMEOUT
+                _cause = "E6_READ_TIMEOUT" if (m or {}).get("error_code") == "E6_READ_TIMEOUT" else "EXCHANGE_READ_FAILED"
+                out.append({"code": _ltg.STOP_FAILURE_FLATTEN, "tile": tile_of(open_filled[0]), "cause": _cause,
                             "detail": f"position open, exchange read failing {now - state['blind_since']:.0f}s (E6/E7)"})
         else:
             state.pop("blind_since", None)   # nothing exposed: blindness is not accumulating towards a disarm

@@ -83,7 +83,7 @@ test('E6: fly-view read_age_s is measured from the oldest read SEND time (never 
 
 test('E6 budget: fast mirror reuses money-tick reads, reads only when none is fresh, never past the guard', () => {
   assert.equal(BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN, 90);
-  assert.equal(EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN, 72);
+  assert.equal(EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN, 54);   // #852 R3 RK (3): the routine class of the shared budget
   const quiet = { 'v2/auth/r/orders': 0 };
   assert.deepEqual(exchangeMirrorReadPlan({ ordersReuseAgeMs: 400, positionsReuseAgeMs: 900, balanceAgeMs: 2_000, callsLastMinute: {} }),
     { orders: 'REUSE', positions: 'REUSE', balance: 'REUSE' });
@@ -93,7 +93,7 @@ test('E6 budget: fast mirror reuses money-tick reads, reads only when none is fr
     callsLastMinute: { 'v2/auth/r/orders': 72, 'v2/auth/r/wallets': 72 } }),
   { orders: 'SKIP', positions: 'REUSE', balance: 'REUSE' });
   // Fast mirror alone (no money tick to reuse): 60 / 1.75 = 34.3 orders + 34.3 positions reads/min per exposed account,
-  // wallets 60 / 15 = 4/min: under the 72 guard and well under Bitfinex's 90.
+  // wallets 60 / 15 = 4/min: under the 54 routine guard and well under Bitfinex's 90.
   const perMin = 60_000 / EXCHANGE_MIRROR_EXPOSED_EVERY_MS;
   assert.ok(perMin < 35 && perMin < EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN);
   assert.equal(60_000 / EXCHANGE_MIRROR_BALANCE_EVERY_MS, 4);

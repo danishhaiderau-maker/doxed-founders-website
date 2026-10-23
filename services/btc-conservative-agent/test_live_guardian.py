@@ -577,3 +577,23 @@ def test_rk0225_tick_latches_red_for_untagged_codes_before_disarm_and_force_flat
     tick = _SRC[_SRC.index("def _live_guardian_tick"):_SRC.index("def live_guardian_loop")]
     red = tick.index('_lg.latch_red(_LIVE_GUARDIAN_STATE, {')
     assert "RED_CODES" in tick and red < tick.index("_disarm_live_control(reason)") < tick.index("_live_guardian_force_flat(reason, now, disarmed=True)")
+
+
+def test_rk3_evidence_read_timeout_is_stamped_e6_read_timeout():
+    """RK binding ruling (3) (#852 R3): the relay mirror's error_code E6_READ_TIMEOUT becomes the STOP_FAILURE cause."""
+    c = ch(fill_at_ts=NOW - 100, stop_confirmed=True)
+    timed_out = {"ok": False, "error": "Bitfinex v2/auth/r/positions: authenticated request total deadline exceeded after 2000ms",
+                 "error_code": "E6_READ_TIMEOUT"}
+    st = {}
+    assert g.evaluate([c], timed_out, st, NOW, book=None) == []
+    out = g.evaluate([c], timed_out, st, NOW + 11, book=None)
+    sf = [v for v in out if v["code"] == g._ltg_caps.STOP_FAILURE_FLATTEN]
+    assert sf and sf[0]["cause"] == "E6_READ_TIMEOUT"
+    blind = [v for v in g.evaluate([c], timed_out, st, NOW + 31, book=None) if v["code"] == "EXCHANGE_MIRROR_BLIND"]
+    assert blind and blind[0]["cause"] == "E6_READ_TIMEOUT"
+    # any other failed read keeps the generic cause
+    st2 = {}
+    g.evaluate([c], {"ok": False, "error": "HTTP 500", "error_code": "EXCHANGE_READ_FAILED"}, st2, NOW, book=None)
+    sf2 = [v for v in g.evaluate([c], {"ok": False, "error": "HTTP 500"}, st2, NOW + 11, book=None)
+           if v["code"] == g._ltg_caps.STOP_FAILURE_FLATTEN]
+    assert sf2 and sf2[0]["cause"] == "EXCHANGE_READ_FAILED"

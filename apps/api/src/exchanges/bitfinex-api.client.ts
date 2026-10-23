@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHmac } from 'node:crypto';
 import { btcToSats } from '@dcf/utils';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
@@ -366,6 +367,57 @@ export function bitfinexAuthCallsLastMinute(nowMs = Date.now()): Record<string, 
   return out;
 }
 
+/**
+ * #852 E6 + RK binding ruling (3): ONE shared, process-wide (= per relay IP) read budget per authenticated endpoint,
+ * covering the exchange mirror, the money tick, force-flat / position-flatten and any other relay read (e.g. #854's
+ * positions read). A read is admitted only while the endpoint's sent count in the last 60 s is below its class cap:
+ *   - routine  (exchange mirror, monitoring reads such as #854): < BITFINEX_AUTH_ROUTINE_CAP_PER_MIN (54)
+ *   - tick     (default: every unmarked read, i.e. the money tick / order management): < BITFINEX_AUTH_TICK_CAP_PER_MIN (72)
+ *   - critical (force-flat / position-flatten read-backs): < BITFINEX_AUTH_CRITICAL_CAP_PER_MIN (89)
+ * so the total can never reach Bitfinex's 90/min (a breach blocks the IP for 60 s: stops unplaceable), the tick keeps
+ * 18 reads/min of headroom above the mirror and the flatten path 17 more above the tick (never starved by a fast mirror).
+ * Writes (v2/auth/w/: order submit / cancel / stop placement / flatten) are NEVER refused by this budget.
+ */
+export type BitfinexAuthReadClass = 'critical' | 'tick' | 'routine';
+export const BITFINEX_AUTH_CRITICAL_CAP_PER_MIN = BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN - 1;
+export const BITFINEX_AUTH_TICK_CAP_PER_MIN = Math.floor(BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN * 0.8);
+export const BITFINEX_AUTH_ROUTINE_CAP_PER_MIN = Math.floor(BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN * 0.6);
+const BITFINEX_AUTH_CLASS_CAP: Record<BitfinexAuthReadClass, number> = {
+  critical: BITFINEX_AUTH_CRITICAL_CAP_PER_MIN,
+  tick: BITFINEX_AUTH_TICK_CAP_PER_MIN,
+  routine: BITFINEX_AUTH_ROUTINE_CAP_PER_MIN,
+};
+const authReadClass = new AsyncLocalStorage<BitfinexAuthReadClass>();
+/** Run ``fn`` with every Bitfinex authenticated read it issues charged to ``cls`` (innermost scope wins). */
+export function withBitfinexReadClass<T>(cls: BitfinexAuthReadClass, fn: () => T): T {
+  return authReadClass.run(cls, fn);
+}
+/** Force-flat / position-flatten read-backs: admitted up to the critical cap (reserved headroom). */
+export function withBitfinexCriticalReads<T>(fn: () => T): T {
+  return withBitfinexReadClass('critical', fn);
+}
+export function currentBitfinexReadClass(): BitfinexAuthReadClass {
+  return authReadClass.getStore() ?? 'tick';
+}
+export function isBitfinexAuthWrite(apiPath: string): boolean {
+  return /(^|\/)auth\/w\//.test(apiPath);
+}
+/** Pure-ish admission decision of the shared budget (reads the process-wide 60 s log). */
+export function bitfinexAuthAdmission(
+  apiPath: string,
+  cls: BitfinexAuthReadClass,
+  nowMs = Date.now(),
+): { ok: true } | { ok: false; reason: string } {
+  if (isBitfinexAuthWrite(apiPath)) return { ok: true };
+  const cap = BITFINEX_AUTH_CLASS_CAP[cls] ?? BITFINEX_AUTH_TICK_CAP_PER_MIN;
+  const n = (authCallLog.get(apiPath) ?? []).filter((t) => nowMs - t < 60_000).length;
+  if (n < cap) return { ok: true };
+  return {
+    ok: false,
+    reason: `BITFINEX_AUTH_BUDGET: ${apiPath} ${n} sent in 60s >= ${cls} cap ${cap}/min (Bitfinex limit ${BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN})`,
+  };
+}
+
 /** @internal tests only */
 export function resetBitfinexAuthCallLog(): void {
   authCallLog.clear();
@@ -408,6 +460,7 @@ export async function bitfinexAuthPost<T = unknown>(
   body: Record<string, unknown> = {},
   timeoutMs = 12_000,
 ): Promise<T> {
+  const readClass = currentBitfinexReadClass();   // captured before any await (#852 E6 shared budget)
   await assertProtectiveStopSide(apiPath, body);
   const lane = nonceLaneFor(creds.apiKey);
   const enqueuedAtMs = Date.now();
@@ -433,6 +486,9 @@ export async function bitfinexAuthPost<T = unknown>(
           `Bitfinex ${apiPath}: authenticated request deadline exceeded after ${timeoutMs}ms`,
         );
       }
+      // #852 E6 / RK (3): one shared read budget; writes are never refused, reads by class (see bitfinexAuthAdmission)
+      const admission = bitfinexAuthAdmission(apiPath, readClass);
+      if (!admission.ok) throw new Error(admission.reason);
       const nonce = allocateBitfinexAuthNonce(creds.apiKey);
       recordBitfinexAuthCall(apiPath);
       try {
@@ -1199,11 +1255,12 @@ export class BitfinexTradingClient {
   async listActiveOrders(
     creds: ExchangeCredentials,
     symbol = BITFINEX_BTC_PERP_SYMBOL,
+    timeoutMs?: number,
   ): Promise<BitfinexActiveOrder[]> {
     const sentAtMs = Date.now();
     const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/orders', {
       sym: symbol,
-    });
+    }, timeoutMs);
     const orders = parseActiveOrdersPayload(rows, symbol);
     rememberAuthRead(creds.apiKey, 'orders', symbol, sentAtMs, orders);
     return orders;
@@ -1230,9 +1287,10 @@ export class BitfinexTradingClient {
   async getOpenPositionDetail(
     creds: ExchangeCredentials,
     symbol = BITFINEX_BTC_PERP_SYMBOL,
+    timeoutMs?: number,
   ): Promise<BitfinexPositionDetail | null> {
     const sentAtMs = Date.now();
-    const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/positions');
+    const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/positions', {}, timeoutMs);
     const detail = parseOpenPositionPayload(rows, symbol);
     rememberAuthRead(creds.apiKey, 'positions', symbol, sentAtMs, detail);
     return detail;

@@ -81,6 +81,9 @@ import {
   bitfinexAuthCallsLastMinute,
   recentBitfinexAuthRead,
   BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN,
+  BITFINEX_AUTH_ROUTINE_CAP_PER_MIN,
+  withBitfinexReadClass,
+  withBitfinexCriticalReads,
 } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
@@ -4036,10 +4039,21 @@ export const EXCHANGE_MIRROR_DUE_CHECK_MS = 250;
 export const EXCHANGE_MIRROR_REUSE_MAX_AGE_MS = 1_000;
 /** The Derivatives balance is not stop evidence: refreshed at the slow cadence only. */
 export const EXCHANGE_MIRROR_BALANCE_EVERY_MS = 15_000;
-/** Fast mirror issues NO new read of an endpoint already at 80 % of Bitfinex's
- * 90 req/min/IP (a breach blocks the IP for 60 s: blind relay, stops unplaceable).
- * Evidence then ages and the Fly guardian fails closed (flatten), never the IP. */
-export const EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN = Math.floor(BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN * 0.8);
+/** #852 E6 / RK (3): the fast mirror is the ROUTINE class of the one shared Bitfinex read budget
+ * (bitfinexAuthAdmission): it issues NO new read of an endpoint already at the routine cap (54 of Bitfinex's
+ * 90 req/min/IP; a breach blocks the IP for 60 s: blind relay, stops unplaceable), keeping 18/min for the money tick
+ * and 17/min more for force-flat read-backs. Evidence then ages and the Fly guardian fails closed (flatten), never the IP. */
+export const EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN = BITFINEX_AUTH_ROUTINE_CAP_PER_MIN;
+/** RK (3): one mirror evidence read (orders / positions) times out after this; the mirror then publishes
+ * ok=false with error_code E6_READ_TIMEOUT, which Fly stamps as the STOP_FAILURE_FLATTEN cause. */
+export const EXCHANGE_MIRROR_READ_TIMEOUT_MS = 2_000;
+
+/** Pure (RK (3)): error_code for a failed mirror read. */
+export function exchangeMirrorErrorCode(message: string): 'E6_READ_TIMEOUT' | 'BITFINEX_AUTH_BUDGET' | 'EXCHANGE_READ_FAILED' {
+  if (/^BITFINEX_AUTH_BUDGET/.test(message)) return 'BITFINEX_AUTH_BUDGET';
+  if (/E6_READ_TIMEOUT|deadline exceeded|timed? ?out|TimeoutError|aborted due to timeout/i.test(message)) return 'E6_READ_TIMEOUT';
+  return 'EXCHANGE_READ_FAILED';
+}
 /** Budgets used for the worst-case evidence age (measured relay signed-read p95 0.59 s, 12-19 Oct EXECUTOR-DIAG). */
 export const STOP_EVIDENCE_TIMING = {
   relayEveryS: EXCHANGE_MIRROR_EXPOSED_EVERY_MS / 1000,
@@ -10366,13 +10380,18 @@ await this.notifications
             }
             continue;   // not published: evidence ages and the Fly guardian fails closed
           }
-          const [orders, position, balance] = await Promise.all([
-            plan.orders === 'REUSE' && reusedOrders ? reusedOrders.value : this.bitfinex.listActiveOrders(creds),
-            plan.positions === 'REUSE' && reusedPosition ? reusedPosition.value : this.bitfinex.getOpenPositionDetail(creds),
+          // #852 E6 / RK (3): mirror reads are the ROUTINE class of the shared budget and time out after 2 s
+          const [orders, position, balance] = await withBitfinexReadClass('routine', () => Promise.all([
+            plan.orders === 'REUSE' && reusedOrders
+              ? reusedOrders.value
+              : this.bitfinex.listActiveOrders(creds, undefined, EXCHANGE_MIRROR_READ_TIMEOUT_MS),
+            plan.positions === 'REUSE' && reusedPosition
+              ? reusedPosition.value
+              : this.bitfinex.getOpenPositionDetail(creds, undefined, EXCHANGE_MIRROR_READ_TIMEOUT_MS),
             plan.balance === 'REUSE' && lastBalance
               ? lastBalance.usd
               : this.bitfinex.getDerivativesAvailableUsd(creds).catch(() => null),
-          ]);
+          ]));
           if (!(plan.balance === 'REUSE' && lastBalance)) this.exchangeMirrorBalance.set(instance.id, { atMs: readStartedAt, usd: balance });
           const ordersAt = plan.orders === 'REUSE' && reusedOrders ? reusedOrders.sentAtMs : readStartedAt;
           const positionAt = plan.positions === 'REUSE' && reusedPosition ? reusedPosition.sentAtMs : readStartedAt;
@@ -10392,10 +10411,12 @@ await this.notifications
           };
           evidenceAtMs = Math.min(evidenceAtMs, evidenceAt);
         } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
           mirror = {
             schema: 'relay_exchange_mirror_v1',
             ok: false,
-            error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+            error: message.slice(0, 160),
+            error_code: exchangeMirrorErrorCode(message),   // RK (3): E6_READ_TIMEOUT -> Fly STOP_FAILURE cause
             read_at: new Date().toISOString(),
           };
         }
@@ -22084,7 +22105,9 @@ await this.notifications
       if (fenced) await refreshLiveEntryFence(this.prisma, fenceId).catch(() => undefined);
     };
     try {
-      const r = await this.forceFlatDisarmAccountInner(userId, agentSlug, touch, reason);
+      // #852 E6 / RK (3): both flatten routes run here; their read-backs use the CRITICAL class of the shared budget
+      // (reserved headroom above the mirror and the money tick: never starved). Writes are never budget-refused.
+      const r = await withBitfinexCriticalReads(() => this.forceFlatDisarmAccountInner(userId, agentSlug, touch, reason));
       // HM2: the exchange is the truth. Only after a FLAT_NO_STOPS read-back (still under the fence), close every
       // OPEN / PENDING_ENTRY row of this account as non-countable with the trigger reason + the exchange evidence. A failed
       // reconcile (or rows left open) => dbReconciled=false => the route returns ok=false (Fly goes RED).
