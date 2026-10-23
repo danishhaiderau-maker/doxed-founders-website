@@ -49766,6 +49766,9 @@ def status():
                 "order_multiverse_written": len(_order_multiverse_written),
                 "v22_retired_r17": v22_retired_r17_count(),
                 "v22_retired_r17_label": "positive v22 events retired (R17): no stored 1m path, never written",
+                "lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(),
+                "lifecycle_qualification_retired_r17_label": "lifecycles stopped at QUALIFICATION_HORIZON_RETIRED_R17 "
+                                                             "(POST_EXIT_PATH source retired; transfer bundles only)",
                 "cleanup_enabled": False,
                 "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
                 "family_tiles_arm_discovery_grid": True,
@@ -52350,6 +52353,24 @@ def _collection_epoch_parity(lifecycle_public) -> dict:
     else:
         verdict = "MISMATCH"
     return {**identities, "status": verdict, "match": verdict == "MATCH"}
+
+
+def _lifecycle_qualification_retired_r17_total() -> int:
+    """HM C11: lifecycles that stopped at QUALIFICATION_HORIZON_RETIRED_R17. The worker runs as a subprocess, so the
+    runtime owner accumulates its per-cycle counts; an in-process run (tests, catch-up) adds the module counter."""
+    total = 0
+    try:
+        raw = _lifecycle_pipeline_runtime_status().get("qualification_retired_r17_total")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            total += raw
+    except Exception:  # noqa: BLE001 - never break /health
+        pass
+    try:
+        import lifecycle_pipeline as _lp
+        total += max(0, int(_lp.lifecycle_qualification_retired_r17_count()))
+    except Exception:  # noqa: BLE001
+        pass
+    return total
 
 
 def _lifecycle_pipeline_runtime_status() -> dict:
