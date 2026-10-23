@@ -1,7 +1,18 @@
+import pytest
 import pandas as pd
 
 import analysis_hygiene as h
 import late_window_reprice as lw
+
+
+@pytest.fixture(autouse=True)
+def _r17_proof_rule_out_of_scope(monkeypatch):
+    """R17 proof rule (countable only with book/delay/walk/level proof) is covered by test_r17_exclusion.py.
+    These synthetic rows test other properties, so the proof check is neutralised here; the pinned-list and
+    stamped exclusions still apply."""
+    import r17_exclusion
+    monkeypatch.setattr(r17_exclusion, "proof_failures", lambda row: [])
+
 
 
 def test_forced_and_late_window_excluded_and_bp_added():

@@ -151,6 +151,16 @@ import types
 import monitor_tiles as mt
 
 
+@pytest.fixture(autouse=True)
+def _r17_proof_rule_out_of_scope(monkeypatch):
+    """R17 proof rule (countable only with book/delay/walk/level proof) is covered by test_r17_exclusion.py.
+    These synthetic rows test other properties, so the proof check is neutralised here; the pinned-list and
+    stamped exclusions still apply."""
+    import r17_exclusion
+    monkeypatch.setattr(r17_exclusion, "proof_failures", lambda row: [])
+
+
+
 def _bot_ns(names, **extra):
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
