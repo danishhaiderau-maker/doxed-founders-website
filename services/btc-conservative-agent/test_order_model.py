@@ -98,5 +98,15 @@ def test_no_maker_take_profit_anywhere():
     import gs_regime_exit_stack as stack
     import combo_pathway_config as cfg
     import inspect
-    assert "MAKER_LIMIT_AT_TARGET" not in inspect.getsource(cfg)
+    import regime_adaptive_binding as rab
+    # The take_profit_fill label string feeds active_tile_registry_signature, which research_freeze pins
+    # (MID_EPOCH_REGISTRY_SIGNATURES); moving that pin needs owner approval, so the label stays byte-identical.
+    # It is descriptive only: the only MAKER_LIMIT_AT_TARGET occurrences are those frozen labels, and the
+    # executing ExitActions are BOT_SENT market legs (maker=False).
+    src = inspect.getsource(cfg)
+    lines = [ln.strip() for ln in src.splitlines() if "MAKER_LIMIT_AT_TARGET" in ln]
+    assert lines and all(ln == '"take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",'
+                         for ln in lines)
+    rab_src = inspect.getsource(rab)
+    assert "maker=True" not in rab_src and rab_src.count("maker=False") >= 2
     assert '"maker": True' not in inspect.getsource(stack)
