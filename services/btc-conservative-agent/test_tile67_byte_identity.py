@@ -13,10 +13,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 BASE = "51d926f93"
+# #839 F2/F3 (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result (realism-v2 shared trigger helper / entry quote stamping; R4 pricing intent unchanged for tiles 1-5 except the reviewed realism changes).
 PINNED = {
     "bot.py": {
         "get_mark_price": "f9c6c2b6cd40d0e9b558ee8b31d73f0a5b0079fc8162ba667a0b8265eba1c707",
-        "_paper_lane_entry_result": "f488ced8086d6786d86611e6158e1bac5802ae8f46bf88b34b0950352d5e2097",
+        "_paper_lane_entry_result": "beff32f680828074a2233e794250c8c65260210a3ecc4dbd941cb32846e30d47",
         "_tp1_gate": "0a7525eacb19a11174f204045917bcfe2ee7f1602f062f7ae9db448ce4d004cf",
         "_paper_lane_exit": "cf376f81eb080d117a07cf969b852e153d0eec2ec491639a91fdac0079d2fa16",
         "_disloc_delay": "bd27730709158b9bfdcc944c6f303603aa9c2b2f7ccf63d91fc4c485b9bbb9f4"
