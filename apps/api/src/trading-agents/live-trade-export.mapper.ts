@@ -1,5 +1,6 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
+import { latestBitfinexPositionIdStamp } from './bitfinex-position-id-stamp';
 
 type IntentEnvelope = {
   direction?: string;
@@ -52,6 +53,16 @@ export type LiveTradeExportRow = {
   regime: string | null;
   strategy: string | null;
   showcaseExitReason: string | null;
+  /**
+   * Additive: Bitfinex POSITION_ID from the post-stop positions read-back
+   * (BITFINEX_POSITION_ID_STAMP). Null unless the read-back matched the fill
+   * exactly. Field name matches #849's live_funding_ledger contract.
+   */
+  bitfinex_position_id: number | null;
+  /** ISO time the positions read-back returned (null if never stamped). */
+  bitfinex_position_id_read_at: string | null;
+  /** STAMPED / READ_FAILED / MULTI_POSITION / ... (null if never stamped). */
+  bitfinex_position_id_status: string | null;
   events: LiveTradeExportEvent[];
 };
 
@@ -145,6 +156,7 @@ export function mapParticipantToExportRow(input: {
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
     .map((e) => mapEvent(e.payload, e.eventType, e.createdAt));
 
+  const pidStamp = latestBitfinexPositionIdStamp(input.participant.events);
   const filledEvent = events.find((e) => e.eventType === 'FILLED');
   const exitEvent = [...events].reverse().find((e) => e.eventType === 'EXIT');
   const orderEvent = events.find((e) => e.eventType === 'ORDER_PLACED');
@@ -205,6 +217,15 @@ export function mapParticipantToExportRow(input: {
     regime: intent.regime ?? null,
     strategy: intent.strategy ?? null,
     showcaseExitReason: input.cycle.showcaseExitReason,
+    bitfinex_position_id:
+      pidStamp?.status === 'STAMPED'
+      && typeof pidStamp.bitfinex_position_id === 'number'
+      && Number.isSafeInteger(pidStamp.bitfinex_position_id)
+      && pidStamp.bitfinex_position_id > 0
+        ? pidStamp.bitfinex_position_id
+        : null,
+    bitfinex_position_id_read_at: pidStamp?.position_id_read_at ?? null,
+    bitfinex_position_id_status: pidStamp?.status ?? null,
     events,
   };
 }
@@ -247,6 +268,10 @@ const CSV_COLUMNS: Array<keyof LiveTradeExportRow | 'eventsSummary'> = [
   'strategy',
   'showcaseExitReason',
   'eventsSummary',
+  // Additive columns appended last so existing column positions are unchanged.
+  'bitfinex_position_id',
+  'bitfinex_position_id_read_at',
+  'bitfinex_position_id_status',
 ];
 
 export function liveTradesToCsv(payload: LiveTradeExportPayload): string {

@@ -10,6 +10,10 @@ import {
   signLiveExecutionReport,
 } from './live-copy-approval';
 import { BITFINEX_BTC_PERP_SYMBOL, BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
+import {
+  latestBitfinexPositionIdStamp,
+  type BitfinexPositionIdStampPayload,
+} from './bitfinex-position-id-stamp';
 
 /**
  * The copier's protective stop as submitStopOrder sends it (type STOP, flags
@@ -101,6 +105,30 @@ export function liveCopyAccountLabel(instanceId: string): string {
   return `acct-${String(instanceId).slice(0, 8)}`;
 }
 
+/** Report `position` block from a BITFINEX_POSITION_ID_STAMP event, or null. */
+export function liveCopyPositionBlock(stamp: BitfinexPositionIdStampPayload | null): {
+  bitfinex_position_id: number | null;
+  position_side: 'LONG' | 'SHORT' | null;
+  read_at_ts: number | null;
+  status: string;
+  source: string;
+} | null {
+  if (!stamp) return null;
+  const pid = typeof stamp.bitfinex_position_id === 'number'
+    && Number.isSafeInteger(stamp.bitfinex_position_id)
+    && stamp.bitfinex_position_id > 0
+    ? stamp.bitfinex_position_id
+    : null;
+  const readMs = isoMs(stamp.position_id_read_at);
+  return {
+    bitfinex_position_id: stamp.status === 'STAMPED' ? pid : null,
+    position_side: stamp.status === 'STAMPED' ? stamp.position_side : null,
+    read_at_ts: readMs != null ? sec(readMs) : null,
+    status: String(stamp.status),
+    source: String(stamp.read_source ?? 'POST_STOP_POSITIONS_READBACK'),
+  };
+}
+
 /**
  * Pure: durable executor events of ONE approved cycle -> signed-report bodies
  * (unsigned here). Hops: signal -> intent (Fly) -> website receive -> order
@@ -142,6 +170,10 @@ export function buildLiveCopyReports(input: {
     // One exchange fill can be recorded by two paths (CANCEL_RACE_FILL and
     // EXCHANGE_FILL_RECONCILE). Report each exchange fill once.
     const seenFills = new Set<string>();
+    // Additive: the Bitfinex POSITION_ID read back after the stop (never
+    // inferred). #849's _report_pid_side reads position.bitfinex_position_id
+    // (+ position_side). Null-pid stamps carry their status for audit.
+    const positionBlock = liveCopyPositionBlock(latestBitfinexPositionIdStamp(mine));
     const tl: Record<string, number | null> = {
       fly_signal_at_ts: flySignalTs,
       fly_intent_emitted_at_ts: flyIntentTs,
@@ -230,6 +262,7 @@ export function buildLiveCopyReports(input: {
               fast_path: pl.entry_fast_path ?? null,
             },
             fill: { price: num(pl.fill_price), qty: num(pl.qty), source: pl.fill_price_source ?? pl.fill_source ?? null },
+            ...(positionBlock ? { position: positionBlock } : {}),
           });
           if (pl.stop_loss_placed === true && pl.stopOrderId != null) {
             push(e, 'STOP_PLACED', {
@@ -280,6 +313,7 @@ export function buildLiveCopyReports(input: {
               paper_exit_price: num(pl.showcase_exit_price),
               exchange_order_id: pl.close_exchange_order_id != null ? String(pl.close_exchange_order_id) : null,
             },
+            ...(positionBlock ? { position: positionBlock } : {}),
           });
           break;
         }

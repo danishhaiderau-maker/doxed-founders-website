@@ -70,7 +70,36 @@ export type BitfinexPositionDetail = {
   pnlUsd: number;
   pnlPct: number;
   direction: 'LONG' | 'SHORT';
+  /**
+   * POSITION_ID (row[11]) exactly as Bitfinex returned it, or null when the
+   * row has no positive safe-integer id. Never inferred. Additive: the sim
+   * client and older callers may omit it.
+   */
+  positionId?: number | null;
+  /**
+   * MTS_CREATE (row[12]) — the position's creation time in epoch ms exactly
+   * as Bitfinex returned it in the SAME read-back, or absent when the row has
+   * no positive safe-integer value. Additive, never inferred.
+   */
+  createdAtMs?: number | null;
 };
+
+/**
+ * The positions read-back contained more than one row for the requested
+ * symbol. Same message as before; typed so the position-id stamp can report
+ * MULTI_POSITION instead of a generic read failure.
+ */
+export class BitfinexMultiplePositionsError extends Error {
+  constructor(symbol: string) {
+    super(`Bitfinex returned duplicate ${symbol} position rows`);
+    this.name = 'BitfinexMultiplePositionsError';
+  }
+}
+
+/** POSITION_ID [11] of a v2 `auth/r/positions` row, or null. Never inferred. */
+export function parseBitfinexPositionId(raw: unknown): number | null {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+}
 
 export type BitfinexPositionCloseLedgerRow = {
   ledgerId: string;
@@ -643,7 +672,7 @@ export function parseOpenPositionPayload(
     }
     if (row[0] !== symbol) continue;
     if (matched) {
-      throw new Error(`Bitfinex returned duplicate ${symbol} position rows`);
+      throw new BitfinexMultiplePositionsError(symbol);
     }
     if (row.length < 8) {
       throw new Error(`Bitfinex ${symbol} position row is incomplete`);
@@ -671,6 +700,8 @@ export function parseOpenPositionPayload(
     ) {
       throw new Error(`Bitfinex ${symbol} position amount or base price is invalid`);
     }
+    const positionId = parseBitfinexPositionId(row[11]);
+    const createdAtMs = parseBitfinexPositionCreatedAtMs(row[12]);
     matched = {
       symbol,
       amount,
@@ -678,9 +709,17 @@ export function parseOpenPositionPayload(
       pnlUsd,
       pnlPct,
       direction: amount > 0 ? 'LONG' : 'SHORT',
+      // Additive: present only when Bitfinex returned a real POSITION_ID.
+      ...(positionId != null ? { positionId } : {}),
+      ...(createdAtMs != null ? { createdAtMs } : {}),
     };
   }
   return matched;
+}
+
+/** row[12] MTS_CREATE: a positive safe-integer epoch-ms, else null (never inferred). */
+export function parseBitfinexPositionCreatedAtMs(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 export class BitfinexTradingClient {
