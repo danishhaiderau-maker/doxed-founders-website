@@ -50,7 +50,7 @@ def live_funding_failure(chain: Mapping[str, Any] | None, live_funding: Mapping[
     if not live_funding:
         return "LIVE_FUNDING_UNVERIFIED:NO_READBACK"
     import r17_exclusion as _rx
-    label = _rx.funding_failure(live_funding)
+    label = _rx.funding_failure(live_funding, live=True)   # HM (D): the live leg accepts only LIVE_LEDGER_V1
     return None if label is None else f"LIVE_{label}:{live_funding.get('funding_status')}"
 
 

@@ -180,9 +180,11 @@ def liq_failure(row):
     return None
 
 
-def funding_failure(row):
+def funding_failure(row, *, live: bool = False):
     """HM #849 items 1-3 (24 Oct): a row counts only with settlement-exact funding that priced every crossed
-    settlement from deriv status, with the window ends at the priced fill ts. Returns the failure label or None."""
+    settlement from deriv status, with the window ends at the priced fill ts. Returns the failure label or None.
+    HM (D): the accepted model is leg-specific - paper rows (default) reject LIVE_LEDGER_V1; ``live=True`` (the live
+    leg's ledger read-back, live_vs_paper) accepts only LIVE_LEDGER_V1."""
     st = _exact(row.get("funding_status"))
     if st == "FUNDING_PRICER_ERROR":
         return "FUNDING_PRICER_ERROR"
@@ -194,7 +196,8 @@ def funding_failure(row):
             fb = [fb]
     if fb is None or not isinstance(fb, list) or fb:
         return "FUNDING_TS_FALLBACK" if fb else "FUNDING_UNVERIFIED"
-    if (_exact(row.get("funding_model")) not in F.FUNDING_MODEL_OK or st not in F.FUNDING_STATUS_OK
+    if (_exact(row.get("funding_model")) not in (F.LIVE_FUNDING_MODEL_OK if live else F.PAPER_FUNDING_MODEL_OK)
+            or st not in F.FUNDING_STATUS_OK
             or not _truthy(row.get("funding_verified"))):
         return "FUNDING_UNVERIFIED"
     return None

@@ -143,6 +143,8 @@ def _post(path: str, body: dict, creds, timeout: float = 8.0):
         raise ReadError(f"HTTP_{exc.code}") from None
     except Exception as exc:  # noqa: BLE001 - redacted: only the exception class name leaves this function
         raise ReadError(f"TRANSPORT_{type(exc).__name__}") from None
+    if isinstance(data, list) and data and data[0] == "error" and "ratelimit" in str(data[-1]).lower():
+        raise ReadError("HTTP_429")   # Bitfinex 'ratelimit: error' body -> the job backs off
     if not isinstance(data, list) or (data and data[0] == "error"):
         raise ReadError("API_ERROR")
     return data
@@ -160,22 +162,28 @@ def read_funding_ledger(start_ts: float, end_ts: float, creds=None, post=_post) 
     return rows
 
 
-def resolve_position_id(entry_fill_ts: float, exit_fill_ts: float, creds=None, post=_post):
-    """The ONE Bitfinex position (positions/hist, SYMBOL) whose life matches the real fills; None if not unique."""
+def resolve_position_id(entry_fill_ts: float, exit_fill_ts: float, creds=None, post=_post, position_id=None):
+    """The ONE Bitfinex position (positions/hist, SYMBOL) whose life matches the real fills; None if not unique.
+    With the chain's ``bitfinex_position_id`` that id is required AND its window is still checked (HM A)."""
     creds = creds or read_credentials()
     if not creds:
         raise ReadError("READ_KEY_MISSING")
     rows = post(POSITIONS_PATH, {"start": int((entry_fill_ts - 3600) * 1000), "end": int((exit_fill_ts + 3600) * 1000),
                                  "limit": 100}, creds)
-    return match_position(rows, entry_fill_ts, exit_fill_ts)
+    return match_position(rows, entry_fill_ts, exit_fill_ts, position_id=position_id)
 
 
-def match_position(rows, entry_fill_ts, exit_fill_ts):
+def match_position(rows, entry_fill_ts, exit_fill_ts, position_id=None):
     """Pure: (position_id, create_ts, update_ts, position_funding) of the unique SYMBOL position created at the entry fill and last
-    updated at the exit fill (+/- POSITION_TOL_S); None when zero or several match."""
+    updated at the exit fill (+/- POSITION_TOL_S); None when zero or several match. HM (A): a known
+    ``position_id`` (the chain's bitfinex_position_id) narrows the candidates to that id but NEVER skips the window
+    check against the row's real fills - an id whose life does not match the fills is unresolved (None)."""
     hits = []
+    want = None if position_id in (None, "") else str(position_id)
     for r in rows or []:
         if not isinstance(r, list) or len(r) < 14 or r[0] != SYMBOL:
+            continue
+        if want is not None and str(r[11]) != want:
             continue
         c, u = _f(r[12]), _f(r[13])
         if c is None or u is None:
@@ -221,6 +229,10 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
            "funding_ts_fallbacks": []}
     if exit_ts_source != "exit_fill_record_at_ts" and b is not None and abs(b - _grid(b)) <= EXIT_TS_FALLBACK_NEAR_S:
         out["funding_ts_fallbacks"] = [f"exit_ts:{exit_ts_source}"]  # a non-fill exit stamp next to a settlement
+    if a is None:   # HM (E): no real entry fill ts -> explicit fallback flag, never a guessed window (non-countable)
+        out["funding_ts_fallbacks"] = out["funding_ts_fallbacks"] + ["entry_ts:fill_at_ts_missing"]
+    if b is None:
+        out["funding_ts_fallbacks"] = out["funding_ts_fallbacks"] + ["exit_ts:exit_fill_missing"]
     if a is None or b is None or b < a:
         out["funding_status"] = "UNVERIFIED_FILL_TS_MISSING"
         return out
@@ -247,9 +259,13 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
             continue
         p = near[0]
         tied = position is not None and position[1] < t <= position[2] + POSITION_TOL_S
-        if tied and live_notional_usd and p["rate"]:
-            implied = abs(p["amount"] / p["rate"])                # the notional Bitfinex charged
-            tied = 0.8 <= implied / float(live_notional_usd) <= 1.25  # one lot only; a merged position cannot tie
+        if tied:   # HM (A): the notional check is mandatory - missing qty / price / rate -> UNTIED, never skipped
+            notional, rate = _f(live_notional_usd), p["rate"]
+            if not notional or not rate:
+                tied = False
+            else:
+                implied = abs(p["amount"] / rate)                 # the notional Bitfinex charged
+                tied = 0.8 <= implied / notional <= 1.25          # one lot only; a merged position cannot tie
         if not tied:
             statuses.append("UNTIED")
             problems.append("UNVERIFIED_ENTRY_UNTIED" if position is not None else "UNVERIFIED_POSITION_UNRESOLVED")
@@ -291,85 +307,216 @@ def chain_exit_fill(chain: Mapping[str, Any]):
     return None, None
 
 
-class Reader:
-    """I/O wrapper. Key gate first (RK 03:38): separate key + permission read-back with no write right, else EVERY row
-    is UNVERIFIED (``KEY_GATE:<code>``). A verified read-back is cached for good; a failed one is retried after RETRY_S.
-    Requests draw on this key's own GLOBAL_BUDGET; at most MAX_NEW_READS uncached rows per ``begin()``."""
-    RETRY_S = 60.0
-    MAX_NEW_READS = 5
+def _row_inputs(chain: Mapping[str, Any]):
+    """(entry fill ts, exit fill ts, exit source, notional, chain position id, cache key) - pure."""
+    a = _f(chain.get("fill_at_ts"))
+    b, src = chain_exit_fill(chain)
+    qty, px = _f(chain.get("fill_qty") or chain.get("qty")), _f(chain.get("fill_price"))
+    notional = abs(qty * px) if qty and px else None
+    pid = chain.get("bitfinex_position_id")
+    pid = None if pid in (None, "") else str(pid)
+    return a, b, src, notional, pid, (str(chain.get("correlation_id") or ""), a, b, pid or "")
+
+
+def _closed(chain: Mapping[str, Any]) -> bool:
+    return bool(chain.get("closed") or chain.get("exit_ack_at_ts"))
+
+
+class FundingReadbackJob:
+    """HM (B)/(C) 24 Oct: the ONLY place this module touches the network. One owner thread runs ``run_once`` every
+    TICK_S: key gate (RK 03:38 permission read-back) first, then per queued row the ledger read and the positions/hist
+    read, each drawing one slot of this key's process-wide GLOBAL_BUDGET (12/min, thread-safe); an HTTP 429 / Bitfinex
+    'ratelimit' answer stops the tick and backs off exponentially (BACKOFF_BASE_S .. BACKOFF_MAX_S). Results are cached
+    per row (correlation id, fill window, position id), stamped with the read time and the ledger ids (RK 4).
+
+    GET handlers only call ``lookup`` - a dict read under a lock that never performs I/O: a row not read yet is
+    ``PENDING_READBACK`` (non-countable); a refused key gate stamps every row UNVERIFIED (``KEY_GATE:<code>``)."""
+    TICK_S = 5.0
+    RETRY_S = 60.0              # a failed row read is re-queued after this
+    BACKOFF_BASE_S = 60.0
+    BACKOFF_MAX_S = 900.0
+    MAX_PENDING = 5000
 
     def __init__(self, creds_status_fn: Callable = credential_status, post=_post, clock=time.time,
-                 budget: RateBudget | None = None):
+                 budget: RateBudget | None = None, chains_fn: Callable | None = None):
         self._creds_status_fn, self._raw_post, self._clock = creds_status_fn, post, clock
         self._budget_rl = budget or GLOBAL_BUDGET
-        self._cache: dict = {}
-        self._budget = self.MAX_NEW_READS
+        self.chains_fn = chains_fn
         self._lock = threading.Lock()
+        self._pending: dict = {}     # key -> work record (owner thread fills it)
+        self._cache: dict = {}       # key -> finished read-back
         self._gate, self._gate_at, self._gate_final, self._creds = None, None, False, None
+        self._backoff_until, self._backoff_n = 0.0, 0
+        self._thread, self._owner, self._stop = None, None, threading.Event()
+        self.requests_made = 0
+
+    # ---- GET side: pure cache reads, never any I/O -------------------------------------------------------------
+    def lookup(self, chain: Mapping[str, Any], paper_funding_usd=None):
+        chain = chain or {}
+        if not _closed(chain):
+            return None
+        a, b, src, notional, pid, key = _row_inputs(chain)
+        kw = dict(paper_funding_usd=paper_funding_usd, exit_ts_source=src, live_notional_usd=notional)
+        if a is None or b is None or b < a:
+            return verify(a, b, read_error="NO_READ", key_gate=self._gate, **kw)   # HM (E) flags, non-countable
+        now = self._clock()
+        with self._lock:
+            gate, hit = self._gate, self._cache.get(key)
+            if gate in (None, "OK") and (hit is None or (hit["error"] and now - hit["read_at_ts"] >= self.RETRY_S)):
+                self._enqueue_locked(key, a, b, pid)
+        if hit is not None and hit["error"] is None:
+            return self._result(hit, a, b, kw)
+        if gate not in (None, "OK"):     # the job refuses to read: every row is UNVERIFIED
+            return verify(a, b, read_error="KEY_GATE:" + gate, read_at_ts=None, key_gate=gate, **kw)
+        if hit is not None:
+            return self._result(hit, a, b, kw)
+        out = verify(a, b, read_error="PENDING_READBACK", read_at_ts=None, key_gate=gate or "PENDING", **kw)
+        out["funding_status"] = "PENDING_READBACK"   # not read yet by the background job -> non-countable
+        return out
+
+    __call__ = lookup
+
+    @staticmethod
+    def _result(hit, a, b, kw):
+        return verify(a, b, ledger_rows=hit["rows"], read_error=hit["error"], read_at_ts=hit["read_at_ts"],
+                      position=hit["position"], key_gate="OK", **kw)
+
+    def submit(self, chain: Mapping[str, Any]) -> None:
+        """Queue a closed row for the owner thread (in-memory only)."""
+        chain = chain or {}
+        if not _closed(chain):
+            return
+        a, b, _src, _n, pid, key = _row_inputs(chain)
+        if a is None or b is None or b < a:
+            return
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit is None or (hit["error"] and self._clock() - hit["read_at_ts"] >= self.RETRY_S):
+                self._enqueue_locked(key, a, b, pid)
+
+    def _enqueue_locked(self, key, a, b, pid):
+        if key not in self._pending and len(self._pending) < self.MAX_PENDING:
+            self._pending[key] = {"a": a, "b": b, "pid": pid, "rows": None, "read_at_ts": None, "pos_done": False,
+                                  "position": None}
+
+    # ---- owner side: the single thread that performs every network call ----------------------------------------
+    def start(self) -> bool:
+        """Start the single owner thread (idempotent). Returns True when this call started it."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="live-funding-readback", daemon=True)
+            self._thread.start()
+            return True
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        t = self._thread
+        if t is not None:
+            t.join(timeout)
+
+    def _loop(self):
+        self._owner = threading.get_ident()
+        while not self._stop.is_set():
+            try:
+                self.run_once()
+            except Exception:  # noqa: BLE001 - the job must survive; nothing secret is in scope of a log here
+                pass
+            self._stop.wait(self.TICK_S)
 
     def _post(self, path, body, creds):
+        if self._owner is not None and threading.get_ident() != self._owner:
+            raise ReadError("NOT_OWNER_THREAD")   # single owner: no other thread may spend this key's budget
         if not self._budget_rl.acquire():
-            raise ReadError("RATE_BUDGET_EXHAUSTED")
+            raise _BudgetEmpty()
+        self.requests_made += 1
         return self._raw_post(path, body, creds)
 
-    def startup(self):
-        """The key gate. Returns None (OK) or the refusal code; write rights refuse for the process lifetime."""
+    def _backoff(self, now):
+        self._backoff_n += 1
+        self._backoff_until = now + min(self.BACKOFF_MAX_S, self.BACKOFF_BASE_S * (2 ** (self._backoff_n - 1)))
+
+    def gate_status(self):
+        return self._gate
+
+    def run_once(self) -> None:
         now = self._clock()
+        if now < self._backoff_until:
+            return
+        if callable(self.chains_fn):
+            try:
+                for ch in self.chains_fn() or []:
+                    self.submit(ch)
+            except Exception:  # noqa: BLE001 - a broken chain source reads nothing this tick
+                pass
+        try:
+            if not self._startup(now):
+                return
+            while True:
+                with self._lock:
+                    key = next(iter(self._pending), None)
+                    work = self._pending.get(key) if key is not None else None
+                if work is None:
+                    return
+                self._advance(key, work, now)
+        except _BudgetEmpty:
+            return
+        except ReadError as exc:
+            if str(exc) == "HTTP_429":
+                self._backoff(now)
+                return
+            raise
+
+    def _startup(self, now) -> bool:
+        """The key gate. True when reads may run. Write rights refuse for the process lifetime."""
         if self._gate == "OK":
-            return None
+            return True
         if self._gate_final or (self._gate and self._gate_at is not None and now - self._gate_at < GATE_RETRY_S):
-            return self._gate
+            return False
         creds, code = self._creds_status_fn()
         if creds is not None:
             try:
                 code = check_permissions(creds, post=self._post)
                 self._gate_final = code is not None
             except ReadError as exc:
+                if str(exc) == "HTTP_429":
+                    raise
                 code = "KEY_PERMISSIONS_READ_FAILED:" + str(exc)
-        self._gate, self._gate_at, self._creds = (code or "OK"), now, (creds if code is None else None)
-        return code
-
-    def begin(self):
-        self._budget = self.MAX_NEW_READS
-        self.startup()
-        return self
-
-    def __call__(self, chain: Mapping[str, Any], paper_funding_usd=None):
-        chain = chain or {}
-        if not (chain.get("closed") or chain.get("exit_ack_at_ts")):
-            return None
-        a = _f(chain.get("fill_at_ts"))
-        b, src = chain_exit_fill(chain)
-        qty, px = _f(chain.get("fill_qty") or chain.get("qty")), _f(chain.get("fill_price"))
-        notional = abs(qty * px) if qty and px else None
-        kw = dict(paper_funding_usd=paper_funding_usd, exit_ts_source=src, live_notional_usd=notional)
-        gate = self.startup()
-        if gate:   # the job refuses to read; the row is stamped UNVERIFIED
-            return verify(a, b, read_error="KEY_GATE:" + gate, read_at_ts=None, key_gate=gate, **kw)
-        key = (str(chain.get("correlation_id") or ""), a, b)
-        now = self._clock()
+        self._backoff_n = 0
         with self._lock:
-            hit = self._cache.get(key)
-            if hit and (hit[1] is None or now - hit[0] < self.RETRY_S):
-                rows, err, pos, at = hit[2]
-                return verify(a, b, ledger_rows=rows, read_error=err, read_at_ts=at, position=pos, key_gate="OK", **kw)
-            if self._budget <= 0:
-                return verify(a, b, read_error="READ_DEFERRED", read_at_ts=None, key_gate="OK", **kw)
-            self._budget -= 1
-        rows, err, pos = None, None, None
-        if a is not None and b is not None:
-            try:
-                rows = read_funding_ledger(a - TIE_TOL_S, b + TIE_TOL_S, creds=self._creds, post=self._post)
-                pos = resolve_position_id(a, b, creds=self._creds, post=self._post)
-                pid = chain.get("bitfinex_position_id")
-                if pos is not None and pid not in (None, "") and str(pid) != str(pos[0]):
-                    pos = None   # the chain names another position: cannot be tied
-            except ReadError as exc:
-                err = str(exc)
-        res = verify(a, b, ledger_rows=rows, read_error=err, read_at_ts=now, position=pos, key_gate="OK", **kw)
+            self._gate, self._gate_at, self._creds = (code or "OK"), now, (creds if code is None else None)
+        return code is None
+
+    def _advance(self, key, work, now):
+        """One row, resumable across ticks (a budget stop keeps what was already read)."""
+        try:
+            if work["rows"] is None:
+                work["rows"] = read_funding_ledger(work["a"] - TIE_TOL_S, work["b"] + TIE_TOL_S, creds=self._creds,
+                                                   post=self._post)
+                work["read_at_ts"] = self._clock()
+                self._backoff_n = 0
+            if not work["pos_done"]:
+                work["position"] = resolve_position_id(work["a"], work["b"], creds=self._creds, post=self._post,
+                                                       position_id=work["pid"])
+                work["pos_done"] = True
+                self._backoff_n = 0
+            self._finish(key, work, None)
+        except ReadError as exc:
+            if str(exc) in ("HTTP_429", "NOT_OWNER_THREAD"):
+                raise
+            self._finish(key, work, str(exc))
+
+    def _finish(self, key, work, error):
+        rec = {"rows": None if error else work["rows"], "position": None if error else work["position"],
+               "error": error, "read_at_ts": work["read_at_ts"] or self._clock()}
         with self._lock:
-            self._cache[key] = (now, None if res["funding_verified"] else err or res["funding_status"], (rows, err, pos, now))
-        return res
+            self._cache[key] = rec
+            self._pending.pop(key, None)
 
 
-DEFAULT_READER = Reader()
+class _BudgetEmpty(Exception):
+    """This key's minute budget is spent: stop the tick, keep the queue (never an error stamped on a row)."""
+
+
+DEFAULT_JOB = FundingReadbackJob()

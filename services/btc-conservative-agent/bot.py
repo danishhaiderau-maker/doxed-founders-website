@@ -62954,6 +62954,10 @@ def _wire_live_copy_monitor() -> None:
         _lcm.wire(_live_copy_monitor_context, authorize=monitor_integrity_authorized)
         app.register_blueprint(_lcm.blueprint)
         logger.info("[LIVE COPY] read-only /api/monitor/live/* routes wired")
+        try:  # #849 HM (B)/(C): the one background owner of every funding ledger / permission read (GETs read its cache)
+            _lcm.start_live_funding_job()
+        except Exception as exc:  # noqa: BLE001 - no job -> live rows stay PENDING_READBACK (non-countable)
+            logger.warning(f"[LIVE COPY] funding read-back job not started: {type(exc).__name__}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[LIVE COPY] monitor wiring failed: {exc}")
 

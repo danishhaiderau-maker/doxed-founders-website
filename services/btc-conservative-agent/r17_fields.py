@@ -30,8 +30,11 @@ MEASURED_DELAY_PATTERN = r"(?:lane|POOLED_LIVE_ACK_CROSS_LANE:(?:ENTRY_MKT_GTC|M
 TRIGGER_PRICE_SOURCE_OK = frozenset({"book"})
 EVIDENCE_OK = frozenset({"COMPLETE"})
 STOP_COVERAGE_OK = frozenset({"STOP_COVERAGE_OK"})
-FUNDING_MODEL_OK = frozenset({"SETTLEMENT_EXACT_V2",  # HM #849 item 1: paper rows, settlement-exact deriv-status funding
-                              "LIVE_LEDGER_V1"})      # #849 RK 24 Oct: live rows, Bitfinex funding-ledger read-back
+# HM (D) 24 Oct: the funding source is leg-specific. PAPER rows accept only the settlement-exact deriv-status model;
+# a LIVE_LEDGER_V1 value on a paper row is rejected (FUNDING_UNVERIFIED). LIVE rows accept only the ledger read-back.
+PAPER_FUNDING_MODEL_OK = frozenset({"SETTLEMENT_EXACT_V2"})   # HM #849 item 1: paper rows, settlement-exact funding
+LIVE_FUNDING_MODEL_OK = frozenset({"LIVE_LEDGER_V1"})         # #849 RK 24 Oct: live rows, Bitfinex funding-ledger read-back
+FUNDING_MODEL_OK = PAPER_FUNDING_MODEL_OK                      # r17_exclusion's paper-row gate
 FUNDING_STATUS_OK = frozenset({"PRICED", "NO_CROSSING"})
 BOOK_RECEIVE_SOURCE_OK = frozenset({"WS_FRAME"})  # RK/HM #851: measured WS receipt; INFERRED_BUCKET_LAG never counts
 
@@ -64,7 +67,8 @@ CONTRACT = {
                       "proven clear of the liquidation distance (RK/HM K1, 24 Oct); True or missing fails",
     "liq_mark_rows_n": "number > 0 (the BFXCI mark series over the hold was read)",
     "liq_trigger_ts": "absent / None (neither the mark nor a last trade reached liq_px during the hold)",
-    "funding_model": "SETTLEMENT_EXACT_V2 (legacy pro-rata accrual fails: FUNDING_UNVERIFIED)",
+    "funding_model": "SETTLEMENT_EXACT_V2 (legacy pro-rata accrual fails: FUNDING_UNVERIFIED; LIVE_LEDGER_V1 on a paper "
+                     "row fails FUNDING_UNVERIFIED, HM D)",
     "funding_status": "PRICED | NO_CROSSING (UNVERIFIED_* -> FUNDING_UNVERIFIED; FUNDING_PRICER_ERROR -> FUNDING_PRICER_ERROR)",
     "funding_verified": "True (real bool or 'true'); False / missing fails FUNDING_UNVERIFIED (HM #849 item 1)",
     "funding_ts_fallbacks": "[] (real empty list): the window ends are the priced fill ts; any entry fails FUNDING_TS_FALLBACK",
@@ -79,10 +83,13 @@ LIVE_FUNDING_CONTRACT = {
                       "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
                       "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
                       "UNVERIFIED_LEDGER_POSITION_MISMATCH (ledger sum vs positions/hist FUNDING) | "
-                      "UNVERIFIED_POSITION_FUNDING_MISSING fail",
+                      "UNVERIFIED_POSITION_FUNDING_MISSING | PENDING_READBACK (HM B/C: not read yet by the background "
+                      "job) fail",
     "funding_verified": "True only for PRICED / NO_CROSSING",
     "funding_usd_raw": "COST-positive USD = -sum(ledger amounts used); 0.0 for NO_CROSSING; null when unverified",
-    "funding_ts_fallbacks": "[] unless the exit ts is not the Bitfinex exit fill record AND lies within 60 s of a settlement",
+    "funding_ts_fallbacks": "[] unless the exit ts is not the Bitfinex exit fill record AND lies within 60 s of a settlement; "
+                            "entry_ts:fill_at_ts_missing / exit_ts:exit_fill_missing when a fill ts is absent (HM E: "
+                            "explicit flag, non-countable, the window is never guessed)",
     "funding_exit_ts_source": "exit_fill_record_at_ts (else the fallback stamp name)",
     "funding_ts_crossed": "list of settlement epoch s in (entry fill, exit fill]",
     "funding_ledger_ids": "Bitfinex ledger ids used (RK 4)",
@@ -91,10 +98,13 @@ LIVE_FUNDING_CONTRACT = {
     "funding_usd_by_settlement": "[{settlement_ts, ledger_id, ledger_mts, funding_usd}]",
     "funding_settlement_status": "per crossed settlement: LEDGER | NO_ENTRY | UNTIED | AMBIGUOUS",
     "funding_position_id": "the Bitfinex position id (positions/hist, unique match to the fills) or null",
-    "funding_readback_at_ts": "epoch s of the ledger read (RK 4); null when the read was deferred",
-    "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (BFX_FUNDING_READ_KEY, own 12 req/min cap)",
-    "funding_readback_error": "redacted code (KEY_GATE:<gate> / HTTP_<n> / TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL / "
-                              "RATE_BUDGET_EXHAUSTED / READ_DEFERRED) or null; never a key, signature or response body",
+    "funding_readback_at_ts": "epoch s of the background job's ledger read (RK 4), cached per row; null until read",
+    "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (BFX_FUNDING_READ_KEY). HM B/C: every ledger / "
+                                 "positions / permissions read runs in ONE background owner thread (live_funding_ledger."
+                                 "FundingReadbackJob) under the global 12 req/min budget with 429 backoff; GETs only read "
+                                 "the per-row cache and never touch the network",
+    "funding_readback_error": "redacted code (PENDING_READBACK / NO_READ / KEY_GATE:<gate> / HTTP_<n> incl. HTTP_429 / "
+                              "TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL) or null; never a key, signature or body",
     "funding_key_gate": "OK, else READ_KEY_MISSING | READ_KEY_NOT_SEPARATE | KEY_HAS_WRITE:<scopes> | "
                         "KEY_PERMISSIONS_READ_FAILED:<code> (RK 03:38: BFX_FUNDING_READ_KEY/SECRET, a separate Fly-only "
                         "key, permission read-back with NO write right; any refusal -> every row UNVERIFIED)",

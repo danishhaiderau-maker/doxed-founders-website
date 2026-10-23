@@ -377,15 +377,33 @@ def live_vs_paper_route():
                     skip_reasons=ctx.get("live_skip_reasons") or {}, lane_filter=None if not lane else
                     (lambda ch, tw: _keep(ch, tw) if ch else True), limit=limit,
                     exit_send_for=ctx.get("fly_exit_send"),
-                    # #849 RK 24 Oct: live funding from the Bitfinex funding ledger (read-only key; READ_KEY_MISSING ->
-                    # the closed live row is LIVE_FUNDING_UNVERIFIED). HM live-path review: this is the Fly monitor path.
-                    funding_readback_for=ctx.get("live_funding_readback") or _live_funding_reader())
+                    # #849 RK 24 Oct + HM (B)/(C): live funding from the Bitfinex funding ledger. This GET only READS the
+                    # background job's cache (no network call); a row not read yet is PENDING_READBACK (non-countable).
+                    # HM live-path review: this is the Fly monitor path.
+                    funding_readback_for=ctx.get("live_funding_readback") or _live_funding_lookup())
     return _ok(out)
 
 
-def _live_funding_reader():
+def _live_funding_lookup():
     import live_funding_ledger as lfl
-    return lfl.DEFAULT_READER.begin()
+    return lfl.DEFAULT_JOB.lookup   # cache read only; the owner thread (start_live_funding_job) does every read
+
+
+def _closed_live_chains():
+    """In-memory chain source for the background job (no network): closed live chains from the monitor context."""
+    provider = _CTX.get("provider")
+    ctx = provider() if provider else None
+    if not isinstance(ctx, dict):
+        return []
+    chains = lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
+    return [c for c in chains["accounts"].values() if c.get("closed") or c.get("exit_ack_at_ts")]
+
+
+def start_live_funding_job() -> bool:
+    """Start the single owner thread of the #849 funding read-back (HM B/C). Called once at app wiring (bot.py)."""
+    import live_funding_ledger as lfl
+    lfl.DEFAULT_JOB.chains_fn = _closed_live_chains
+    return lfl.DEFAULT_JOB.start()
 
 
 @blueprint.route("/api/monitor/live/gaps", methods=["GET"])
