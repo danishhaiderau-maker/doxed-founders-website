@@ -40,7 +40,12 @@ QUOTE_SOURCE_REST = "REST"
 QUOTE_SOURCE_UNKNOWN = "UNKNOWN"
 
 ENTRY_QUOTE_KEYS = ("entry_quote_bid", "entry_quote_ask", "entry_quote_age_s", "entry_quote_age_flag",
-                    "entry_quote_source", "entry_quote_bbo_ts", "entry_decision_signal_ts", "entry_decision_recorded_ts")
+                    "entry_quote_source", "entry_quote_bbo_ts", "entry_decision_signal_ts", "entry_decision_recorded_ts",
+                    "entry_trigger_ref_price", "entry_trigger_ref_source", "entry_trigger_ref_age_s")
+# REALISM_V2 F3: the price the entry trigger itself referenced (the side the order executes against: ask for LONG,
+# bid for SHORT), which source it came from (TICKER_WS / TICKER_REST / TICKER_UNKNOWN, or BOOK when the tile's
+# TRIGGER_PRICE_SOURCE is the 1 s book) and its age at the decision. Measurement only.
+REF_SOURCE_BOOK = "BOOK"
 ENTRY_BOOK_KEYS = ("entry_book_best_bid", "entry_book_best_ask", "entry_book_s", "entry_book_age_s",
                    "entry_book_age_flag", "entry_pricer_signal_ts", "entry_trigger_vs_book_bp",
                    "entry_trigger_vs_book_reason", "entry_measure_reason")
@@ -148,6 +153,22 @@ def quote_source(bbo_ts: Any, ws_last_tick: Any, rest_last_tick: Any) -> str:
     return QUOTE_SOURCE_UNKNOWN
 
 
+def entry_trigger_ref(side: Any, *, bid: Any = None, ask: Any = None, age: Any = None, source: Any = None,
+                      book: Any = None, ref_ts: Any = None) -> dict:
+    """F3: entry_trigger_ref_price / _source / _age_s. ``book`` given -> BOOK (age = ref_ts - book "s"); else the
+    ticker quote (``source`` = WS / REST / UNKNOWN, age as measured by the decision)."""
+    side_u = _side(side)
+    if isinstance(book, Mapping):
+        px = _best(book, "a" if side_u == "LONG" else "b") if side_u else None
+        a, _flag = book_age_s(ref_ts, book)
+        return {"entry_trigger_ref_price": px, "entry_trigger_ref_source": REF_SOURCE_BOOK,
+                "entry_trigger_ref_age_s": a}
+    px = (_pos(ask) if side_u == "LONG" else _pos(bid)) if side_u else None
+    a = _f(age)
+    return {"entry_trigger_ref_price": px, "entry_trigger_ref_source": "TICKER_" + str(source or QUOTE_SOURCE_UNKNOWN),
+            "entry_trigger_ref_age_s": round(a, 3) if a is not None and a >= 0 else None}
+
+
 def entry_quote_fields(decision: Mapping[str, Any] | None, *, bbo_ts: Any = None, ws_last_tick: Any = None,
                        rest_last_tick: Any = None, recorded_ts: Any = None) -> dict:
     """Cheap decision-quote stamp (no book read, no I/O): the quote the decision itself saw."""
@@ -160,11 +181,14 @@ def entry_quote_fields(decision: Mapping[str, Any] | None, *, bbo_ts: Any = None
         raw_age_v, flag = None, NEGATIVE_AGE
     else:
         raw_age_v, flag = (round(raw_age, 3) if raw_age is not None else None), None
+    src = quote_source(bbo_ts, ws_last_tick, rest_last_tick)
     return {"entry_quote_bid": _pos(d.get("bid")), "entry_quote_ask": _pos(d.get("ask")),
             "entry_quote_age_s": raw_age_v, "entry_quote_age_flag": flag,
-            "entry_quote_source": quote_source(bbo_ts, ws_last_tick, rest_last_tick),
+            "entry_quote_source": src,
             "entry_quote_bbo_ts": _pos(bbo_ts), "entry_decision_signal_ts": sig,
-            "entry_decision_recorded_ts": _f(recorded_ts)}
+            "entry_decision_recorded_ts": _f(recorded_ts),
+            **entry_trigger_ref(d.get("direction") or d.get("side"), bid=d.get("bid"), ask=d.get("ask"),
+                                age=raw_age_v, source=src)}
 
 
 def entry_book_fields(side: Any, decision: Mapping[str, Any] | None, book_signal: Any,
@@ -222,6 +246,11 @@ def entry_fields(side: Any, decision: Mapping[str, Any] | None, book_signal: Any
         legacy = entry_quote_fields(d)
         quote.update({k: legacy[k] for k in ("entry_quote_bid", "entry_quote_ask", "entry_quote_age_s",
                                              "entry_quote_age_flag", "entry_decision_signal_ts")})
+    if d and quote.get("entry_trigger_ref_price") is None:
+        # F3 for rows recorded before the ref fields existed: rebuild from the stamped quote (side from the row).
+        quote.update(entry_trigger_ref(side or d.get("direction"), bid=quote.get("entry_quote_bid"),
+                                       ask=quote.get("entry_quote_ask"), age=quote.get("entry_quote_age_s"),
+                                       source=quote.get("entry_quote_source")))
     return {**quote, **entry_book_fields(side, d, book_signal, pricer_signal_ts)}
 
 

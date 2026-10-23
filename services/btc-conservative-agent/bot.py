@@ -5211,7 +5211,12 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         pos["exit_fee_type"] = "MAKER"
     fill_px = float(book_price) if book_price else float(price)
     _leg_trigger_px = fill_px  # the rule's trigger level; fill_px is replaced by the leg's book fill below
-    _leg_trigger_ts = time.time()
+    _tmeta = pos.pop("_trigger_meta", None) or {}
+    source_pos.pop("_trigger_meta", None)
+    # REALISM_V2 F2: a book-mode trigger fired at its event time (the 1 s row's completion / the trade print), not at
+    # the evaluation wall clock; ticker mode keeps the evaluation time.
+    _leg_trigger_ts = (float(_tmeta["ts"]) if _tmeta.get("basis") in ("BOOK_TOP", "LAST_TRADE") and _tmeta.get("ts")
+                       else time.time())
     _leg_fill = None
     if source_pos.get("_tp1_pending") and not (float(action.remaining_fraction) > 0
                                                and (source_pos["_tp1_pending"] or {}).get("key") == action.partial_key):
@@ -5289,6 +5294,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         # #807 measurement: age of the ticker BBO this trigger was evaluated on. Lock-free read (a float; callers may
         # hold trade_lock, and state_lock must never be taken inside it).
         pos["exit_trigger_bbo_ts"] = state.get("bbo_ts")
+        _stamp_trigger_basis(pos, direction, now, price, _tmeta)
         with trade_lock:
             source_pos.clear()
             source_pos.update(pos)
@@ -5331,6 +5337,84 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
     return False
 
 
+
+
+def _realism_family_exit(pos: dict, price: float, now: float, *, exit_source: str = "POSITION_MANAGER",
+                         close_async: bool = False) -> bool:
+    """REALISM_V2 F2: the shared exit-trigger driver for paper-book tiles (no per-tile code).
+
+    TRIGGER_PRICE_SOURCE=ticker (default): the policy sees the ticker mark as before; the trigger is dual-stamped
+    (ticker + 1 s book top + last trade at the trigger instant) with trigger_basis TICKER.
+    TRIGGER_PRICE_SOURCE=book: the policy is fed, in time order, every executable-book-side price (bid for a LONG
+    exit, ask for a SHORT exit) of each 1 s book row completed since the last evaluation; the first event that
+    produces an action wins and its basis (BOOK_TOP) and time are the trigger. Known-level stops race on book top
+    PLUS last trade (see _realism_level_stops). When no fresh book row exists (> 2 s) the policy still runs on the
+    ticker mark so time exits fire, flagged TICKER_BOOK_STALE (UNVERIFIED for price-level exits).
+    """
+    import quote_trigger as _qt
+    lane = str(pos.get("research_lane") or "").upper()
+    src = _qt.trigger_price_source(lane)
+    pos["trigger_price_source"] = src
+    fired = _realism_level_stops(pos, price, now, src, exit_source=exit_source, close_async=close_async)
+    if fired:
+        return True
+    if src != _qt.SOURCE_BOOK:
+        pos["_trigger_meta"] = {"basis": _qt.BASIS_TICKER, "ts": float(now), "px": float(price or 0),
+                                "quote_stale": None}
+        return _apply_family_tile_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
+    import paper_fill as _pf
+    direction = str(pos.get("dir") or "").upper()
+    cursor = float(pos.get("_trigger_cursor_ts") or 0)
+    start = max(cursor, float(pos.get("entry_ts") or 0), float(now) - 30.0)
+    rows = _qt.book_rows_between(start, float(now), _pf.book10l_at)
+    events = _qt.exit_events(direction, start, float(now), book_rows=rows, include_trades=False)
+    pos["_trigger_cursor_ts"] = float(now)
+    if not events:
+        latest = None
+        try:
+            latest = _pf.book10l_at(float(now))
+        except Exception:  # noqa: BLE001
+            latest = None
+        age = (float(now) - float(latest["s"])) if isinstance(latest, dict) and latest.get("s") is not None else None
+        if age is not None and not _qt.is_stale(age):
+            return False  # book is fresh and nothing new since the last evaluation
+        pos["_trigger_meta"] = {"basis": _qt.BASIS_TICKER_STALE_BOOK, "ts": float(now), "px": float(price or 0),
+                                "quote_stale": True}
+        return _apply_family_tile_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
+    for ev in events:
+        pos["_trigger_meta"] = {"basis": ev["basis"], "ts": float(ev["ts"]), "px": float(ev["px"]),
+                                "quote_stale": False, "book_s": ev.get("book_s")}
+        pos["_exit_eval_price"] = float(ev["px"])
+        if _apply_family_tile_exit(pos, float(ev["px"]), float(ev["ts"]), exit_source=exit_source,
+                                   close_async=close_async):
+            return True
+        if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+            return True
+    return False
+
+
+def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: float, meta: dict) -> None:
+    """REALISM_V2 F2 dual stamp on a terminal exit trigger: trigger_basis + trigger_price_source + the ticker view and
+    the 1 s book-top / last-trade view at the trigger instant. Measurement; never a fill input. Lock-free state reads."""
+    import quote_trigger as _qt
+    import paper_fill as _pf
+    try:
+        book = _pf.book10l_at(float(trigger_ts) + 1e-6)
+    except Exception:  # noqa: BLE001
+        book = None
+    trades = _qt.trades_between(float(trigger_ts) - _qt.STALE_S, float(trigger_ts))
+    tick_px = state.get("bid") if direction == "LONG" else state.get("ask")
+    pos.update(_qt.dual_stamp(direction, "exit", trigger_ts, ticker_px=tick_px, ticker_ts=state.get("bbo_ts"),
+                              book=book, last_trade=trades[-1] if trades else None))
+    pos["exit_trigger_basis"] = (meta or {}).get("basis") or _qt.BASIS_TICKER
+    pos["exit_trigger_quote_stale"] = (meta or {}).get("quote_stale")
+    pos.setdefault("trigger_price_source", _qt.DEFAULT_SOURCE)
+
+
+def _realism_level_stops(pos: dict, price: float, now: float, src: str, *, exit_source: str,
+                         close_async: bool) -> bool:
+    """Hook for known-level stops (exchange-resident stop vs paper hard stop). PR1: no-op (False)."""
+    return False
 
 
 def _apply_position_exits(pos: dict, price: float, now: float = None, *,
@@ -5388,6 +5472,8 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
     pos["_exit_eval_price"] = float(price or 0)
 
     if str(pos.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
+        if _is_paper_book_lane(pos):
+            return _realism_family_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
         return _apply_family_tile_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
@@ -7024,6 +7110,45 @@ def _is_paper_book_lane(rec) -> bool:
     return str(rec.get("research_lane") or "").upper() in _tf.MIGRATED_LANES
 
 
+def _order_entry_decision(order: dict) -> dict:
+    tid = (order or {}).get("trade_id")
+    signal = (trades_map.get(tid, {}).get("signal_ref") or {}) if tid else {}
+    d = (signal or {}).get("adaptive_entry_decision") or (order or {}).get("adaptive_entry_decision") or {}
+    return d if isinstance(d, dict) else {}
+
+
+def _paper_entry_quote_gate(order: dict, lane: str, direction: str, signal_ts: float):
+    """REALISM_V2 F2 entry gate (shared, no per-tile code): the tile's TRIGGER_PRICE_SOURCE quote at the signal must be
+    at most 2 s old (same threshold for ticker and book), else QUOTE_STALE. Stamps trigger_price_source and the F3
+    entry_trigger_ref_* view of the selected source on the order (measurement; never a fill input).
+    Returns None (proceed) or "QUOTE_STALE"."""
+    import quote_trigger as _qt
+    src = _qt.trigger_price_source(lane)
+    order["trigger_price_source"] = src
+    if src == _qt.SOURCE_BOOK:
+        import paper_fill as _pf
+        try:
+            book = _pf.book10l_at(float(signal_ts))
+        except Exception:  # noqa: BLE001
+            book = None
+        q = _qt.selected_quote(direction, "entry", signal_ts, src, book=book)
+    else:
+        d = _order_entry_decision(order)
+        age = d.get("bbo_age_sec")
+        if age is None:
+            # no decision-time ticker age recorded for this order: unmeasured, not stale (the entry decision's own
+            # max_bbo_age_sec guard already ran); the row says so.
+            order["entry_quote_stale"] = None
+            order["entry_quote_selected_age_s"] = None
+            return None
+        bbo_ts = float(signal_ts) - float(age)
+        q = _qt.selected_quote(direction, "entry", signal_ts, src,
+                               ticker_px=d.get("ask") if direction == "LONG" else d.get("bid"), ticker_ts=bbo_ts)
+    order["entry_quote_stale"] = bool(q["quote_stale"])
+    order["entry_quote_selected_age_s"] = q["quote_age_s"]
+    return _qt.QUOTE_STALE if q["quote_stale"] else None
+
+
 def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
     """IOC entry at signal_ts + measured delay from the 10-level book; cached on the order.
     Returns None while the fill time has not arrived (unless force)."""
@@ -7038,6 +7163,14 @@ def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
         return None
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     order.setdefault("requested_qty", order.get("qty"))
+    stale = _paper_entry_quote_gate(order, lane, direction, signal_ts)
+    if stale:
+        # REALISM_V2 F2: the tile's trigger source was older than 2 s at the signal -> the entry is skipped (never
+        # priced, never a trade); the no-fill path records the shadow row and cancels the order.
+        res = {"status": stale, "side": direction, "signal_ts": signal_ts, "delay_s": float(delay_s),
+               "delay_source": delay_source, "requested_qty": order.get("requested_qty")}
+        order["paper_fill_result"] = res
+        return res
     res = _tf.entry_fill(direction, float(order.get("requested_qty") or order.get("qty") or 0),
                          signal_ts, delay_s, delay_source)
     if force and res.get("status") == "REJECT_NO_BOOK":

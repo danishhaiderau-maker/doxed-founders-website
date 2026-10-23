@@ -606,3 +606,4 @@ test_tile67_byte_identity.py
 test_tile_display_vs_key_contract.py
 test_r17_exclusion.py
 test_trigger_measure.py
+test_quote_trigger.py
