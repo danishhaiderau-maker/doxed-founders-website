@@ -211,6 +211,8 @@ export class TradingAgentsController {
     const uid = userId.trim();
     const reason = (body.reason?.trim() || 'OPS_REARM').slice(0, 200);
     const startedAt = new Date().toISOString();
+    // RK L27 (#852): refuse BEFORE flattening/arming; setInstancePaused re-checks (TOCTOU-safe).
+    await this.instances.assertLiveArmL27('ops/rearm', 'bitfinex');
     const flat = await this.execution.emergencyFlattenOpenCopyLots(uid, slug);
     const armed = await this.instances.setInstancePaused(uid, slug, false);
     // Audit line (Railway logs are retained; grep OPS-REARM).

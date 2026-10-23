@@ -62656,6 +62656,14 @@ def _live_guardian_tile_arm_block(lane: str) -> str | None:
                                os.environ.get(_ltg.STOP_AMENDMENT_ENV))
 
 
+def _live_l27_arm_block() -> str | None:
+    """RK L27 on EVERY arm path (#852): the shared live_tile_gate.l27_arm_block over the persisted latest real L. Used by the
+    Fly output ON route, the per-tile live-orders route (via arm_gate_block), the protection-bootstrap re-arm route and the
+    relay's arm/re-arm routes (they read it from GET /api/live-copy/arm-gate)."""
+    import live_tile_gate as _ltg
+    return _ltg.l27_arm_block(_LIVE_GUARDIAN_STATE.get("liq_latest_l"), os.environ.get(_ltg.STOP_AMENDMENT_ENV))
+
+
 def _live_guardian_arm_block() -> str | None:
     """Arm refusal while a force-flat is unconfirmed (RED) or still running."""
     if _LIVE_GUARDIAN_STATE.get("red_alert"):
@@ -63026,6 +63034,10 @@ def api_live_copy_output():
         if _ff_block:
             return jsonify({"ok": False, "error": _ff_block, "red_alert": _LIVE_GUARDIAN_STATE.get("red_alert"),
                             "live_copy_output": output.snapshot()}), 409
+        _l27 = _live_l27_arm_block()
+        if _l27:   # RK L27 (#852): the global output arm path refuses too, not only the per-tile switch
+            return jsonify({"ok": False, "error": _l27, "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
+                            "live_copy_output": output.snapshot()}), 409
         mirror_block = _mirror_arm_block()
         if mirror_block:
             return jsonify({"ok": False, "error": "MIRROR_ARM_BLOCKED", "reason": mirror_block,
@@ -63084,6 +63096,10 @@ def api_live_copy_protection_bootstrap():
         if not _get_live_copy_eligibility().is_eligible(lane):
             results[lane] = {"ok": False, "error": "LANE_NOT_OPERATOR_ELIGIBLE"}
             continue
+        _tile_block = _live_guardian_arm_block() or _live_guardian_tile_arm_block(lane)
+        if _tile_block:   # RK L27 / G4 / G6 + RED (#852): a bootstrap (re-)arm is an arm path like any other
+            results[lane] = {"ok": False, "error": _tile_block}
+            continue
         prior_tid = ((boot.snapshot().get("lanes") or {}).get(lane) or {}).get("trade_id")
         prior_filled = False
         if prior_tid:
@@ -63103,6 +63119,22 @@ def api_live_copy_protection_bootstrap():
     first = next(iter(results.values()), {})
     return jsonify({"ok": all_ok, "error": None if all_ok else first.get("error"),
                     "results": results, "protection_bootstrap": boot.snapshot()}), (200 if all_ok else 409)
+
+
+LIVE_ARM_GATE_SCHEMA = "fly_live_arm_gate_v1"
+
+
+@app.route('/api/live-copy/arm-gate', methods=['GET'])
+def api_live_copy_arm_gate():
+    """RK L27 on every arm path (#852): read-only verdict of the SHARED arm-gate liq check (live_tile_gate.l27_arm_block)
+    for the relay's arm/re-arm routes (instance resume, ops/rearm, hire). No secrets; the relay fails closed when this
+    is unreadable or l27_block is set."""
+    import live_tile_gate as _ltg
+    return jsonify({"schema": LIVE_ARM_GATE_SCHEMA, "ts": time.time(), "l27_block": _live_l27_arm_block(),
+                    "guardian_arm_block": _live_guardian_arm_block(),
+                    "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
+                    "stop_amendment": str(os.environ.get(_ltg.STOP_AMENDMENT_ENV) or "") or None,
+                    "liq_check_max_bp": _ltg.LIQ_CHECK_MAX_BP})
 
 
 @app.route('/api/live-copy/status', methods=['GET'])

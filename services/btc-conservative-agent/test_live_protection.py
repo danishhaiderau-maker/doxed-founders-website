@@ -649,3 +649,114 @@ def test_852_e6_worst_case_evidence_age_under_normal_cadence_never_false_flatten
     assert ltg.open_position_protection(dict(m, read_age_s=4.9, fetched_at_ts=NOW), book(), NOW)["disarm"] == []
     assert (ltg.STOP_FAILURE_FLATTEN, "STOP_RESIDENCY_UNCONFIRMED") in codes(
         ltg.open_position_protection(dict(m, read_age_s=5.1, fetched_at_ts=NOW), book(), NOW))
+
+
+# ---- #852 RK L27 on EVERY arm path: the same shared helper (live_tile_gate.l27_arm_block) gates each route ----------------
+class _App:
+    def route(self, *a, **k):
+        return lambda f: f
+
+
+def _route_ns(route, state, extra=None, body=None, amendment=None):
+    """exec one Flask route (and _live_l27_arm_block) from bot.py with stubbed request/jsonify."""
+    import os
+    import types
+    a = _SRC.index(f"@app.route('{route}'")
+    b = _SRC.index("\n@app.route(", a + 10)
+    la = _SRC.index("def _live_l27_arm_block")
+    lb = _SRC.index("\ndef ", la + 10)
+    env = {ltg.STOP_AMENDMENT_ENV: amendment} if amendment else {}
+    fake_os = types.SimpleNamespace(environ=env)
+    calls = []
+    ns = {"app": _App(), "os": fake_os, "time": _t, "logger": logging.getLogger("t"), "_LIVE_GUARDIAN_STATE": state,
+          "request": types.SimpleNamespace(get_json=lambda silent=True: dict(body or {"enabled": True})),
+          "jsonify": lambda *a, **k: dict(*a, **k), "_admin_authed_strict": lambda: True,
+          "_strict_json_boolean": lambda d, k: d.get(k) if isinstance(d.get(k), bool) else None,
+          "_live_guardian_heartbeat_stale": lambda: False, "_live_guardian_arm_block": lambda: None, "CALLS": calls}
+    ns.update(extra or {})
+    sa = _SRC.index("LIVE_ARM_GATE_SCHEMA = ")
+    exec(_SRC[sa:_SRC.index("\n", sa)], ns)
+    exec(_SRC[la:lb], ns)
+    exec(_SRC[a:b], ns)
+    return ns, calls
+
+
+def _resp(r):
+    return r if isinstance(r, dict) else r[0], (200 if isinstance(r, dict) else r[1])
+
+
+_TOO_CLOSE = {"stop_liq_distance_bp": 12.0, "too_close": True, "amendment_at_record": ""}
+
+
+def test_852_l27_fly_output_on_route_refuses_and_new_amendment_unblocks():
+    import types
+    out = types.SimpleNamespace(snapshot=lambda: {"enabled": False},
+                                set=lambda en, by=None, reason=None: {"enabled": en})
+    extra = {"_get_live_copy_output": lambda: out, "_live_copy_paper_lock_active": lambda: False,
+             "_mirror_arm_block": lambda: None, "_onoff_actor": lambda d: "t", "_onoff_reason": lambda r, d: r,
+             "_live_guardian_persist": lambda: True}
+    ns, _ = _route_ns("/api/live-copy/output", {"liq_latest_l": _TOO_CLOSE}, extra)
+    body, code = _resp(ns["api_live_copy_output"]())
+    assert code == 409 and body["error"] == ltg.DENY_L27_LATEST_L
+    ns, _ = _route_ns("/api/live-copy/output", {"liq_latest_l": _TOO_CLOSE}, extra, amendment="PASS:stop-amend-1")
+    body, code = _resp(ns["api_live_copy_output"]())
+    assert code == 200 and body["live_copy_output"]["enabled"] is True
+    ns, _ = _route_ns("/api/live-copy/output", {}, extra)                     # nothing recorded: no estimate, no refusal
+    assert _resp(ns["api_live_copy_output"]())[1] == 200
+    # OFF is always allowed
+    ns, _ = _route_ns("/api/live-copy/output", {"liq_latest_l": _TOO_CLOSE},
+                      dict(extra, _get_bfx_live_switch=lambda: types.SimpleNamespace(reset_all_off=lambda reason: None),
+                           _get_live_copy_bootstrap=lambda: types.SimpleNamespace(disable=lambda reason: None)),
+                      body={"enabled": False})
+    assert _resp(ns["api_live_copy_output"]())[1] == 200
+
+
+def test_852_l27_fly_protection_bootstrap_rearm_refuses_per_lane():
+    import sys
+    import types
+    sys.modules.setdefault("combo_pathway_config", types.ModuleType("combo_pathway_config"))
+    sys.modules["combo_pathway_config"].ACTIVE_TILE_REGISTRY = {"GS01": {}}
+    boot = types.SimpleNamespace(snapshot=lambda: {"lanes": {}}, enable=lambda *a, **k: (True, {}),
+                                 disable=lambda **k: {})
+    tile_src = _SRC[_SRC.index("def _live_guardian_tile_arm_block"):_SRC.index("\ndef ", _SRC.index("def _live_guardian_tile_arm_block") + 10)]
+    extra = {"_get_live_copy_bootstrap": lambda: boot,
+             "_get_live_copy_eligibility": lambda: types.SimpleNamespace(is_eligible=lambda lane: True),
+             "_live_copy": types.SimpleNamespace(BOOTSTRAP_MAX_ACTIVE_LANES=2, BOOTSTRAP_FILL_REPORT_TYPES=())}
+    ns, _ = _route_ns("/api/live-copy/protection-bootstrap", {"liq_latest_l": _TOO_CLOSE}, extra, body={"enabled": True, "lane": "GS01"})
+    exec(tile_src, ns)
+    body, code = _resp(ns["api_live_copy_protection_bootstrap"]())
+    assert code == 409 and body["results"]["GS01"]["error"] == ltg.DENY_L27_LATEST_L
+    ns, _ = _route_ns("/api/live-copy/protection-bootstrap", {}, extra, body={"enabled": True, "lane": "GS01"})
+    exec(tile_src, ns)
+    assert _resp(ns["api_live_copy_protection_bootstrap"]())[1] == 200
+    ns, _ = _route_ns("/api/live-copy/protection-bootstrap", {}, dict(extra, _live_guardian_arm_block=lambda: "LIVE_GUARDIAN_FORCE_FLAT_RED"),
+                      body={"enabled": True, "lane": "GS01"})
+    exec(tile_src, ns)
+    assert _resp(ns["api_live_copy_protection_bootstrap"]())[0]["results"]["GS01"]["error"] == "LIVE_GUARDIAN_FORCE_FLAT_RED"
+
+
+def test_852_l27_fly_arm_gate_endpoint_serves_the_shared_helper_verdict_for_the_relay():
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {"liq_latest_l": _TOO_CLOSE})
+    body = ns["api_live_copy_arm_gate"]()
+    assert body["schema"] == "fly_live_arm_gate_v1" and body["l27_block"] == ltg.DENY_L27_LATEST_L
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {"liq_latest_l": _TOO_CLOSE}, amendment="PASS:stop-amend-1")
+    assert ns["api_live_copy_arm_gate"]()["l27_block"] is None
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {})
+    assert ns["api_live_copy_arm_gate"]()["l27_block"] is None
+    assert "LIVE_ARM_GATE_SCHEMA = \"fly_live_arm_gate_v1\"" in _SRC
+
+
+def test_852_l27_every_fly_arm_path_uses_the_one_helper():
+    def body(route):
+        a = _SRC.index(f"@app.route('{route}'")
+        ends = [i for i in (_SRC.find("\n@app.route(", a + 10), _SRC.find("\n\n\ndef ", a + 10)) if i > 0] or [len(_SRC)]
+        return _SRC[a:min(ends)]
+    assert "_live_l27_arm_block()" in body("/api/live-copy/output")
+    assert "_live_guardian_tile_arm_block(lane)" in body("/api/bitfinex/tiles/<lane>/live-orders")   # arm_gate_block => l27
+    assert "_live_guardian_tile_arm_block(lane)" in body("/api/live-copy/protection-bootstrap")
+    assert "_live_l27_arm_block()" in body("/api/live-copy/arm-gate")
+    la = _SRC.index("def _live_l27_arm_block")
+    assert "_ltg.l27_arm_block(" in _SRC[la:_SRC.index("\ndef ", la + 10)]
+    # the retired direct-arm routes cannot arm at all
+    for r in ("/api/live_arm", "/api/bitfinex_live"):
+        assert "return _retired_direct_arm_response()" in body(r)
