@@ -3973,6 +3973,12 @@ export function buildExchangeMirror(input: {
   };
 }
 
+/** Pure: force-flat read-back verdict (RK 24 Oct). FLAT_NO_STOPS only with zero position AND zero active orders. */
+export function forceFlatReadBackVerdict(positionAmount: number, activeOrders: number): 'FLAT_NO_STOPS' | 'NOT_FLAT' | 'FLAT_WITH_ORDERS' {
+  if (!Number.isFinite(positionAmount) || btcToSats(positionAmount) !== 0) return 'NOT_FLAT';
+  return activeOrders > 0 ? 'FLAT_WITH_ORDERS' : 'FLAT_NO_STOPS';
+}
+
 /** Re-send an unchanged live-copy coordination state to Fly at least this often. */
 export const LIVE_COPY_COORD_REASSERT_MS = 5 * 60_000;
 
@@ -21719,6 +21725,85 @@ await this.notifications
       if (attempt < 14) await this.emergencyPositionReadWait(750);
     }
     return { known: false, position: latest, samples };
+  }
+
+  /**
+   * RK ruling 24 Oct (#852): live-guardian auto-disarm => FORCE-FLAT with a read-back. The caller (ops/force-flat-disarm)
+   * pauses the instance FIRST. Steps: (1) emergency-close every OPEN copy lot through the owner-equivalent close path
+   * (emergencyFlattenOpenCopyLots); (2) if the exchange still shows a position (residual/orphan), a reduce-only market
+   * flatten (submitPositionFlatten, CLOSE+REDUCE_ONLY: can never reverse); (3) cancel EVERY active order on the symbol,
+   * stops included; (4) a fresh private read-back: verdict FLAT_NO_STOPS only when no position AND no active order.
+   * Never waits for a fill (R8): one pass; the caller retries a bounded number of times. Returns no secrets.
+   */
+  async forceFlatDisarmAccount(
+    userId: string,
+    agentSlug: string,
+  ): Promise<{
+    verdict: 'FLAT_NO_STOPS' | 'NOT_FLAT' | 'FLAT_WITH_ORDERS' | 'NOT_LIVE' | 'READ_FAILED';
+    flattened: number;
+    residualCloseOrderId: number | null;
+    cancelled: number;
+    positionAmount: number | null;
+    openOrders: number | null;
+    errors: string[];
+    readAt: string;
+  }> {
+    const errors: string[] = [];
+    const msg = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 160);
+    let flattened = 0;
+    try {
+      flattened = (await this.emergencyFlattenOpenCopyLots(userId, agentSlug)).flattened;
+    } catch (e) {
+      errors.push(`lots:${msg(e)}`);
+    }
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    const instance = agent
+      ? await this.prisma.tradingAgentInstance.findUnique({ where: { agentId_userId: { agentId: agent.id, userId } } })
+      : null;
+    const empty = { flattened, residualCloseOrderId: null, cancelled: 0, positionAmount: null, openOrders: null };
+    if (!instance?.exchangeProvider || instance.exchangeProvider === 'paper') {
+      return { verdict: 'NOT_LIVE', ...empty, errors, readAt: new Date().toISOString() };
+    }
+    const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
+    if (!creds) return { verdict: 'READ_FAILED', ...empty, errors: [...errors, 'credentials-missing'], readAt: new Date().toISOString() };
+    let residualCloseOrderId: number | null = null;
+    try {
+      const pos = await this.bitfinex.getOpenPositionDetail(creds);
+      if (pos && btcToSats(pos.amount) !== 0) {
+        residualCloseOrderId = await this.bitfinex.submitPositionFlatten(creds, {
+          positionDirection: pos.amount > 0 ? 'LONG' : 'SHORT',
+          qty: Math.abs(pos.amount),
+          leverage: resolveSubscriberLeverage(),
+        });
+      }
+    } catch (e) {
+      errors.push(`residual:${msg(e)}`);
+    }
+    let cancelled = 0;
+    try {
+      for (const o of await this.bitfinex.listActiveOrders(creds)) {
+        try {
+          await this.bitfinex.cancelOrder(creds, o.id);
+          cancelled += 1;
+        } catch (e) {
+          errors.push(`cancel:${o.id}:${msg(e)}`);
+        }
+      }
+    } catch (e) {
+      errors.push(`orders:${msg(e)}`);
+    }
+    try {
+      const [pos, orders] = await Promise.all([
+        this.bitfinex.getOpenPositionDetail(creds),
+        this.bitfinex.listActiveOrders(creds),
+      ]);
+      const amt = pos ? pos.amount : 0;
+      const verdict = forceFlatReadBackVerdict(amt, orders.length);
+      return { verdict, flattened, residualCloseOrderId, cancelled, positionAmount: amt, openOrders: orders.length, errors, readAt: new Date().toISOString() };
+    } catch (e) {
+      errors.push(`readback:${msg(e)}`);
+      return { verdict: 'READ_FAILED', flattened, residualCloseOrderId, cancelled, positionAmount: null, openOrders: null, errors, readAt: new Date().toISOString() };
+    }
   }
 
   async emergencyFlattenOpenCopyLots(

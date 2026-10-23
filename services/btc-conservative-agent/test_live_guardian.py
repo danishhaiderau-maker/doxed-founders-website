@@ -4,6 +4,8 @@ NOW = 1_800_000_000.0
 MIR = {"ok": True, "positions": [], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.79}}
 
 
+FF: list = []   # force-flat stub calls (C2)
+
 def ch(**k):
     return {"correlation_id": "GS01-1", "lane": "FAMILY_GS01_XV", **k}
 
@@ -35,13 +37,13 @@ def test_orphan_must_persist_and_ledger_mismatch_respects_grace():
     assert "LEDGER_MISMATCH" not in codes(g.evaluate([ch(fill_at_ts=NOW - 2, stop_confirmed=True)], mp, {}, NOW))
 
 
-def test_daily_realised_loss_cap_one_dollar_and_new_day_resets_baseline():
+def test_daily_realised_loss_cap_ten_cents_and_new_day_resets_baseline():
     st = {}
     assert g.evaluate([], MIR, st, NOW) == []
     low = dict(MIR, balance={"derivatives_available_usd": 205.70})
     assert "DAILY_LOSS_CAP" in codes(g.evaluate([], low, st, NOW + 60))
-    ok = dict(MIR, balance={"derivatives_available_usd": 206.20})
-    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([], ok, {"day": g.day_key(NOW), "day_baseline": 206.79, "last_flat_balance": 206.20, "last_flat_ts": NOW}, NOW + 60))
+    ok = dict(MIR, balance={"derivatives_available_usd": 206.74})    # $0.05 < the aligned $0.10 cap (HM C1)
+    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([], ok, {"day": g.day_key(NOW), "day_baseline": 206.79, "last_flat_balance": 206.74, "last_flat_ts": NOW}, NOW + 60))
     st2 = {"day_baseline": 300.0, "day_baseline_ts": NOW - 90000}      # a baseline older than 24 h has aged out
     assert "DAILY_LOSS_CAP" not in codes(g.evaluate([], low, st2, NOW)) and st2["day_baseline"] == 205.70
 
@@ -83,7 +85,8 @@ def test_bot_wiring_tick_disarms_on_violation_and_is_inert_when_output_off():
               "_get_live_copy_output": lambda: Out(on), "_offline_sim_epoch_floor": lambda: None,
               "_tile_integrity_chains": lambda now: [{"correlation_id": "GS01-1", "lane": "FAMILY_GS01_XV", "fill_at_ts": now - 9}],
               "_live_guardian_mirror": lambda: {"ok": True, "positions": [{}], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.0}},
-              "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}}}
+              "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}},
+              "_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
         exec(src[start:end], g_)
         return g_["_live_guardian_tick"]()
     assert run(False) == [] and calls == []
@@ -107,7 +110,8 @@ def _tick_ns(on=True, chains=None, mirror=None, epoch=None):
     ns = {"time": _t, "_LIVE_GUARDIAN_ERROR_LIMIT": 3, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"enabled": True, "calc": {}, "disarms": [], "last_violations": [], "heartbeat_ts": None},
           "_get_live_copy_output": lambda: Out(), "_tile_integrity_chains": lambda now: chains(now) if callable(chains) else (chains or []),
           "_live_guardian_mirror": lambda: mirror, "_offline_sim_epoch_floor": lambda: epoch,
-          "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}}}
+          "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}},
+              "_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
     exec(src_cut(start, end), ns)
     return ns, calls
 
@@ -169,7 +173,8 @@ def test_heartbeat_stale_dead_guardian_disarms_and_arming_refuses_while_stale():
 
     import live_guardian as lg
     ns = {"time": _t, "_LIVE_GUARDIAN_ERROR_LIMIT": 3, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"heartbeat_ts": _t.time() - 60, "disarms": []},
-          "_get_live_copy_output": lambda: Out(), "_disarm_live_control": lambda r: calls.append(r)}
+          "_get_live_copy_output": lambda: Out(), "_disarm_live_control": lambda r: calls.append(r),
+          "_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True}}
     exec("import live_guardian as _lg\n" + _SRC[s:e], ns)
     assert ns["_live_guardian_watchdog"]() is True and calls == ["AUTO_DISARM:GUARDIAN_STALE"]
     ns["_LIVE_GUARDIAN_STATE"]["heartbeat_ts"] = _t.time()
@@ -401,8 +406,8 @@ def test_tile_key_mismatch_entry_order_without_its_tile_chain_after_grace():
     st2 = {}
     for t in (NOW, NOW + 30):
         assert "TILE_KEY_MISMATCH" not in codes(g.evaluate([pend], m, st2, t, lane_needle=""))
-    # legacy (non tile-keyed) cids and stops are never attributed by cid
-    legacy = dict(MIR, open_orders=[{"id": 8, "type": "LIMIT", "cid": 12345}, {"id": 9, "type": "STOP", "cid": _ltg.encode_cid("gs1", 1)}])
+    # legacy (non tile-keyed) cids and reduce-only stops are never attributed by cid (HM C6: only reduce_only is skipped)
+    legacy = dict(MIR, open_orders=[{"id": 8, "type": "LIMIT", "cid": 12345}, {"id": 9, "type": "STOP", "reduce_only": True, "cid": _ltg.encode_cid("gs1", 1)}])
     st3 = {}
     g.evaluate([], legacy, st3, NOW, lane_needle="")
     assert "TILE_KEY_MISMATCH" not in codes(g.evaluate([], legacy, st3, NOW + 30, lane_needle=""))
@@ -455,3 +460,57 @@ def test_g6_unattributed_loss_counts_towards_total_and_errors_fail_safe():
 def test_g6_is_checked_even_when_the_exchange_mirror_is_blind():
     v = g.evaluate([lc("gs1-a", -0.05, NOW - 3)], {"ok": False, "error": "x"}, {}, NOW)
     assert ltg.VIOL_TILE_LOSS_CAP in codes(v)
+
+
+# ------------------------------------------------------------------ HM R2 C2 / RK force-flat (bounded retries, RED, no auto re-arm)
+def _ff_ns():
+    import collections, logging, threading, time as _tt
+    from collections import deque
+    src = _SRC[_SRC.index("LIVE_GUARDIAN_FORCE_FLAT_CONFIRMATION ="):_SRC.index("def _live_copy_stale_exit_check")]
+    ns = {"time": _tt, "threading": threading, "deque": deque, "collections": collections, "logger": logging.getLogger("t"), "_LIVE_GUARDIAN_STATE": {},
+          "_BOT_ADMIN_TOKEN": "x", "LIVE_COPY_OPS_BASE": "http://relay", "LIVE_COPY_OPS_USER_ID": "u", "requests": None}
+    exec(src, ns)
+    return ns
+
+
+def test_c2_force_flat_ok_only_on_flat_no_stops_and_paused():
+    ns = _ff_ns()
+    rec = {"reason": "MUTEX_BREACH"}
+    seq = [{"ok": False, "verdict": "NOT_FLAT"}, {"ok": True, "verdict": "FLAT_NO_STOPS", "paused": True}]
+    ns["_live_guardian_force_flat_worker"](rec, post=lambda r: seq.pop(0), sleep=lambda s: None)
+    assert rec["ok"] and rec["readback"] == "FLAT_NO_STOPS" and rec["attempts"] == 2
+    assert "red_alert" not in ns["_LIVE_GUARDIAN_STATE"] and ns["_live_guardian_arm_block"]() is None
+
+
+def test_c2_force_flat_unconfirmed_after_bounded_retries_is_red_and_blocks_arming():
+    ns = _ff_ns()
+    calls, sleeps = [], []
+    ff = ns["_live_guardian_force_flat"]("STOP_PLACEMENT_FAILED", now=1.0,
+                                        spawn=lambda fn: None)   # spawned, not yet done -> arming refuses (in progress)
+    assert ns["_live_guardian_arm_block"]() == "LIVE_GUARDIAN_FORCE_FLAT_IN_PROGRESS"
+    assert ns["_LIVE_GUARDIAN_STATE"]["auto_disarm_latched"]["reason"] == "STOP_PLACEMENT_FAILED"
+    ns["_live_guardian_force_flat_worker"](ff, post=lambda r: calls.append(r) or {"ok": False, "verdict": "FLAT_WITH_ORDERS"},
+                                           sleep=sleeps.append)
+    assert len(calls) == len(ns["_LIVE_GUARDIAN_FORCE_FLAT_RETRY_SEC"]) == 3 and sleeps == [5.0, 15.0]
+    red = ns["_LIVE_GUARDIAN_STATE"]["red_alert"]
+    assert red["code"] == "FORCE_FLAT_UNCONFIRMED" and red["readback"] == "FLAT_WITH_ORDERS"
+    assert ns["_live_guardian_arm_block"]() == "LIVE_GUARDIAN_FORCE_FLAT_RED"
+    assert ns["_live_guardian_force_flat_check"]()["status"] == "RED"
+    # a post that raises is also unconfirmed (never treated as flat)
+    ns2 = _ff_ns()
+    ns2["_live_guardian_force_flat_worker"]({"reason": "x"}, post=lambda r: 1 / 0, sleep=lambda s: None)
+    assert ns2["_LIVE_GUARDIAN_STATE"]["red_alert"]["readback"] == "UNCONFIRMED"
+
+
+def test_c2_wiring_red_alert_surfaces_arming_refuses_and_stale_exit_never_rearms():
+    assert "_live_guardian_force_flat_check()" in _SRC[_SRC.index("def _system_health_fly_self_checks"):]
+    assert _SRC.count("_live_guardian_arm_block()") >= 3   # live output ON route + per-tile ON route
+    stale = _SRC[_SRC.index("def _live_copy_stale_exit_check"):]
+    stale = stale[:stale.index("\ndef ")]
+    assert stale.index('_LIVE_GUARDIAN_STATE.get("auto_disarm_latched")') < stale.index("_BOT_ADMIN_TOKEN:")   # before the rearm post
+    tick = _SRC[_SRC.index("def _live_guardian_tick"):_SRC.index("def live_guardian_loop")]
+    assert "_live_guardian_force_flat(" in tick
+    helper = _SRC[_SRC.index("def _live_guardian_force_flat_post"):_SRC.index("def _live_guardian_force_flat_worker")]
+    assert "/force-flat-disarm" in helper and "rearm" not in helper and "logger" not in helper   # never logs the token
+    on = _SRC[_SRC.index('reason=_onoff_reason("OPERATOR_ON", data))'):][:200]
+    assert '_LIVE_GUARDIAN_STATE.pop("auto_disarm_latched", None)' in on

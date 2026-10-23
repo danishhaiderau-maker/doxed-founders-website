@@ -58,6 +58,7 @@ VIOL_TILE_LOSS_CAP = "LIVE_TILE_DAILY_LOSS_CAP"
 VIOL_TOTAL_LOSS_CAP = "LIVE_TOTAL_DAILY_LOSS_CAP"
 
 SKIP_MUTEX = "LIVE_SKIPPED_MUTEX"
+DENY_DAILY_LOSS_CAP = "LIVE_DAILY_LOSS_CAP"
 DENY_TILE_KEY_UNKNOWN = "LIVE_TILE_KEY_UNKNOWN"
 DENY_TILE_CAP = "LIVE_TILE_MARGIN_CAP"
 DENY_TOTAL_CAP = "LIVE_TOTAL_MARGIN_CAP"
@@ -134,7 +135,8 @@ def load_caps(environ: Mapping[str, str] | None = None) -> dict:
             for k, v in raw.items():
                 x = _f(v)
                 if str(k).lower() in TILE_KEY_CODES and x is not None and x >= 0:
-                    per_tile[str(k).lower()] = x
+                    # HM C4: env can only LOWER a tile below the $0.25 default, never raise it
+                    per_tile[str(k).lower()] = min(x, DEFAULT_TILE_MARGIN_CAP_USD)
     except ValueError:
         per_tile = {}
     total = _f(env.get("LIVE_TOTAL_MARGIN_CAP_USD"))
@@ -197,13 +199,15 @@ def flat_check(mirror: Mapping[str, Any] | None) -> list:
     if m is None or m.get("ok") is not True:
         return [DENY_MIRROR_BLIND]
     age = _f(m.get("read_age_s"))
-    if age is not None and age > MIRROR_MAX_AGE_SEC:
+    if age is None or age < 0 or age > MIRROR_MAX_AGE_SEC:     # HM C5: a missing read age is BLIND, never fresh
         return [DENY_MIRROR_BLIND]
     reasons = []
     positions = [p for p in (m.get("positions") or []) if (_f((p or {}).get("amount")) or 0.0) != 0.0 or "amount" not in (p or {})]
     if positions:
         reasons.append(f"{DENY_NOT_FLAT}:POSITION")
-    entries = [o for o in (m.get("open_orders") or []) if not (o or {}).get("reduce_only") and "STOP" not in str((o or {}).get("type") or "").upper()]
+    # HM C6: only reduce-only (protective) orders are excluded; a non-reduce-only STOP (stop-entry) is an entry order.
+    # reduce_only unknown (None) counts as an entry (fail closed).
+    entries = [o for o in (m.get("open_orders") or []) if (o or {}).get("reduce_only") is not True]
     if entries:
         reasons.append(f"{DENY_NOT_FLAT}:ENTRY_ORDER")
     return reasons
@@ -251,6 +255,11 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         info.update(entries_today=n, max_entries_per_day=int(caps.get("max_entries_per_day", MAX_ENTRIES_PER_DAY)), utc_day=day)
         if n >= info["max_entries_per_day"]:
             reasons.append(DENY_DAILY_LIMIT)
+        # 6. HM G6 loss caps (belt and braces: the guardian disarms ALL on a breach; admission also refuses meanwhile)
+        loss_v = daily_loss_violations(chains, now, registry)
+        info["daily_loss_violations"] = [v["code"] for v in loss_v]
+        if loss_v:
+            reasons.append(DENY_DAILY_LOSS_CAP)
         return (not reasons), reasons, info
     except Exception as exc:  # noqa: BLE001 - any error refuses the live entry (paper unaffected)
         return False, [f"{DENY_GATE_ERROR}:{type(exc).__name__}"], {}
@@ -298,3 +307,15 @@ def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
         return out
     except Exception as exc:  # noqa: BLE001
         return [{"code": f"{VIOL_TOTAL_LOSS_CAP}_ERROR", "tile": None, "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}]
+
+
+FORCE_FLAT_CLOSE_MARKERS = ("AUTHENTICATED_EMERGENCY_CLOSE", "FORCE_FLAT", "GUARDIAN_FORCE_FLAT")
+
+
+def force_flat_non_countable(chain: Mapping[str, Any] | None) -> bool:
+    """RK (24 Oct): a live trade closed by the guardian force-flat (relay ops/force-flat-disarm -> emergency close) is
+    NON-COUNTABLE for any gate/strategy evidence. Matched on the chain's close reason/source; fail-safe False only for
+    a chain with no close info at all."""
+    c = chain if isinstance(chain, Mapping) else {}
+    blob = " ".join(str(c.get(k) or "") for k in ("close_reason", "exit_reason", "close_source", "exit_source", "reason")).upper()
+    return any(m in blob for m in FORCE_FLAT_CLOSE_MARKERS)

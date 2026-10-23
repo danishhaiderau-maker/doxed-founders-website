@@ -6,8 +6,10 @@ or ``None`` when it is account-wide. The disarm semantics are unchanged: any vio
 
 ``evaluate`` looks at the live-copy chains (executor reports), the relay's exchange mirror (balance / positions / orders /
 orphans) and its own small state, and returns violations. The bot calls ``_disarm_live_control`` on any violation, which
-turns Fly's live output OFF, resets every per-tile switch, cancels managed pending entries and marks open positions exit-only.
-It never places or closes an order itself. No trading fees; funding only.
+turns Fly's live output OFF, resets every per-tile switch, cancels managed pending entries and marks open positions exit-only,
+and then (RK ruling 24 Oct) ``_live_guardian_force_flat``, which asks the relay to pause the instance and emergency-close
+every open copy lot (fire-and-forget; never waits for flat). This module itself places or closes nothing. No trading fees;
+funding only. HM G6 daily loss caps ($0.05/tile, $0.10 total, UTC day; prereg AMEND3 D3) come from live_tile_gate.
 """
 from __future__ import annotations
 
@@ -15,7 +17,12 @@ import time
 from typing import Any, Iterable, Mapping
 
 STOP_MISSING_SEC = 5.0          # HM: stop must be confirmed within 5 s of the fill
-DAILY_LOSS_CAP_USD = 1.00       # HM: daily realised live loss cap
+import live_tile_gate as _ltg_caps  # noqa: E402
+
+# HM C1 (24 Oct): aligned with the G6 account-wide cap pinned in live_tile_gate (prereg AMEND3 D3, $0.10). Was $1.00. This
+# rolling-24 h check runs on the ledger AND on the Derivatives balance (so funding is included); the UTC-day G6 checks
+# (per tile $0.05, total $0.10) run on the ledger in live_tile_gate.daily_loss_violations.
+DAILY_LOSS_CAP_USD = _ltg_caps.DAILY_LOSS_CAP_TOTAL_USD
 LEDGER_GRACE_SEC = 10.0         # fill/close propagation grace before a position-count mismatch counts
 BALANCE_DRIFT_USD = 0.50        # unexplained balance change when flat beyond reported pnl; this $0.50 tolerance is the allowance for funding (the bot passes funding_usd_today=0)
 ORPHAN_GRACE_SEC = 3.0          # an orphan must persist across this long (two reads) to count
@@ -136,7 +143,7 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     bad = []
     for o in orders:
         t = _ltg.decode_cid((o or {}).get("cid"))
-        if t is None or (o or {}).get("reduce_only") or "STOP" in str((o or {}).get("type") or "").upper():
+        if t is None or (o or {}).get("reduce_only") is True:   # HM C6: only reduce-only (protective) orders are skipped
             continue
         if t not in live_tiles:
             bad.append((o, t))

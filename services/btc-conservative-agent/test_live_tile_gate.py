@@ -279,3 +279,39 @@ def test_bot_wires_admission_into_stamp_and_reports_tile_gate():
     assert "admission_gate=(lambda: _live_tile_admission(lane, trade_id, now))" in src
     assert "def _live_tile_admission(" in src and "_ltg.admit_entry(" in src
     assert '"tile_gate"' in src and 'lane_needle=""' in src
+
+
+# ------------------------------------------------------------------ HM R2 C4 / C5 / C6 / C1-admission
+def test_c4_env_per_tile_cap_is_clamped_to_the_default():
+    caps = ltg.load_caps({"LIVE_TILE_MARGIN_CAPS_USD_JSON": '{"gs1": 5.0, "gs6": 0.10}'})
+    assert caps["per_tile_usd"] == {"gs1": ltg.DEFAULT_TILE_MARGIN_CAP_USD, "gs6": 0.10}
+    assert ltg.total_cap_usd({"gs1", "gs6"}, caps) <= 2 * ltg.DEFAULT_TILE_MARGIN_CAP_USD
+
+
+@pytest.mark.parametrize("age", [None, "x", -1])
+def test_c5_missing_or_bad_read_age_is_blind(age):
+    m = {k: v for k, v in FLAT.items() if k != "read_age_s"}
+    if age is not None:
+        m["read_age_s"] = age
+    ok, r, _ = admit(mirror=m)
+    assert not ok and ltg.DENY_MIRROR_BLIND in r
+
+
+@pytest.mark.parametrize("order", [{"type": "STOP", "reduce_only": False}, {"type": "STOP"}, {"type": "STOP", "reduce_only": None}])
+def test_c6_only_reduce_only_orders_are_skipped(order):
+    ok, r, _ = admit(mirror=dict(FLAT, open_orders=[order]))
+    assert not ok and "ACCOUNT_NOT_FLAT:ENTRY_ORDER" in r
+
+
+def test_c1_admission_refuses_while_a_daily_loss_cap_is_breached():
+    lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.06}
+    ok, r, info = admit(chains=[lost])
+    assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and info["daily_loss_violations"]
+    small = dict(lost, pnl_usd=-0.01)
+    assert admit(chains=[small])[0]
+
+
+def test_force_flattened_trades_are_non_countable():
+    assert ltg.force_flat_non_countable({"close_reason": "AUTHENTICATED_EMERGENCY_CLOSE"})
+    assert ltg.force_flat_non_countable({"exit_source": "guardian_force_flat"})
+    assert not ltg.force_flat_non_countable({"close_reason": "TP"}) and not ltg.force_flat_non_countable(None)

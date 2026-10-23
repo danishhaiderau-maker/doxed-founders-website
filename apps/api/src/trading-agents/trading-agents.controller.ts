@@ -219,6 +219,46 @@ export class TradingAgentsController {
     return { ok: true, flattened: flat.flattened, armed, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
   }
 
+  /**
+   * RK ruling 24 Oct (#852): Fly's live guardian calls this on EVERY auto-disarm (any violation, guardian error or stale
+   * guardian). Pauses the instance FIRST (no new entry can be placed; never resumes it - only a strict operator re-arm
+   * can), then force-flats the account and reads it back (forceFlatDisarmAccount). Admin-token only, throttled, audit
+   * line without the token. Returns the read-back verdict; ok only when paused AND FLAT_NO_STOPS.
+   */
+  @Public()
+  @Throttle({ default: { limit: 6, ttl: 60000 } })
+  @Post(':slug/ops/force-flat-disarm')
+  async opsForceFlatDisarm(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { confirmation?: string; reason?: string },
+  ) {
+    assertBotAdminToken(adminHeader, authorization);
+    if (!userId?.trim()) throw new BadRequestException('userId query param is required');
+    if (body?.confirmation !== 'FORCE_FLAT_AND_DISARM') {
+      throw new BadRequestException('confirmation must equal FORCE_FLAT_AND_DISARM');
+    }
+    const uid = userId.trim();
+    const reason = (body.reason?.trim() || 'GUARDIAN_AUTO_DISARM').slice(0, 200);
+    const startedAt = new Date().toISOString();
+    let paused = false;
+    let pauseError: string | null = null;
+    try {
+      await this.instances.setInstancePaused(uid, slug, true);
+      paused = true;
+    } catch (e) {
+      pauseError = (e instanceof Error ? e.message : String(e)).slice(0, 160);
+    }
+    // flatten even if the pause failed (fail safe); ok stays false so Fly raises RED
+    const flat = await this.execution.forceFlatDisarmAccount(uid, slug);
+    const ok = paused && flat.verdict === 'FLAT_NO_STOPS';
+    // eslint-disable-next-line no-console
+    console.log(`[OPS-FORCE-FLAT-DISARM] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} paused=${paused} verdict=${flat.verdict} flattened=${flat.flattened} cancelled=${flat.cancelled} errors=${flat.errors.length} at=${startedAt}`);
+    return { ok, paused, pauseError, ...flat, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
+  }
+
   @Public()
   @Throttle({ default: { limit: 2, ttl: 60000 } })
   @Post(':slug/ops/emergency-reconcile')
