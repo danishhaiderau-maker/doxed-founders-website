@@ -258,10 +258,36 @@ def test_family_policy_exits_book_the_tick_that_triggered_them(monkeypatch, reas
 
 
 def test_maker_take_profit_books_its_resting_limit(monkeypatch):
-    pos = _short_pos()
+    """HM B3: the resting TP books its own limit only when the book row confirms the side-correct price is through it."""
+    pos = _short_pos(tp=ENTRY - 100)
+    pos["_exit_eval_price"] = ENTRY - 130  # trigger mark beyond the limit: never booked (no price improvement)
+    monkeypatch.setattr(bot, "refresh_bbo_state", lambda *a, **k: None)
+    _book(monkeypatch, ENTRY - 140, ENTRY - 120)  # SHORT: best ask <= tp
+    booked, sim = bot.resolve_sim_exit_price(pos, True, "GS_ATR_TAKE_PROFIT")
+    assert abs(booked - (ENTRY - 100)) < 0.02 and sim["source"] == "exit_maker_limit_fill"
+    assert sim["exit_pricing_basis"] == "BOOK_CONFIRMED_MAKER_LIMIT" and sim["exit_evidence_status"] == "COMPLETE"
+    assert pos["exit_price_age_s"] is not None
+
+
+def test_maker_take_profit_unconfirmed_by_book_is_a_book_taker_exit(monkeypatch):
+    pos = _short_pos(tp=ENTRY - 100)
     pos["_exit_eval_price"] = ENTRY - 100
     monkeypatch.setattr(bot, "refresh_bbo_state", lambda *a, **k: None)
+    _book(monkeypatch, ENTRY - 60, ENTRY - 50)  # SHORT: best ask above tp -> limit not proven filled
     booked, sim = bot.resolve_sim_exit_price(pos, True, "GS_ATR_TAKE_PROFIT")
+    assert abs(booked - (ENTRY - 50)) < 0.02 and sim["source"] == "exit_book_row_at_fill"
+    assert sim["exit_maker_tp_unconfirmed"] is True
+
+
+def test_non_trigger_maker_tp_uses_book_path(monkeypatch):
+    pos = _short_pos(tp=ENTRY - 100)
+    pos["_exit_eval_price"] = ENTRY - 100
+    monkeypatch.setattr(bot, "_is_trigger_consistent_exit_reason", lambda r: False)
+    _book(monkeypatch, ENTRY - 60, ENTRY - 50)
+    booked, sim = bot.resolve_sim_exit_price(pos, True, "TAKE_PROFIT")
+    assert abs(booked - (ENTRY - 50)) < 0.02 and sim["exit_maker_tp_unconfirmed"] is True
+    _book(monkeypatch, ENTRY - 110, ENTRY - 105)
+    booked, sim = bot.resolve_sim_exit_price(pos, True, "TAKE_PROFIT")
     assert abs(booked - (ENTRY - 100)) < 0.02 and sim["source"] == "exit_maker_limit_fill"
 
 

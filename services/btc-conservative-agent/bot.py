@@ -8410,6 +8410,26 @@ def _legacy_exit_book_fill(direction: str, fill_ts: float, trigger: float, pos: 
     return float(trigger or pos.get("entry") or 0), "exit_forced_no_book_trigger", meta
 
 
+def _legacy_maker_tp_fill(direction: str, fill_ts: float, trigger: float, pos: dict):
+    """HM B3 / R3: the legacy resting maker take-profit is priced from the shared book pricer, never from the trigger mark
+    or the ticker. It books its OWN limit (pos['tp']; the trigger only when no tp is stored) - a resting limit never gets
+    price improvement - and only when the latest complete book row confirms the side-correct price is at or through the
+    limit (LONG best bid >= tp, SHORT best ask <= tp: the take_profit_fill label's 'side-correct mark trades through').
+    Otherwise the limit is not proven filled and the close is a taker exit on the book row (_legacy_exit_book_fill),
+    stamped exit_maker_tp_unconfirmed. Returns (px, source, meta)."""
+    import paper_fill as _pf
+    import quote_trigger as _qt
+    limit = float(pos.get("tp") or 0) or float(trigger or 0)
+    bx = _qt.book_exit_price(direction, fill_ts, _pf.book10l_at)
+    if limit > 0 and bx.get("px") and _qt.level_reached(direction, _qt.KIND_TARGET, limit, bx["px"]):
+        return limit, "exit_maker_limit_fill", {
+            "exit_pricing_basis": "BOOK_CONFIRMED_MAKER_LIMIT", "exit_book_s": bx.get("book_s"),
+            "exit_price_age_s": bx.get("price_age_s"), "exit_evidence_status": "COMPLETE",
+            "exit_maker_limit_px": round(limit, 2)}
+    px, source, meta = _legacy_exit_book_fill(direction, fill_ts, trigger, pos)
+    return px, source, {**meta, "exit_maker_tp_unconfirmed": True}
+
+
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
     """Paper exit fill = side-correct BBO at the moment the close executes.
 
@@ -8433,8 +8453,8 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
         with state_lock:
             bbo_ts = float(state.get("bbo_ts") or state.get("price_ts") or 0)
         maker_tp = bool(exit_is_maker) and "TAKE_PROFIT" in reason_u
-        if maker_tp and trigger > 0:
-            px, source = trigger, "exit_maker_limit_fill"
+        if maker_tp:
+            px, source, book_meta = _legacy_maker_tp_fill(direction, fill_ts, trigger, pos)
         else:
             px, source, book_meta = _legacy_exit_book_fill(direction, fill_ts, trigger, pos)
         sim = {
@@ -8449,27 +8469,17 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
             "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
                                     if trigger > 0 and px > 0 else None),
         }
-        if not (maker_tp and trigger > 0):
-            sim.update(book_meta)
-            pos.update({k: v for k, v in book_meta.items() if k.startswith("exit_")})
+        sim.update(book_meta)
+        pos.update({k: v for k, v in book_meta.items() if k.startswith("exit_")})
         pos["exit_trigger_price"] = sim["trigger_price"]
         pos["exit_fill_price"] = sim["fill_price"]
         return round(px, 2), sim
-    refresh_bbo_state()
-    refresh_order_book_state()
-    # RK step 2: book-row mark only (no ticker last price); the trigger/entry is the last resort, stamped.
-    fallback = get_mark_price(direction) or trigger or float(pos.get("entry") or 0)
-    if exit_is_maker:
-        tp_px = float(pos.get("tp") or 0)
-        if tp_px > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
-            pos["exit_trigger_price"] = pos["exit_fill_price"] = round(tp_px, 2)
-            return tp_px, None
-        pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
-        pos["exit_fill_price"] = round(fallback, 2)
-        return fallback, None
-    # RK step 2: the market exit is priced on the first book row at/after the fill (shared pricer rows), not on the
-    # cached WS book walk / ticker.
-    px, source, book_meta = _legacy_exit_book_fill(direction, time.time(), trigger, pos)
+    # RK step 2 / HM B3: every remaining exit is priced on the shared pricer's book rows (no ticker, no trigger mark,
+    # no cached WS book walk). A maker TP books its limit only when the book row confirms it (_legacy_maker_tp_fill).
+    if exit_is_maker and float(pos.get("tp") or 0) > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
+        px, source, book_meta = _legacy_maker_tp_fill(direction, time.time(), trigger, pos)
+    else:
+        px, source, book_meta = _legacy_exit_book_fill(direction, time.time(), trigger, pos)
     sim = {"avg_price": round(px, 2), "filled_qty": qty, "fully_filled": True, "source": source, **book_meta}
     pos.update({k: v for k, v in book_meta.items() if k.startswith("exit_")})
     pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
