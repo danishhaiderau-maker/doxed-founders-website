@@ -310,3 +310,11 @@ def test_scorer_end_to_end_on_fixture(fixture_dir, tmp_path):
     assert any(k.startswith("AI_RANDOM_SIDE|") for k in res["variants"])
     assert "NOTRADE_SCORE_FOLLOW|TAKER|TIME_60M" in res["variants"]
     assert all(math.isfinite(t.get("net_bp", 0.0)) for t in trades)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_walk_forward_unquarantined(monkeypatch):
+    # These tests pin the legacy walk-forward scorer math; production has WALK_FORWARD_1S retired (R17, HM #850 R2
+    # C1), covered by test_r17_retired_sources.py.  Kept (not deleted) pending the paper_fill rebuild.
+    from research import r3_quarantine
+    monkeypatch.setattr(r3_quarantine, "ACTIVE", r3_quarantine.ACTIVE - {"WALK_FORWARD_1S"})

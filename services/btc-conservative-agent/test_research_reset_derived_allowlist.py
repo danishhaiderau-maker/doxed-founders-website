@@ -79,3 +79,17 @@ def test_derived_plan_executes_only_fixture_paths_and_retains_control(tmp_path):
     assert result["status"] == "COMPLETE"
     assert control.exists()
     assert not any((tmp_path / name).exists() for name in names)
+
+
+def test_entry_baseline_replay_report_and_sidecar_are_discarded_at_reset(tmp_path):
+    """HM #850 R2 N1 (Rule 17): the retired entry_baseline_replay report + receipts sidecar are reset targets."""
+    from research_reset_inventory import ANALYZER_SIDECAR_REPORT_FILES
+    src = Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8-sig")
+    for name in ANALYZER_SIDECAR_REPORT_FILES:
+        assert f'"{name}"' in src  # ENTRY_BASELINE_REPLAY_REPORT_FILE / _RECEIPTS_FILE
+    names = ["analyzer/" + n for n in sorted(ANALYZER_SIDECAR_REPORT_FILES)]
+    for name in names:
+        put(tmp_path, name)
+    assert not plan_research_reset(tmp_path)["targets"]  # still epoch-proof gated
+    planned = plan_research_reset(tmp_path, proof=proof(tmp_path))
+    assert {x["path"] for x in planned["targets"]} == set(names)

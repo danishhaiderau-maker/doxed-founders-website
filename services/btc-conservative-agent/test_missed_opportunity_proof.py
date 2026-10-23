@@ -704,3 +704,30 @@ def test_missed_opportunity_heatmap_writes_strict_json_for_nan_shadow_pnl(
 
     assert payload["heatmap"][0]["shadow_pnl_total_usd"] == 0.0
     assert json.loads((tmp_path / "heatmap.json").read_text(encoding="utf-8")) == payload
+
+
+import pytest as _pytest_r17
+from research import r3_quarantine as _r3q_r17
+
+
+@_pytest_r17.fixture(autouse=True)
+def _legacy_limit_fill_1s_unquarantined(monkeypatch):
+    # These tests pin the legacy 1 s limit-fill math; production has LIMIT_FILL_1S retired (R17, RK #847 cond 4),
+    # covered by test_r17_retired_sources.py.  Kept (not deleted) pending the book_limit_entry rebuild.
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"LIMIT_FILL_1S"})
+
+
+def test_retired_limit_fill_1s_labels_proof_rows(tmp_path, monkeypatch):
+    """HM #850 R2 C2: with LIMIT_FILL_1S retired, proof rows reject as SOURCE_RETIRED_R17, labelled."""
+    engine = _load_engine()
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) | {"LIMIT_FILL_1S"})
+    monkeypatch.delenv("BTC_AGENT_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _identity_ledgers(tmp_path)
+    _write_jsonl(tmp_path / "chase_offset_touch_grid.jsonl", _signed_rows())
+    _write_complete_canonical_tape(tmp_path)
+    row = engine.build_missed_opportunity_proof_report(session={})["proofs"][0]
+    assert row["classification"] == "INSUFFICIENT_EVIDENCE" and row["qualification_eligible"] is False
+    assert "SOURCE_RETIRED_R17" in row["coverage"]["rejection_codes"]
+    assert "TAPE_OR_EXECUTION_EVIDENCE_INCOMPLETE" not in row["coverage"]["rejection_codes"]
+    assert row["coverage"]["tape_status"] == "source retired (R17)"

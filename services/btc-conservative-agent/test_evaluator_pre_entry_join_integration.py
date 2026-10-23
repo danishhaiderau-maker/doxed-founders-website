@@ -217,3 +217,14 @@ def test_partial_feature_join_preserves_only_actual_valid_observations(tmp_path)
     assert "depth_bucket" not in row["pre_entry_features"]
     assert row["pre_entry_features"]["regime"] == {"value": "BULL", "observed_ts": 8.0}
     assert row["bucket_definition_signature"] is None
+
+
+import pytest as _pytest_r17
+from research import r3_quarantine as _r3q_r17
+
+
+@_pytest_r17.fixture(autouse=True)
+def _legacy_limit_fill_1s_unquarantined(monkeypatch):
+    # These tests pin the legacy 1 s limit-fill math; production has LIMIT_FILL_1S retired (R17, RK #847 cond 4),
+    # covered by test_r17_retired_sources.py.  Kept (not deleted) pending the book_limit_entry rebuild.
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"LIMIT_FILL_1S"})

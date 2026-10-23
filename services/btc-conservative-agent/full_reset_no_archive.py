@@ -13,6 +13,14 @@ Safety model
   ``.jsonl`` / ``.csv`` row streams with every rotated ``.N`` / ``.N.gz`` copy). Paper rows (including the
   PAPER_FILL_FORCED deploy-flatten rows, which live in those CSVs), the paper IOC no-fill shadow file, tape,
   book, deriv, (retired) DISLOC ledgers and shadow streams are all in it.
+  Analyzer-derived reports (``ANALYZER_DERIVED_REPORT_NAMES``), the analyzer run manifests
+  (``ANALYZER_DERIVED_MANIFEST_NAMES``) and the known producers' episode-receipt shards in an ``analyzer/``
+  directory at any depth are DELETE too (R5 fresh-only, no archive). KEEP / code / secrets / CONFIG / in-process /
+  preserved research win over them; the deny-list and RELAY rule do not (RK ruling on HM #850 R2 C4: they are
+  derived copies; the deny-list protects the primary tile / live / switch files only).
+* Outside runtime/ exactly three Fly scopes are planned and DELETED IN FULL: ``<data_root>/analyzer_mirror/**``,
+  ``<data_root>/analyzer_generations/**`` and ``<data_root>/analyzer_current.json`` (the bot's analyzer mirror), with
+  a read-back after execute (completed=false if anything is left).
 * Anything that is neither allowlisted nor an explicit data class is UNCLASSIFIED: it is RETAINED and listed in
   the plan and receipt. Nothing is ever deleted by default.
 * The plan pins the sha256 of every allowlisted file and a parsed "flag view" (every live / arm / force_paper /
@@ -48,12 +56,14 @@ import hashlib
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 import clean_epoch_wipe as cew
 import data_epoch
+import research_reset_inventory as rri
 
 MODE = "full-reset-no-archive"
 PLAN_SCHEMA = "full_reset_no_archive_plan_v1"
@@ -118,6 +128,52 @@ DELETE_TAPE_DATASETS = cew.TAPE_DATASETS | cew.MARKET_DATASETS
 # The ONLY names allowed to override the deny-list (top level, plus that stream's own rotations). Owner decision
 # 2026-10-17 21:15 AEDT: tile_integrity.jsonl is an append-only data stream (tile integrity rows), not a switch.
 DENY_OVERRIDE_DELETE_NAMES = frozenset({"tile_integrity.jsonl"})
+# Analyzer-derived reports (R5 fresh-only, no archive): every report the analyzer regenerates from collected rows is
+# DELETE when it sits in an ``analyzer/`` directory at ANY depth. The declared set is the shared inventory
+# (research_reset_inventory, parity-tested against the analyzer's own report list, R4: one list) plus the derived
+# reports the analyzer / past_analysis write outside that list. Manifests, pointers, snapshots and the startup sync gate
+# are NOT here (they stay UNCLASSIFIED and retained); KEEP, CONFIG, RELAY and the deny-list are evaluated first and win.
+ANALYZER_DIR_NAME = "analyzer"
+ANALYZER_EXTRA_DERIVED_REPORT_NAMES = frozenset({
+    "ai_confidence_expectancy.json", "ai_scan_independence_report.json", "all_epochs_bp.json",
+    "analyzer_input_blockers.json", "conservative_shadow_terminal_report.json", "counterfactual_coverage_report.json",
+    "discovery_cohort_scorecard_report.json", "dynamic_policy_analysis_report.json",
+    "evidence_coverage_triage_report.json", "execution_funnel_summary.json", "exit_reports_validation.json",
+    "historical_trade_cohort_report.json", "lane_definition_report.json", "lane_memory_validation.json",
+    "lane_retirement_report.json", "lifecycle_bundle_inventory.json", "policy_evidence_binding_report.json",
+    "policy_research_reports.json",
+})
+ANALYZER_DERIVED_REPORT_NAMES = frozenset(
+    rri.ANALYZER_REPORT_FILES | rri.ANALYZER_SIDECAR_REPORT_FILES | ANALYZER_EXTRA_DERIVED_REPORT_NAMES)
+# HM #850 R2 C2: the analyzer's own run manifests describe the deleted reports (analyzer_research_engine_v62.py:118
+# REPORT_MANIFEST_FILE, :129 SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE, :130 POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+# research/past_analysis.py:247 past_analysis_manifest.json): stale after the wipe, so DELETE with them.
+ANALYZER_DERIVED_MANIFEST_NAMES = frozenset({
+    "report_manifest.json", "policy_evidence_library_manifest.json", "safe_policy_genome_v3_exhaustive_manifest.json",
+    "past_analysis_manifest.json",
+})
+# HM #850 R2 C5: only the KNOWN producers' receipt shards (the shared inventory, R4: one list), never a generic
+# ``*episode_receipts.jsonl.gz`` suffix. Today that is analyzer_research_engine_v62.py:120
+# ENTRY_BASELINE_REPLAY_RECEIPTS_FILE; an unknown shard stays UNCLASSIFIED and (being .gz) blocks execute.
+ANALYZER_EPISODE_RECEIPTS_SUFFIX = "episode_receipts.jsonl.gz"
+ANALYZER_EPISODE_RECEIPTS_FILES = frozenset(
+    n for n in rri.ANALYZER_SIDECAR_REPORT_FILES if n.endswith(ANALYZER_EPISODE_RECEIPTS_SUFFIX))
+# RK ruling on HM #850 R2 C4(b): both are written ONLY by the analyzer (derived, not a relay audit of real fills):
+#   analyzer_research_engine_v62.py:163 BITFINEX_COPY_FIDELITY_REPORT_FILE / :165 COPY_ONLY_EXCHANGE_FILLS_REPORT_FILE,
+#   written by research_cohort_split_reports() (:3261, rows :3270 / :3279) -> _write_cohort_report() (:3225), which
+#   opens analyzer_report_path(filename) (:3251-3252, analyzer_report_path at :190). No other writer in the repo.
+# So inside an analyzer/ directory they are ANALYZER_DERIVED_REPORT (DELETE), not RELAY evidence. Switchable spot: a
+# name removed from this set falls back to the RELAY KEEP rule (classify step 4a checks it).
+ANALYZER_RELAY_NAMED_DERIVED_REPORTS = frozenset({
+    "bitfinex_copy_fidelity_lifecycles_report.json", "copy_only_exchange_fills_report.json",
+})
+# RK ruling C4(a) / HM C3: the Fly analyzer mirror lives OUTSIDE runtime/ on the volume (bot.py _analyzer_mirror_dir,
+# _analyzer_generations_dir, _analyzer_current_pointer_path under BOT_DATA_DIR=/app/data). These three, and nothing
+# else outside runtime/, are scanned and DELETED IN FULL (tile_* copies included: the deny-list protects only the
+# primary tile files, never mirror copies), with a read-back after execute.
+FLY_ANALYZER_MIRROR_DIRS = ("analyzer_mirror", "analyzer_generations")
+FLY_ANALYZER_POINTER_FILES = ("analyzer_current.json",)
+FLY_SCOPE_PREFIX = "@data/"
 DENY_NAME_TOKENS = ("live", "arm", "flag", "switch", "tile", "settings")
 DELETE_STREAM_SUFFIXES = (".jsonl", ".csv", ".jsonl.gz", ".csv.gz")
 ROTATION_RE = cew.ROTATION_RE
@@ -161,6 +217,17 @@ def classify(relpath: str) -> tuple[str, str]:
     # 4. pre-fresh-start irreplaceable research and signed receipts
     if any(t in lower for t in PRESERVED_RESEARCH_TOKENS):
         return KEEP, "PRESERVED_RESEARCH"
+    # 4a. analyzer-derived reports, run manifests and the known producers' episode-receipt shards in an analyzer/
+    # directory at any depth (R5 fresh-only). RK C4(a): these are derived COPIES, so they are evaluated BEFORE the
+    # deny-list (which protects only primary tile / live / switch files) and before the RELAY rule (C4(b) evidence).
+    if ANALYZER_DIR_NAME in parts[:-1]:
+        relay_named = any(t in lower for t in cew.RELAY_TOKENS)
+        if name in ANALYZER_EPISODE_RECEIPTS_FILES:
+            return DELETE, "ANALYZER_EPISODE_RECEIPTS"
+        if base in ANALYZER_DERIVED_REPORT_NAMES and (not relay_named or base in ANALYZER_RELAY_NAMED_DERIVED_REPORTS):
+            return DELETE, "ANALYZER_DERIVED_REPORT"
+        if name in ANALYZER_DERIVED_MANIFEST_NAMES:
+            return DELETE, "ANALYZER_DERIVED_MANIFEST"
     # 4b. DENY-LIST: anything that smells like a live / arming / flag / switch / tile / settings file is NEVER deleted by
     # any rule below (explicit, dataset or catch-all). Not on KEEP means UNCLASSIFIED, so execute aborts for data files.
     if top_level and base in DENY_OVERRIDE_DELETE_NAMES:  # owner decision 17 Oct 21:15: a data stream, not a switch
@@ -183,6 +250,120 @@ def classify(relpath: str) -> tuple[str, str]:
     if top_level and (lower.endswith(DELETE_STREAM_SUFFIXES) or _ANY_ROTATION_RE.match(name)):
         return DELETE, "ROW_STREAM_ROTATED_COPY" if _ANY_ROTATION_RE.match(name) else "ROW_STREAM"
     return UNCLASSIFIED, "NOT_ALLOWLISTED_NOT_A_DATA_CLASS"
+
+
+def classify_fly_scope(relpath: str) -> tuple[str, str]:
+    """``@data/<rel>`` paths (relative to the data root, outside runtime/): only the Fly analyzer mirror scopes."""
+    parts = relpath.replace("\\", "/")[len(FLY_SCOPE_PREFIX):].split("/")
+    if any(p in ("", ".", "..") for p in parts):  # HM #850 R2 C3b: no traversal / empty segments, ever
+        return UNCLASSIFIED, "FLY_SCOPE_PATH_TRAVERSAL"
+    if len(parts) >= 2 and parts[0] == "analyzer_mirror":
+        return DELETE, "FLY_ANALYZER_MIRROR"
+    if len(parts) >= 2 and parts[0] == "analyzer_generations":
+        return DELETE, "FLY_ANALYZER_GENERATION"
+    if len(parts) == 1 and parts[0] in FLY_ANALYZER_POINTER_FILES:
+        return DELETE, "FLY_ANALYZER_CURRENT_POINTER"
+    return UNCLASSIFIED, "OUTSIDE_RUNTIME_NOT_IN_SCOPE"
+
+
+def classify_candidate(rel: str) -> tuple[str, str]:
+    return classify_fly_scope(rel) if rel.startswith(FLY_SCOPE_PREFIX) else classify(rel)
+
+
+def fly_scope_paths(data_root: Path | str) -> list[str]:
+    """The ONLY paths outside runtime/ the plan may list (exactly these three)."""
+    root = Path(data_root)
+    return [f"{(root / d).as_posix()}/**" for d in FLY_ANALYZER_MIRROR_DIRS] + [
+        (root / f).as_posix() for f in FLY_ANALYZER_POINTER_FILES]
+
+
+def _fly_scope_files(data_root: Path) -> Iterable[tuple[str, str, os.stat_result]]:
+    """(abs path, @data/ rel, stat) for every regular file in the three Fly analyzer scopes. A symlinked scope root is
+    never followed (nothing outside the volume can be reached)."""
+    data_root = Path(data_root)
+    for d in FLY_ANALYZER_MIRROR_DIRS:
+        root = data_root / d
+        if root.is_dir() and not root.is_symlink():
+            for rel, st in _walk(root):
+                yield str(root / rel), f"{FLY_SCOPE_PREFIX}{d}/{rel}", st
+    for f in FLY_ANALYZER_POINTER_FILES:
+        path = data_root / f
+        if path.is_file() and not path.is_symlink():
+            yield str(path), f"{FLY_SCOPE_PREFIX}{f}", os.lstat(path)
+
+
+def _scandir_kind(entry: os.DirEntry) -> str:
+    if entry.is_symlink():
+        return "symlink"
+    if entry.is_dir(follow_symlinks=False):
+        return "dir"
+    if entry.is_file(follow_symlinks=False):
+        return "file"
+    return "other"
+
+
+def _fly_scope_leftovers(data_root: Path) -> tuple[list[dict], list[str]]:
+    """HM #850 R2 C3b: every entry of ANY kind (file, dir, symlink, fifo, ...) still inside the Fly analyzer scopes,
+    found with lexists / scandir without ever following a symlink. A symlinked (or non-directory) scope root is
+    itself a leftover. Returns (entries, problems) where problems are hard failures (symlink root, unreadable dir)."""
+    entries: list[dict] = []
+    problems: list[str] = []
+    for d in FLY_ANALYZER_MIRROR_DIRS:
+        root = data_root / d
+        rel_root = f"{FLY_SCOPE_PREFIX}{d}"
+        if not os.path.lexists(root):
+            continue
+        if os.path.islink(root):
+            entries.append({"rel": rel_root, "kind": "symlink"})
+            problems.append(f"SYMLINKED_SCOPE_ROOT:{rel_root}")
+            continue
+        if not stat.S_ISDIR(os.lstat(root).st_mode):
+            entries.append({"rel": rel_root, "kind": "other"})
+            problems.append(f"SCOPE_ROOT_NOT_A_DIRECTORY:{rel_root}")
+            continue
+        stack = [(str(root), rel_root)]
+        while stack:
+            path, rel = stack.pop()
+            try:
+                with os.scandir(path) as it:
+                    children = sorted(it, key=lambda e: e.name)
+            except OSError as exc:
+                problems.append(f"UNREADABLE:{rel}:{type(exc).__name__}")
+                continue
+            for e in children:
+                kind = _scandir_kind(e)
+                child_rel = f"{rel}/{e.name}"
+                entries.append({"rel": child_rel, "kind": kind})
+                if kind == "dir":
+                    stack.append((e.path, child_rel))
+    return entries, problems
+
+
+def fly_analyzer_readback(data_root: Path | str) -> dict:
+    """Post-execute read-back (HM #850 R2 C3b): ok only when the mirror / generations scope roots are real (not
+    symlinked) directories with NO entry of any kind left inside (files, dirs, symlinks, ...) and the pointer is gone
+    (``lexists``: a dangling pointer symlink also fails)."""
+    root = Path(data_root)
+    entries, problems = _fly_scope_leftovers(root)
+    files = [e["rel"] for e in entries if e["kind"] == "file"]
+    pointer = [f for f in FLY_ANALYZER_POINTER_FILES if os.path.lexists(root / f)]
+    return {"ok": not entries and not problems and not pointer, "leftover_entries": entries[:50],
+            "leftover_count": len(entries), "leftover_files": files[:50], "leftover_file_count": len(files),
+            "leftover_kinds": {k: sum(1 for e in entries if e["kind"] == k) for k in sorted({e["kind"] for e in entries})},
+            "problems": problems, "pointer_present": pointer, "scopes": fly_scope_paths(root)}
+
+
+def _prune_empty_fly_dirs(data_root: Path) -> None:
+    for d in FLY_ANALYZER_MIRROR_DIRS:
+        root = data_root / d
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for directory, _dirs, _files in sorted(os.walk(root, followlinks=False), key=lambda t: -len(t[0])):
+            if directory != str(root):
+                try:
+                    os.rmdir(directory)  # only ever succeeds on an empty directory
+                except OSError:
+                    pass
 
 
 # ------------------------------------------------------------------ planning
@@ -240,7 +421,7 @@ def flag_views(runtime: Path) -> dict:
     return views
 
 
-RULES_VERSION = "full-reset-rules-v4-denylist-tile-integrity"
+RULES_VERSION = "full-reset-rules-v7-fly-analyzer-mirror"
 
 
 def rules_identity() -> bytes:
@@ -249,7 +430,7 @@ def rules_identity() -> bytes:
     doc = {"version": RULES_VERSION, "delete_exact": sorted(DELETE_EXACT_NAMES), "delete_datasets": sorted(DELETE_TAPE_DATASETS),
            "delete_suffixes": list(DELETE_STREAM_SUFFIXES), "keep_exact": sorted(KEEP_EXACT_NAMES),
            "keep_prefixes": list(KEEP_PREFIXES), "inprocess": list(INPROCESS_RESET_BASES),
-           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "deny_override": sorted(DENY_OVERRIDE_DELETE_NAMES), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
+           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "deny_override": sorted(DENY_OVERRIDE_DELETE_NAMES), "analyzer_dir": ANALYZER_DIR_NAME, "analyzer_reports": sorted(ANALYZER_DERIVED_REPORT_NAMES), "analyzer_receipts": sorted(ANALYZER_EPISODE_RECEIPTS_FILES), "analyzer_manifests": sorted(ANALYZER_DERIVED_MANIFEST_NAMES), "analyzer_before_deny": True, "analyzer_relay_named": sorted(ANALYZER_RELAY_NAMED_DERIVED_REPORTS), "fly_dirs": list(FLY_ANALYZER_MIRROR_DIRS), "fly_files": list(FLY_ANALYZER_POINTER_FILES), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
     return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -275,7 +456,8 @@ def top_level_unclassified(unclassified: list) -> list:
 
 
 def build_plan(data_root: Path | str) -> dict:
-    """Read-only plan over ``<data_root>/runtime``. Only the runtime directory itself is scanned, never alias roots."""
+    """Read-only plan over ``<data_root>/runtime`` plus EXACTLY the three Fly analyzer mirror scopes on the volume
+    (``fly_scope_paths``). Nothing else outside runtime/ is scanned, and alias roots are never followed."""
     runtime = Path(data_root) / "runtime"
     candidates, kept, unclassified = [], {}, []
     keep_digests: dict[str, str] = {}
@@ -296,6 +478,16 @@ def build_plan(data_root: Path | str) -> dict:
                 keep_digests[rel] = _sha256_file(str(runtime / rel))
         else:
             unclassified.append({"rel": rel, "bytes": int(st.st_size)})
+    for path, rel, st in _fly_scope_files(Path(data_root)):
+        action, reason = classify_fly_scope(rel)
+        if action != DELETE:  # unreachable by construction; fail closed (retained and listed)
+            unclassified.append({"rel": rel, "bytes": int(st.st_size)})
+            continue
+        candidates.append({"path": path, "rel": rel, "bytes": int(st.st_size), "mtime_ns": int(st.st_mtime_ns),
+                           "reason": reason})
+        row = by_class.setdefault(reason, {"files": 0, "bytes": 0})
+        row["files"] += 1
+        row["bytes"] += int(st.st_size)
     candidates.sort(key=lambda c: c["path"])
     identity = rules_identity()
     blocking = [u for u in unclassified if is_data_file(u["rel"])]
@@ -305,6 +497,7 @@ def build_plan(data_root: Path | str) -> dict:
             "delete_by_class": by_class, "kept_by_reason": kept,
             "unclassified_retained_count": len(unclassified), "unclassified_retained": unclassified[:500],
             "unclassified_data_files_count": len(blocking), "unclassified_data_files": blocking[:200],
+            "outside_runtime_delete_scopes": fly_scope_paths(data_root),
             "keep_digests": keep_digests, "keep_flag_views": flag_views(runtime), "plan_sha256": hashlib.sha256(identity).hexdigest(),
             "notes": ["unclassified files are retained and listed, never deleted",
                       "V3 store, WAL, SQLite, collector v22 and research alias dirs are reset by the in-process "
@@ -526,7 +719,7 @@ def execute(plan: dict, *, receipts_dir: Path | str, git_rev: str, reason: str, 
     deleted, freed, skipped = [], 0, []
     for row in plan["candidates"]:
         path, rel = row["path"], row["rel"]
-        action, why = classify(rel)
+        action, why = classify_candidate(rel)
         if action != DELETE:
             skipped.append({"path": path, "why": f"CLASSIFICATION_CHANGED:{action}:{why}"})
             continue
@@ -538,6 +731,9 @@ def execute(plan: dict, *, receipts_dir: Path | str, git_rev: str, reason: str, 
         unlink(path)  # a file still being appended by a collector is deleted on purpose; the restart follows
         deleted.append(path)
         freed += size
+    data_root = Path(plan.get("data_root") or runtime.parent)
+    _prune_empty_fly_dirs(data_root)
+    readback = fly_analyzer_readback(data_root)  # RK C4(a): read the mirror scopes back after the unlinks
     bytes_changed = []
     for rel, digest in plan["keep_digests"].items():
         try:
@@ -552,10 +748,10 @@ def execute(plan: dict, *, receipts_dir: Path | str, git_rev: str, reason: str, 
     with gzip.open(rdir / LISTING_NAME, "wt", encoding="utf-8") as fh:
         for path in deleted:
             fh.write(json.dumps({"path": path}) + "\n")
-    complete = {**intent, "phase": "COMPLETE", "completed": not changed, "finished_at_utc": data_epoch.utc_iso(now()),
+    complete = {**intent, "phase": "COMPLETE", "completed": not changed and readback["ok"], "finished_at_utc": data_epoch.utc_iso(now()),
                 "deleted_files": len(deleted), "freed_bytes": freed, "freed_gb": round(freed / 1e9, 3),
                 "skipped": skipped[:200], "skipped_count": len(skipped), "keep_flags_changed": changed,
-                "keep_bytes_changed_informational": bytes_changed,
+                "keep_bytes_changed_informational": bytes_changed, "fly_analyzer_readback": readback,
                 "deleted_listing": str(rdir / LISTING_NAME)}
     _fsync_json(rdir / COMPLETE_NAME, complete)
     with open(receipts_dir / "receipts.jsonl", "a", encoding="utf-8") as fh:
@@ -563,6 +759,10 @@ def execute(plan: dict, *, receipts_dir: Path | str, git_rev: str, reason: str, 
                             sort_keys=True, default=str) + "\n")
     if changed:
         raise FullResetRefused(f"LIVE_FLAGS_CHANGED: {changed} (receipt {rdir / COMPLETE_NAME} records completed=false)")
+    if not readback["ok"]:
+        raise FullResetRefused(f"FLY_ANALYZER_READBACK_FAILED: {readback['leftover_count']} entr(ies) left "
+                               f"({readback['leftover_kinds']}), problems {readback['problems']}, pointer "
+                               f"{readback['pointer_present']} (receipt {rdir / COMPLETE_NAME} records completed=false)")
     return complete
 
 
@@ -574,7 +774,8 @@ def verify_after(plan: dict) -> dict:
     after = flag_views(runtime)
     changed = sorted(name for name, view in plan.get("keep_flag_views", {}).items() if after.get(name) != view)
     missing = sorted(rel for rel in plan["keep_digests"] if not (runtime / rel).exists())
-    return {"ok": not changed and not missing, "delete_class_leftovers": leftovers[:50],
+    fly = fly_analyzer_readback(plan.get("data_root") or runtime.parent)
+    return {"ok": not changed and not missing and fly["ok"], "fly_analyzer_readback": fly, "delete_class_leftovers": leftovers[:50],
             "delete_class_leftover_count": len(leftovers),
             "keep_flags_changed": changed, "keep_missing": missing}
 

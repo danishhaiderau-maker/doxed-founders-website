@@ -46,3 +46,14 @@ def test_input_identity_binds_quantity_and_tape():
     assert second['replay_input_sha256']!=first['replay_input_sha256']
     values['tape'][0]['bid_qty']=.25
     assert replay_conditional_delayed_entry(**values)['replay_input_sha256']!=second['replay_input_sha256']
+
+
+import pytest as _pytest_r17
+from research import r3_quarantine as _r3q_r17
+
+
+@_pytest_r17.fixture(autouse=True)
+def _legacy_limit_fill_1s_unquarantined(monkeypatch):
+    # These tests pin the legacy 1 s limit-fill math; production has LIMIT_FILL_1S retired (R17, RK #847 cond 4),
+    # covered by test_r17_retired_sources.py.  Kept (not deleted) pending the book_limit_entry rebuild.
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"LIMIT_FILL_1S"})

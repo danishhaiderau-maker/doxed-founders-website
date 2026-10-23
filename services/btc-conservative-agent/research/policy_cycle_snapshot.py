@@ -193,6 +193,16 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         conservative_fill = build_conservative_fill_cohort(
             snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
         )
+    from research.r3_quarantine import is_retired_payload
+
+    if is_retired_payload(conservative_fill):
+        # RK #847 cond 4: the 1 s conservative fill cohort is source retired (R17): nothing is written.
+        print(f"  Conservative fill cohort: {conservative_fill['label']} — {CONSERVATIVE_FILL_REPORT_FILE} not written")
+        return {
+            "candidate": candidate, "best": best, "cycle_snapshot": snapshot["receipt"],
+            "microstructure": snapshot["microstructure"],
+            "conservative_fill": conservative_fill,
+        }
     conservative_fill.update({
         "cycle_snapshot": snapshot["receipt"],
         "microstructure_snapshot": snapshot["microstructure_snapshot"]["receipt"],

@@ -776,6 +776,8 @@ def _iter_data_payloads(name: str):
 def _pick_best_payload(name: str, default=None):
     if default is None:
         default = {}
+    if _r3_quarantine.quarantined_file(name):
+        return default  # R3/R17: a retired producer's stale output is never read
     # Loading the session itself must not recurse through _load_bot_session on
     # a brand-new/empty installation where research_session.json is absent.
     session = {} if name == "research_session.json" else (_load_bot_session() or {})
@@ -1545,6 +1547,8 @@ def _declared_atomic_generation_report(name: str) -> tuple[dict | None, dict]:
     root/report fallback.  Coverage must never surface a file from an analyzer
     pass that has not completed the published-directory exchange.
     """
+    if _r3_quarantine.quarantined_file(name):
+        return None, {"reason": _r3_quarantine.STATUS, "label": _r3_quarantine.RETIRED_LABEL, "manifest": {}}
     for base in (ROOT, DATA_ROOT):
         published = base / PUBLISHED_REPORTS_DIR
         manifest_path = published / REPORT_MANIFEST_FILE

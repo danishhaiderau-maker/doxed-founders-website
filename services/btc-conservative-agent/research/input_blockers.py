@@ -477,7 +477,11 @@ ENTRY_BASELINE_REPLAY_REPORT = "entry_baseline_replay_report.json"
 def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any]:
     """DEGRADED (never OK) when any baseline in the entry baseline replay has 0 fills, or the report is missing."""
     from research.entry_baseline_replay import replay_health
+    from research.r3_quarantine import quarantined_file
 
+    if quarantined_file(ENTRY_BASELINE_REPLAY_REPORT):
+        # RK #847 cond 4: priced on market_microstructure_1s -> retired, never read, never BLOCKED.
+        return _retired("entry_baseline_replay")
     report = _load_json(report_dir / ENTRY_BASELINE_REPLAY_REPORT)
     if report is None:
         # HM #847 N2: an absent report is a measured gap, never silently dropped.

@@ -37,6 +37,20 @@ sys.path.insert(0, str(AGENT / "research"))
 
 from research import fill_model as fm  # noqa: E402
 from research import genome_grid_study as gg  # noqa: E402
+from research import r3_quarantine  # noqa: E402
+
+# HM #850 R3 (24 Oct 2026 AEDT): this study books exits with fill_model.realistic_exit_margin on the 1s tape
+# (R3/R17).  Retired, not deleted: main() refuses with SOURCE_RETIRED_R17 (exit 4, nothing written) and replay()
+# raises, so boss_retest.py / danish_study.py, which import replay(), cannot price through it either.
+RETIRED_KEY = "EXIT_STUDY_1S"
+RETIRED_EXIT_CODE = 4
+
+
+def _refuse(what: str) -> None:
+    if r3_quarantine.is_active(RETIRED_KEY):
+        raise r3_quarantine.R3QuarantinedSource(
+            f"{r3_quarantine.SOURCE_RETIRED_R17} {RETIRED_KEY}: refusing {what} -- {r3_quarantine.RETIRED_LABEL}. "
+            f"{r3_quarantine.REASON}")
 
 NOTIONAL = gg.MARGIN_USD * gg.LEVERAGE
 HARD_STOP = 40.0
@@ -131,6 +145,7 @@ def exit_variants(base_min: float) -> dict[str, dict[str, Any]]:
 def replay(path: dict[str, np.ndarray], var: dict[str, Any], atr_pct: float) -> tuple[float, str, float, float]:
     """REALISTIC_V1 exit replay (twin of gg.fast_replay plus bp targets, armed giveback, BE after partial,
     early cuts). Returns (realized bp, reason, exit age s, MFE bp at exit)."""
+    _refuse("exit_study.replay (fill_model.realistic_exit_margin on the 1s tape)")
     cur, mfe, age = path["cur"], path["mfe"], path["age"]
     n = len(cur)
     atr_m = float(atr_pct) * gg.LEVERAGE
@@ -633,6 +648,12 @@ def load_tape_or_blocked(mirror, tier_a):
 
 def main() -> int:
     global _TAPE
+    if r3_quarantine.is_active(RETIRED_KEY):
+        print(json.dumps(r3_quarantine.disabled_payload(RETIRED_KEY, status=r3_quarantine.SOURCE_RETIRED_R17,
+                                                        section="exit_study.main")), file=sys.stderr)
+        print(f"exit_study: {r3_quarantine.RETIRED_LABEL} -- {r3_quarantine.SOURCE_RETIRED_R17}, not run, "
+              "nothing written", file=sys.stderr)
+        return RETIRED_EXIT_CODE
     ap = argparse.ArgumentParser()
     ap.add_argument("--mirror", required=True)
     ap.add_argument("--tier-a", required=True)

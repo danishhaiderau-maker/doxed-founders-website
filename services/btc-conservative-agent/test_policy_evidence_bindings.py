@@ -390,3 +390,14 @@ def test_evaluator_incident_index_still_inspects_full_intent_rows(tmp_path, monk
     monkeypatch.setattr(runtime_identity_incidents.IncidentEpisodeIndex, "add", recording)
     build_v3_conservative_results(v3)
     assert sorted(seen)[-1] == 50 and seen.count(50) == 1
+
+
+import pytest as _pytest_r17
+from research import r3_quarantine as _r3q_r17
+
+
+@_pytest_r17.fixture(autouse=True)
+def _legacy_limit_fill_1s_unquarantined(monkeypatch):
+    # These tests pin the legacy 1 s limit-fill math; production has LIMIT_FILL_1S retired (R17, RK #847 cond 4),
+    # covered by test_r17_retired_sources.py.  Kept (not deleted) pending the book_limit_entry rebuild.
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"LIMIT_FILL_1S"})
