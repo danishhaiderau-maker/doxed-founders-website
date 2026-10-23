@@ -29,6 +29,7 @@ def load_function(name, namespace):
 def load_fanout(namespace):
     """The shared fan-out plus the per-tile verdict helper it delegates to."""
     namespace.setdefault("_patient_chase_policy", lambda _lane: None)
+    namespace.setdefault("_stamp_entry_quote", lambda _decision, _quote_ctx: None)  # #809 measurement-only stamp
     load_function("_record_tile_decision_and_dispatch", namespace)
     return load_function("spawn_combo_lanes_from_ai_scan", namespace)
 
