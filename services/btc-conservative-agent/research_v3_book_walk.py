@@ -50,6 +50,9 @@ TAPE_SYMBOL = "tBTCF0:USTF0"
 # that a last-trade stop at that level did NOT trigger; if it touches a stop, the cell is R17_UNPROVEN.
 STOP_UNOBSERVABLE_TRADE_GAP_S = 5.0
 STOP_UNOBSERVABLE_REASON = "STOP_UNOBSERVABLE_TRADE_GAP"
+# RK #847 cond 2: the 5 s gap is an INTERIM threshold (chosen, not data-derived); every report stamps the count.
+STOP_UNOBSERVABLE_RULE_STATUS = "INTERIM_CHOSEN_NOT_DATA_DERIVED"
+C2_FLAGGED_KEY = "c2_stop_unobservable_trade_gap_cells"
 KIND_TRADE, KIND_BOOK = 0, 1
 EXIT_FILL_DELAY_SOURCE = "FIRST_BOOK_ROW_AT_OR_AFTER_TRIGGER"
 
@@ -422,6 +425,9 @@ def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapp
         "r17_unproven_cells": sum(cells.values()),
         "r17_unproven_cell_reasons": dict(sorted(cells.items())),
         "stop_unobservable_trade_gap_s": STOP_UNOBSERVABLE_TRADE_GAP_S,
+        # RK #847 cond 2: how many cells the interim C2 rule flagged in THIS report (0 is stamped, not omitted).
+        C2_FLAGGED_KEY: int(cells.get(STOP_UNOBSERVABLE_REASON, 0)),
+        "stop_unobservable_rule_status": STOP_UNOBSERVABLE_RULE_STATUS,
         # Kept for the window summary / dashboards that read the old mark-source keys.
         "fallback_events": unproven,
         "side_correct_ratio": round(countable / total, 6) if total else None,

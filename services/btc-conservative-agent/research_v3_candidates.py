@@ -26,6 +26,7 @@ from research_v3_book_walk import (
     R17_UNPROVEN,
     STOP_BASIS_UNVERIFIED,
     STOP_TRIGGER_LABEL,
+    C2_FLAGGED_KEY,
     STOP_UNOBSERVABLE_REASON,
     PreparedBookWalkArrays,
     coverage_summary,
@@ -1491,6 +1492,17 @@ class _ProtectionCellStore:
                 "exit_reason": self.names[self.c_exit[cell]],
                 "replay_path_basis": basis,
             }
+        if state == R17_UNPROVEN:
+            # HM #847 C2 (interim 5 s rule): the stop was touched by the book inside a trade-print gap.
+            return {
+                "outcome_state": R17_UNPROVEN,
+                "r17_unproven_reason": STOP_UNOBSERVABLE_REASON,
+                "entry_price_source": ENTRY_PRICE_SOURCE_1S,
+                "net_pnl_usd": None,
+                "unproven_net_pnl_usd": pnl,
+                "exit_reason": self.names[self.c_exit[cell]],
+                "replay_path_basis": basis,
+            }
         outcome = {
             "outcome_state": state,
             "entry_price_source": ENTRY_PRICE_SOURCE_1S,
@@ -1786,6 +1798,12 @@ def _assess_policy(
         "partial_fills": partial_fills,
         "no_fills": no_fills,
         "unsupported_episodes": unsupported,
+        # RK #847 cond 2: cells (this policy x episode) the interim C2 5 s trade-gap rule flagged R17_UNPROVEN.
+        C2_FLAGGED_KEY: sum(
+            1 for row in rows
+            if ((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("r17_unproven_reason")
+            == STOP_UNOBSERVABLE_REASON
+        ),
         "receipt_identity": {
             "schema": "candidate_episode_receipt_identity_summary_v1",
             "complete_episodes": sum(

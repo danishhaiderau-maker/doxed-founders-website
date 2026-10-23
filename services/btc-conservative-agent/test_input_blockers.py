@@ -101,6 +101,9 @@ class PaperExitLadderCohortTest(unittest.TestCase):
         self.assertEqual(list(kept), [f"{PREFIX}-ok"])
         self.assertEqual(receipt["schema"], "paper_exit_ladder_cohort_v2")
         self.assertIs(receipt["book_coverage_loaded"], True)
+        # RK #847 cond 2: the C2 rule does not run here; the receipt says so explicitly.
+        self.assertIsNone(receipt["c2_stop_unobservable_trade_gap_cells"])
+        self.assertEqual(receipt["c2_stop_unobservable_rule"], "NOT_APPLIED_NO_BOOK_WALK_STOP_REPLAY")
 
     def test_replay_outside_book_coverage_is_r17_unproven_and_excluded(self):
         rows = [_trade(f"{PREFIX}-covered"), _trade(f"{PREFIX}-late"), _trade(f"{PREFIX}-nospan")]

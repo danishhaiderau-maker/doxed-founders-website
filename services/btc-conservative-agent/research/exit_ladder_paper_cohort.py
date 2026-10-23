@@ -190,6 +190,10 @@ def build_paper_exit_ladder_cohort(
         "r17_unproven_reasons": dict(sorted(unproven_reasons.items())),
         "book_coverage_loaded": book_coverage is not None,
         "book_coverage_receipt": dict(coverage_receipt or {}),
+        # RK #847 cond 2: the interim C2 5 s trade-gap rule runs only inside the protection screen's book-walk
+        # stop replay; this cohort filter replays no stops, so it flags nothing (stamped explicitly, not 0).
+        "c2_stop_unobservable_trade_gap_cells": None,
+        "c2_stop_unobservable_rule": "NOT_APPLIED_NO_BOOK_WALK_STOP_REPLAY",
     }
 
 
