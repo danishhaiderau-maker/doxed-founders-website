@@ -365,7 +365,9 @@ def test_carried_book_row_keeps_the_frame_receive_time_not_the_bucket(tmp_path):
     c.close_second(110, now=111.3)
     row = _rows(tmp_path / ssc.BOOK_FILE)[-1]
     assert row["carried"] is True and row["receive_ts"] < 101 and row["receive_ts"] != 110  # the frame, not s
-    assert frame == [] or frame[-1]["receive_ts"] == row["receive_ts"]
+    # HM 02:55 nit: never vacuous - the carried row's receive time IS the snapshot frame's (on_bfx now=100.1), with its mono
+    assert frame == []  # no row was closed before the carried one: the frame's time comes from the snapshot itself
+    assert row["receive_ts"] == 100.1 and row["receive_ts_source"] == "WS_FRAME" and row["receive_mono"] is not None
 
 
 def test_trades_deriv_and_quotes_carry_measured_receive_ts(tmp_path):
@@ -423,3 +425,41 @@ def test_ws_loop_reads_wall_and_mono_at_the_same_receive_point(tmp_path):
     c._ws_loop("lighter", "wss://x", [], lambda msg, now, mono=None: got.append((now, mono)))
     assert got and got[0][1] is not None
     assert got[0] == (500.0, 7.0) and reads[:2] == ["w", "m"]
+
+
+def test_bfx_ws_loop_receive_point_reaches_the_book_row_through_the_bitfinex_handler_signature(tmp_path):
+    """HM 02:55 nit: the receive point is read once after ws.recv() and passed through the BITFINEX handler signature
+    handler(msg, chans, now, mono=...) into the book row's receive_ts / receive_mono (not a re-read inside on_bfx)."""
+    wall = iter([100.0 + 0.05 * i for i in range(200)])
+    mono = iter([7.0 + i for i in range(200)])
+    c = ssc.Collector(str(tmp_path), clock=lambda: next(wall), mono=lambda: next(mono))
+    frames = iter([json.dumps({"event": "subscribed", "channel": "book", "chanId": 1}),
+                   json.dumps([1, [[100, 1, 0.5], [200, 1, -0.5]]]), json.dumps([1, [101, 1, 0.5]])])
+    got = []
+
+    class _WS:
+        def send(self, _):
+            pass
+
+        def recv(self):
+            try:
+                return next(frames)
+            except StopIteration:
+                c.stop.set()
+                raise TimeoutError("timed out")
+
+        def close(self):
+            pass
+
+    def handler(msg, chans, now, mono=None):  # the exact bitfinex call shape used by _ws_loop
+        got.append((now, mono))
+        c.on_bfx(msg, chans, now, mono=mono)
+
+    c._ws_factory = lambda url: _WS()
+    c._ws_loop("bitfinex", "wss://x", [], handler)
+    assert len(got) == 3 and all(m is not None for _, m in got)
+    rx_wall, rx_mono = got[-1]  # the last book frame's recv-point pair
+    c.close_second(int(rx_wall), now=int(rx_wall) + 1.3)
+    row = _rows(tmp_path / ssc.BOOK_FILE)[-1]
+    assert row["receive_ts"] == ssc.book_receive_stamp(rx_wall, rx_mono)["receive_ts"]
+    assert row["receive_mono"] == round(rx_mono, 3) and row["receive_ts_source"] == "WS_FRAME"
