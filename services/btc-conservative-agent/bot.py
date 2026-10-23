@@ -5884,7 +5884,9 @@ def _apply_legacy_lane_exit(pos: dict, price: float, now: float, unreal_pct: flo
         close_position(pos, "EARLY_FAIL")
         return True
 
-    if (pos.get("dir") == "LONG" and price <= pos.get("sl", 0)) or (pos.get("dir") == "SHORT" and price >= pos.get("sl", 0)):
+    import quote_trigger as _qt
+    # HM B3: the level tests are the shared trigger helper on the book-row price from _legacy_book_gate (never ticker).
+    if _qt.level_reached(pos.get("dir"), _qt.KIND_STOP, pos.get("sl"), price):
         logger.info(f"[EXIT TRIGGER] STOP_LOSS trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
         close_position(pos, "STOP_LOSS")
         return True
@@ -5902,8 +5904,8 @@ def _apply_legacy_lane_exit(pos: dict, price: float, now: float, unreal_pct: flo
         return True
 
     tp_price = pos.get("tp", 0)
-    if tp_price > 0:
-        if (pos.get("dir") == "LONG" and price >= tp_price) or (pos.get("dir") == "SHORT" and price <= tp_price):
+    if tp_price and float(tp_price) > 0:
+        if _qt.level_reached(pos.get("dir"), _qt.KIND_TARGET, tp_price, price):
             logger.info(f"[EXIT TRIGGER] TAKE_PROFIT_EMERGENCY trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
             close_position(pos, "TAKE_PROFIT")
             return True

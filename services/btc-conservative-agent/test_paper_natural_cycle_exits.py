@@ -187,6 +187,42 @@ def test_non_combo_lane_stale_book_fires_no_price_exit_and_refuses_ticker(monkey
     assert pos["_trigger_meta"]["basis"] == "BOOK_TOP"
 
 
+@pytest.mark.parametrize("lane, extra", [
+    ("CONTINUOUS", {"bitfinex_position_id": 991, "bitfinex_live_entry": True, "adopted": True}),  # adopted LIVE
+    ("GS_FADE3_TP30", {}),                       # a tile missing from the combo lists
+    ("FAMILY_RETIRED_ORPHAN_LANE", {}),          # retired-lane orphan
+    ("", {}),                                    # lane-less legacy row
+])
+def test_every_non_combo_lane_exits_on_the_book_never_the_ticker(monkeypatch, lane, extra):
+    """HM B3: CONTINUOUS (adopted live exposure), GS-FADE3 and any lane outside COMBO_EXECUTION_LANES: the caller's
+    (ticker) price is ignored; only the shared book pricer row through the level closes the position."""
+    closed = _CloseCapture()
+    monkeypatch.setattr(bot, "close_position", closed)
+    monkeypatch.setattr(bot, "append_replay_tick", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "_emit_genome_execution_event", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "_log_ladder_exit_audit", lambda *a, **k: None)
+    assert lane not in bot.COMBO_EXECUTION_LANES
+    pos = _short_pos(research_lane=lane, **extra)
+    thesis_px = _margin_price(bot.THESIS_FAST_EXIT_UNREAL_PCT)
+    with bot.state_lock:
+        bot.state["bid"], bot.state["ask"], bot.state["price"] = thesis_px - 1, thesis_px, thesis_px
+    _book(monkeypatch, ENTRY - 8.0, ENTRY + 8.0)  # the book is calm: the ticker through the cut must not close
+    assert bot._apply_position_exits(pos, thesis_px, now=1_700_000_010.0) is False
+    assert closed.calls == [] and pos["_trigger_meta"]["basis"] == "BOOK_TOP"
+    _book(monkeypatch, thesis_px - 1.0, thesis_px)
+    assert bot._apply_position_exits(pos, ENTRY, now=1_700_000_011.0) is True  # caller price is calm; the book is not
+    assert closed.calls[0][0] == "THESIS_FAST_CUT" and abs(closed.calls[0][1] - thesis_px) < 0.02
+
+
+def test_legacy_level_checks_use_the_shared_trigger_helper():
+    src = open(bot.__file__, encoding="utf-8").read()
+    body = src[src.index("def _apply_legacy_lane_exit"):src.index("def _legacy_clock_exit")]
+    assert "_qt.level_reached(pos.get(\"dir\"), _qt.KIND_STOP" in body
+    assert "_qt.level_reached(pos.get(\"dir\"), _qt.KIND_TARGET" in body
+    gate = src[src.index("def _apply_position_exits"):src.index("def _apply_combo_lane_exit")]
+    assert "not in COMBO_EXECUTION_LANES" in gate and "_legacy_book_gate(pos, now)" in gate
+
+
 def test_forced_no_book_legacy_exit_is_priced_unverified_not_dropped(monkeypatch):
     import paper_fill
 
