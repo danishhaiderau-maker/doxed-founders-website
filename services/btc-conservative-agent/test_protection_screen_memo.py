@@ -25,7 +25,7 @@ def _source():
     }
 
 
-def _fill_receipt(source, child, *, book_at=None):
+def _fill_receipt(source, child, *, book_at=None, window=None):
     return {
         "outcome": "FILL", "trigger_bucket_ts": child["fill_ts"], "fill_price": child["fill_price"],
         "requested_qty": 1.0, "filled_qty": 1.0, "schedule_sha256": "sched-1",

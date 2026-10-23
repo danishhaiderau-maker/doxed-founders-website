@@ -33,7 +33,7 @@ def evaluate_protection_screen(inputs, *args, **kwargs):
 def entry_receipt(row, *, visible_qty=2.0, crossed=True):
     """RK R3: the CONSERVATIVE entry is decided on the book window (entry_tape), never on ordered_1s_prices."""
     walk = entry_tape(visible_qty, crossed).window(990, 1010)
-    return _conservative_child_receipt(row, row["entry_children"][0], book_at=walk.book_at)
+    return _conservative_child_receipt(row, row["entry_children"][0], book_at=walk.book_at, window=walk)
 
 
 def source(event_id="event-1", episode_id="episode-1"):
@@ -805,7 +805,7 @@ class V3CandidateTests(unittest.TestCase):
         self.assertTrue(report["candidates"])
         self.assertTrue(all(
             candidate["policy_spec"]["fill"]["source_fill_model"]
-            == "book10l-arrival-walk-v2"
+            == "book10l-place-then-rest-v3"
             for candidate in report["candidates"]
         ))
 
@@ -855,12 +855,15 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(report["mark_source"]["r17_unproven_cell_reasons"],
                          {"R17_UNPROVEN_ENTRY": len(report["candidates"])})
         row = conservative_source(visible_qty=0.25)
-        # verified 1.5 s delay: the 0.75 remainder then rests only on rows that never reach the limit -> NOT_FILLED
+        # HM #848 P2: even with a verified delay a PARTIAL (remainder rests with no print at the limit) is
+        # evidence INCOMPLETE -> R17_UNPROVEN_ENTRY, never a countable partial.
         row.update({"entry_delay_s": 1.5, "entry_delay_source": "lane_max_n12"})
-        verified = evaluate_protection_screen([row], book_walk=entry_tape(0.25))["candidates"][0]
+        report = evaluate_protection_screen([row], book_walk=entry_tape(0.25))
+        verified = report["candidates"][0]
         self.assertEqual(verified["full_fills"], 0)
-        self.assertEqual(verified["partial_fills"], 1)
-        self.assertEqual(verified["conservative_fill_rate"], 1.0)
+        self.assertEqual(verified["partial_fills"], 0)
+        self.assertEqual(report["mark_source"]["r17_unproven_cell_reasons"],
+                         {"R17_UNPROVEN_ENTRY": len(report["candidates"])})
 
     def test_conservative_entry_receipt_is_book_priced_and_stamped_r17_unproven_entry(self):
         """RK R3: entry priced by paper_fill on BFX_BOOK_10L at a quote_trigger book-row trigger; default delay
@@ -879,7 +882,7 @@ class V3CandidateTests(unittest.TestCase):
         self.assertAlmostEqual(receipt["filled_qty"], 0.25)
         self.assertLessEqual(receipt["fill_price"], 100.0)
         self.assertEqual(receipt["r17_entry_status"], "R17_UNPROVEN_ENTRY")
-        self.assertEqual(receipt["r17_entry_reason"], "UNVERIFIED_DELAY")
+        self.assertIn("DELAY_NOT_MEASURED", receipt["r17_entry_failures"])
         self.assertEqual(entry_receipt(conservative_source(), crossed=False)["outcome"], "NO_FILL")
         missing = _conservative_child_receipt(src, src["entry_children"][0])
         self.assertEqual(missing["outcome"], "UNSUPPORTED")
@@ -945,9 +948,28 @@ class V3CandidateTests(unittest.TestCase):
         ))
         self.assertTrue(all(candidate["episodes_total"] == 2 for candidate in report["candidates"]))
 
-    def test_conservative_no_fill_contributes_no_execution_pnl(self):
+    def test_conservative_no_fill_on_default_delay_is_unproven_not_a_countable_no_fill(self):
+        """HM #848 C2/P3: with the default (unmeasured) delay a NO_FILL is R17_UNPROVEN_ENTRY, not a zero."""
         report = evaluate_protection_screen([conservative_source(crossed=False)],
                                             book_walk=entry_tape(crossed=False))
+        first = report["candidates"][0]
+        self.assertEqual(first["no_fills"], 0)
+        self.assertEqual(report["mark_source"]["r17_unproven_cell_reasons"],
+                         {"R17_UNPROVEN_ENTRY": len(report["candidates"])})
+        outcome = research_v3_candidates._ProtectionCellStore()
+        nan = float("nan")
+        cell = (research_v3_candidates._KIND_NO_FILL_UNPROVEN, None, None, nan, nan, nan, nan)
+        outcome.append(0, 0, 0, 0, outcome.encode_conservative(cell),
+                       outcome.encode_diagnostic((research_v3_candidates._KIND_NO_FILL, None, None, float("nan"))))
+        got = outcome.conservative_outcome(0, "BOOK_WALK", {})
+        self.assertEqual(got["outcome_state"], "R17_UNPROVEN")
+        self.assertEqual(got["r17_unproven_reason"], "R17_UNPROVEN_ENTRY")
+        self.assertEqual(got["entry_fill_state"], "NO_FILL")
+
+    def test_conservative_no_fill_contributes_no_execution_pnl(self):
+        row = conservative_source(crossed=False)
+        row.update({"entry_delay_s": 0.5, "entry_delay_source": "lane_max_n12"})
+        report = evaluate_protection_screen([row], book_walk=entry_tape(crossed=False))
         first = report["candidates"][0]
         self.assertEqual(first["full_fills"], 0)
         self.assertEqual(first["partial_fills"], 0)
