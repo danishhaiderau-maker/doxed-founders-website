@@ -418,3 +418,22 @@ def test_entry_proof_failures_is_the_entry_subset_of_proof_failures():
     assert set(entry) <= set(r17.proof_failures(bad))
     exit_only = good_row(exit_walk_bp=None, stop_coverage=None)
     assert r17.entry_proof_failures(exit_only) == [] and r17.proof_failures(exit_only)
+
+
+def test_c4_every_1s_limit_fill_receipt_is_stamped_unproven_in_one_place():
+    """HM #848 C4: conservative_limit_fill (1s tape) stamps R17_UNPROVEN_ENTRY + ENTRY_PRICED_ON_1S_TAPE for every
+    caller (analyzer v62, entry_baseline_replay, policy_evidence_evaluator, latency_schedule_replay,
+    conservative_fill_cohort); the analyzer tape join carries it at top level too."""
+    import r17_fields
+    from research.conservative_limit_fill import evaluate_limit_fill
+    r = evaluate_limit_fill([], direction="LONG", requested_qty=1.0, chase_schedule=[])
+    assert r["entry_price_source"] == r17_fields.ENTRY_PRICE_SOURCE_1S
+    assert r["r17_entry_status"] == r17_fields.R17_UNPROVEN_ENTRY
+    assert r["r17_entry_reason"] == r17_fields.REASON_ENTRY_PRICED_ON_1S_TAPE
+    assert "ENTRY_PRICED_ON_1S_TAPE" in r17.proof_failures(good_row(**{k: r[k] for k in (
+        "entry_price_source", "r17_entry_status")}))
+    src = (ROOT / "analyzer_research_engine_v62.py").read_text()
+    join = src[src.index('"schema": "analyzer_compressed_chase_tape_join_v2"'):]
+    join = join[:join.index('"conservative_evaluator_receipt": evaluator')]
+    assert '"r17_entry_status": "R17_UNPROVEN_ENTRY"' in join and '"ENTRY_PRICED_ON_1S_TAPE"' in join
+    assert r17_fields.R17_UNPROVEN_ENTRY == "R17_UNPROVEN_ENTRY" and r17_fields.ENTRY_PRICE_SOURCE_1S == "MARKET_MICROSTRUCTURE_1S"

@@ -14166,6 +14166,9 @@ def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tap
         "slippage_usd": slippage_usd, "slippage_model": slippage_model or None,
         "fee_profile": first.get("fee_profile"), "entry_fee_rate": entry_fee_rate,
         "exit_fee_rate": exit_fee_rate, "points": points,
+        # HM #848 C4 / RK R3: priced on market_microstructure_1s -> never countable (r17_exclusion rejects it)
+        "entry_price_source": "MARKET_MICROSTRUCTURE_1S", "r17_entry_status": "R17_UNPROVEN_ENTRY",
+        "r17_entry_reason": "ENTRY_PRICED_ON_1S_TAPE",
         "conservative_evaluator_receipt": evaluator,
     }
 
