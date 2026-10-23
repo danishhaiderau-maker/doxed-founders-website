@@ -85,8 +85,20 @@ def test_placement_and_stamping_never_read_the_ledger():
                     and isinstance(n.func.value, ast.Call)
                     and getattr(n.func.value.func, "id", "") == "_get_live_copy_approvals"):
                 readers.add(fn.name)
-    # only the read-only monitor contexts may read it; the stamp/placement path only appends
-    assert readers == {"_live_copy_gap_ctx", "_live_copy_monitor_context"}, readers
+    # only the read-only monitor contexts may read it; the stamp/placement path only appends.
+    # #849 HM R4 F3: _wire_live_copy_monitor may read it ONLY as the lazy feed of the background funding job
+    # (start_live_funding_job(approvals_rows=lambda: ...rows())), never on placement / stamping.
+    assert readers == {"_live_copy_gap_ctx", "_live_copy_monitor_context", "_wire_live_copy_monitor"}, readers
+    wire = next(fn for fn in ast.walk(ast.parse(src)) if isinstance(fn, ast.FunctionDef)
+                and fn.name == "_wire_live_copy_monitor")
+    for n in ast.walk(wire):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("rows", "_load")
+                and isinstance(n.func.value, ast.Call)
+                and getattr(n.func.value.func, "id", "") == "_get_live_copy_approvals"):
+            owner = [c for c in ast.walk(wire) if isinstance(c, ast.Call)
+                     and getattr(c.func, "attr", "") == "start_live_funding_job"
+                     and any(isinstance(k.value, ast.Lambda) and n in ast.walk(k.value) for k in c.keywords)]
+            assert owner, "approvals read in _wire_live_copy_monitor outside the funding-job feed lambda"
     stamp = next(fn for fn in ast.walk(ast.parse(src)) if isinstance(fn, ast.FunctionDef)
                  and "_get_live_copy_approvals().append" in (ast.get_source_segment(src, fn) or ""))
     seg = ast.get_source_segment(src, stamp)

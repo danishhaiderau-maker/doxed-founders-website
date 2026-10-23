@@ -8,6 +8,7 @@ HTTP 503 with verdict RED instead of a fabricated healthy answer.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Callable
 
 from flask import Blueprint, jsonify, request
@@ -354,7 +355,8 @@ def live_vs_paper_route():
     if err is not None:
         return err
     import live_vs_paper as lvp
-    chains = lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
+    reports = ctx.get("reports") or []
+    chains = lcm.build_chains(ctx.get("approvals") or [], reports)
     twins = ctx.get("paper_twins") or {}
     intents = chains["intents"]
     lane = str(request.args.get("lane") or "").strip().upper()
@@ -371,13 +373,113 @@ def live_vs_paper_route():
     def _keep_paper(_ch, _twin):  # paper-only rows carry their lane on the emitted intent
         return True
 
-    accts = list(chains["accounts"].values())
+    # HM R5 G1: the SAME pid/side attach as the funding job's feed (_with_pid_side -> _report_pid_side), so a route row
+    # resolves to the job's cache key (lfl._row_inputs: correlation id, fill window, pid) and a verified row can show.
+    accts = _with_pid_side(chains, reports)
     out = lvp.build(accts, twins, intents,
                     paper_signal_ids=[c for c, i in intents.items() if not lane or lane in str(i.get("lane") or "").upper()],
                     skip_reasons=ctx.get("live_skip_reasons") or {}, lane_filter=None if not lane else
                     (lambda ch, tw: _keep(ch, tw) if ch else True), limit=limit,
-                    exit_send_for=ctx.get("fly_exit_send"))
+                    exit_send_for=ctx.get("fly_exit_send"),
+                    # #849 RK 24 Oct + HM (B)/(C): live funding from the Bitfinex funding ledger. This GET only READS the
+                    # background job's cache (no network call); a row not read yet is PENDING_READBACK (non-countable).
+                    # HM live-path review: this is the Fly monitor path.
+                    funding_readback_for=ctx.get("live_funding_readback") or _live_funding_lookup())
     return _ok(out)
+
+
+def _live_funding_lookup():
+    import live_funding_ledger as lfl
+    return lfl.DEFAULT_JOB.lookup   # cache read only; the owner thread (start_live_funding_job) does every read
+
+
+# HM R4 F3 (live-path isolation): the funding job's chain feed reads ONLY the in-memory approvals ledger rows and the
+# execution journal rows (bot.py passes ``_get_live_copy_approvals().rows`` / ``_get_live_copy_journal().rows``). It never
+# calls the monitor context provider (bot.py _live_copy_monitor_context: relay fly-view on the shared relay HTTP session,
+# trade_lock via _live_copy_paper_twins, account-transition writes) - no network, no trade_lock, no writes.
+_FUNDING_FEED: dict = {"approvals": None, "reports": None}
+# HM pr854 Q6 / #849 condition: the ONLY pid carrier is the report ``position`` block PR #854's Fly reporter writes
+# (live-copy-fly-reporter.ts liveCopyPositionBlock <- bitfinex-position-id-stamp.ts), and only a STAMPED one read back
+# by the post-stop positions read. Every other status (MULTI_POSITION, READ_FAILED, *_MISMATCH, NO_POSITION, ...),
+# source, block or key carries no pid.
+PID_STAMP_STATUS_OK = "STAMPED"
+PID_STAMP_SOURCE = "POST_STOP_POSITIONS_READBACK"
+
+
+def _stamped_pid(v):
+    """A real Bitfinex POSITION_ID: a positive int (bool rejected) or a canonical ASCII-decimal string (HM N1: isascii()
+    and isdigit(), no leading zero, so no '²' / '５' / '007' / '0'); anything else -> None. Pure; never raises."""
+    if type(v) is int:
+        return str(v) if v > 0 else None
+    if type(v) is str and v and v.isascii() and v.isdigit() and v[0] != "0":
+        return v
+    return None
+
+
+def _report_pid_side(report) -> tuple:
+    """(position id, side) from the executor report's ``position`` block ONLY, and only when that block is a #854
+    stamp with status == STAMPED and source == POST_STOP_POSITIONS_READBACK. Never inferred and never taken from the
+    top level, fill / close / exit / order blocks or a generic ``position_id`` key: anything else -> (None, None)
+    (pid None -> UNVERIFIED_POSITION_ID_MISSING; side None -> no pin)."""
+    try:                                    # HM N1: a malformed report never raises (no 500, no skipped tick)
+        pos = report.get("position") if isinstance(report, Mapping) else None
+        if not isinstance(pos, Mapping):
+            return None, None
+        if pos.get("status") != PID_STAMP_STATUS_OK or pos.get("source") != PID_STAMP_SOURCE:
+            return None, None
+        pid = _stamped_pid(pos.get("bitfinex_position_id"))
+        if pid is None:
+            return None, None
+        v = pos.get("position_side")
+        v = v.upper() if type(v) is str else None
+        return pid, (v if v in ("LONG", "SHORT") else None)
+    except Exception:
+        return None, None
+
+
+def _closed_live_chains():
+    """In-memory chain source for the background job: closed live chains built from the approvals + journal rows only,
+    with the position id and side the executor reported (HM R4 F3, RK 04:12). No monitor context, no I/O."""
+    af, rf = _FUNDING_FEED.get("approvals"), _FUNDING_FEED.get("reports")
+    if not (callable(af) and callable(rf)):
+        return []
+    reports = list(rf() or [])
+    chains = lcm.build_chains(list(af() or []), reports)
+    return [c for c in _with_pid_side(chains, reports) if c.get("closed") or c.get("exit_ack_at_ts")]
+
+
+def _with_pid_side(chains, reports) -> list:
+    """HM R5 G1: the ONE pid/side attach shared by the funding job feed (_closed_live_chains) and the live-vs-paper
+    route: every account chain (build_chains output) gains ``bitfinex_position_id`` / ``position_side`` exactly as the
+    executor reported them for its (correlation id, account) via _report_pid_side. Pure, no I/O; never inferred."""
+    found: dict = {}
+    for r in reports or []:
+        if not isinstance(r, dict):
+            continue
+        key = (str(r.get("correlation_id") or ""), str(r.get("account") or "UNKNOWN"))
+        pid, side = _report_pid_side(r)
+        if pid is None:
+            continue
+        cur = found.setdefault(key, {"pid": pid, "side": side, "conflict": False})
+        if cur["pid"] != pid or (side and cur["side"] and cur["side"] != side):
+            cur["conflict"] = True          # two different stamped pids/sides for one chain: never first-wins
+        cur["side"] = cur["side"] or side
+    out = []
+    for key, c in chains["accounts"].items():
+        f = found.get(key) or {}
+        if f.get("conflict"):
+            f = {}                          # conflicting stamps -> no pid (UNVERIFIED_POSITION_ID_MISSING), fail closed
+        out.append(dict(c, bitfinex_position_id=f.get("pid"), position_side=f.get("side")))
+    return out
+
+
+def start_live_funding_job(approvals_rows=None, journal_rows=None) -> bool:
+    """Start the single owner thread of the #849 funding read-back (HM B/C). Called once at app wiring (bot.py) with
+    the in-memory row readers (HM R4 F3). Without them the job has no chains (every live row stays non-countable)."""
+    import live_funding_ledger as lfl
+    _FUNDING_FEED["approvals"], _FUNDING_FEED["reports"] = approvals_rows, journal_rows
+    lfl.DEFAULT_JOB.chains_fn = _closed_live_chains
+    return lfl.DEFAULT_JOB.start()
 
 
 @blueprint.route("/api/monitor/live/gaps", methods=["GET"])

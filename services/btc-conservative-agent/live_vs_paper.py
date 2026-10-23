@@ -39,8 +39,23 @@ def _truthy(v) -> bool:
     return v is True or str(v).strip().lower() in ("1", "true", "yes")
 
 
+def live_funding_failure(chain: Mapping[str, Any] | None, live_funding: Mapping[str, Any] | None):
+    """#849 RK (3): a CLOSED traded live row counts only with a verified funding read-back (live_funding_ledger.verify:
+    PRICED from the ledger, or a proven NO_CROSSING 0). None -> countable or not applicable; else the reason label.
+    A paper-vs-live funding gap is never a reason (the ledger value is the truth)."""
+    chain = chain or {}
+    traded = bool(_pos(chain.get("fill_price")) or _f(chain.get("fill_at_ts")))
+    if not (traded and (chain.get("closed") or chain.get("exit_ack_at_ts"))):
+        return None
+    if not live_funding:
+        return "LIVE_FUNDING_UNVERIFIED:NO_READBACK"
+    import r17_exclusion as _rx
+    label = _rx.funding_failure(live_funding, live=True)   # HM (D): the live leg accepts only LIVE_LEDGER_V1
+    return None if label is None else f"LIVE_{label}:{live_funding.get('funding_status')}"
+
+
 def pair_countability(chain: Mapping[str, Any] | None, twin: Mapping[str, Any] | None,
-                      fly_exit_send: Mapping[str, Any] | None = None) -> dict:
+                      fly_exit_send: Mapping[str, Any] | None = None, live_funding: Mapping[str, Any] | None = None) -> dict:
     """R8-live both legs: a pair is non-countable when EITHER leg was force-closed; a live-only forced close
     (USER_RELAY_STOP, ADMIN_FORCE_FLAT, deploy/maintenance flatten ...) marks the paper twin non-countable too,
     and a paper twin that is itself non-countable (forced, R17, default delay ...) makes the pair non-countable."""
@@ -61,9 +76,12 @@ def pair_countability(chain: Mapping[str, Any] | None, twin: Mapping[str, Any] |
     legs_nc = bool(chain) and legs["non_countable"]
     if legs_nc:
         reasons.extend(legs["non_countable_reasons"])
+    fund_nc = live_funding_failure(chain, live_funding) if chain else None
+    if fund_nc:  # live leg only: the paper twin keeps its own settlement-exact funding verdict
+        reasons.append(fund_nc)
     twin_nc = bool(twin) and bool(live or paper_forced or _truthy(twin.get("non_countable")))
-    live_reason = ("FORCED_CLOSE:" + live) if live else (legs["non_countable_reasons"][0] if legs_nc else None)
-    return {"live_non_countable": bool(live) or legs_nc, "live_non_countable_reason": live_reason,
+    live_reason = (("FORCED_CLOSE:" + live) if live else (legs["non_countable_reasons"][0] if legs_nc else None)) or fund_nc
+    return {"live_non_countable": bool(live) or legs_nc or bool(fund_nc), "live_non_countable_reason": live_reason,
             "live_legs": legs["legs"] if chain else None,
             "paper_twin_non_countable": twin_nc,
             "paper_twin_non_countable_reason": (("LIVE_TWIN_FORCED_CLOSE:" + live) if live else
@@ -105,8 +123,10 @@ def _anchor_drift(side, paper_anchor, live_fill, traded: bool) -> dict:
 
 
 def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] | None, intent: Mapping[str, Any] | None = None,
-             skip_reason: str | None = None, fly_exit_send: Mapping[str, Any] | None = None) -> dict:
+             skip_reason: str | None = None, fly_exit_send: Mapping[str, Any] | None = None,
+             live_funding: Mapping[str, Any] | None = None) -> dict:
     chain, twin, intent = chain or {}, twin or {}, intent or {}
+    live_funding = dict(live_funding) if live_funding else None
     sg = _sign(twin.get("side"))
     p_in, p_out = _pos(twin.get("entry_price")), _pos(twin.get("exit_price"))
     l_in, l_out = _pos(chain.get("fill_price")), _pos(chain.get("exit_price"))
@@ -134,7 +154,13 @@ def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] 
         "outcome_bp_paper": paper_bp, "outcome_bp_live": live_bp,
         "outcome_delta_bp": round(live_bp - paper_bp, 2) if live_bp is not None and paper_bp is not None else None,
         "funding_usd_paper": _f(twin.get("funding_usd_raw") if twin.get("funding_usd_raw") is not None else twin.get("funding_fees_usd")),
-        "funding_usd_live": _f(chain.get("funding_usd")),
+        # #849 RK (3)/(4): the live funding is the ledger read-back value when verified (else null); the executor's
+        # unverified funding_usd stays visible as funding_usd_live_reported. Gap = realism metric, never an exclusion.
+        "funding_usd_live": (_f(live_funding.get("funding_usd_raw")) if live_funding and live_funding.get("funding_verified")
+                             else None),
+        "funding_usd_live_reported": _f(chain.get("funding_usd")),
+        "funding_live_minus_paper_usd": (_f(live_funding.get("funding_live_minus_paper_usd")) if live_funding else None),
+        "live_funding": live_funding,
         "paper_exit_reason": twin.get("exit_reason"), "live_exit_reason": chain.get("exit_reason"),
         # #807: the paper exit's trigger vs the 1 s book at the trigger second (+ = book better than the trigger) and the
         # ticker BBO age it fired on. Measurement only.
@@ -152,7 +178,7 @@ def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] 
         "twin_status": ("PAIRED" if chain and twin else "NO_PAPER_TWIN" if chain else "PAPER_ONLY"),
         **_anchor_drift(twin.get("side"), twin.get("exchange_stop_anchor_px") or p_in, l_in, traded),
         # HM R2 K3 / RK C: pair-level countability (both legs; live-only forced close -> paper twin non-countable)
-        **pair_countability(chain, twin, fly_exit_send),
+        **pair_countability(chain, twin, fly_exit_send, live_funding),
     }
     row["missing"] = sorted(k for k in ("paper_fill_ts", "live_exit_price", "live_exit_ts", "funding_usd_paper", "funding_usd_live",
                                          "fill_to_stop_ms") if traded and row.get(k) is None)
@@ -161,10 +187,22 @@ def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] 
 
 def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, Any]], intents: Mapping[str, Mapping[str, Any]] | None = None,
           paper_signal_ids: Iterable[str] = (), skip_reasons: Mapping[str, str] | None = None, lane_filter=None, limit: int = 200,
-          exit_send_for=None) -> dict:
+          exit_send_for=None, funding_readback_for=None) -> dict:
     """Rows for every live chain plus every paper signal live never traded (with a reason code). ``exit_send_for``
     (trade id -> this bot's Fly exit-send record) feeds the live per-leg check (HM 01:43 item 3); absent -> the
-    exit Fly-send / relay-receive legs are missing and the live row is non-countable."""
+    exit Fly-send / relay-receive legs are missing and the live row is non-countable. ``funding_readback_for``
+    ((chain, paper_funding_usd) -> live_funding_ledger.verify dict) is the #849 live funding read-back; absent or
+    failing -> a closed live row is LIVE_FUNDING_UNVERIFIED (non-countable)."""
+
+    def _funding(ch, twin):
+        if not callable(funding_readback_for):
+            return None
+        twin = twin or {}
+        paper = twin.get("funding_usd_raw") if twin.get("funding_usd_raw") is not None else twin.get("funding_fees_usd")
+        try:
+            return funding_readback_for(ch, _f(paper))
+        except Exception:  # noqa: BLE001 - a failed read-back is unverified funding (fail closed)
+            return None
 
     def _exit_send(ch):
         if not callable(exit_send_for):
@@ -184,7 +222,8 @@ def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, 
             continue
         seen.add(cid)
         live_ids.add(cid)
-        rows.append(pair_row(cid, ch, twins.get(cid), intents.get(cid), skip_reasons.get(cid), fly_exit_send=_exit_send(ch)))
+        rows.append(pair_row(cid, ch, twins.get(cid), intents.get(cid), skip_reasons.get(cid), fly_exit_send=_exit_send(ch),
+                             live_funding=_funding(ch, twins.get(cid))))
     live_spans = [(_f(c.get("fill_at_ts")), _f(c.get("exit_at_ts")) or (None if not c.get("closed") else _f(c.get("closed_at_ts"))), str(c.get("correlation_id")))
                   for c in chains if _f(c.get("fill_at_ts"))]
     for cid in paper_signal_ids:

@@ -132,13 +132,19 @@ MAINTENANCE_MARGIN = 0.005  # Bitfinex derivatives maintenance margin 0.5% (supp
 
 
 def liquidation_check(direction: Any, mark_at_open: Any, leverage: Any, *, marks: Optional[list],
-                      trades: Optional[list], stop_trigger_ts: Optional[float], stop_fill_px: Any) -> dict:
+                      trades: Optional[list], stop_trigger_ts: Optional[float], stop_fill_px: Any,
+                      funding_paid: Optional[list] = None) -> dict:
     """HM M10 / tracker 17:30 mark-price liquidation model (isolated, UNVALIDATED).
 
     Liquidation price = the REAL BFXCI mark at open (bfx_deriv_status_1s) moved adverse by (1/leverage - 0.5%
     maintenance margin). Liquidation fires on the FIRST of the BFXCI mark OR a tBTCF0:USTF0 last trade reaching that
     level (liq_trigger_source mark | trade). liq_unverified = True when liquidation fired before the exchange stop,
-    OR the stop fill slipped past the liquidation price, OR the mark data is missing."""
+    OR the stop fill slipped past the liquidation price, OR the mark data is missing.
+
+    HM #849 item 6: ``funding_paid`` = [{"ts", "usd", "qty"}] settlements paid during the hold (positive usd = cost).
+    Paid funding comes out of the isolated margin, so from each settlement ts on the liquidation price moves toward
+    the market by usd/qty (LONG up, SHORT down; a receipt moves it away). An unpriced settlement (usd None) makes the
+    distance unknowable: liq_unverified, FUNDING_UNPRICED_FOR_LIQ."""
     m0, lev = _f(mark_at_open), _f(leverage)
     d = str(direction or "").upper()
     out = {"liq_model": LIQ_MODEL, "liq_model_validated": False, "liq_mark_at_open": m0, "liq_bp": None,
@@ -151,16 +157,33 @@ def liquidation_check(direction: Any, mark_at_open: Any, leverage: Any, *, marks
     bp = (1.0 / lev - MAINTENANCE_MARGIN) * 1e4
     lpx = m0 * (1 - bp / 1e4) if d == "LONG" else m0 * (1 + bp / 1e4)
     out.update(liq_bp=round(bp, 4), liq_px=round(lpx, 8))
+    steps, unpriced = [], False
+    for fp_ in funding_paid or ():
+        ts_, usd_, q_ = _f((fp_ or {}).get("ts")), (fp_ or {}).get("usd"), _f((fp_ or {}).get("qty"))
+        if usd_ is None or ts_ is None or q_ is None or q_ <= 0:
+            unpriced = True
+            continue
+        sh = float(usd_) / q_
+        steps.append((ts_, sh if d == "LONG" else -sh))
+    steps.sort()
 
-    def reached(px):
-        return px is not None and (px <= lpx if d == "LONG" else px >= lpx)
+    def lpx_at(t):
+        if t is None:
+            return lpx + sum(x for _, x in steps)
+        return lpx + sum(x for ts_, x in steps if ts_ <= float(t))
+    out["liq_funding_shift_px"] = sum(x for _, x in steps) if funding_paid is not None else None
+    out["liq_px_funding_adj"] = round(lpx_at(None), 8) if funding_paid is not None else None
+
+    def reached(px, t=None):
+        lp = lpx_at(t) if steps else lpx
+        return px is not None and (px <= lp if d == "LONG" else px >= lp)
     ev = []
     for m in marks or ():
-        if reached(_f(m.get("mark"))):
+        if reached(_f(m.get("mark")), float(m["s"]) + 1.0):
             ev.append((float(m["s"]) + 1.0, "mark"))  # a 1 s mark row is known at the end of its second
             break
     for tr in trades or ():
-        if reached(_f(tr.get("px"))) and _f(tr.get("ts")) is not None:
+        if _f(tr.get("ts")) is not None and reached(_f(tr.get("px")), float(tr["ts"])):
             ev.append((float(tr["ts"]), "trade"))
             break
     if ev:
@@ -170,9 +193,11 @@ def liquidation_check(direction: Any, mark_at_open: Any, leverage: Any, *, marks
         out["liq_before_stop"] = bool(st is None or ts < st)
     fp = _f(stop_fill_px)
     if fp is not None:
-        out["liq_stop_slipped_past"] = bool(reached(fp))
+        out["liq_stop_slipped_past"] = bool(reached(fp, _f(stop_trigger_ts)))
     if marks is None:
         out.update(liq_unverified=True, liq_reason="NO_MARK_DATA")
+    if unpriced:
+        out.update(liq_unverified=True, liq_reason=out["liq_reason"] or "FUNDING_UNPRICED_FOR_LIQ")
     if out["liq_before_stop"]:
         out.update(liq_unverified=True, liq_reason="LIQ_BEFORE_STOP")
     if out["liq_stop_slipped_past"]:

@@ -396,7 +396,11 @@ PRICING_KEYS = ("non_countable", "non_countable_reason", "fill_model", "fill_mod
                 "entry_delay_drift_bp", "exit_delay_drift_usd", "exit_delay_drift_bp", "exit_touch_drift_usd",
                 "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
                 # #731: repriced exits are distinct and carry their lag (the pre-registered valid-trade filter needs both)
-                "exit_pricing_basis", "exit_repriced_lag_s")
+                "exit_pricing_basis", "exit_repriced_lag_s",
+                # REALISM_V2 F5: settlement-exact funding (raw, per settlement, aligned with funding_ts_crossed)
+                "funding_model", "funding_status", "funding_verified", "funding_usd_raw", "funding_rate_applied",
+                "funding_rate_ts", "funding_mark_price", "funding_mark_ts", "funding_usd_by_settlement",
+                "funding_settlement_status")
 
 
 _PRICING_NUMERIC = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms",
@@ -404,17 +408,24 @@ _PRICING_NUMERIC = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age
                     "book_slippage_usd_entry", "book_slippage_usd_exit", "book_slippage_usd_total", "entry_walk_bp",
                     "exit_walk_bp", "entry_delay_drift_usd", "entry_delay_drift_bp", "exit_delay_drift_usd",
                     "exit_delay_drift_bp", "exit_touch_drift_usd", "exit_touch_drift_bp",
-                    "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured", "exit_repriced_lag_s")
+                    "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured", "exit_repriced_lag_s",
+                    "funding_rate", "funding_usd_raw")
 _PRICING_STRUCT = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
                    "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",
-                   "entry_provenance", "exit_provenance", "funding_settlement_rates")
-_PRICING_BOOL = ("legacy_pricing",)
+                   "entry_provenance", "exit_provenance", "funding_settlement_rates",
+                   "funding_rate_applied", "funding_rate_ts", "funding_mark_price", "funding_mark_ts",
+                   "funding_usd_by_settlement", "funding_settlement_status")
+_PRICING_BOOL = ("legacy_pricing", "funding_verified")
 
 
 def _restore_pricing_value(key: str, value: Any) -> Any:
     """CSV-reloaded rows carry strings: give numbers, bools and dict/list reprs their types back."""
     import ast as _ast
     import paper_fill as _pf
+    if key == "funding_ts_crossed":
+        # F5/HM: 277 pre-19-Oct rows hold the string form ('[]' x264, '[1792310400]' etc x13): JSON-parse, never "empty"
+        import tile_fill as _tf
+        return _tf.parse_funding_ts_crossed(value)
     if key in _PRICING_NUMERIC:
         n = _pf.as_number(value)
         return int(n) if n is not None and n == int(n) and key in ("fill_model_version", "exit_legs", "exit_legs_unmeasured") else n

@@ -143,7 +143,13 @@ def test_fee_model_and_funding_fields():
     assert "8h settlement" in f["funding_source"]
     assert tf.funding_fields(100, 200, 0.0)["funding_ts_crossed"] == []
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
-    assert "funding_fields(pos.get(\"entry_ts\")" in src and "BITFINEX_FEE_RATES" not in src.split("def close_position")[1][:20000]
+    # HM #849 item 7: structural (AST) check instead of a whitespace-exact source string
+    import ast as _ast
+    close_fn = next(n for n in _ast.parse(src).body if isinstance(n, _ast.FunctionDef) and n.name == "close_position")
+    called = {getattr(c.func, "attr", None) or getattr(c.func, "id", None)
+              for c in _ast.walk(close_fn) if isinstance(c, _ast.Call)}
+    assert {"funding_fields", "_paper_funding_v2"} <= called
+    assert "BITFINEX_FEE_RATES" not in {getattr(n, "id", None) for n in _ast.walk(close_fn)}
 
 
 # ----------------------------------------------------------------------------- HM blockers B1-B5 + nits

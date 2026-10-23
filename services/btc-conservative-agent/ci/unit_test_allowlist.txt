@@ -613,6 +613,8 @@ test_delay_pool_f1.py
 test_stop_coverage_c3c7.py
 test_r17_contract_fields.py
 test_r17_close_position_row.py
+test_funding_f5.py
+test_live_funding_ledger.py
 test_live_ack_pool.py
 test_first_after_rk3.py
 test_rk1_live_exit_stamps.py

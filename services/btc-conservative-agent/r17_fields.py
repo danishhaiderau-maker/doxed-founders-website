@@ -32,6 +32,12 @@ MEASURED_DELAY_PATTERN = r"POOLED_LIVE_ACK_CROSS_LANE:(?:ENTRY_MKT_GTC|MAKER_RES
 TRIGGER_PRICE_SOURCE_OK = frozenset({"book"})
 EVIDENCE_OK = frozenset({"COMPLETE"})
 STOP_COVERAGE_OK = frozenset({"STOP_COVERAGE_OK"})
+# HM (D) 24 Oct: the funding source is leg-specific. PAPER rows accept only the settlement-exact deriv-status model;
+# a LIVE_LEDGER_V1 value on a paper row is rejected (FUNDING_UNVERIFIED). LIVE rows accept only the ledger read-back.
+PAPER_FUNDING_MODEL_OK = frozenset({"SETTLEMENT_EXACT_V2"})   # HM #849 item 1: paper rows, settlement-exact funding
+LIVE_FUNDING_MODEL_OK = frozenset({"LIVE_LEDGER_V1"})         # #849 RK 24 Oct: live rows, Bitfinex funding-ledger read-back
+FUNDING_MODEL_OK = PAPER_FUNDING_MODEL_OK                      # r17_exclusion's paper-row gate
+FUNDING_STATUS_OK = frozenset({"PRICED", "NO_CROSSING"})
 BOOK_RECEIVE_SOURCE_OK = frozenset({"WS_FRAME"})  # RK/HM #851: measured WS receipt; INFERRED_BUCKET_LAG never counts
 
 # field -> accepted positive value (human/contract form; r17_exclusion implements the check)
@@ -63,6 +69,100 @@ CONTRACT = {
                       "proven clear of the liquidation distance (RK/HM K1, 24 Oct); True or missing fails",
     "liq_mark_rows_n": "number > 0 (the BFXCI mark series over the hold was read)",
     "liq_trigger_ts": "absent / None (neither the mark nor a last trade reached liq_px during the hold)",
+    "funding_model": "SETTLEMENT_EXACT_V2 (legacy pro-rata accrual fails: FUNDING_UNVERIFIED; LIVE_LEDGER_V1 on a paper "
+                     "row fails FUNDING_UNVERIFIED, HM D)",
+    "funding_status": "PRICED | NO_CROSSING (UNVERIFIED_* -> FUNDING_UNVERIFIED; FUNDING_PRICER_ERROR -> FUNDING_PRICER_ERROR)",
+    "funding_verified": "True (real bool or 'true'); False / missing fails FUNDING_UNVERIFIED (HM #849 item 1)",
+    "funding_ts_fallbacks": "[] (real empty list): the window ends are the priced fill ts; any entry fails FUNDING_TS_FALLBACK",
+}
+
+# #849 RK ruling 24 Oct (PASS + 4 amendments): LIVE-row funding read-back (live_funding_ledger.verify). The four
+# gating fields above apply unchanged with funding_model LIVE_LEDGER_V1; the rest are proof / metric fields (not gates).
+LIVE_FUNDING_CONTRACT = {
+    "funding_model": "LIVE_LEDGER_V1",
+    "funding_status": "PRICED (every crossed settlement tied to exactly one category-29 ledger entry, or a proven ZERO_RATE "
+                      "settlement per the RK zero-rate ruling) | NO_CROSSING (no "
+                      "00/08/16 UTC settlement in (entry fill, exit fill] per tile_fill.settlements_crossed -> a countable 0); "
+                      "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
+                      "UNVERIFIED_POSITION_ID_MISSING (HM R4 N2 / RK 04:12: the chain has no bitfinex_position_id - no-crossing rows "
+                      "included; never read) | UNVERIFIED_POSITION_UNRESOLVED (no unique positions/hist row with that id at the "
+                      "fills, or the positions read failed incl. POSITIONS_PAGE_FULL) | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
+                      "UNVERIFIED_EXIT_TS_FALLBACK (HM R4 F4: exit ts source is not exit_fill_record_at_ts; never read) | "
+                      "UNVERIFIED_LEDGER_POSITION_MISMATCH (SIGNED: |pf - POSITION_FUNDING_SIGN * ledger sum| > 1e-8) | "
+                      "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN (RK 04:09 + HM R4 F1: a non-zero tied entry while "
+                      "POSITION_FUNDING_SIGN is unset - no RK+HM-confirmed ACTIVE pin) | "
+                      "UNVERIFIED_POSITION_FUNDING_MISSING | UNVERIFIED_ZERO_RATE_READ_FAILED | "
+                      "UNVERIFIED_ZERO_RATE_MISSING | UNVERIFIED_ZERO_RATE_POSITION_CHECK | PENDING_READBACK (HM B/C: not read yet by the background "
+                      "job) fail",
+    "funding_verified": "True only for PRICED / NO_CROSSING",
+    "funding_usd_raw": "COST-positive USD = -sum(ledger amounts used); 0.0 for NO_CROSSING; null when unverified",
+    "funding_ts_fallbacks": "[] unless: exit_ts:<source> whenever the exit ts is NOT the Bitfinex exit fill record "
+                            "(HM R4 F4 - any distance from a settlement, no near-settlement window; row UNVERIFIED); "
+                            "entry_ts:fill_at_ts_missing / exit_ts:exit_fill_missing when a fill ts is absent (HM E: "
+                            "explicit flag, non-countable, the window is never guessed)",
+    "funding_exit_ts_source": "exit_fill_record_at_ts (else the fallback stamp name -> UNVERIFIED_EXIT_TS_FALLBACK)",
+    "funding_ts_crossed": "list of settlement epoch s in (entry fill, exit fill]",
+    "funding_ledger_ids": "Bitfinex ledger ids used (RK 4)",
+    "funding_ledger_mts": "their MTS (epoch s)",
+    "funding_ledger_amounts": "their raw amounts (received-positive, as Bitfinex books them)",
+    "funding_ledger_balances": "HM R4 N3: the ledger BALANCE [6] after each used entry, raw (same order as the ids)",
+    "funding_usd_by_settlement": "[{settlement_ts, ledger_id, ledger_mts, funding_usd, ledger_amount, ledger_balance}]",
+    "funding_settlement_status": "per crossed settlement: LEDGER | UNTIED | AMBIGUOUS | ZERO_RATE (no entry, counted 0) | "
+                                 "RATE_READ_FAILED | RATE_MISSING | RATE_NONZERO | ZERO_RATE_POSITION_CHECK",
+    "funding_settlement_rate_readbacks": "RK zero-rate ruling (24 Oct): per crossed settlement with NO ledger entry "
+                                         "{settlement_ts, rate (text, exactly as returned), row_mts, read_at_ts, endpoint "
+                                         "(api-pub v2/status/deriv/tBTCF0:USTF0/hist), error, status}. Counted 0 ONLY "
+                                         "when CURRENT_FUNDING of the last row before that EXACT settlement (its next-"
+                                         "funding ts == the settlement, confirmed by the flip) is exactly 0 as returned "
+                                         "(Decimal parse, never rounded, never from a neighbour) AND positions/hist "
+                                         "FUNDING for the pid EQUALS the sum of the tied ledger entries within 1e-8 "
+                                         "(RK amendment 04:07 + RK 04:09 / HM R4 F1: SIGNED, never magnitudes - both ~0, or |pf - POSITION_FUNDING_SIGN * sum| <= 1e-8 under an ACTIVE sign). Every "
+                                         "crossed settlement needs exactly one proof: a tied entry, or (no entry only) "
+                                         "an exact-0 rate read - an entry present means no rate read is used; read in "
+                                         "the background job under the "
+                                         "same 12/min budget, never in a GET. Else LIVE_FUNDING_UNVERIFIED",
+    "funding_position_id": "REQUIRED for a verified row (RK 04:12): the chain's bitfinex_position_id, confirmed by a unique "
+                           "positions/hist row with that id whose create/update match the fills (+/-10 s; page limit 50, a "
+                           "full page fails POSITIONS_PAGE_FULL); window-only matching is a violation; else null",
+    "funding_position_id_source": "chain.bitfinex_position_id when resolved | MISSING when the chain has no pid | null",
+    "funding_readback_at_ts": "epoch s of the background job's ledger read (RK 4), cached per row; null until read",
+    "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (BFX_FUNDING_READ_KEY). HM B/C: every ledger / "
+                                 "positions / permissions read runs in ONE background owner thread (live_funding_ledger."
+                                 "FundingReadbackJob) under the global 12 req/min budget with 429 backoff; GETs only read "
+                                 "the per-row cache and never touch the network",
+    "funding_readback_error": "redacted code (PENDING_READBACK / NO_READ / KEY_GATE:<gate> / HTTP_<n> incl. HTTP_429 / "
+                              "TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL / POSITIONS_PAGE_FULL) or null; never a key, signature or body",
+    "funding_key_gate": "OK, else READ_KEY_MISSING | READ_KEY_NOT_SEPARATE | KEY_HAS_WRITE:<scopes> | "
+                        "KEY_PERMISSIONS_READ_FAILED:<code> (RK 03:38: BFX_FUNDING_READ_KEY/SECRET, a separate Fly-only "
+                        "key, permission read-back with NO write right; any refusal -> every row UNVERIFIED)",
+    "funding_position_funding": "positions/hist FUNDING [4] of the tied position, raw (cross-check vs the ledger). "
+                                "HM R4 F1/F2: verified iff |pf| <= 1e-8 AND |ledger sum| <= 1e-8, or the sign is ACTIVE and "
+                                "|pf - POSITION_FUNDING_SIGN * ledger sum| <= 1e-8 (signed, no abs, no relative tolerance); "
+                                "same rule on the zero-rate, tied-only and no-crossing paths",
+    "funding_position_funding_sign": "+1 / -1 from an ACTIVE pin confirmed by BOTH an RK and an HM ref, else null "
+                                     "(POSITION_FUNDING_SIGN = None: unproven -> non-zero rows UNVERIFIED). HM R5 G3: the "
+                                     "pin is re-checked on every read and at activate - checks a, b, c all ok, c.sign == "
+                                     "the pin sign, ledger_id and pid present, sign an int in {-1, +1} (bool / JSON true "
+                                     "rejected); anything else is null (unproven) / refused",
+    "funding_sign_pin_status": "NONE | PROPOSED | ACTIVE | DISAGREEMENT | UNREADABLE (persisted live_funding_sign_pin.json "
+                               "on the BOT_DATA_DIR root, outside every reset path; the ONE path for the CLI and the job, no override; "
+                               "BOT_DATA_DIR unset -> UNREADABLE, fail closed, no cwd fallback)",
+    "funding_sign_pin_refs": "{rk, hm} confirmation refs of the ACTIVE pin, else null",
+    "funding_sign_pin_flag": "SIGN_PIN_DISAGREEMENT when checks (a)/(b)/(c) disagreed (nothing pinned, row UNVERIFIED), "
+                             "else null",
+    "funding_sign_pin_check": "this row's proposal check, if run (only while no pin state exists, only for ONE closed "
+                              "live position with a SINGLE tied non-zero cat-29 entry): {result AGREE|DISAGREE|"
+                              "INSUFFICIENT, position_funding_sign, a: [{ledger_id, amount, balance [6], prev_ledger_id, "
+                              "prev_balance, balance_change, ok}], b: [{settlement_ts, rate, rate_row_mts, side, "
+                              "expected_sign (Bitfinex: rate > 0 -> longs pay shorts), ok}], c: {position_funding_raw, "
+                              "ledger_amount_raw, sign, diff, ok}, trade_id, pid, ledger_ids, ledger_mts, settlement_ts, "
+                              "checked_at_ts}. AGREE persists a PROPOSED pin; ACTIVE only via `live_funding_ledger.py "
+                              "sign-pin confirm --rk-ref <RK> --hm-ref <HM>`, never automatically",
+    "funding_fee_anomaly": "True when the read returned a fee-like / non-funding row: flagged for HM, NEVER applied (R7); "
+                           "not a gate",
+    "funding_fee_anomaly_ledger_ids": "their ledger ids",
+    "funding_paper_usd": "the paper twin's settlement-exact funding (cost-positive) for the same signal",
+    "funding_live_minus_paper_usd": "funding_usd_raw - funding_paper_usd: realism metric only, NEVER an exclusion (RK 3)",
 }
 # Matching is EXACT: string values are compared after stripping surrounding spaces only (no case folding);
 # numbers must be finite and >= 0.
