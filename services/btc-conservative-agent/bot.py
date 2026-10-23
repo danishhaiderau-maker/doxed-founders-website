@@ -33988,18 +33988,20 @@ def _cross_lane_pool():
 
 
 def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
-    """Measured live delay per lane/leg from the F1 live-ack pool (DelaySampler): n<10 default 1.5 s (UNVERIFIED),
-    then MAX until n>=20, then q0.90.  RK A: a lane with NO live acks of its own on this leg (paper-only: no per-tile
-    list) and a pool key (from its order model) uses the cross-lane pool instead: own signal->send + pooled send->ack,
-    fail closed below n=10 per key."""
-    sampler = _paper_delay_sampler()
+    """The paper delay for one lane/leg: the row's own signal->send + the pooled send->ack/fill of the shared
+    live_ack_pool (one definition: per order-type key, skew/boot/leg checks, n<10 fail closed, MAX at 10-19, q0.90 at
+    n>=20).  HM 02:55 N1: the old per-lane B1 DelaySampler is stamps-only and never prices a row (it is not split by
+    order type, has no skew/boot/leg checks or per-row s2s, and its exit sample was live ack - paper exit trigger);
+    a leg with no pool key fails closed (default delay, UNVERIFIED -> non-countable)."""
+    import paper_fill as _pf
+    _paper_delay_sampler()  # restores the per-epoch pool file (the cross-lane pool is persisted with it)
     if pool_key is None and leg == "exit" and own_signal_to_send_s is None:
         # the one bare exit caller is _tp1_gate (R4 byte-pinned): a bot-sent reduce-only market exit. HM 01:43 item 4:
         # its own signal -> Fly intent is NOT measured for a paper row (there is no paper send; 0.0 was assumed), so it
         # stays None -> the pooled label carries "default_own_s2s_missing" -> UNVERIFIED -> non-countable.
         pool_key = _live_ack_pool.KEY_EXIT_RO_MKT
-    if pool_key is None or sampler._xs(lane, leg):
-        return sampler.delay(lane, leg)
+    if pool_key is None:
+        return _pf.DEFAULT_DELAY_S, "default_until_n10"
     pool = _cross_lane_pool()
     try:
         if pool.admit_pending(time.time(), _live_ack_pool.boot_log_path()):
