@@ -49972,6 +49972,27 @@ def _live_guardian_record_protection(now, viol) -> None:
                                      "next": "Strategist evaluates a tighter stop on ALL fresh-epoch real-book data (AMEND5 G4(c'))"}
             changed = True
             break
+    # RK L27 (24 Oct): the LATEST real L (Bitfinex only, G5) on any live position, persisted; the arm gate refuses while it is
+    # <= 15 bp past the stop (shared _ltg.liq_too_close) until a NEW stop amendment has passed. Never estimated.
+    for p in _prot.get("positions") or []:
+        d = p.get("stop_liq_distance_bp")
+        if d is None or not p.get("liq_price") or p.get("liq_source") != _ltg.LIQ_SOURCE:
+            continue
+        cur = st.get("liq_latest_l") or {}
+        if (cur.get("trade_id") == _prot.get("trade_id") and cur.get("stop_liq_distance_bp") == d
+                and cur.get("liq_price") == p.get("liq_price")):
+            break
+        import os as _os
+        st["liq_latest_l"] = {"ts": now, "tile": _prot.get("tile"), "trade_id": _prot.get("trade_id"), "side": p.get("side"),
+                              "stop_level": p.get("stop_level"), "liq_price": p.get("liq_price"),
+                              "liq_read_at": p.get("liq_read_at"), "liq_source": _ltg.LIQ_SOURCE, "stop_liq_distance_bp": d,
+                              "too_close": _ltg.liq_too_close(d),
+                              "amendment_at_record": str(_os.environ.get(_ltg.STOP_AMENDMENT_ENV) or "")}
+        if st["liq_latest_l"]["too_close"]:
+            logger.critical(f"[LIVE GUARDIAN] L27 latest real L={p.get('liq_price')} stop={p.get('stop_level')} stop_liq_bp={d} "
+                            f"<= {_ltg.LIQ_CHECK_MAX_BP:g} bp: arming refused until a new stop amendment passes [PIPELINE ENFORCEMENT]")
+        changed = True
+        break
     if not st.get("first_live_liq_distance"):
         for p in ((st.get("calc") or {}).get("protection") or {}).get("positions") or []:
             if p.get("liq_price") and p.get("entry"):
@@ -49995,7 +50016,7 @@ def _live_guardian_record_protection(now, viol) -> None:
 # and on the first tick with a fresh relay view the state is re-derived from the exchange: relay paused (no armed account)
 # while the mirror is NOT FLAT_NO_STOPS => RED BOOT_REDERIVED_NOT_FLAT + force-flat. A restart never clears RED.
 _LIVE_GUARDIAN_PERSIST_KEYS = ("red_alert", "red_alert_cleared", "auto_disarm_latched", "stop_failure_events", "liq_events",
-                               "first_live_liq_distance", "g4_first_l", "stop_reeval")
+                               "first_live_liq_distance", "g4_first_l", "stop_reeval", "liq_latest_l")
 _LIVE_GUARDIAN_PERSIST_FILE = "live_guardian_state.json"
 
 
@@ -50257,6 +50278,7 @@ def monitor_live_guardian_route():
                        "liq_normal_min_bp": _ltg.LIQ_NORMAL_MIN_BP, "liq_clamp_rate_max": _ltg.LIQ_CLAMP_RATE_MAX,
                        "liq_clamp_min_n": _ltg.LIQ_CLAMP_MIN_N, "liq_source": _ltg.LIQ_SOURCE,
                        "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval"),
+                       "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
                        "fade3_hm_gate": bool(str(os.environ.get("LIVE_HM_GATE_FADE3") or "").upper().startswith("PASS"))},
             "today": _live_guardian_today_summary(),
             "active": bool(_get_live_copy_output().snapshot().get("enabled")),
@@ -62055,7 +62077,8 @@ def _live_tile_admission(lane, trade_id, now):
     ok, reasons, info = _ltg.admit_entry(
         lane=lane, trade_id=trade_id, now=now, chains=chains, mirror=mirror,
         decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD,
-        book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"), hm_gate=os.environ.get("LIVE_HM_GATE_FADE3"))
+        book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"), hm_gate=os.environ.get("LIVE_HM_GATE_FADE3"),
+        latest_l=_LIVE_GUARDIAN_STATE.get("liq_latest_l"), stop_amendment=os.environ.get(_ltg.STOP_AMENDMENT_ENV))
     _amber = _LIVE_GUARDIAN_STATE.get("amber") or {}
     if ok and _amber.get("codes") and now - float(_amber.get("ts") or 0) <= 5.0:
         # the guardian's rolling-24 h ledger cap / AMBER entry blocks (AMEND4 E1: entry block only, never a disarm)
@@ -62626,7 +62649,8 @@ def _live_guardian_tile_arm_block(lane: str) -> str | None:
     (c') first L; FADE3 arms only after GS-01's first real L is (a)/(b) AND HM's live gate passed (LIVE_HM_GATE_FADE3=PASS:<ref>)."""
     import live_tile_gate as _ltg
     return _ltg.arm_gate_block(_ltg.tile_key_for_lane(lane), _LIVE_GUARDIAN_STATE.get("g4_first_l"),
-                               os.environ.get("LIVE_HM_GATE_FADE3"))
+                               os.environ.get("LIVE_HM_GATE_FADE3"), _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
+                               os.environ.get(_ltg.STOP_AMENDMENT_ENV))
 
 
 def _live_guardian_arm_block() -> str | None:
@@ -63435,7 +63459,8 @@ def api_bitfinex_tile_live_orders(lane: str):
         return jsonify({"ok": False, "error": _live_guardian_arm_block(), "lane": lane, "bitfinex_live_orders": False}), 409
     if enabled and _live_guardian_tile_arm_block(lane):
         return jsonify({"ok": False, "error": _live_guardian_tile_arm_block(lane), "lane": lane, "bitfinex_live_orders": False,
-                        "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval")}), 409
+                        "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval"),
+                        "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l")}), 409
     if enabled:
         sw.request_on(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     else:

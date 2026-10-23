@@ -127,6 +127,11 @@ G4C_DISARMED_TILES = ("gs1", "gs6")   # G4(c'): GS-01 stays disarmed, and so doe
 DENY_G4_STOP_REEVAL = "LIVE_G4C_STOP_REEVAL"
 DENY_G6_NO_FIRST_L = "LIVE_G6_GS01_FIRST_L_PENDING"
 DENY_G6_HM_GATE = "LIVE_G6_HM_GATE_NOT_PASSED"
+# RK ruling (24 Oct) L27: no pre-entry liq ESTIMATE path (G5 bans estimates). Instead the arm gate refuses while the latest
+# RECORDED real L (Bitfinex, persisted across restarts) is <= 15 bp past the stop, until a NEW stop amendment has passed
+# (LIVE_STOP_AMENDMENT_PASSED=PASS:<ref>, different from the value in force when that L was recorded).
+DENY_L27_LATEST_L = "LIVE_L27_LATEST_REAL_L_LE_15BP"
+STOP_AMENDMENT_ENV = "LIVE_STOP_AMENDMENT_PASSED"
 DENY_DAILY_LOSS_CAP = SKIP_DAILY_CAP   # AMEND4 E1(L12): the cap refusal IS the LIVE_SKIPPED_DAILY_CAP stamp
 DENY_TILE_KEY_UNKNOWN = "LIVE_TILE_KEY_UNKNOWN"
 DENY_TILE_CAP = "LIVE_TILE_MARGIN_CAP"
@@ -286,7 +291,8 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
                 decisions: Iterable[tuple], armed_lanes: Iterable[str], entry_margin_usd: float,
                 caps: Mapping[str, Any] | None = None, registry: Mapping[str, Mapping] | None = None,
                 book: Mapping[str, Any] | None = None, g4_first_l: Mapping[str, Any] | None = None,
-                hm_gate: str | None = None) -> tuple[bool, list, dict]:
+                hm_gate: str | None = None, latest_l: Mapping[str, Any] | None = None,
+                stop_amendment: str | None = None) -> tuple[bool, list, dict]:
     """(ok, reasons, info) for the FIRST entry event of a live trade. Pure; fail closed on any error.
 
     ``decisions``: iterable of (trade_id, decision_row) (TradeDecisions rows; persisted, so the daily count and the in-flight
@@ -307,7 +313,7 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         if others:
             reasons.append(SKIP_MUTEX)
         # 2. AMEND5 G4(c') / G6: GS-01 + FADE3 disarmed after a (c') first L; FADE3 only after (a)/(b) AND HM's gate
-        g = arm_gate_block(key, g4_first_l, hm_gate)
+        g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment)
         info["g4_first_l_outcome"] = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
         if g:
             reasons.append(g)
@@ -429,19 +435,43 @@ def force_flat_non_countable(chain: Mapping[str, Any] | None) -> bool:
     return any(m in blob for m in FORCE_FLAT_CLOSE_MARKERS)
 
 
+def liq_too_close(stop_liq_bp: float | None) -> bool:
+    """THE shared liq check (R4; RK L27): the REAL L is <= 15 bp (inclusive) past the exchange stop. One implementation used
+    by E5/G4 (g4_outcome), G3 (open_position_protection) and the arm gate (l27_arm_block). Unknown distance => False here;
+    each caller fails closed on an unreadable L on its own terms (G3: LIQ_UNREADABLE)."""
+    d = _f(stop_liq_bp)
+    return d is not None and d <= LIQ_CHECK_MAX_BP
+
+
+def l27_arm_block(latest_l: Mapping[str, Any] | None, stop_amendment: str | None = None) -> str | None:
+    """RK L27 (24 Oct): refuse arming while the latest recorded real L is too close (liq_too_close) and no NEW stop amendment
+    has passed since it was recorded. No estimate is ever made; with no recorded L there is nothing to refuse on."""
+    if not isinstance(latest_l, Mapping) or not liq_too_close(latest_l.get("stop_liq_distance_bp")):
+        return None
+    a = str(stop_amendment or "").strip()
+    if a.upper().startswith("PASS") and a != str(latest_l.get("amendment_at_record") or "").strip():
+        return None
+    return DENY_L27_LATEST_L
+
+
 def g4_outcome(stop_liq_bp: float | None) -> str | None:
     """AMEND5 G4 by the real L distance past the exchange stop (bp): (c') <= 15 (inclusive), (b) 15 < d < 28, (a) >= 28."""
     d = _f(stop_liq_bp)
     if d is None:
         return None
-    if d <= LIQ_CHECK_MAX_BP:
+    if liq_too_close(d):
         return G4_C
     return G4_B if d < LIQ_NORMAL_MIN_BP else G4_A
 
 
-def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, hm_gate: str | None = None) -> str | None:
+def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, hm_gate: str | None = None,
+                   latest_l: Mapping[str, Any] | None = None, stop_amendment: str | None = None) -> str | None:
     """AMEND5 G4(c') + G6 arm/entry gate (pure, shared). GS-01 arms first (its first L is unknown until it trades); after a
-    G4(c') reading GS-01 and FADE3 stay disarmed (STOP_REEVAL). FADE3 needs a first L in (a)/(b) AND HM's live gate pass."""
+    G4(c') reading GS-01 and FADE3 stay disarmed (STOP_REEVAL). FADE3 needs a first L in (a)/(b) AND HM's live gate pass.
+    RK L27: every tile is refused while the latest recorded real L is too close and no new stop amendment has passed."""
+    l27 = l27_arm_block(latest_l, stop_amendment)
+    if l27:
+        return l27
     out = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
     if out == G4_C and tile_key in G4C_DISARMED_TILES:
         return DENY_G4_STOP_REEVAL
@@ -629,7 +659,7 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
         if not liq_ok and not fill_grace:
             res["disarm"].append({"code": LIQ_CHECK_FLATTEN, "tile": None, "cause": "LIQ_UNREADABLE",
                                   "detail": f"position liq_price={p.get('liq_price')!r} read_at={p.get('liq_read_at')!r} unreadable (AMEND5 G3)"})
-        elif liq_ok and row["stop_liq_distance_bp"] is not None and row["stop_liq_distance_bp"] <= LIQ_CHECK_MAX_BP:
+        elif liq_ok and liq_too_close(row["stop_liq_distance_bp"]):
             res["disarm"].append({"code": LIQ_CHECK_FLATTEN, "tile": None, "cause": "LIQ_LE_15BP_PAST_STOP",
                                   "stop_liq_distance_bp": row["stop_liq_distance_bp"],
                                   "detail": f"real L {liq} is {row['stop_liq_distance_bp']} bp past stop {stop} <= {LIQ_CHECK_MAX_BP:g} bp (AMEND5 G3)"})

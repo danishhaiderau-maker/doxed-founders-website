@@ -554,3 +554,80 @@ def test_rk_e6_no_10s_stop_evidence_window_left_in_source():
     src = pathlib.Path(ltg.__file__).read_text()
     assert "2 * STOP_RESIDENT_MAX_AGE_S" not in src and "STOP_RESIDENT_MAX_AGE_S + STOP_RESIDENT_MAX_AGE_S" not in src
     assert ltg.STOP_RESIDENT_MAX_AGE_S == 5.0 and ltg.BOOK_HOLD_MAX_AGE_S == 10.0
+
+
+# ---- RK ruling (24 Oct) L27: one shared liq check (R4); arm gate refuses on the latest recorded REAL L; no estimate ----------
+_L27_ROW = {"side": "LONG", "entry": 100500.0, "stop_level": 100000.0, "liq_price": 99880.0, "liq_read_at": NOW - 1,
+            "stop_liq_distance_bp": 12.0, "liq_source": ltg.LIQ_SOURCE}
+
+
+def test_rk_l27_shared_liq_helper_bounds():
+    assert ltg.liq_too_close(15.0) and ltg.liq_too_close(0.0) and not ltg.liq_too_close(15.01)
+    assert not ltg.liq_too_close(None)
+    assert ltg.g4_outcome(15.0) == ltg.G4_C and ltg.g4_outcome(15.01) == ltg.G4_B
+
+
+def test_rk_l27_arm_gate_refuses_until_a_new_amendment_passes():
+    rec = {"stop_liq_distance_bp": 12.0, "amendment_at_record": ""}
+    for tile in ("gs1", "gs6", "gb1"):                                      # every tile, account-wide
+        assert ltg.arm_gate_block(tile, {"outcome": ltg.G4_A}, "PASS:hm", rec) == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, None, rec, "FAIL") == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, None, rec, "PASS:stop-amend-1") is None
+    old = dict(rec, amendment_at_record="PASS:stop-amend-1")              # the amendment already in force when L was read
+    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:stop-amend-1") == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:stop-amend-2") is None
+    assert ltg.arm_gate_block("gb1", None, None, dict(rec, stop_liq_distance_bp=16.0)) is None
+    assert ltg.arm_gate_block("gb1", None, None, None) is None             # nothing recorded: no estimate, no refusal
+
+
+def test_rk_l27_admit_entry_carries_the_l27_refusal():
+    reasons = ltg.admit_entry(lane="x", trade_id="x", now=NOW, chains=[], mirror=mirror(), decisions=[], armed_lanes=[],
+                              entry_margin_usd=1.0, latest_l={"stop_liq_distance_bp": 1.0})[1]
+    assert reasons   # unknown tile key fails closed first; the L27 refusal is wired via arm_gate_block (source test below)
+    src = pathlib.Path(ltg.__file__).read_text()
+    assert "g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment)" in src
+
+
+def test_rk_l27_refusal_persists_across_a_restart(tmp_path, monkeypatch):
+    monkeypatch.delenv(ltg.STOP_AMENDMENT_ENV, raising=False)
+    ns, st = _rec_ns({"tile": "gs1", "trade_id": "t1", "positions": [_L27_ROW]})
+    ns["_live_guardian_record_protection"](NOW, [])
+    assert st["liq_latest_l"]["too_close"] and st["liq_latest_l"]["stop_liq_distance_bp"] == 12.0
+    p = _persist_ns(tmp_path)
+    p["_LIVE_GUARDIAN_STATE"].update(liq_latest_l=st["liq_latest_l"])
+    assert p["_live_guardian_persist"]()
+    p2 = _persist_ns(tmp_path)                                              # Fly restart
+    p2["_live_guardian_restore"](NOW + 60)
+    latest = p2["_LIVE_GUARDIAN_STATE"].get("liq_latest_l")
+    assert latest and ltg.arm_gate_block("gb1", None, None, latest, None) == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, None, latest, "PASS:stop-amend-1") is None
+    # a later live position with a safe real L replaces the record (the latest L decides)
+    ns, st2 = _rec_ns({"tile": "gs1", "trade_id": "t2", "positions": [dict(_L27_ROW, stop_liq_distance_bp=30.0)]},
+                      {"liq_latest_l": latest})
+    ns["_live_guardian_record_protection"](NOW + 90, [])
+    assert st2["liq_latest_l"]["trade_id"] == "t2" and not st2["liq_latest_l"]["too_close"]
+    # G5: a non-Bitfinex L is never recorded
+    ns, st3 = _rec_ns({"tile": "gs1", "trade_id": "t3", "positions": [dict(_L27_ROW, liq_source=None)]})
+    ns["_live_guardian_record_protection"](NOW, [])
+    assert "liq_latest_l" not in st3
+
+
+def test_rk_l27_g3_flatten_disarms_all():
+    r = ltg.open_position_protection(mirror([dict(LONG, liq_price=100000.0 * (1 - 10 / 1e4))], [STOP_L]), book(), NOW)
+    assert any(c == ltg.LIQ_CHECK_FLATTEN for c, _ in codes(r))
+    assert ltg.LIQ_CHECK_FLATTEN in g.RED_CODES                             # RED => reduce-only flatten + disarm ALL
+    d, _ = g.split_violations([{"code": ltg.LIQ_CHECK_FLATTEN, "tile": "gs1"}])
+    assert d and d[0]["code"] == ltg.LIQ_CHECK_FLATTEN
+
+
+def test_rk_l27_all_three_call_sites_use_the_one_helper():
+    import inspect
+    assert "liq_too_close(" in inspect.getsource(ltg.g4_outcome)                   # E5/G4
+    assert "liq_too_close(" in inspect.getsource(ltg.open_position_protection)     # G3
+    assert "liq_too_close(" in inspect.getsource(ltg.l27_arm_block)                # arm gate
+    assert "l27_arm_block(" in inspect.getsource(ltg.arm_gate_block)
+    src = pathlib.Path(ltg.__file__).read_text()
+    assert src.count("<= LIQ_CHECK_MAX_BP") == 1                                   # only inside liq_too_close
+    a = _SRC.index("def _live_guardian_tile_arm_block")
+    assert "liq_latest_l" in _SRC[a:_SRC.index("\ndef ", a + 10)]
+    assert '"liq_latest_l")' in _SRC[_SRC.index("_LIVE_GUARDIAN_PERSIST_KEYS ="):_SRC.index("_LIVE_GUARDIAN_PERSIST_FILE =")]
