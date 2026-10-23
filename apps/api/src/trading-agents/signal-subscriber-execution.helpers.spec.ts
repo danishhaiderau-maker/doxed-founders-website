@@ -3,6 +3,9 @@ import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
+// #842 Tasks 2-3 specs, wired here so `npm test --workspace=@dcf/api` and CI unit-tests run them.
+import './exit-post-close-reconcile.spec';
+import './rk1-live-exit-stamps.spec';
 import {
   executorWakeAuthorized,
   parseExecutorWakeRequest,
