@@ -6,6 +6,7 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
+import { liveRowCountability } from './live-row-countability';
 
 type IntentEnvelope = {
   direction?: 'LONG' | 'SHORT';
@@ -364,6 +365,8 @@ export function mapSubscriberExchangeLiveBook(input: {
           ? 'Exchange-linked participant lifecycle'
           : 'Neon lifecycle; exchange linkage incomplete',
         negativeEvidence: row.negativeEvidence ?? null,
+        // HM B4: forced closes carry non_countable on the website live row.
+        ...liveRowCountability(row.cycle.showcaseExitReason, row.terminalReason),
       });
     }
   }
@@ -422,6 +425,9 @@ export function mapSubscriberExchangeLiveBook(input: {
   trades.length = 0;
   trades.push(...mergedParticipantRows, ...unmatchedLedger);
 
+  for (const t of trades) {
+    if (t.nonCountable === undefined) Object.assign(t, liveRowCountability(t.exitReason));
+  }
   trades.sort((a, b) => {
     const ta = parseMelbourneTimestampMs(a.exchangeExitTime ?? a.time) ?? 0;
     const tb = parseMelbourneTimestampMs(b.exchangeExitTime ?? b.time) ?? 0;

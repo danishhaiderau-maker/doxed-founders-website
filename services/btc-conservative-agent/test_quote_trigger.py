@@ -243,7 +243,10 @@ def test_bot_wiring():
     src = open(os.path.join(HERE, "bot.py"), encoding="utf-8").read()
     tree = ast.parse(src)
     fns = {n.name: ast.get_source_segment(src, n) for n in tree.body if isinstance(n, ast.FunctionDef)}
-    assert "_realism_family_exit(" in fns["_apply_position_exits"]
-    assert "_paper_entry_quote_gate(" in fns["_paper_lane_entry_result"]
+    # RK step 2: _apply_position_exits dispatches combo lanes to _apply_combo_lane_exit (same family exit path).
+    assert "_apply_combo_lane_exit(" in fns["_apply_position_exits"]
+    assert "_realism_family_exit(" in fns["_apply_combo_lane_exit"]
+    assert "_paper_lane_entry_core(" in fns["_paper_lane_entry_result"]
+    assert "_paper_entry_quote_gate(" in fns["_paper_lane_entry_core"]
     assert "_stamp_trigger_basis(" in fns["_apply_family_tile_exit"]
     assert "trigger_price_source" in fns["_realism_family_exit"]
