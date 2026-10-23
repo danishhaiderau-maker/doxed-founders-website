@@ -24,6 +24,8 @@ import numpy as np
 from research_v3_book_walk import (
     BASIS_BOOK_WALK,
     R17_UNPROVEN,
+    STOP_BASIS_UNVERIFIED,
+    STOP_TRIGGER_LABEL,
     STOP_UNOBSERVABLE_REASON,
     PreparedBookWalkArrays,
     coverage_summary,
@@ -1360,6 +1362,9 @@ def _code(table: dict[Any, int], names: list[Any], value: Any) -> int:
     return code
 
 
+_BOOK_WALK_STOP_EXITS = frozenset({"PHYSICAL_HARD_STOP", "ATR_STOP", "THESIS_FAST_CUT"})
+
+
 class _ProtectionCellStore:
     """Columnar (policy, episode) outcomes: one compact cell per kept sample.
 
@@ -1472,6 +1477,9 @@ class _ProtectionCellStore:
             "underwater_observation_ratio": underwater,
             "replay_path_basis": basis,
         }
+        if basis == BASIS_BOOK_WALK and outcome["exit_reason"] in _BOOK_WALK_STOP_EXITS:
+            outcome["stop_trigger_label"] = STOP_TRIGGER_LABEL  # HM #847 N4
+            outcome["stop_basis_flag"] = STOP_BASIS_UNVERIFIED
         outcome["cost_evidence"] = build_measured_execution_cost_receipt(
             base.get("authoritative_cost_source") or {},
             source_receipt_ids=base.get("authoritative_cost_source_ids") or [],

@@ -185,3 +185,18 @@ def test_coverage_summary_stamps_the_tape_symbol():
     # HM #847 N3
     out = coverage_summary({BASIS_BOOK_WALK: 1}, {BASIS_BOOK_WALK: 1}, {}, {"book_first_s": 1.0}, horizon_sec=7200)
     assert out["symbol"] == "tBTCF0:USTF0"
+
+
+def test_stop_exit_cells_carry_the_last_trade_doc_inferred_label():
+    # HM #847 N4: a stop exit (trade prints live, so observable) is labelled; a non-stop exit is not.
+    def row(s):
+        return book_row(s, ENTRY - 2.0 if s >= 1100 else ENTRY, (ENTRY - 2.0 if s >= 1100 else ENTRY) + 0.05)
+
+    trades = [trade_row(s, ENTRY - 2.0 if s >= 1100 else ENTRY + 0.05) for s in range(990, 1700)]
+    tape = _tape([row(s) for s in range(990, 1700)], trades)
+    path = PreparedBookWalkArrays(tape.window(998, 1600), direction="LONG", entry_price=ENTRY, leverage=1.0,
+                                  fill_ts=1000.0, horizon_sec=600, qty=MARGIN / ENTRY)
+    plan = ReplayPlan({"loss_protection": {"hard_stop_margin_pct": 1.0}, "profit_protection": {"mode": "NONE"}})
+    cell = replay_cell(path, plan, atr_pct_at_fill=ATR, leverage=1.0, margin_usd=MARGIN)
+    assert (cell["status"], cell["exit_reason"]) == ("COMPLETE", "PHYSICAL_HARD_STOP")
+    assert cell["stop_trigger_label"] == "LAST_TRADE_DOC_INFERRED"

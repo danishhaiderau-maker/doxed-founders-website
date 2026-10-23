@@ -429,7 +429,7 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
                 "underwater_observation_ratio": None}
     terminal_mfe = float(path.mfe[exit_index])
     gross_usd = margin_usd * realized / 100.0
-    return {
+    cell = {
         "status": "COMPLETE",
         "exit_reason": exit_reason,
         "net_pnl_usd": round(gross_usd - 0.0 - 0.0, 8),
@@ -437,6 +437,18 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
         "profit_giveback_pct": round(max(0.0, terminal_mfe - exit_margin), 8),
         "underwater_observation_ratio": round(int(path.underwater[exit_index]) / n, 8),
     }
+    label = stop_trigger_label(path, exit_reason)
+    if label:
+        cell["stop_trigger_label"] = label
+    return cell
+
+
+def stop_trigger_label(path: Any, exit_reason: str | None) -> str | None:
+    """HM #847 N4: every book-walk stop exit says its trigger basis is the doc-inferred last-trade rule."""
+    if exit_reason not in _STOP_EXIT_REASONS or getattr(path, "gap_neg_mae", None) is None:
+        return None
+    from research_v3_book_walk import STOP_TRIGGER_LABEL
+    return STOP_TRIGGER_LABEL
 
 
 def replay_protected_policy_arrays(
