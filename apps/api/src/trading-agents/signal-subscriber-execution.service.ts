@@ -3840,11 +3840,18 @@ export async function countLiveMutexOthers(
 }
 /** HM1: bound for a crashed fence holder; the route refreshes it before each exchange step. */
 export const LIVE_ENTRY_FENCE_TTL_MS = 120_000;
+/**
+ * B4 (#852 R3, real Postgres): the fence waits on the account live-mutex behind every queued claim. Prisma's default 5 s
+ * interactive-transaction timeout expired under a 20-claim burst on a Neon branch (fence lost -> unfenced flatten, ok=false),
+ * so the fence transaction gets an explicit, longer bound. Still bounded: a stuck lock fails the fence (the route still
+ * flattens and reports fenced=false).
+ */
+export const LIVE_ENTRY_FENCE_TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 } as const;
 export function liveEntryFenceActiveWhere(userId: string, nowMs = Date.now()) {
   return { userId, expiresAt: { gt: new Date(nowMs) } };
 }
 type LiveEntryFenceDb = {
-  $transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
+  $transaction: <T>(fn: (tx: any) => Promise<T>, opts?: { maxWait?: number; timeout?: number }) => Promise<T>;
   liveEntryFence: {
     update: (a: any) => Promise<unknown>;
     deleteMany: (a: any) => Promise<unknown>;
@@ -3866,7 +3873,7 @@ export async function acquireLiveEntryFence(
     await tx.liveEntryFence.create({
       data: { id: fenceId, userId, reason: reason.slice(0, 200), acquiredAt: new Date(nowMs), expiresAt: new Date(nowMs + LIVE_ENTRY_FENCE_TTL_MS) },
     });
-  });
+  }, LIVE_ENTRY_FENCE_TX_OPTIONS);
 }
 export async function refreshLiveEntryFence(db: LiveEntryFenceDb, fenceId: string, nowMs = Date.now()): Promise<void> {
   await db.liveEntryFence.update({ where: { id: fenceId }, data: { expiresAt: new Date(nowMs + LIVE_ENTRY_FENCE_TTL_MS) } });

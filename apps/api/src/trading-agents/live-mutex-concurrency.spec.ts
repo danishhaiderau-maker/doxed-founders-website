@@ -7,6 +7,7 @@ import {
   acquireLiveEntryFence,
   countLiveMutexOthers,
   LIVE_ENTRY_FENCE_TTL_MS,
+  LIVE_ENTRY_FENCE_TX_OPTIONS,
   LIVE_MUTEX_INTENT_WINDOW_MS,
   releaseLiveEntryFence,
   liveMutexWhere,
@@ -196,4 +197,20 @@ test('HM1 fence: the route holds it for its whole run and releases it in finally
   const ctl = readFileSync(resolve(__dirname, 'trading-agents.controller.ts'), 'utf8');
   assert.equal((ctl.match(/forceFlatDisarmAccount\(uid, slug, reason\)/g) ?? []).length, 2);
   assert.equal((ctl.match(/&& flat\.fenced/g) ?? []).length, 2);
+});
+
+test('B4 R3 (real Postgres finding): the fence transaction carries an explicit bound above Prisma\'s 5 s default', async () => {
+  // A 20-claim burst on a Neon branch held the account lock > 5 s; with the default the fence txn expired (unfenced flatten).
+  assert.ok(LIVE_ENTRY_FENCE_TX_OPTIONS.timeout >= 15_000 && LIVE_ENTRY_FENCE_TX_OPTIONS.timeout <= 30_000);
+  assert.ok(LIVE_ENTRY_FENCE_TX_OPTIONS.maxWait >= 5_000);
+  let seen: unknown = null;
+  const db = {
+    $transaction: async (fn: (tx: any) => Promise<unknown>, opts?: unknown) => {
+      seen = opts;
+      return fn({ $executeRawUnsafe: async () => 0, liveEntryFence: { create: async () => ({}) } });
+    },
+    liveEntryFence: { update: async () => ({}), deleteMany: async () => ({}) },
+  };
+  await acquireLiveEntryFence(db as any, 'u1', 'f1', 'r');
+  assert.deepEqual(seen, LIVE_ENTRY_FENCE_TX_OPTIONS);
 });
