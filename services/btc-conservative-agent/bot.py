@@ -33249,7 +33249,9 @@ def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
     """HM-BATCH2 / R3 (no ticker anywhere): record the book top at close on every closed row as COMPARISON columns only
     (never pricing): exit_book_top_bid / exit_book_top_ask / exit_book_top_s from the latest complete bfx_book_10l_1s row
     (paper_fill.book10l_at, the shared pricer's rows). The old exit_bid / exit_ask came from the WS-ticker microstructure
-    tape ring and are no longer written. A row older than max_age_sec is not stamped (exit_book_top_missing). Never raises."""
+    tape ring and are no longer written. A row older than max_age_sec is not stamped (exit_book_top_missing). Never raises.
+    HM R2 N-c: kept (not dead) - read by monitor_checks (exit spread check), data_gaps (exit_bid/ask columns) and
+    monitor_tiles (row view). Comparison only; no pricer or trigger reads these columns."""
     try:
         import paper_fill as _pf
         import quote_trigger as _qt
