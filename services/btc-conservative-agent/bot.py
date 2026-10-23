@@ -71,7 +71,7 @@ from raw_generation_cleanup_owner import RawGenerationCleanupOwner
 from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
-from relay_event_outbox import RelayEventOutbox
+from relay_event_outbox import RelayEventOutbox, fly_send_stamp_headers as _fly_send_stamp_headers
 import relay_stack_mode as _relay_stack_mode
 import live_copy_control as _live_copy
 import thread_health as _thread_health
@@ -7917,7 +7917,9 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     original = float(source_pos.get("policy_original_qty") or source_pos.get("qty") or 0)
     pend = source_pos.get("_tp1_pending")
     if not (isinstance(pend, dict) and pend.get("key") == key):
-        delay_s, delay_source = _disloc_delay(lane, "exit")
+        # RK (2): the gate is this leg's send code point; own trigger -> send measured per row, pooled EXIT_RO_MKT
+        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+                                              own_signal_to_send_s=_paper_own_s2s_exit(now, time.time()))
         marker = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s), "delay_s": float(delay_s),
                   "delay_source": delay_source, "close_fraction": float(close_fraction), "attempts": 0}
         if action is not None:
@@ -8005,9 +8007,9 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     import tile_fill as _tf
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
-    # HM 01:43 item 4: now - t0 is pricing lag, not a measured exit send -> own signal->send unmeasured (fail closed)
+    # RK (2): own trigger -> send code point (exit_sent_ts), never now - t0 (pricing lag); missing -> fail closed
     delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
-                                          own_signal_to_send_s=None)
+                                          own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
     _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
     res = _paper_stamp_pool(_tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -8109,9 +8111,10 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
         price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
     else:
-        # HM 01:43 item 4: now - t0 is pricing lag (the thread waits for the book row), not a measured exit send
+        # RK (2): own trigger -> send code point (exit_sent_ts, stamped by close_position before pricing); never
+        # now - t0 (pricing lag: the thread waits for the book row). Pooled send->ack by order type (EXIT_RO_MKT).
         delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
-                                              own_signal_to_send_s=None)
+                                              own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
         _paper_note_exit_trigger(pos, t0)
         price_fn = lambda: _paper_stamp_pool(  # noqa: E731
             _tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -8279,7 +8282,9 @@ def _book_receive_row_fields(side: str, sim) -> dict:
     sim = sim if isinstance(sim, dict) else {}
     return {f"{side}_book_receive_ts": sim.get("book_receive_ts"),
             f"{side}_book_receive_mono": sim.get("book_receive_mono"),
-            f"{side}_book_receive_ts_source": sim.get("book_receive_ts_source")}
+            f"{side}_book_receive_ts_source": sim.get("book_receive_ts_source"),
+            # HM 02:55 nit: the price age measured from the RECEIPT (fill time - receive_ts, ms)
+            f"{side}_book_receive_age_ms": sim.get("book_receive_age_ms")}
 
 
 def _delay_leg_unverified(sim) -> bool:
@@ -8552,14 +8557,22 @@ def _legacy_exit_book_fill(direction: str, fill_ts: float, trigger: float, pos: 
     wait = 0.0 if (getattr(_PAPER_EXIT_TLS, "no_wait", False) or dead) else LEGACY_EXIT_BOOK_WAIT_S
     deadline = time.time() + wait
     while True:
-        row = _pf.first_row_at_or_after(_pf.book10l_at, fill_ts, horizon_s=max(1.0, LEGACY_EXIT_BOOK_WAIT_S + 2))
+        # RK 24 Oct (3): the FIRST row received at/after the fill time (shared helper); a row that cannot be proven
+        # first (or has no measured receive_ts) is still priced but UNVERIFIED via the shared first_after_proof.
+        _hz = max(1.0, LEGACY_EXIT_BOOK_WAIT_S + 2)
+        row = (_pf.first_row_received_at_or_after(_pf.book10l_at, fill_ts, horizon_s=_hz)
+               or _pf.first_row_at_or_after(_pf.book10l_at, fill_ts, horizon_s=_hz))
         px = _qt.exec_px(direction, "exit", row) if row else None
         if px:
             age = round(float(row["s"]) + 1.0 - float(fill_ts), 3)
+            _rx = row.get("receive_ts")
+            _fa = _pf.first_after_proof(row, fill_ts, max(float(fill_ts), float(_rx or 0)))
             return float(px), "exit_book_row_at_or_after_fill", {
                 "exit_pricing_basis": "BOOK_ROW_AT_OR_AFTER_FILL", "exit_book_s": row.get("s"),
                 "exit_price_age_s": max(0.0, age), "exit_stale_book_at_fill": True,
-                "exit_evidence_status": "COMPLETE"}
+                "exit_book_receive_ts": _rx, "exit_first_after_reason": _fa["first_after_reason"],
+                "exit_evidence_status": "COMPLETE" if _fa["first_after_ok"] else "UNVERIFIED",
+                **({} if _fa["first_after_ok"] else {"exit_unverified_reason": _fa["first_after_reason"]})}
         if time.time() >= deadline:
             break
         time.sleep(0.25)
@@ -11396,6 +11409,21 @@ def _commit_marketable_relay_payload(payload: dict) -> bool:
         return True
 
 
+def _relay_close_exit_stamps(pos, exit_reason) -> dict:
+    """RK (1) 24 Oct: the exit trigger instant (epoch s, as measured on this row) and its order class for the signed
+    POSITION_CLOSED body. Additive only: an unmeasured trigger is omitted, never invented."""
+    import order_model as _om
+    pos = pos if isinstance(pos, dict) else {}
+    out = {"exit_order_class": str(pos.get("exit_order_class") or _om.exit_order_class(exit_reason))}
+    try:
+        trig = float(pos.get("exit_trigger_ts") or 0)
+    except (TypeError, ValueError):
+        trig = 0.0
+    if trig > 0 and math.isfinite(trig):
+        out["exit_trigger_ts"] = round(trig, 6)
+    return out
+
+
 def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     """POST one already-durable event and remove it only on an exact DB ACK."""
     if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
@@ -11422,6 +11450,9 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
         headers["X-Bot-Control-Secret"] = legacy_secret
     started = time.perf_counter()
     send_wall = time.time()  # HM 01:43 blocker 1: Fly send stamp (wall, Fly chrony clock) of THIS POST
+    # RK (1): the same stamp travels to Railway in HMAC-signed headers (not the body: retries stay hash-identical).
+    headers.update(_fly_send_stamp_headers(
+        webhook_secret, str(payload.get("event_id") or event_id), send_wall))
     try:
         response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
         response.raise_for_status()
@@ -33170,6 +33201,9 @@ def close_position(pos: dict, exit_reason: str):
             "exit_reason": exit_reason, "direction": pos.get("dir"),
             "exit_price": price,
             "research_lane": pos.get("research_lane") or (master or {}).get("research_lane"),
+            # RK (1): measured exit trigger + order class on the signed POSITION_CLOSED (static, so retries stay
+            # hash-identical); absent when unmeasured -> the live row stays non-countable.
+            **_relay_close_exit_stamps(pos, exit_reason),
         },
         target_mutator=target_mutator, live_mutator=live_mutator,
         canonical_lock=position_close_lock,
@@ -34065,18 +34099,15 @@ def _cross_lane_pool():
 
 
 def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
-    """Measured live delay per lane/leg from the F1 live-ack pool (DelaySampler): n<10 default 1.5 s (UNVERIFIED),
-    then MAX until n>=20, then q0.90.  RK A: a lane with NO live acks of its own on this leg (paper-only: no per-tile
-    list) and a pool key (from its order model) uses the cross-lane pool instead: own signal->send + pooled send->ack,
-    fail closed below n=10 per key."""
-    sampler = _paper_delay_sampler()
-    if pool_key is None and leg == "exit" and own_signal_to_send_s is None:
-        # the one bare exit caller is _tp1_gate (R4 byte-pinned): a bot-sent reduce-only market exit. HM 01:43 item 4:
-        # its own signal -> Fly intent is NOT measured for a paper row (there is no paper send; 0.0 was assumed), so it
-        # stays None -> the pooled label carries "default_own_s2s_missing" -> UNVERIFIED -> non-countable.
-        pool_key = _live_ack_pool.KEY_EXIT_RO_MKT
-    if pool_key is None or sampler._xs(lane, leg):
-        return sampler.delay(lane, leg)
+    """The paper delay for one lane/leg: the row's own signal->send + the pooled send->ack/fill of the shared
+    live_ack_pool (one definition: per order-type key, skew/boot/leg checks, n<10 fail closed, MAX at 10-19, q0.90 at
+    n>=20).  HM 02:55 N1: the old per-lane B1 DelaySampler is stamps-only and never prices a row (it is not split by
+    order type, has no skew/boot/leg checks or per-row s2s, and its exit sample was live ack - paper exit trigger);
+    a leg with no pool key fails closed (default delay, UNVERIFIED -> non-countable)."""
+    import paper_fill as _pf
+    _paper_delay_sampler()  # restores the per-epoch pool file (the cross-lane pool is persisted with it)
+    if pool_key is None:
+        return _pf.DEFAULT_DELAY_S, "default_until_n10"
     pool = _cross_lane_pool()
     try:
         if pool.admit_pending(time.time(), _live_ack_pool.boot_log_path()):
@@ -34115,7 +34146,7 @@ def _fly_exit_send_record(trade_id: str):
                 "fly_send_rtt_s": row.get("fly_send_rtt_s"),
                 "railway_received_at_ts": _iso_or_unix(row.get("platform_received_at")),
                 "attempts": row.get("fly_attempts"),
-                "exit_signal_at_ts": row.get("exit_signal_at_unix")}  # None until POSITION_CLOSED carries it
+                "exit_signal_at_ts": row.get("exit_signal_at_unix")}  # RK (1): POSITION_CLOSED exit_trigger_ts
     return None
 
 
@@ -34126,6 +34157,18 @@ def _paper_own_s2s_entry(order: dict):
     except (TypeError, ValueError):
         return None
     return round(sent - sig, 6) if sig > 0 and sent >= sig else None
+
+
+def _paper_own_s2s_exit(t0, sent_ts):
+    """RK (2): a paper BOT_SENT exit's OWN trigger -> send, measured per row: the exit trigger (exit_trigger_ts) to
+    the close path's send code point (close_position stamps exit_sent_ts before pricing, the same point for live-
+    relayed and paper rows; _tp1_gate's marker for a partial leg). None when either is missing or the send precedes
+    the trigger (-> the pooled label carries default_own_s2s_missing -> UNVERIFIED -> non-countable)."""
+    try:
+        a, b = float(t0 or 0), float(sent_ts or 0)
+    except (TypeError, ValueError):
+        return None
+    return round(b - a, 6) if a > 0 and b >= a else None
 
 
 def _paper_entry_pool_key(order: dict, lane: str):

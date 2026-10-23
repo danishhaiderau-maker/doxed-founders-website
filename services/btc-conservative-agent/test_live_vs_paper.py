@@ -158,9 +158,14 @@ def test_hm3_live_row_per_leg_check_fails_closed_on_a_missing_or_reversed_leg():
             "LIVE_LEG_MISSING:exit.relay_receive"} <= set(r["non_countable_reasons"])
     r = lv.pair_row("c9", dict(base, railway_received_at_ts=9.8), twin, fly_exit_send=_EXIT_SEND)  # receive after ack
     assert "LIVE_LEG_ORDER:entry.relay_receive->ack_fill" in r["non_countable_reasons"]
-    # an exchange-resident stop exit has no Fly send leg; an open row has no exit legs
+    # RK (1) 24 Oct: an exchange-resident stop exit has no Fly send leg; its legs are trade print -> Bitfinex fill
+    # record, both required (the print is not carried on Railway today -> non-countable). An open row has no exit legs.
     r = lv.pair_row("c9", dict(base, exit_order_class="EXCHANGE_RESIDENT"), twin)
-    assert r["live_non_countable"] is False and "exit" not in r["live_legs"]
+    assert r["live_non_countable"] is True and "exit" not in r["live_legs"]
+    assert "LIVE_LEG_MISSING:exit_resident.signal" in r["non_countable_reasons"]
+    r = lv.pair_row("c9", dict(base, exit_order_class="EXCHANGE_RESIDENT", exit_trigger_print_at_ts=49.95,
+                               exit_fill_record_at_ts=50.2), twin)
+    assert r["live_non_countable"] is False and list(r["live_legs"]["exit_resident"]) == ["signal->ack_fill"]
     opened = {k: v for k, v in base.items() if k not in ("closed", "exit_ack_at_ts")}
     assert lap.live_legs(opened, None, closed=False)["non_countable"] is False
 

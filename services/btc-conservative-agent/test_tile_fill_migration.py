@@ -212,7 +212,7 @@ def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None
                     "_paper_lane_entry_result", "_paper_lane_entry_core", "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close",
-                    "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", "_paper_entry_pool_key", "_paper_own_s2s_entry", *extra_names],
+                    "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", "_paper_entry_pool_key", "_paper_own_s2s_entry", "_paper_own_s2s_exit", *extra_names],
                    trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg, **kw: delay,
                    _live_ack_pool=live_ack_pool,
                    _paper_stamp_pool=lambda res, lane, leg: res, _paper_note_exit_trigger=lambda pos, t0: None,
@@ -1023,3 +1023,32 @@ def test_realism_v2_maker_rest_queue_reset_on_reprice_and_drop(monkeypatch):
     assert res["entry_order_model"] == "MAKER_REST" and res["entry_rest_reprices"] == 1
     empty = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "_entry_rest": {"fills": []}}
     assert ns["_paper_entry_rest_drop"](empty, "X") is False  # nothing filled -> the caller cancels (NO_FILL)
+
+
+def test_rk2_paper_bot_sent_exit_own_s2s_is_trigger_to_send_code_point(monkeypatch):
+    """RK (2): every paper BOT_SENT exit prices with its OWN trigger -> send code point (close_position's exit_sent_ts;
+    the _tp1_gate marker for a partial leg) + the pooled EXIT_RO_MKT send->ack; a resident stop stays at delay 0 and
+    never asks the pool; a missing send stamp passes None (fail closed)."""
+    _use_book(monkeypatch)
+    seen = []
+    clk = _Clock(1000.25)
+    ns = _lane_ns(clk)
+    ns["_disloc_delay"] = lambda lane, leg, **kw: (seen.append((leg, kw)) or (0.5, "default_until_n10"))
+    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "qty": 1.0}
+    ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5)
+    assert seen[-1] == ("exit", {"pool_key": "EXIT_RO_MKT", "own_signal_to_send_s": 0.25})
+    assert ns["_paper_own_s2s_exit"](1000.0, 1000.4) == pytest.approx(0.4)
+    assert ns["_paper_own_s2s_exit"](1000.0, None) is None and ns["_paper_own_s2s_exit"](1000.0, 999.0) is None
+    assert ns["_paper_own_s2s_exit"](None, 1000.0) is None
+    ns["_PAPER_EXIT_TLS"].no_wait = True
+    try:
+        pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "dir": "LONG", "qty": 1.0, "entry": 100.0,
+               "exit_trigger_ts": 1000.0, "exit_sent_ts": 1000.3}
+        ns["_paper_lane_exit"](pos, "ATR_TP")
+        assert seen[-1][1]["pool_key"] == "EXIT_RO_MKT" and seen[-1][1]["own_signal_to_send_s"] == pytest.approx(0.3)
+        assert "0.0, \"EXCHANGE_RESIDENT_NO_DELAY\"" in _func_src((ROOT / "bot.py").read_text(encoding="utf-8"), "_paper_lane_exit")
+        pos.pop("exit_sent_ts")
+        ns["_paper_lane_exit"](pos, "ATR_TP")
+        assert seen[-1][1]["own_signal_to_send_s"] is None
+    finally:
+        ns["_PAPER_EXIT_TLS"].no_wait = False

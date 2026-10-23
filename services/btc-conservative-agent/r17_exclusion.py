@@ -207,7 +207,8 @@ def book_receive_failures(row) -> list:
     for side, label in (("entry", "BOOK_RECEIVE_TS_MISSING"), ("exit", "EXIT_BOOK_RECEIVE_TS_MISSING")):
         rx, mono = _num(row.get(f"{side}_book_receive_ts")), _num(row.get(f"{side}_book_receive_mono"))
         if (_exact(row.get(f"{side}_book_receive_ts_source")) not in F.BOOK_RECEIVE_SOURCE_OK
-                or rx is None or rx <= 0 or mono is None or mono < 0):
+                or rx is None or rx <= 0 or mono is None or mono < 0
+                or not _nonneg(row.get(f"{side}_book_receive_age_ms"))):  # HM 02:55: age from receipt >= 0 (proof)
             out.append(label)
     return out
 

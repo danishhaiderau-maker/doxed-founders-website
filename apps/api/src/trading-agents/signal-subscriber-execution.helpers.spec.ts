@@ -6136,6 +6136,9 @@ test('reads a signed showcase close without another canonical-state fetch', () =
       exitReason: 'PROFIT_LOCK_LADDER',
       sourceEventAtMs: Date.parse('2026-08-10T18:46:47.476Z'),
       platformReceivedAtMs: Date.parse('2026-08-10T18:46:47.584Z'),
+      // RK (1): unmeasured exit stamps are null, never invented.
+      exitTriggerAtMs: null,
+      flySendStartedAtMs: null,
     },
   );
   assert.equal(

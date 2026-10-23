@@ -39,6 +39,17 @@ def _pool():
     return s
 
 
+def _cross_lane_pool():
+    """HM 02:55 N1: only the shared live_ack_pool prices a paper row. A REAL CrossLanePool holding 14 admitted
+    Fly intent->ack samples per order-type key (one account@relay ident): ENTRY_MKT_GTC and EXIT_RO_MKT."""
+    import live_ack_pool as lap
+    p = lap.CrossLanePool()
+    for i in range(14):
+        for key in (lap.KEY_ENTRY_MKT, lap.KEY_EXIT_RO_MKT):
+            p.add(key, "acct@relay", 0.9 + 0.02 * i, measured_ts=1.0 + i, trade_id=f"ack-{key}-{i}")
+    return p
+
+
 def _clean_book(monkeypatch, entry_ts):
     """Fresh 1 s book rows; the market is ~110 USD lower before the entry has settled (so a TP is in profit)."""
     def book(t):
@@ -56,6 +67,8 @@ def _pos(now, monkeypatch):
     _clean_book(monkeypatch, entry_ts)
     pool = _pool()
     monkeypatch.setattr(bot, "_paper_delay_sampler", lambda: pool)
+    xpool = _cross_lane_pool()
+    monkeypatch.setattr(bot, "_cross_lane_pool", lambda: xpool)
     d, _src = pool.delay(LANE, "entry")
     order = {"trade_id": f"rv2-r17-cp-{int(now * 1000)}", "research_lane": LANE, "dir": "LONG", "side": "buy",
              "signal_dir": "LONG", "qty": 0.01, "signal_created_ts": entry_ts - d, "created_ts": entry_ts - d}
@@ -120,7 +133,8 @@ def test_close_position_row_passes_r17_on_a_clean_book(monkeypatch, tmp_path, re
     # #845 @470e9cd3 HM R1: exact strings, no case folding
     assert row["exit_evidence_status"] == "COMPLETE" and row["evidence_status"] == "COMPLETE"
     assert row["trigger_price_source"] == "book" and row["stop_coverage"] == "STOP_COVERAGE_OK"
-    assert row["levels_crossed_unfired"] == [] and row["exit_priced_delay_source"].startswith("lane_")
+    assert row["levels_crossed_unfired"] == [] and row["exit_priced_delay_source"].startswith(
+        "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_")  # HM 02:55 N1 / RK (2): pooled by order type
     # HM (a) / R2: finite ages >= 0 from the exit pricer; exit_book_age_ms is the pricer's own book_age_ms
     assert isinstance(row["exit_price_age_s"], (int, float)) and math.isfinite(row["exit_price_age_s"])
     assert row["exit_price_age_s"] >= 0

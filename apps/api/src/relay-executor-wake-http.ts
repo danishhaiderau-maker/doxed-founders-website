@@ -72,6 +72,11 @@ export function parseExecutorWakeRequest(
       exitReason: close.exitReason.trim(),
       sourceEventAtMs: close.sourceEventAtMs,
       platformReceivedAtMs: close.platformReceivedAtMs,
+      // RK (1): optional measured stamps; malformed values are dropped (row stays non-countable), never rejected.
+      exitTriggerAtMs: typeof close.exitTriggerAtMs === 'number' && Number.isFinite(close.exitTriggerAtMs)
+        && close.exitTriggerAtMs > 0 ? close.exitTriggerAtMs : null,
+      flySendStartedAtMs: typeof close.flySendStartedAtMs === 'number' && Number.isFinite(close.flySendStartedAtMs)
+        && close.flySendStartedAtMs > 0 ? close.flySendStartedAtMs : null,
     };
   } else if (raw.signedClose != null) return null;
   let signedOpen: RelayExecutorWakeRequest['signedOpen'];

@@ -1813,6 +1813,9 @@ export function readSignedShowcaseClose(
   exitReason: string;
   sourceEventAtMs: number;
   platformReceivedAtMs: number;
+  /** RK (1): measured stamps when carried; null = not carried (the live row stays non-countable). */
+  exitTriggerAtMs: number | null;
+  flySendStartedAtMs: number | null;
 } | null {
   const intent = envelopeJson as {
       action?: string;
@@ -1827,6 +1830,8 @@ export function readSignedShowcaseClose(
         platform_received_at?: string;
         showcase_exit_price?: number;
         showcase_exit_reason?: string;
+        showcase_exit_trigger_ts?: number;
+        fly_send_started_at?: string;
       };
     } | null;
   const context = intent?.context;
@@ -1869,7 +1874,52 @@ export function readSignedShowcaseClose(
     exitReason,
     sourceEventAtMs,
     platformReceivedAtMs,
+    ...signedCloseExitStamps(context),
   };
+}
+
+/** RK (1): exit trigger (epoch s in the signed body) and Fly send (verified header) stamps, additive only. */
+export function signedCloseExitStamps(context: unknown): {
+  exitTriggerAtMs: number | null;
+  flySendStartedAtMs: number | null;
+} {
+  const ctx = (context && typeof context === 'object' ? context : {}) as Record<string, unknown>;
+  const trig = ctx.showcase_exit_trigger_ts;
+  const exitTriggerAtMs = typeof trig === 'number' && Number.isFinite(trig) && trig > 0 ? Math.round(trig * 1000) : null;
+  const send = Date.parse(String(ctx.fly_send_started_at ?? ''));
+  return { exitTriggerAtMs, flySendStartedAtMs: Number.isFinite(send) && send > 0 ? send : null };
+}
+
+/** RK (1): EXIT payload stamps for a Railway close sent on Fly's signed POSITION_CLOSED (shared helper). */
+export function railwayExitLegStamps(opts?: {
+  exitTriggerAtMs?: number;
+  flySendStartedAtMs?: number;
+  platformReceivedAtMs?: number;
+}): Record<string, string> {
+  const iso = (ms?: number) => (ms != null && Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null);
+  const out: Record<string, string> = { exit_order_class: 'BOT_SENT' };
+  const t = iso(opts?.exitTriggerAtMs);
+  const f = iso(opts?.flySendStartedAtMs);
+  const r = iso(opts?.platformReceivedAtMs);
+  if (t) out.exit_trigger_ts = t;
+  if (f) out.fly_send_started_at = f;
+  if (r) out.platform_received_at = r;
+  return out;
+}
+
+/**
+ * RK (1): EXIT payload stamps for an exchange-resident stop fill. There is no Fly-send leg: the trigger is the real
+ * trade print that crossed the stop and the fill is Bitfinex's own fill record. The trigger print is not carried
+ * on Railway today, so `exit_trigger_print_at` stays absent and the row is non-countable until it is (R17).
+ */
+export function residentExitLegStamps(fillRecordAtMs?: number | null, triggerPrintAtMs?: number | null): Record<string, string> {
+  const iso = (ms?: number | null) => (ms != null && Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null);
+  const out: Record<string, string> = { exit_order_class: 'EXCHANGE_RESIDENT' };
+  const f = iso(fillRecordAtMs);
+  const t = iso(triggerPrintAtMs);
+  if (f) out.exit_fill_record_at = f;
+  if (t) out.exit_trigger_print_at = t;
+  return out;
 }
 
 function mergeSignedShowcaseOrders(
@@ -2463,6 +2513,9 @@ export type RelayExecutorWakeRequest = {
     exitReason: string;
     sourceEventAtMs: number;
     platformReceivedAtMs: number;
+    /** RK (1): measured exit trigger / Fly send stamps (optional, additive). */
+    exitTriggerAtMs?: number | null;
+    flySendStartedAtMs?: number | null;
   };
   /** HMAC-verified source-fill evidence carried by a POSITION_OPENED wake. */
   signedOpen?: {
@@ -15130,6 +15183,7 @@ await this.notifications
       source: 'hire',
       event: 'PARTIAL_FILL_STOP_TRIGGERED',
       exit_reason: 'EXCHANGE_STOP',
+      ...residentExitLegStamps(null),
       qty_closed: partialQty,
       pnl_usd: 0,
       ...await this.authenticatedExchangeObservedTerminalProvenance(
@@ -16650,6 +16704,8 @@ await this.notifications
         showcaseExitReason,
         sourceEventAtMs: signedClose?.sourceEventAtMs,
         platformReceivedAtMs: signedClose?.platformReceivedAtMs,
+        exitTriggerAtMs: signedClose?.exitTriggerAtMs ?? undefined,
+        flySendStartedAtMs: signedClose?.flySendStartedAtMs ?? undefined,
         mirrorRelinked,
         trigger: mirrorTrigger,
         terminalAuthority,
@@ -17589,6 +17645,8 @@ await this.notifications
       showcaseExitReason?: string;
       sourceEventAtMs?: number;
       platformReceivedAtMs?: number;
+      exitTriggerAtMs?: number;
+      flySendStartedAtMs?: number;
       mirrorRelinked?: boolean;
       trigger?: string;
       terminalAuthority: TerminalCloseAuthority;
@@ -17624,6 +17682,8 @@ await this.notifications
       showcaseExitReason?: string;
       sourceEventAtMs?: number;
       platformReceivedAtMs?: number;
+      exitTriggerAtMs?: number;
+      flySendStartedAtMs?: number;
       mirrorRelinked?: boolean;
       trigger?: string;
       terminalAuthority: TerminalCloseAuthority;
@@ -17980,6 +18040,9 @@ await this.notifications
         terminal_close_request_id: terminalClaim.requestId,
         terminal_close_phase: 'CONFIRMED',
         terminal_close_claim_recovered: terminalClaim.recovered,
+        // RK (1): measured legs of this Fly-sent exit (trigger -> Fly send -> Railway receive -> ack/fill);
+        // absent stamps stay absent and the mapper marks the row non-countable.
+        ...railwayExitLegStamps(opts),
         close_submit_started_at: closeTarget.closeSubmitStartedAtMs != null
           ? new Date(closeTarget.closeSubmitStartedAtMs).toISOString()
           : undefined,
@@ -20661,6 +20724,8 @@ await this.notifications
       execution_profile: stableRelayExecutionProfile(),
       exit_price: exitPrice,
       exit_reason: exactStopExecution ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
+      // RK (1): exchange-resident stop: no send leg; fill = Bitfinex's own fill record (trigger print not carried).
+      ...(exactStopExecution ? residentExitLegStamps(stopExecution.firstExecutedAtMs) : {}),
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       pnl_source: exactStopExecution ? 'bitfinex_order_trades' : 'reconstructed',
@@ -21002,6 +21067,8 @@ await this.notifications
       venue: 'bitfinex',
       exit_price: exitPrice,
       exit_reason: 'EXCHANGE_STOP',
+      // RK (1): exchange-resident stop lot; no Bitfinex fill record on this path -> fails closed in the mapper.
+      ...residentExitLegStamps(null),
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       qty_closed: closeQty,

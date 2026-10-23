@@ -66,7 +66,7 @@ POOL_NAMES = ["_DISLOC_DELAYS", "PAPER_DELAY_POOL_FILE", "_PAPER_DELAY_POOL_LOCK
               "_paper_delay_sampler", "_paper_delay_pool_persist", "_paper_delay_pool_reset", "_disloc_delay",
               "_paper_delay_meta", "_DELAY_STAMP_KEYS", "_paper_stamp_pool", "_PAPER_EXIT_TRIGGERS",
               "PAPER_EXIT_TRIGGERS_KEY", "PAPER_EXIT_TRIGGERS_CAP", "_paper_exit_triggers_restore", "_paper_note_exit_trigger", "_paper_delay_observe_report",
-              "_CROSS_LANE_POOL", "_cross_lane_pool", "_iso_or_unix", "_fly_exit_send_record"]
+              "_CROSS_LANE_POOL", "_cross_lane_pool", "_iso_or_unix", "_fly_exit_send_record", "_paper_own_s2s_exit"]
 
 
 def _fresh(tmp, monkeypatch):

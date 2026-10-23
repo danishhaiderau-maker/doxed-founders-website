@@ -1335,6 +1335,8 @@ export class TradingAgentsService implements OnModuleInit {
         negativeEvidence: negativeEvent
           ? String(negativePayload?.event ?? negativePayload?.reason ?? negativeEvent.eventType)
           : null,
+        // RK (1): events feed the shared liveLegStamps leg check in the live-book mapper.
+        events: r.events,
         updatedAt: r.updatedAt,
         createdAt: r.createdAt,
         cycle: {

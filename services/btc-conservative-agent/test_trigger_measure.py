@@ -225,6 +225,9 @@ PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
     "first_row_at_or_after", "_paper_fill_core", "paper_fill",
     # HM C7: depth-short resident walk -> UNVERIFIED
     "DEPTH_SHORT_PARTIAL",
+    # RK 24 Oct (3): FIRST_AFTER = first row RECEIVED at/after trigger (+delay), receive_ts <= fill_ts, shared proof
+    "BOOK_FIRST_AFTER_NOT_FIRST", "BOOK_RECEIVE_BEFORE_TRIGGER", "FIRST_AFTER_PROBE_STEP_S", "_book10l_rows_between",
+    "_book_rows_near", "_rx", "first_after_proof", "first_row_received_at_or_after",
     # F1 delay pool (live acks, three legs, default until n10, MAX until n20, then q0.90)
     "DelaySampler", "DELAY_LEGS", "PRICED_DELAY_LEGS", "MIN_POOL_N", "QUANTILE_SWITCH_N", "POOL_SCHEMA",
     "UNVERIFIED_DELAY", "delay_stamp", "quantile_method_of", "quantile_nearest_rank",

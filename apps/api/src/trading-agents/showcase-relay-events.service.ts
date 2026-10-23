@@ -1,3 +1,4 @@
+import { verifyFlySendStamp } from './fly-send-stamp';
 import {
   LIVE_COPY_ENTRY_EVENTS,
   LiveCopyRejectRing,
@@ -28,6 +29,7 @@ import { BotBridgeService } from './bot-bridge.service';
 import { SignalCyclesService } from './signal-cycles.service';
 import {
   SignalSubscriberExecutionService,
+  signedCloseExitStamps,
   type RelayExecutorWakeRequest,
 } from './signal-subscriber-execution.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -91,6 +93,12 @@ export type ShowcaseRelayEventBody = {
   source_git_rev?: string | null;
   /** Internal receipt timestamp added only after HMAC verification. */
   platform_received_at?: string | null;
+  /** RK (1): measured exit trigger instant (epoch s) carried in the signed POSITION_CLOSED body. */
+  exit_trigger_ts?: number | null;
+  /** RK (1): BOT_SENT | EXCHANGE_RESIDENT, carried in the signed POSITION_CLOSED body. */
+  exit_order_class?: string | null;
+  /** RK (1): Fly send instant, internal only: set from the HMAC-verified X-Fly-Send-* headers. */
+  fly_send_started_at?: string | null;
   /** Option 1: Fly's signed live-copy approval (required for entry events). */
   live_copy_approval?: Record<string, unknown> | null;
   /** Option 1: which Fly outbox delivered this record. */
@@ -431,6 +439,19 @@ export function relayIntentEnvelope(
     ...(body?.event === 'POSITION_CLOSED' && body.exit_reason
       ? { showcase_exit_reason: body.exit_reason }
       : {}),
+    // RK (1): measured exit stamps on the shared Fly->relay path (additive; consumers fail closed without them).
+    ...(body?.event === 'POSITION_CLOSED'
+      && typeof body.exit_trigger_ts === 'number'
+      && Number.isFinite(body.exit_trigger_ts)
+      && body.exit_trigger_ts > 0
+      ? { showcase_exit_trigger_ts: body.exit_trigger_ts }
+      : {}),
+    ...(body?.event === 'POSITION_CLOSED' && body.exit_order_class
+      ? { showcase_exit_order_class: body.exit_order_class }
+      : {}),
+    ...(body?.event === 'POSITION_CLOSED' && body.fly_send_started_at
+      ? { fly_send_started_at: body.fly_send_started_at }
+      : {}),
     ...(body?.event === 'ORDER_EXPIRED' && body.source_created_at
       ? { source_created_at: body.source_created_at }
       : {}),
@@ -736,7 +757,12 @@ export class ShowcaseRelayEventsService {
   async ingest(
     slug: string,
     body: ShowcaseRelayEventBody,
-    context?: { rawBody?: Buffer | string; signatureHeader?: string },
+    context?: {
+      rawBody?: Buffer | string;
+      signatureHeader?: string;
+      flySendStartedAtHeader?: string;
+      flySendSignatureHeader?: string;
+    },
   ) {
     const ingestStartedAt = Date.now();
     if (slug !== 'conservative-btc') {
@@ -817,9 +843,26 @@ export class ShowcaseRelayEventsService {
     this.botBridge.invalidateCache();
 
     const event = body.event;
+    const receivedAtMs = Date.now();
+    // RK (1): the Fly send instant rides in HMAC-signed headers (not the body, which must stay hash-identical
+    // across retries). Kept only when verified; never trusted from the body.
+    const flySendStartedAt = executableSignedPayload
+      ? verifyFlySendStamp({
+          sentAtHeader: context?.flySendStartedAtHeader,
+          signatureHeader: context?.flySendSignatureHeader,
+          eventId: body.event_id,
+          eventTs: body.ts,
+          platformReceivedAtMs: receivedAtMs,
+          secret: this.config.get<string>('SHOWCASE_WEBHOOK_SECRET'),
+        })
+      : null;
     const persistBody: ShowcaseRelayEventBody = executableSignedPayload
-      ? { ...body, platform_received_at: new Date().toISOString() }
-      : { ...body, platform_received_at: undefined };
+      ? {
+          ...body,
+          platform_received_at: new Date(receivedAtMs).toISOString(),
+          fly_send_started_at: flySendStartedAt ?? undefined,
+        }
+      : { ...body, platform_received_at: undefined, fly_send_started_at: undefined };
     let intentCreated = false;
 
     // A verified v1 payload already contains authenticated direction, price,
@@ -916,6 +959,10 @@ export class ShowcaseRelayEventsService {
           exitReason: body.exit_reason.trim(),
           sourceEventAtMs: Date.parse(body.ts),
           platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
+          ...signedCloseExitStamps({
+            showcase_exit_trigger_ts: body.exit_trigger_ts,
+            fly_send_started_at: persistBody.fly_send_started_at,
+          }),
         }
       : undefined;
     const earlyNoCopyClose =
