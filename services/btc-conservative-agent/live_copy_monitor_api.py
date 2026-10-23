@@ -376,8 +376,16 @@ def live_vs_paper_route():
                     paper_signal_ids=[c for c, i in intents.items() if not lane or lane in str(i.get("lane") or "").upper()],
                     skip_reasons=ctx.get("live_skip_reasons") or {}, lane_filter=None if not lane else
                     (lambda ch, tw: _keep(ch, tw) if ch else True), limit=limit,
-                    exit_send_for=ctx.get("fly_exit_send"))
+                    exit_send_for=ctx.get("fly_exit_send"),
+                    # #849 RK 24 Oct: live funding from the Bitfinex funding ledger (read-only key; READ_KEY_MISSING ->
+                    # the closed live row is LIVE_FUNDING_UNVERIFIED). HM live-path review: this is the Fly monitor path.
+                    funding_readback_for=ctx.get("live_funding_readback") or _live_funding_reader())
     return _ok(out)
+
+
+def _live_funding_reader():
+    import live_funding_ledger as lfl
+    return lfl.DEFAULT_READER.begin()
 
 
 @blueprint.route("/api/monitor/live/gaps", methods=["GET"])

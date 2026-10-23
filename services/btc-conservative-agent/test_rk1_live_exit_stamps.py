@@ -80,8 +80,11 @@ def test_fly_chain_carries_exit_order_class_and_exit_stamps_into_the_leg_check()
     appr = [{"correlation_id": "c1", "signal_at_ts": 1.0, "created_at_ts": 1.1, "entry_allowed": True}]
     ch = next(iter(lcm.build_chains(appr, rep)["accounts"].values()))
     assert ch["exit_order_class"] == "EXCHANGE_RESIDENT" and ch["exit_fill_record_at_ts"] == 5.2
-    pc = lv.pair_countability(ch, None)
+    fund = {"funding_model": "LIVE_LEDGER_V1", "funding_status": "NO_CROSSING", "funding_verified": True,
+            "funding_ts_fallbacks": []}  # #849: a closed live row also needs a verified funding read-back
+    pc = lv.pair_countability(ch, None, live_funding=fund)
     assert pc["live_non_countable"] is False, pc
+    assert lv.pair_countability(ch, None)["live_non_countable_reason"] == "LIVE_FUNDING_UNVERIFIED:NO_READBACK"
     rep[1]["timeline"].pop("exit_trigger_print_at_ts")  # print not carried -> non-countable (R17)
     ch = next(iter(lcm.build_chains(appr, rep)["accounts"].values()))
     assert lv.pair_countability(ch, None)["live_non_countable"] is True

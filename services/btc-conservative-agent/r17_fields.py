@@ -30,7 +30,8 @@ MEASURED_DELAY_PATTERN = r"(?:lane|POOLED_LIVE_ACK_CROSS_LANE:(?:ENTRY_MKT_GTC|M
 TRIGGER_PRICE_SOURCE_OK = frozenset({"book"})
 EVIDENCE_OK = frozenset({"COMPLETE"})
 STOP_COVERAGE_OK = frozenset({"STOP_COVERAGE_OK"})
-FUNDING_MODEL_OK = frozenset({"SETTLEMENT_EXACT_V2"})  # HM #849 item 1: settlement-exact deriv-status funding only
+FUNDING_MODEL_OK = frozenset({"SETTLEMENT_EXACT_V2",  # HM #849 item 1: paper rows, settlement-exact deriv-status funding
+                              "LIVE_LEDGER_V1"})      # #849 RK 24 Oct: live rows, Bitfinex funding-ledger read-back
 FUNDING_STATUS_OK = frozenset({"PRICED", "NO_CROSSING"})
 BOOK_RECEIVE_SOURCE_OK = frozenset({"WS_FRAME"})  # RK/HM #851: measured WS receipt; INFERRED_BUCKET_LAG never counts
 
@@ -67,6 +68,36 @@ CONTRACT = {
     "funding_status": "PRICED | NO_CROSSING (UNVERIFIED_* -> FUNDING_UNVERIFIED; FUNDING_PRICER_ERROR -> FUNDING_PRICER_ERROR)",
     "funding_verified": "True (real bool or 'true'); False / missing fails FUNDING_UNVERIFIED (HM #849 item 1)",
     "funding_ts_fallbacks": "[] (real empty list): the window ends are the priced fill ts; any entry fails FUNDING_TS_FALLBACK",
+}
+
+# #849 RK ruling 24 Oct (PASS + 4 amendments): LIVE-row funding read-back (live_funding_ledger.verify). The four
+# gating fields above apply unchanged with funding_model LIVE_LEDGER_V1; the rest are proof / metric fields (not gates).
+LIVE_FUNDING_CONTRACT = {
+    "funding_model": "LIVE_LEDGER_V1",
+    "funding_status": "PRICED (every crossed settlement tied to exactly one category-29 ledger entry) | NO_CROSSING (no "
+                      "00/08/16 UTC settlement in (entry fill, exit fill] per tile_fill.settlements_crossed -> a countable 0); "
+                      "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
+                      "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING fail",
+    "funding_verified": "True only for PRICED / NO_CROSSING",
+    "funding_usd_raw": "COST-positive USD = -sum(ledger amounts used); 0.0 for NO_CROSSING; null when unverified",
+    "funding_ts_fallbacks": "[] unless the exit ts is not the Bitfinex exit fill record AND lies within 60 s of a settlement",
+    "funding_exit_ts_source": "exit_fill_record_at_ts (else the fallback stamp name)",
+    "funding_ts_crossed": "list of settlement epoch s in (entry fill, exit fill]",
+    "funding_ledger_ids": "Bitfinex ledger ids used (RK 4)",
+    "funding_ledger_mts": "their MTS (epoch s)",
+    "funding_ledger_amounts": "their raw amounts (received-positive, as Bitfinex books them)",
+    "funding_usd_by_settlement": "[{settlement_ts, ledger_id, ledger_mts, funding_usd}]",
+    "funding_settlement_status": "per crossed settlement: LEDGER | NO_ENTRY | UNTIED | AMBIGUOUS",
+    "funding_position_id": "the Bitfinex position id (positions/hist, unique match to the fills) or null",
+    "funding_readback_at_ts": "epoch s of the ledger read (RK 4); null when the read was deferred",
+    "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (read-only key)",
+    "funding_readback_error": "redacted code (READ_KEY_MISSING / HTTP_<n> / TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL / "
+                              "READ_DEFERRED) or null; never a key, signature or response body",
+    "funding_fee_anomaly": "True when the read returned a fee-like / non-funding row: flagged for HM, NEVER applied (R7); "
+                           "not a gate",
+    "funding_fee_anomaly_ledger_ids": "their ledger ids",
+    "funding_paper_usd": "the paper twin's settlement-exact funding (cost-positive) for the same signal",
+    "funding_live_minus_paper_usd": "funding_usd_raw - funding_paper_usd: realism metric only, NEVER an exclusion (RK 3)",
 }
 # Matching is EXACT: string values are compared after stripping surrounding spaces only (no case folding);
 # numbers must be finite and >= 0.
