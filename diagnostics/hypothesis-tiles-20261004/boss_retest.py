@@ -465,7 +465,7 @@ def main() -> int:
     ap.add_argument("--tiles", default="H11,CFM,H9,H10,ENTRY")
     a = ap.parse_args()
     mirror = Path(a.mirror)
-    es._TAPE = gg.load_tape(mirror, Path(a.tier_a))
+    es._TAPE = es.load_tape_or_blocked(mirror, Path(a.tier_a))
     out: dict[str, Any] = {
         "schema": "hypothesis_tiles_coordinator_retest_v1",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

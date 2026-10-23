@@ -50,7 +50,7 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     mirror = Path(a.mirror)
-    es._TAPE = gg.load_tape(mirror, Path(a.tier_a))
+    es._TAPE = es.load_tape_or_blocked(mirror, Path(a.tier_a))
     out = {"schema": "hypothesis_tiles_capped_paired_v1", "unit": "bp per eligible signal, test days, variant - time exit"}
     committed = es.ai_signals(mirror, es._TAPE, "AI_COMMITTED", fade=True)
     asia_eu = lambda s: s.session in ("ASIA", "EU")  # noqa: E731

@@ -186,10 +186,16 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("SHADOW_EXIT_BACKFILL_ONEDRIVE_FORBIDDEN")
     started = time.time()
     tape = None
+    tape_status = "SKIPPED" if args.skip_tape else "LOADED"
     if not args.skip_tape:
         from research.genome_grid_study import load_tape  # noqa: PLC0415
-        tape = load_tape(mirror, Path(args.tier_a))
+        from research.r3_quarantine import R3QuarantinedSource  # noqa: PLC0415
+        try:
+            tape = load_tape(mirror, Path(args.tier_a))
+        except R3QuarantinedSource as exc:  # HM #848 nit: BLOCKED (as --skip-tape), not a crash
+            tape_status = "BLOCKED_R3_QUARANTINE: " + str(exc)
     receipt: dict[str, Any] = {"schema": "shadow_exit_backfill_receipt_v1", "record_schema": sxp.SCHEMA,
+                               "tape_status": tape_status,
                                "mirror": str(mirror), "tier_a": args.tier_a, "inputs_read_only": True,
                                "tape_seconds": None if tape is None else int(len(tape.bid)),
                                "tape_range": None if tape is None else [tape.t0, tape.end]}
