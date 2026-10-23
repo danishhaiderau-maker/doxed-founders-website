@@ -62955,7 +62955,10 @@ def _wire_live_copy_monitor() -> None:
         app.register_blueprint(_lcm.blueprint)
         logger.info("[LIVE COPY] read-only /api/monitor/live/* routes wired")
         try:  # #849 HM (B)/(C): the one background owner of every funding ledger / permission read (GETs read its cache)
-            _lcm.start_live_funding_job()
+            # HM R4 F3: the job's chain feed is the in-memory approvals + journal rows ONLY (never the monitor context:
+            # no relay fly-view, no trade_lock, no transition writes). HM live-path review.
+            _lcm.start_live_funding_job(approvals_rows=lambda: _get_live_copy_approvals().rows(),
+                                        journal_rows=lambda: _get_live_copy_journal().rows())
         except Exception as exc:  # noqa: BLE001 - no job -> live rows stay PENDING_READBACK (non-countable)
             logger.warning(f"[LIVE COPY] funding read-back job not started: {type(exc).__name__}")
     except Exception as exc:  # noqa: BLE001

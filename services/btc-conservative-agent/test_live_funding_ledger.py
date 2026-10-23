@@ -1005,3 +1005,105 @@ def test_N3_ledger_balance_is_stamped_per_entry():
     assert out["funding_ledger_balances"] == [1234.5678]
     assert out["funding_usd_by_settlement"][0]["ledger_balance"] == 1234.5678
     assert out["funding_usd_by_settlement"][0]["ledger_amount"] == -0.025
+
+
+# ---- HM R4 F3: live-path isolation - the chain feed is the in-memory approvals + journal rows only -----------------
+import ast
+import os
+import threading
+
+import live_copy_control as lcc
+import live_copy_monitor_api as lcma
+
+_BOT_SRC = os.path.join(os.path.dirname(os.path.abspath(lfl.__file__)), "bot.py")
+
+
+def _feed_files(tmp_path):
+    ap = lcc.ApprovalLedger(path=tmp_path / "approvals.jsonl", clock=lambda: S + 500)
+    jr = lcc.ExecutionJournal(path=tmp_path / "reports.jsonl", clock=lambda: S + 500)
+    ap.append({"correlation_id": "c1", "trade_id": "c1", "event": "ORDER_PLACED", "entry_allowed": True,
+               "created_at_ts": S - 70, "signal_at_ts": S - 75})
+    jr.append({"report_id": "r1", "type": "ORDER_FILLED", "correlation_id": "c1", "account": "A",
+               "timeline": {"fill_at_ts": S - 60}, "fill": {"price": 100.0, "qty": 2.5, "side": "LONG"}})
+    jr.append({"report_id": "r2", "type": "POSITION_CLOSED", "correlation_id": "c1", "account": "A",
+               "timeline": {"exit_fill_record_at_ts": S + 60},
+               "close": {"price": 100.4, "ts": S + 60, "bitfinex_position_id": 5}})
+    jr.append({"report_id": "r3", "type": "POSITION_CLOSED", "correlation_id": "c2", "account": "A",
+               "timeline": {"fill_at_ts": S - 60, "exit_fill_record_at_ts": S + 60}, "close": {"price": 1.0}})
+    return ap, jr
+
+
+def _snap(tmp_path):
+    return {p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in tmp_path.iterdir() if p.suffix == ".jsonl"}
+
+
+def test_F3_feed_builds_chains_from_rows_only_never_the_monitor_context(tmp_path, monkeypatch):
+    ap, jr = _feed_files(tmp_path)
+    monkeypatch.setitem(lcma._CTX, "provider", lambda: (_ for _ in ()).throw(AssertionError("monitor context called")))
+    monkeypatch.setitem(lcma._FUNDING_FEED, "approvals", ap.rows)
+    monkeypatch.setitem(lcma._FUNDING_FEED, "reports", jr.rows)
+    before = _snap(tmp_path)
+    chains = {c["correlation_id"]: c for c in lcma._closed_live_chains()}
+    assert chains["c1"]["bitfinex_position_id"] == "5" and chains["c1"]["position_side"] == "LONG"
+    assert chains["c1"]["fill_at_ts"] == S - 60 and chains["c1"]["exit_fill_record_at_ts"] == S + 60
+    assert chains["c2"]["bitfinex_position_id"] is None and chains["c2"]["position_side"] is None   # never inferred
+    assert _snap(tmp_path) == before                                                                   # no writes
+    # the job: one tick reads the rows, spends its reads in its own thread, and writes nothing to the feed files
+    sent = []
+    job = _job(post=_fake(sent=sent), get=lambda path, params: [])   # pin-proposal rate read (owner thread only)
+    job.chains_fn = lcma._closed_live_chains
+    job.run_once()
+    assert _snap(tmp_path) == before
+    out = job.lookup(chains["c1"])
+    assert out["funding_position_id"] == 5 and out["funding_position_id_source"] == "chain.bitfinex_position_id"
+    assert job.lookup(chains["c2"])["funding_status"] == "UNVERIFIED_POSITION_ID_MISSING"
+
+
+def test_F3_no_chain_polling_while_the_key_gate_is_closed():
+    calls, sent = [], []
+    job = _job(post=_fake(sent=sent), creds_status_fn=lambda: (None, "READ_KEY_MISSING"))
+    job.chains_fn = lambda: calls.append(1) or [CHAIN]
+    for _ in range(3):
+        job.run_once()
+    assert calls == [] and sent == []
+    job = _job(post=_fake(perms=PERMS_RO[:-2] + [["withdraw", 1, 1], ["ui_withdraw", 0, 0]], sent=sent))
+    job.chains_fn = lambda: calls.append(1) or [CHAIN]
+    job.run_once()
+    assert calls == [] and [p for p, _ in sent] == [lfl.PERMISSIONS_PATH]   # write rights: refused, nothing polled
+    job = _job(post=_fake(sent=[]), get=lambda path, params: [])
+    job.chains_fn = lambda: calls.append(1) or [CHAIN]
+    job.run_once()
+    assert calls == [1]                                                     # gate OK -> the in-memory feed is read
+
+
+def test_F3_chain_feed_takes_no_trade_lock_and_makes_no_relay_call(tmp_path, monkeypatch):
+    ap, jr = _feed_files(tmp_path)
+    monkeypatch.setitem(lcma._FUNDING_FEED, "approvals", ap.rows)
+    monkeypatch.setitem(lcma._FUNDING_FEED, "reports", jr.rows)
+    trade_lock = threading.Lock()
+    trade_lock.acquire()          # held by "the trader": any acquisition by the feed would block (timeout -> fail)
+    done = []
+    t = threading.Thread(target=lambda: done.append(lcma._closed_live_chains()), daemon=True)
+    t.start()
+    t.join(5)
+    trade_lock.release()
+    assert done and len(done[0]) == 2
+    # the wiring in bot.py hands the job ONLY the two row readers - never the monitor context
+    tree = ast.parse(open(_BOT_SRC, encoding="utf-8").read())
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    wire = funcs["_wire_live_copy_monitor"]
+    call = next(n for n in ast.walk(wire) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "start_live_funding_job")
+    assert sorted(k.arg for k in call.keywords) == ["approvals_rows", "journal_rows"] and not call.args
+    used = {n.id for k in call.keywords for n in ast.walk(k.value) if isinstance(n, ast.Name)}
+    assert used == {"_get_live_copy_approvals", "_get_live_copy_journal"}
+    for name in ("_get_live_copy_approvals", "_get_live_copy_journal", "_live_copy_singleton"):
+        src = ast.unparse(funcs[name])
+        assert "trade_lock" not in src and "_relay_http_session" not in src and "_live_copy_monitor_context" not in src
+    for cls in (lcc.ApprovalLedger, lcc.ExecutionJournal):
+        import inspect
+        src = inspect.getsource(cls.rows)
+        assert "open(" not in src and "requests" not in src and "trade_lock" not in src
+    import inspect
+    feed_src = inspect.getsource(lcma._closed_live_chains) + inspect.getsource(lcma._report_pid_side)
+    for bad in ("_CTX", "provider", "requests", "http", "trade_lock", "open(", "append(", "write"):
+        assert bad not in feed_src.replace("found.setdefault", "").replace("out.append(", ""), bad

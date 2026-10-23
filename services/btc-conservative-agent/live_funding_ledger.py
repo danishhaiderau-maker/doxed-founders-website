@@ -729,8 +729,9 @@ def chain_exit_fill(chain: Mapping[str, Any]):
 
 
 def _chain_side(chain: Mapping[str, Any]):
-    """The position side for check (b): the chain's ``position_side`` (the live copy mirrors its paper twin's signal side,
-    attached by live_copy_monitor_api._closed_live_chains) or ``side``; None when unknown (then no pin is proposed)."""
+    """The position side for check (b): the chain's ``position_side`` (as the executor reported it, attached by
+    live_copy_monitor_api._closed_live_chains - HM R4 F3: never the paper twin, whose read takes trade_lock) or
+    ``side``; None when unknown (then no pin is proposed)."""
     v = chain.get("position_side") or chain.get("side")
     return str(v).upper() if v else None
 
@@ -903,15 +904,15 @@ class FundingReadbackJob:
         if now < self._backoff_until:
             return
         self._pin = load_sign_pin(self._pin_file())   # local file only; picks up an HM confirm / reject between ticks
-        if callable(self.chains_fn):
-            try:
-                for ch in self.chains_fn() or []:
-                    self.submit(ch)
-            except Exception:  # noqa: BLE001 - a broken chain source reads nothing this tick
-                pass
         try:
             if not self._startup(now):
-                return
+                return      # HM R4 F3: no chain polling at all while the key gate is closed
+            if callable(self.chains_fn):
+                try:   # in-memory feed only (approvals + journal rows): no network, no trade_lock, no writes
+                    for ch in self.chains_fn() or []:
+                        self.submit(ch)
+                except Exception:  # noqa: BLE001 - a broken chain source reads nothing this tick
+                    pass
             while True:
                 with self._lock:
                     key = next(iter(self._pending), None)

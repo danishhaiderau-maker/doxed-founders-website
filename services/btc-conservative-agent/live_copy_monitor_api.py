@@ -389,19 +389,61 @@ def _live_funding_lookup():
     return lfl.DEFAULT_JOB.lookup   # cache read only; the owner thread (start_live_funding_job) does every read
 
 
+# HM R4 F3 (live-path isolation): the funding job's chain feed reads ONLY the in-memory approvals ledger rows and the
+# execution journal rows (bot.py passes ``_get_live_copy_approvals().rows`` / ``_get_live_copy_journal().rows``). It never
+# calls the monitor context provider (bot.py _live_copy_monitor_context: relay fly-view on the shared relay HTTP session,
+# trade_lock via _live_copy_paper_twins, account-transition writes) - no network, no trade_lock, no writes.
+_FUNDING_FEED: dict = {"approvals": None, "reports": None}
+_PID_KEYS = ("bitfinex_position_id", "position_id")
+
+
+def _report_pid_side(report) -> tuple:
+    """(position id, side) an executor report carries itself - top level or in its fill / close / exit / order /
+    position block. Never inferred: absent -> None (pid None -> UNVERIFIED_POSITION_ID_MISSING; side None -> no pin)."""
+    pid = side = None
+    blocks = [report] + [report.get(k) for k in ("fill", "close", "exit", "order", "position")
+                         if isinstance(report.get(k), dict)]
+    for b in blocks:
+        for k in _PID_KEYS:
+            if pid is None and b.get(k) not in (None, ""):
+                pid = str(b.get(k))
+        v = str(b.get("position_side") or b.get("side") or "").upper()
+        if side is None and v in ("LONG", "SHORT"):
+            side = v
+    return pid, side
+
+
 def _closed_live_chains():
-    """In-memory chain source for the background job (no network): closed live chains from the monitor context."""
-    provider = _CTX.get("provider")
-    ctx = provider() if provider else None
-    if not isinstance(ctx, dict):
+    """In-memory chain source for the background job: closed live chains built from the approvals + journal rows only,
+    with the position id and side the executor reported (HM R4 F3, RK 04:12). No monitor context, no I/O."""
+    af, rf = _FUNDING_FEED.get("approvals"), _FUNDING_FEED.get("reports")
+    if not (callable(af) and callable(rf)):
         return []
-    chains = lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
-    return [c for c in chains["accounts"].values() if c.get("closed") or c.get("exit_ack_at_ts")]
+    reports = list(rf() or [])
+    chains = lcm.build_chains(list(af() or []), reports)
+    found: dict = {}
+    for r in reports:
+        if not isinstance(r, dict):
+            continue
+        key = (str(r.get("correlation_id") or ""), str(r.get("account") or "UNKNOWN"))
+        pid, side = _report_pid_side(r)
+        cur = found.setdefault(key, {"pid": None, "side": None})
+        cur["pid"] = cur["pid"] or pid
+        cur["side"] = cur["side"] or side
+    out = []
+    for key, c in chains["accounts"].items():
+        if not (c.get("closed") or c.get("exit_ack_at_ts")):
+            continue
+        f = found.get(key) or {}
+        out.append(dict(c, bitfinex_position_id=f.get("pid"), position_side=f.get("side")))
+    return out
 
 
-def start_live_funding_job() -> bool:
-    """Start the single owner thread of the #849 funding read-back (HM B/C). Called once at app wiring (bot.py)."""
+def start_live_funding_job(approvals_rows=None, journal_rows=None) -> bool:
+    """Start the single owner thread of the #849 funding read-back (HM B/C). Called once at app wiring (bot.py) with
+    the in-memory row readers (HM R4 F3). Without them the job has no chains (every live row stays non-countable)."""
     import live_funding_ledger as lfl
+    _FUNDING_FEED["approvals"], _FUNDING_FEED["reports"] = approvals_rows, journal_rows
     lfl.DEFAULT_JOB.chains_fn = _closed_live_chains
     return lfl.DEFAULT_JOB.start()
 
