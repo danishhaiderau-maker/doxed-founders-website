@@ -563,7 +563,10 @@ def test_hm5r2_fresh_flat_reading_never_clears_liq_clamp_red():
         for _ in range(3):
             assert ns["_live_guardian_red_clear_if_flat"](NOW) is False
         st = ns["_LIVE_GUARDIAN_STATE"]
-        assert st["red_alert"]["code"] == red["code"] and "red_alert_cleared" not in st
+        # C-R3-1: the plain stacked code is dropped on the FLAT evidence (recorded); the ack-only code stays (never cleared here)
+        assert st["red_alert"]["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED" and "red_alert_cleared" not in st
+        assert g.red_codes(st["red_alert"]) == ["LIQ_CLAMP_FLATTEN_UNCONFIRMED"]
+        assert [c["code"] for c in st["red_alert"].get("flat_cleared_codes") or []] == [c for c in red.get("codes", []) if c != "LIQ_CLAMP_FLATTEN_UNCONFIRMED"]
         assert st["red_alert"]["flat_evidence_ts"] == NOW and ns["PERSISTS"] == [1]   # stamped + persisted once
     # a plain RED still clears on the same evidence (unchanged)
     ns = _red_clear_ns({"ts": NOW - 100, "code": "FORCE_FLAT_UNCONFIRMED"})
@@ -572,9 +575,11 @@ def test_hm5r2_fresh_flat_reading_never_clears_liq_clamp_red():
 
 def test_hm5r2_operator_ack_is_the_only_clear_and_is_stamped_and_persisted():
     ns = _ffo_ns()
+    ns["_live_guardian_mirror"] = lambda: {}
     persisted = []
     ns["_live_guardian_persist"] = lambda: persisted.append(dict(ns["_LIVE_GUARDIAN_STATE"])) or True
-    red = {"ts": NOW, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "codes": ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_NOT_STARTED"]}
+    red = {"ts": NOW - 10, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "codes": ["LIQ_CLAMP_FLATTEN_UNCONFIRMED"],
+           "flat_evidence_ts": NOW - 5}
     st = ns["_LIVE_GUARDIAN_STATE"]
     st["red_alert"] = dict(red)
     ack = ns["_live_guardian_red_ack"]
@@ -599,6 +604,69 @@ def test_hm5r2_operator_ack_is_the_only_clear_and_is_stamped_and_persisted():
     assert stamp["codes"] == red["codes"] and st["red_alert_cleared"]["evidence"] == "OPERATOR_ACK"
     assert persisted and "red_alert" not in persisted[-1] and persisted[-1]["red_alert_acks"][-1]["actor"] == "danish"
     assert ack("danish", "again", red["code"], NOW)[1]["error"] == "NO_RED"
+
+
+def _ack_ns(red, mirror_view=None):
+    ns = _ffo_ns()
+    ns["_live_guardian_mirror"] = lambda: (mirror_view or {})
+    ns["_LIVE_GUARDIAN_STATE"]["red_alert"] = dict(red)
+    return ns, ns["_live_guardian_red_ack"]
+
+
+def test_c_r3_1_ack_refuses_any_stacked_plain_code():
+    for codes in (["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_NOT_STARTED"],
+                  ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_UNCONFIRMED", "UNTAGGED_ORDER"]):
+        ns, ack = _ack_ns({"ts": NOW - 10, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "codes": codes, "flat_evidence_ts": NOW - 1})
+        code, out = ack("danish", "checked", "LIQ_CLAMP_FLATTEN_UNCONFIRMED", NOW)
+        assert code == 409 and out["error"] == "RED_NOT_ACK_ONLY" and out["not_ack_only"] == codes[1:]
+        assert ns["_LIVE_GUARDIAN_STATE"]["red_alert"]["codes"] == codes and "red_alert_acks" not in ns["_LIVE_GUARDIAN_STATE"]
+    # a plain primary RED is never ackable either (it clears only on exchange evidence)
+    ns, ack = _ack_ns({"ts": NOW - 10, "code": "FORCE_FLAT_UNCONFIRMED", "flat_evidence_ts": NOW - 1})
+    assert ack("danish", "checked", "FORCE_FLAT_UNCONFIRMED", NOW)[1]["error"] == "RED_NOT_ACK_ONLY"
+
+
+def test_c_r3_1_ack_requires_flat_evidence_newer_than_the_red():
+    base = {"ts": NOW - 10, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "codes": ["LIQ_CLAMP_FLATTEN_UNCONFIRMED"]}
+    for red in (dict(base), dict(base, flat_evidence_ts=NOW - 20), dict(base, flat_evidence_ts=NOW - 10),
+                dict(base, flat_evidence_ts="bad"),
+                # evidence older than a code stacked later (also[].ts) is stale too
+                dict(base, flat_evidence_ts=NOW - 5, also=[{"ts": NOW - 2, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED"}])):
+        ns, ack = _ack_ns(red)
+        code, out = ack("danish", "checked", red["code"], NOW)
+        assert code == 409 and out["error"] == "NO_FLAT_EVIDENCE" and "red_alert" in ns["_LIVE_GUARDIAN_STATE"]
+    # latch_red drops older FLAT evidence when a new code is stacked on an ack-only RED
+    import live_guardian as g
+    st = {"red_alert": dict(base, flat_evidence_ts=NOW - 5)}
+    g.latch_red(st, {"ts": NOW - 1, "code": "FORCE_FLAT_UNCONFIRMED"})
+    assert "flat_evidence_ts" not in st["red_alert"]
+
+
+def test_c_r3_1_ack_refused_while_the_flatten_entry_fence_is_held():
+    red = {"ts": NOW - 10, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "codes": ["LIQ_CLAMP_FLATTEN_UNCONFIRMED"], "flat_evidence_ts": NOW - 5}
+    ns, ack = _ack_ns(red)
+    ns["_LIVE_GUARDIAN_POSITION_FLATTEN_LOG"].append({"requested": True, "ts": NOW - 3})       # position-flatten running
+    code, out = ack("danish", "checked", red["code"], NOW)
+    assert code == 409 and out["error"] == "LIVE_FLATTEN_FENCE_HELD" and out["fence"] == "FLATTEN_IN_PROGRESS"
+    ns["_LIVE_GUARDIAN_POSITION_FLATTEN_LOG"][-1]["done_ts"] = NOW - 2                          # done, no read-back after it
+    code, out = ack("danish", "checked", red["code"], NOW)
+    assert code == 409 and out["fence"] == "FLATTEN_READBACK_PENDING" and "red_alert" in ns["_LIVE_GUARDIAN_STATE"]
+    # a relay read taken after the flatten finished releases the fence -> the ack is accepted
+    ns["_live_guardian_mirror"] = lambda: {"ok": True, "fetched_at_ts": NOW, "read_age_s": 1.0}
+    code, out = ack("danish", "checked", red["code"], NOW)
+    assert code == 200 and out["ok"] and "red_alert" not in ns["_LIVE_GUARDIAN_STATE"]
+    # an unreadable fence fails closed
+    ns, ack = _ack_ns(red)
+    ns["_live_guardian_mirror"] = lambda: 1 / 0
+    assert ack("danish", "checked", red["code"], NOW)[1]["error"] == "LIVE_FLATTEN_FENCE_HELD"
+
+
+def test_c_r3_1_ack_accepts_an_ack_only_red_with_fresh_flat_evidence_and_no_fence():
+    red = {"ts": NOW - 10, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "codes": ["LIQ_CLAMP_FLATTEN_UNCONFIRMED"], "flat_evidence_ts": NOW - 5}
+    ns, ack = _ack_ns(red)
+    code, out = ack("danish", "flat, checked", red["code"], NOW, auth_method="token")
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    assert code == 200 and out["ok"] and "red_alert" not in st and st["red_alert_acks"][-1]["actor"] == "danish"
+    assert st.get("auto_disarm_latched") is None   # re-arms nothing
 
 
 def test_hm5r2_ack_route_wiring_and_persistence_keys():
@@ -830,11 +898,11 @@ def test_852_l27_fly_output_on_route_refuses_and_new_amendment_unblocks():
     assert _resp(ns["api_live_copy_output"]())[1] == 200
 
 
-def test_852_l27_fly_protection_bootstrap_rearm_refuses_per_lane():
-    import sys
+def test_852_l27_fly_protection_bootstrap_rearm_refuses_per_lane(monkeypatch):
     import types
-    sys.modules.setdefault("combo_pathway_config", types.ModuleType("combo_pathway_config"))
-    sys.modules["combo_pathway_config"].ACTIVE_TILE_REGISTRY = {"GS01": {}}
+    # HM C-R3-3: never overwrite the real registry for the rest of the session (monkeypatch restores it)
+    import combo_pathway_config as _cpc
+    monkeypatch.setattr(_cpc, "ACTIVE_TILE_REGISTRY", {"GS01": {}})
     boot = types.SimpleNamespace(snapshot=lambda: {"lanes": {}}, enable=lambda *a, **k: (True, {}),
                                  disable=lambda **k: {})
     tile_src = _SRC[_SRC.index("def _live_guardian_tile_arm_block"):_SRC.index("\ndef ", _SRC.index("def _live_guardian_tile_arm_block") + 10)]

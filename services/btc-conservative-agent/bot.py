@@ -49903,6 +49903,16 @@ def _live_guardian_red_clear_if_flat(now) -> bool:
     if _esv.build(m).get("verdict") != "FLAT_NO_STOPS":
         return False
     if _lgm.red_ack_only(red):
+        # HM C-R3-1: the same fresh FLAT_NO_STOPS evidence that clears a plain RED drops the plain codes stacked on an
+        # ack-only RED (recorded in flat_cleared_codes); the ack-only codes stay until the stamped operator ack.
+        _plain = [c for c in _lgm.red_codes(red) if c not in _lgm.ACK_ONLY_RED_CODES]
+        if _plain:
+            _ack = [c for c in _lgm.red_codes(red) if c in _lgm.ACK_ONLY_RED_CODES]
+            red["flat_cleared_codes"] = (list(red.get("flat_cleared_codes") or [])
+                                         + [{"ts": now, "code": c, "evidence": "relay mirror FLAT_NO_STOPS"} for c in _plain])[-10:]
+            red["codes"] = _ack
+            red["code"] = red.get("code") if red.get("code") in _ack else _ack[0]
+            red.pop("flat_evidence_ts", None)
         if not red.get("flat_evidence_ts"):
             red["flat_evidence_ts"] = now   # shown to the operator; stamped once (no persist churn per tick)
             logger.warning(f"[LIVE GUARDIAN] FLAT_NO_STOPS seen but RED {red.get('code')} needs the operator ack "
@@ -62729,6 +62739,28 @@ def _live_guardian_red_ack(actor, reason, code, now=None, auth_method: str = "")
            for r in list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)):
         return 409, {"ok": False, "error": "LIVE_GUARDIAN_FORCE_FLAT_IN_PROGRESS", "red_code": red.get("code")}
     import live_guardian as _lgm
+    # HM C-R3-1 (#852 R3): (a) EVERY stacked code must be ack-only (a plain code clears only on exchange evidence via
+    # _live_guardian_red_clear_if_flat, which drops it from the stack); (b) FLAT_NO_STOPS evidence stamped AFTER the RED and
+    # after its latest stacked code; (c) never while the Fly flatten entry fence is held (flatten running / read-back pending).
+    _codes = _lgm.red_codes(red)
+    _plain = [c for c in _codes if c not in _lgm.ACK_ONLY_RED_CODES]
+    if not _codes or _plain:
+        return 409, {"ok": False, "error": "RED_NOT_ACK_ONLY", "red_code": red.get("code"), "codes": _codes, "not_ack_only": _plain}
+    _red_ts = max([float(red.get("ts") or 0)] + [float(a.get("ts") or 0) for a in (red.get("also") or []) if isinstance(a, dict)])
+    try:
+        _flat_ts = float(red.get("flat_evidence_ts"))
+    except (TypeError, ValueError):
+        _flat_ts = None
+    if _flat_ts is None or _flat_ts <= _red_ts:
+        return 409, {"ok": False, "error": "NO_FLAT_EVIDENCE", "red_code": red.get("code"), "red_ts": _red_ts,
+                     "flat_evidence_ts": red.get("flat_evidence_ts")}
+    try:
+        _mfn = globals().get("_live_guardian_mirror")
+        _fence = _live_flatten_entry_fence(now, _mfn() if _mfn else None)
+    except Exception as _exc:  # noqa: BLE001 - an unreadable fence fails closed
+        _fence = f"FENCE_UNREADABLE:{type(_exc).__name__}"
+    if _fence:
+        return 409, {"ok": False, "error": "LIVE_FLATTEN_FENCE_HELD", "fence": _fence, "red_code": red.get("code")}
     stamp = {"ts": now, "actor": actor, "reason": reason[:240], "auth": str(auth_method or "")[:32],
              "code": red.get("code"), "codes": _lgm.red_codes(red), "was": red}
     prev_acks, prev_cleared = _LIVE_GUARDIAN_STATE.get("red_alert_acks"), _LIVE_GUARDIAN_STATE.get("red_alert_cleared")

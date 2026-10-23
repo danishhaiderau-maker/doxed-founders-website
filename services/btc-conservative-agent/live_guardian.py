@@ -65,6 +65,8 @@ def latch_red(state: dict, red: Mapping[str, Any]) -> dict:
     if red_ack_only(cur):
         kept = dict(cur)
         kept["codes"] = merged
+        # HM C-R3-1: a new code invalidates earlier FLAT evidence (the ack needs evidence newer than the latest code)
+        kept.pop("flat_evidence_ts", None)
         also = list(kept.get("also") or [])
         also.append({k: new.get(k) for k in ("ts", "code", "reason", "readback", "error") if new.get(k) is not None})
         kept["also"] = also[-RED_ALSO_MAX:]
