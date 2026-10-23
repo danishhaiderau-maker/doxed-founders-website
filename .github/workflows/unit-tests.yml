@@ -23,13 +23,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install API dependencies (for the #842 API specs below)
+      - name: "Install API dependencies (for the #842 API specs below)"
         working-directory: .
         run: |
           npm ci
           npx prisma@6.8.2 generate --schema prisma/schema.prisma
           npm run build:utils
-      - name: Run the #842 API specs (Bitfinex ledger layout, exit post-close reconcile, RK1 exit stamps)
+      - name: "Run the #842 API specs (Bitfinex ledger layout, exit post-close reconcile, RK1 exit stamps)"
         # bitfinex-api.client.spec.ts imports bitfinex-ledger-layout.spec.ts; the helpers spec imports
         # exit-post-close-reconcile.spec.ts and rk1-live-exit-stamps.spec.ts.
         working-directory: apps/api
