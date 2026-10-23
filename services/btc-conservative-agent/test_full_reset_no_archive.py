@@ -720,7 +720,7 @@ def test_denylist_does_not_swallow_the_real_delete_classes():
 
 
 def test_rules_version_is_bumped_and_changes_the_plan_sha(vol, monkeypatch):
-    assert frna.RULES_VERSION == "full-reset-rules-v6-analyzer-manifests-known-receipts"
+    assert frna.RULES_VERSION == "full-reset-rules-v7-fly-analyzer-mirror"
     before = _plan(vol)["plan_sha256"]
     monkeypatch.setattr(frna, "DENY_NAME_TOKENS", ("live", "arm"))
     assert _plan(vol)["plan_sha256"] != before
@@ -785,8 +785,10 @@ ANALYZER_MANIFESTS_DELETE = (
 ANALYZER_RETAINED_UNCLASSIFIED = (
     "manifest.json", "canonical_dataset_current.json", "fly_runtime_snapshot_v1.json",
     "snapshot_meta.json", "verification_index.json", "bot_analyzer_sync.json")
-ANALYZER_DENYLISTED = ("tile_evidence_points_report.json", "tile_paired_comparison_report.json",
-                       "shadow_vs_live_entry_report.json")
+# RK ruling (HM #850 R2 C4(a)): the deny-list protects PRIMARY tile / live / switch files only; the analyzer's derived
+# tile_* report copies are DELETE (v7). shadow_vs_live_entry_report.json is not a declared analyzer report: still denied.
+ANALYZER_TILE_COPIES_NOW_DELETE = ("tile_evidence_points_report.json", "tile_paired_comparison_report.json")
+ANALYZER_DENYLISTED = ("shadow_vs_live_entry_report.json",)
 
 
 def test_n1_entry_baseline_sidecars_are_delete_at_any_depth():
@@ -816,12 +818,8 @@ def test_n1_every_shared_analyzer_report_is_delete_unless_an_earlier_rule_wins()
             action, reason = frna.classify(tmpl.format(name))
             if name in frna.ANALYZER_EPISODE_RECEIPTS_FILES:
                 assert (action, reason) == (frna.DELETE, "ANALYZER_EPISODE_RECEIPTS"), name
-            elif any(t in name for t in frna.DENY_NAME_TOKENS):
-                assert (action, reason) == (frna.UNCLASSIFIED, "DENYLIST_NAME_NEVER_DELETE"), name
-            elif any(t in name for t in wipe.RELAY_TOKENS):
-                assert (action, reason) == (frna.KEEP, "RELAY_BITFINEX_EVIDENCE"), name  # exchange evidence stays
-            else:
-                assert action == frna.DELETE, (tmpl.format(name), reason)
+            else:  # v7: deny-list and RELAY no longer win over a declared analyzer report (RK C4(a)/(b))
+                assert (action, reason) == (frna.DELETE, "ANALYZER_DERIVED_REPORT"), (tmpl.format(name), reason)
 
 
 def test_n1_extra_derived_reports_are_real_analyzer_outputs():
@@ -836,6 +834,8 @@ def test_n1_extra_derived_reports_are_real_analyzer_outputs():
 def test_n1_previously_unclassified_inventory_is_now_delete_and_the_rest_is_pinned():
     for name in ANALYZER_DENYLISTED:
         assert frna.classify("analyzer/" + name) == (frna.UNCLASSIFIED, "DENYLIST_NAME_NEVER_DELETE"), name
+    for name in ANALYZER_TILE_COPIES_NOW_DELETE:
+        assert frna.classify("analyzer/" + name) == (frna.DELETE, "ANALYZER_DERIVED_REPORT"), name
     for name in ANALYZER_RETAINED_UNCLASSIFIED:
         assert frna.classify("analyzer/" + name)[0] == frna.UNCLASSIFIED, name
     for name in frna.ANALYZER_EXTRA_DERIVED_REPORT_NAMES:
@@ -892,3 +892,188 @@ def test_c5_unknown_receipt_shard_blocks_execute(vol, capsys):
     assert "analyzer/mystery_episode_receipts.jsonl.gz" in {u["rel"] for u in plan["unclassified_data_files"]}
     assert _run(_good(vol)) == 9
     assert (vol / "runtime" / "analyzer" / "mystery_episode_receipts.jsonl.gz").exists()
+
+
+# ------------------------------------------------------------------ HM #850 R2 C3 / RK ruling C4(a)(b)
+
+def test_c4a_deny_list_protects_primary_tile_files_by_full_path_only():
+    # primary tile / live / switch files: protected wherever they are, including an undeclared name in analyzer/
+    for rel in ("tile_switches.json", "tile_6_state.json", "tiles/tile_7_switch.json", "live_flags.json",
+                "tile_evidence_points_report.json", "reports/tile_paired_comparison_report.json",
+                "analyzer_old/tile_evidence_points_report.json", "analyzer/tile_switch.json", "analyzer/live_arm.json"):
+        assert frna.classify(rel) == (frna.UNCLASSIFIED, "DENYLIST_NAME_NEVER_DELETE"), rel
+    # derived copies of declared analyzer reports inside analyzer/ at any depth: DELETE
+    for tmpl in ANALYZER_DEPTHS:
+        for name in ANALYZER_TILE_COPIES_NOW_DELETE:
+            assert frna.classify(tmpl.format(name)) == (frna.DELETE, "ANALYZER_DERIVED_REPORT")
+    # the top-level owner override is unchanged
+    assert frna.classify("tile_integrity.jsonl")[0] == frna.DELETE
+    # KEEP rules still beat the analyzer rule (allowlist, config, preserved research)
+    assert frna.classify("analyzer/state.json")[0] == frna.KEEP
+
+
+def test_c4b_bitfinex_named_reports_are_analyzer_derived_with_file_line_evidence(monkeypatch):
+    import re
+    here = Path(__file__).resolve().parent
+    src = (here / "analyzer_research_engine_v62.py").read_text(encoding="utf-8").splitlines()
+    consts = {"BITFINEX_COPY_FIDELITY_REPORT_FILE": "bitfinex_copy_fidelity_lifecycles_report.json",
+              "COPY_ONLY_EXCHANGE_FILLS_REPORT_FILE": "copy_only_exchange_fills_report.json"}
+    for const, fname in consts.items():
+        assert any(line.startswith(f'{const} = "{fname}"') for line in src), const
+        # the only use besides the report lists is the cohort split writer that writes via analyzer_report_path
+        assert any(re.search(rf"\(\w+, {const},", line) for line in src), const
+    body = "\n".join(src)
+    writer = body[body.index("def _write_cohort_report"):body.index("def research_cohort_split_reports")]
+    assert "analyzer_report_path(filename)" in writer and 'open(path, "w"' in writer
+    # no other writer anywhere in the repo (py / ts / js / ps1)
+    named = set()
+    import subprocess
+    tracked = subprocess.run(["git", "ls-files", "*.py", "*.ts", "*.js", "*.ps1"], cwd=REPO_ROOT, check=True,
+                             capture_output=True, text=True).stdout.split()
+    for p in (REPO_ROOT / t for t in tracked):
+        if "node_modules" not in p.parts and not p.name.startswith("test_"):
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if any(f in text for f in consts.values()):
+                named.add(p.name)
+    assert named == {"analyzer_research_engine_v62.py", "research_reset_inventory.py", "full_reset_no_archive.py"}
+    assert frna.ANALYZER_RELAY_NAMED_DERIVED_REPORTS == set(consts.values())
+    for fname in consts.values():
+        for tmpl in ANALYZER_DEPTHS:
+            assert frna.classify(tmpl.format(fname)) == (frna.DELETE, "ANALYZER_DERIVED_REPORT")
+        assert frna.classify(fname)[0] == frna.KEEP  # outside analyzer/ the RELAY rule still keeps it
+    assert frna.classify("analyzer/bitfinex_fill_audit.json") == (frna.KEEP, "RELAY_BITFINEX_EVIDENCE")
+    # switchable spot: out of the set, the RELAY KEEP rule applies again
+    monkeypatch.setattr(frna, "ANALYZER_RELAY_NAMED_DERIVED_REPORTS", frozenset())
+    assert frna.classify("analyzer/copy_only_exchange_fills_report.json") == (frna.KEEP, "RELAY_BITFINEX_EVIDENCE")
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_BOT_MIRROR_FUNCS = ("_data_sync_runtime_root", "_data_sync_volume_root", "_analyzer_mirror_dir",
+                     "_analyzer_generations_dir", "_analyzer_current_pointer_path", "_valid_analyzer_generation",
+                     "_recover_latest_analyzer_generation", "_active_analyzer_mirror_dir")
+
+
+def _bot_mirror_namespace():
+    """The bot's own resolver functions (AST-extracted from bot.py, as test_fly_data_sync_contract does)."""
+    import ast
+    import os
+    import re
+    tree = ast.parse((Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8"))
+    selected = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in _BOT_MIRROR_FUNCS]
+    assert {n.name for n in selected} == set(_BOT_MIRROR_FUNCS)
+    ns = {"Path": Path, "os": os, "json": json, "re": re, "hashlib": hashlib,
+          "_ANALYZER_BUNDLE_MANIFEST": "bundle_manifest.json", "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
+          "_ANALYZER_BUNDLE_ALLOWED_SUFFIXES": frozenset((".html", ".txt", ".json", ".log")),
+          "_ANALYZER_BUNDLE_MAX_MEMBER_BYTES": 50 * 1024 * 1024}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), ns)
+    return ns
+
+
+def _fly_mirror(vol: Path) -> Path:
+    files = {"analysis_dashboard.html": b"<html>dash</html>",
+             "reports/tile_paired_comparison_report.json": b'{"tile": 6}',
+             "reports/tile_evidence_points_report.json": b'{"tile": 7}'}
+    gen = vol / "analyzer_generations" / "generation-20261024T000000Z-abc"
+    for rel, data in files.items():
+        (gen / rel).parent.mkdir(parents=True, exist_ok=True)
+        (gen / rel).write_bytes(data)
+    _w(gen / "bundle_manifest.json", json.dumps({"schema": "analyzer_mirror_bundle_v2", "files": [
+        {"path": rel, "sha256": hashlib.sha256(d).hexdigest(), "size_bytes": len(d)} for rel, d in files.items()]}))
+    _w(gen / "status.json", json.dumps({"complete": True, "schema": "analyzer_mirror_bundle_v2"}))
+    _w(vol / "analyzer_generations" / ".staging-x" / "partial.json", "{}")
+    _w(vol / "analyzer_current.json", json.dumps({"generation": gen.name}))
+    _w(vol / "analyzer_mirror" / "analysis_dashboard.html", "legacy")
+    _w(vol / "analyzer_mirror" / "reports" / "tile_evidence_points_report.json", "{}")
+    _w(vol / "analyzer_mirror" / "live_flags.json", "{}")  # a mirror copy: deleted in full, deny-list does not apply
+    return gen
+
+
+def _other_data(vol: Path) -> dict:
+    """Folders / files on the volume outside runtime/ that are NOT in the Fly analyzer scope."""
+    rels = ("segment-store/a.jsonl", "analyzer_mirror_backup/x.json", "analyzer/report_manifest.json",
+            "analyzer_current.json.bak", "other/analyzer_generations/g/x.json", "top_level.jsonl", "v3/ledger.jsonl")
+    out = {}
+    for rel in rels:
+        _w(vol / rel, f"keep {rel}\n")
+        out[rel] = _sha(vol / rel)
+    return out
+
+
+def test_c3_plan_lists_exactly_the_three_fly_scopes_and_nothing_else_outside_runtime(vol):
+    _fly_mirror(vol)
+    _other_data(vol)
+    plan = _plan(vol)
+    root = vol.as_posix()
+    assert plan["outside_runtime_delete_scopes"] == [f"{root}/analyzer_mirror/**", f"{root}/analyzer_generations/**",
+                                                     f"{root}/analyzer_current.json"]
+    outside = [c for c in plan["candidates"] if not c["path"].startswith(str(vol / "runtime") + "/")]
+    assert outside and all(c["rel"].startswith(frna.FLY_SCOPE_PREFIX) for c in outside)
+    for c in outside:
+        assert (c["path"].startswith((f"{root}/analyzer_mirror/", f"{root}/analyzer_generations/"))
+                or c["path"] == f"{root}/analyzer_current.json"), c["path"]
+    rels = {c["rel"] for c in outside}
+    assert "@data/analyzer_current.json" in rels
+    assert "@data/analyzer_mirror/reports/tile_evidence_points_report.json" in rels  # tile copy: DELETE
+    assert "@data/analyzer_mirror/live_flags.json" in rels
+    assert "@data/analyzer_generations/generation-20261024T000000Z-abc/reports/tile_paired_comparison_report.json" in rels
+    assert "@data/analyzer_generations/.staging-x/partial.json" in rels
+    assert len(rels) == 10  # 5 generation files + 1 staging + 3 legacy mirror + the pointer
+    assert {c["reason"] for c in outside} == {"FLY_ANALYZER_MIRROR", "FLY_ANALYZER_GENERATION",
+                                              "FLY_ANALYZER_CURRENT_POINTER"}
+    assert plan["delete_by_class"]["FLY_ANALYZER_CURRENT_POINTER"]["files"] == 1
+    assert not [u for u in plan["unclassified_retained"] if u["rel"].startswith("@data/")]
+
+
+def test_c3_execute_removes_the_mirror_reads_back_and_bot_resolver_returns_none(vol, monkeypatch, capsys):
+    gen = _fly_mirror(vol)
+    others = _other_data(vol)
+    monkeypatch.setenv("BOT_DATA_DIR", str(vol))
+    bot = _bot_mirror_namespace()
+    assert bot["_analyzer_generations_dir"]() == vol.resolve() / "analyzer_generations"
+    assert bot["_active_analyzer_mirror_dir"]() == gen.resolve()  # the live mirror resolves before the reset
+    assert _run(_good(vol)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["fly_analyzer_readback"]["ok"] is True and out["verify"]["fly_analyzer_readback"]["ok"] is True
+    assert out["completed"] is True
+    for d in ("analyzer_mirror", "analyzer_generations"):
+        assert [p for p in (vol / d).rglob("*") if not p.is_dir()] == []
+        assert [p for p in (vol / d).iterdir()] == []  # empty sub-directories pruned too
+    assert not (vol / "analyzer_current.json").exists()
+    for rel, digest in others.items():  # every other /app/data folder untouched
+        assert _sha(vol / rel) == digest, rel
+    assert bot["_active_analyzer_mirror_dir"]() is None
+    assert bot["_recover_latest_analyzer_generation"]() is None
+    receipt = json.loads(next((vol / "runtime" / frna.RECEIPTS_DIRNAME).glob("*/receipt-complete.json")).read_text())
+    assert receipt["fly_analyzer_readback"]["ok"] is True and receipt["completed"] is True
+
+
+def test_c3_readback_failure_records_completed_false(vol, capsys):
+    _fly_mirror(vol)
+    def unlink(path):
+        if "/analyzer_generations/" not in path:
+            os.unlink(path)
+    rc = frna.run_cli(_good(vol), fetch=lambda url: dict(HEALTH), env=ENV, unlink=unlink)
+    assert rc == 9
+    assert "FLY_ANALYZER_READBACK_FAILED" in capsys.readouterr().out
+    receipt = json.loads(next((vol / "runtime" / frna.RECEIPTS_DIRNAME).glob("*/receipt-complete.json")).read_text())
+    assert receipt["completed"] is False and receipt["fly_analyzer_readback"]["leftover_count"] == 6
+    assert frna.completed_receipt(vol / "runtime" / frna.RECEIPTS_DIRNAME, receipt["plan_sha256"]) is None
+
+
+def test_c3_symlinked_scope_root_is_never_followed(vol, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    _w(outside / "precious.json", "{}")
+    os.symlink(outside, vol / "analyzer_mirror")
+    os.symlink(outside / "precious.json", vol / "analyzer_current.json")
+    plan = _plan(vol)
+    assert not [c for c in plan["candidates"] if c["rel"].startswith("@data/")]
+    assert (outside / "precious.json").exists()
+
+
+def test_c3_fly_scope_rules_change_the_plan_sha(vol, monkeypatch):
+    before = _plan(vol)["plan_sha256"]
+    monkeypatch.setattr(frna, "FLY_ANALYZER_MIRROR_DIRS", ("analyzer_mirror",))
+    assert _plan(vol)["plan_sha256"] != before
