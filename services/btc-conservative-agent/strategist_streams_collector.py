@@ -36,6 +36,12 @@ ms), ``receive_mono`` (time.monotonic() at that same frame) and ``receive_ts_sou
 exact book for any time t in [receive_ts, next frame), so a pricer proves no look-ahead with ``receive_ts <= t``.
 Rows written before this field existed carry no ``receive_ts`` and are non-countable for pricing; a bucket + write-lag
 estimate is never written here (it may only ever be a diagnostic label INFERRED_BUCKET_LAG, never countable).
+A CARRIED book row keeps the receive_ts/receive_mono of the frame it was built from (never the bucket second).
+The wall and monotonic receive times are read together, right after ``ws.recv()`` returns (HM #851 nit a; Paradex:
+right after the HTTP GET returns), before parsing. Trades (``bfx_trades``: per-print ``rx`` [[receive_ts,
+receive_mono], ...] aligned with ``tr`` + row receive_ts/receive_mono = the LAST print's), deriv (``bfx_deriv``) and
+venue quotes (``venue_bbo_1m``: ``rx`` {venue: 60 x [receive_ts, receive_mono] | null}) carry the same measured
+stamps (HM #851 nit b).
 
 Disconnect zeroing is conservative only: on_bfx_disconnect also clears the book-liveness of seconds that are already
 frozen but not yet closed, so a disconnect seen after s+1 can suppress a carried row ``s`` (never the reverse). A
@@ -141,13 +147,21 @@ class Sink:
                 _log(f"write failed {self.path}: {type(exc).__name__}")
 
 
+def _rx_ms(receive_ts: float) -> float:
+    return math.ceil(receive_ts * 1000.0 - 1e-6) / 1000.0  # rounded UP: never earlier than measured
+
+
+def rx_pair(receive_ts: float, receive_mono: float) -> list:
+    """[receive_ts (wall, ceil ms), receive_mono (ms)] of one measured WS/HTTP receipt."""
+    return [_rx_ms(receive_ts), round(receive_mono, 3)]
+
+
 def book_receive_stamp(receive_ts: float, receive_mono: float) -> dict:
     """Measured receive time of a book row (RK/HM #851): wall rounded UP to the ms (never earlier than measured),
     monotonic at the same frame. Empty when there is no measured frame time (the row is then non-countable)."""
     if not receive_ts or receive_ts <= 0:
         return {}
-    return {"receive_ts": math.ceil(receive_ts * 1000.0 - 1e-6) / 1000.0, "receive_mono": round(receive_mono, 3),
-            "receive_ts_source": "WS_FRAME"}
+    return {"receive_ts": _rx_ms(receive_ts), "receive_mono": round(receive_mono, 3), "receive_ts_source": "WS_FRAME"}
 
 
 class BfxBook:
@@ -230,9 +244,10 @@ class Collector:
         self._frozen: dict = {}
         self.book = BfxBook()
         self.lock = threading.Lock()
-        self.trades: list = []  # [recv_sec, [id, ms, amt, px]]
-        self.quotes = {"lighter": None, "paradex": None}  # (bid, ask, recv_ts)
+        self.trades: list = []  # [recv_sec, [id, ms, amt, px], [receive_ts, receive_mono]]
+        self.quotes = {"lighter": None, "paradex": None}  # (bid, ask, recv_ts, recv_mono)
         self.minute: dict = {}
+        self.minute_rx: dict = {}  # {minute: {venue: 60 x [receive_ts, receive_mono] | None}} (HM #851 nit b)
         self._ws_factory = ws_factory or self._default_ws
         self._http_get = http_get or self._default_get
         self.reconnects = {"bitfinex": 0, "lighter": 0}
@@ -265,8 +280,8 @@ class Collector:
         keys = [k for k in self._frozen if k <= sec]
         return self._frozen[max(keys)] if keys else None
 
-    def _event(self, now: float, ev: str, ch=None, **extra) -> None:
-        row = {"r": round(now, 3), "mono": round(self.mono(), 3), "ev": ev}
+    def _event(self, now: float, ev: str, ch=None, _mono: Optional[float] = None, **extra) -> None:
+        row = {"r": round(now, 3), "mono": round(self.mono() if _mono is None else _mono, 3), "ev": ev}
         if ch is not None:
             row["ch"] = ch
         row.update(extra)
@@ -275,25 +290,26 @@ class Collector:
             row["dv"] = dv
         self.events_sink.write(row)
 
-    def on_bfx(self, msg, chans: dict, now: float) -> None:
+    def on_bfx(self, msg, chans: dict, now: float, mono: Optional[float] = None) -> None:
+        """``now``/``mono``: wall + monotonic clock read together right after the WS recv (HM #851 nit a)."""
         with self.lock:
             self._roll(now)
         if isinstance(msg, dict):
             if msg.get("event") == "subscribed":
                 chans[msg.get("chanId")] = msg.get("channel")
-            self._event(now, str(msg.get("event")), msg={k: v for k, v in msg.items() if k != "event"})
+            self._event(now, str(msg.get("event")), _mono=mono, msg={k: v for k, v in msg.items() if k != "event"})
             return
         if isinstance(msg, list) and len(msg) >= 2:
             kind = chans.get(msg[0])
             if msg[1] == "hb":
-                self._event(now, "hb", ch=kind)
+                self._event(now, "hb", _mono=mono, ch=kind)
             elif kind == "trades":
                 if msg[1] in ("te", "tu") and len(msg) > 2 and isinstance(msg[2], list) and len(msg[2]) >= 2:
-                    self._event(now, msg[1], ch=kind, id=msg[2][0], mts=msg[2][1])
+                    self._event(now, msg[1], _mono=mono, ch=kind, id=msg[2][0], mts=msg[2][1])
                 elif isinstance(msg[1], list):
                     # (Re)subscribe snapshot: exchange history, possibly prints missed while disconnected. Kept here
                     # (not in bfx_trades rows, which hold only live prints received after subscribe).
-                    self._event(now, "snapshot", ch=kind, tr=[[int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))]
+                    self._event(now, "snapshot", _mono=mono, ch=kind, tr=[[int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))]
                                                              for t in msg[1] if isinstance(t, list) and len(t) >= 4])
         if isinstance(msg, list) and msg and chans.get(msg[0]) == "book":
             with self.lock:
@@ -304,9 +320,9 @@ class Collector:
             return
         kind = chans.get(msg[0])
         with self.lock:
+            mono = self.mono() if mono is None else mono  # only when a caller did not pass the recv-point reading
             if kind == "book":
                 body = msg[1]
-                mono = self.mono()  # same WS receipt as ``now`` (the caller reads the wall clock right after recv)
                 if body and isinstance(body[0], list):
                     self.book.snapshot(body, now)
                     self.book.mono = mono
@@ -317,12 +333,13 @@ class Collector:
                 if isinstance(msg[1], list) and msg[1] and not isinstance(msg[1][0], list):
                     parsed = parse_deriv_status(msg[1])
                     if parsed:
-                        self.deriv = (parsed, now)
+                        self.deriv = (parsed, now, mono)
                         self._deriv_hist.add(self.deriv, now)
             elif kind == "trades":
                 if msg[1] == "te" and isinstance(msg[2], list):
                     t = msg[2]
-                    self.trades.append([int(now), [int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))]])
+                    self.trades.append([int(now), [int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))],
+                                        rx_pair(now, mono)])
                 # "tu" duplicates "te"; the (re)subscribe snapshot is history, not new prints (logged to EVENTS_FILE).
 
     def on_bfx_disconnect(self, now: Optional[float] = None, reason: Optional[str] = None) -> None:
@@ -335,20 +352,22 @@ class Collector:
             self._frozen = {k: (b, a, ts, ok, 0.0, m) for k, (b, a, ts, ok, _alive, m) in self._frozen.items()}
         self._event(now, "disconnect", reason=reason or "unknown")
 
-    def on_lighter(self, msg: dict, now: float) -> None:
+    def on_lighter(self, msg: dict, now: float, mono: Optional[float] = None) -> None:
+        mono = self.mono() if mono is None else mono
         tk = msg.get("ticker") if isinstance(msg, dict) else None
         if isinstance(tk, dict):
             bid, ask = _f((tk.get("b") or {}).get("price")), _f((tk.get("a") or {}).get("price"))
             if bid and ask:
                 with self.lock:
-                    self.quotes["lighter"] = (bid, ask, now)
+                    self.quotes["lighter"] = (bid, ask, now, mono)
                     self._quote_hist["lighter"].add(self.quotes["lighter"], now)
 
-    def on_paradex(self, body: dict, now: float) -> None:
+    def on_paradex(self, body: dict, now: float, mono: Optional[float] = None) -> None:
+        mono = self.mono() if mono is None else mono
         bid, ask = _f((body or {}).get("bid")), _f((body or {}).get("ask"))
         if bid and ask:
             with self.lock:
-                self.quotes["paradex"] = (bid, ask, now)
+                self.quotes["paradex"] = (bid, ask, now, mono)
                 self._quote_hist["paradex"].add(self.quotes["paradex"], now)
 
     # ---- per-second close ----------------------------------------------------
@@ -369,13 +388,14 @@ class Collector:
                                and alive > 0.0 and end - alive <= BOOK_LIVENESS_SEC)
                 if fresh or carried:
                     b, a = sb, sa
-            trades = [t for rs, t in self.trades if rs <= sec]
+            due = [x for x in self.trades if x[0] <= sec]
+            trades, trade_rx = [x[1] for x in due], [x[2] for x in due]
             self.trades = [x for x in self.trades if x[0] > sec]
             deriv = self._deriv_hist.as_of(sec)
             quotes = {}
             for v, hist in self._quote_hist.items():
                 q = hist.as_of(sec)
-                quotes[v] = (q[0], q[1]) if q and end - q[2] <= MAX_QUOTE_AGE_SEC else None
+                quotes[v] = (q[0], q[1], q[2], q[3]) if q and end - q[2] <= MAX_QUOTE_AGE_SEC else None
             for k in [k for k in self._frozen if k < sec - 60]:
                 if any(j > k and j <= sec for j in self._frozen):
                     self._frozen.pop(k)
@@ -385,18 +405,23 @@ class Collector:
             self.book_sink.write({"s": sec, "b": b, "a": a, **({"carried": True} if carried else {}),
                                   **book_receive_stamp(bts, bmono), **stamp})
         if trades:
-            self.trade_sink.write({"s": sec, "tr": trades, **stamp})
+            last_rx = max(trade_rx, key=lambda r: r[0])
+            self.trade_sink.write({"s": sec, "tr": trades, "rx": trade_rx, "receive_ts": last_rx[0],
+                                   "receive_mono": last_rx[1], "receive_ts_source": "WS_FRAME", **stamp})
         if deriv and end - deriv[1] <= MAX_DERIV_AGE_SEC:
             self.deriv_sink.write({"s": sec, **{k: v for k, v in deriv[0].items() if v is not None},
-                                   "age_s": round(end - deriv[1], 3), **stamp})
+                                   "age_s": round(end - deriv[1], 3), **book_receive_stamp(deriv[1], deriv[2]), **stamp})
         minute = sec - sec % 60
         row = self.minute.setdefault(minute, {v: [None] * 60 for v in quotes})
+        rx = self.minute_rx.setdefault(minute, {v: [None] * 60 for v in quotes})
         for v, q in quotes.items():
             row[v][sec - minute] = None if q is None else [_num(q[0]), _num(q[1])]
+            rx[v][sec - minute] = None if q is None else rx_pair(q[2], q[3])
         for m in [m for m in self.minute if m < minute]:
             data = self.minute.pop(m)
+            data_rx = self.minute_rx.pop(m, {})
             if any(x is not None for seq in data.values() for x in seq):
-                self.venue_sink.write({"m": m, **data, **stamp})
+                self.venue_sink.write({"m": m, **data, "rx": data_rx, "receive_ts_source": "WS_FRAME_OR_HTTP", **stamp})
 
     # ---- workers --------------------------------------------------------------
     def _ws_loop(self, name, url, subs, handler) -> None:
@@ -419,12 +444,13 @@ class Collector:
                         if "timed out" in str(exc).lower() and time.monotonic() - last < SILENT_RECONNECT_SEC:
                             continue
                         raise
+                    rx_wall, rx_mono = self.clock(), self.mono()  # HM #851 nit a: one receive point, before parsing
                     last = time.monotonic()
                     msg = json.loads(raw)
                     if name == "bitfinex":
-                        handler(msg, chans, self.clock())
+                        handler(msg, chans, rx_wall, mono=rx_mono)
                     else:
-                        handler(msg, self.clock())
+                        handler(msg, rx_wall, mono=rx_mono)
                 if name == "bitfinex":
                     self.on_bfx_disconnect(reason="stop")  # graceful shutdown
             except Exception as exc:  # noqa: BLE001
@@ -444,7 +470,8 @@ class Collector:
         while not self.stop.is_set():
             t0 = time.monotonic()
             try:
-                self.on_paradex(self._http_get(PARADEX_BBO), self.clock())
+                body = self._http_get(PARADEX_BBO)
+                self.on_paradex(body, self.clock(), mono=self.mono())  # read together right after the GET returns
             except Exception:  # noqa: BLE001
                 pass
             self.stop.wait(max(0.1, 1.0 - (time.monotonic() - t0)))

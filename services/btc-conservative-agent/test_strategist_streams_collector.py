@@ -9,9 +9,15 @@ def _rows(p):
     return [json.loads(x) for x in Path(p).read_text().splitlines()]
 
 
+RX_KEYS = ("receive_ts", "receive_mono", "receive_ts_source", "rx")
+
+
 def _book_rows(p):
-    """Book rows without the measured receive stamp (asserted separately in test_book_rows_carry_measured_receive_ts)."""
-    return [{k: v for k, v in r.items() if k not in ("receive_ts", "receive_mono", "receive_ts_source")} for r in _rows(p)]
+    """Rows without the measured receive stamps (asserted separately in test_*_carry_measured_receive_ts)."""
+    return [{k: v for k, v in r.items() if k not in RX_KEYS} for r in _rows(p)]
+
+
+_trade_rows = _book_rows
 
 
 def test_book_trades_and_venues(tmp_path):
@@ -32,7 +38,7 @@ def test_book_trades_and_venues(tmp_path):
     c.close_second(160)  # next minute -> flush minute 60
     book = _rows(tmp_path / ssc.BOOK_FILE)[0]
     assert book["s"] == 100 and len(book["b"]) == 10 and book["b"][0] == [110, 0.5] and book["a"][0] == [200, 0.25]
-    assert _rows(tmp_path / ssc.TRADES_FILE) == [{"s": 100, "tr": [[10, 100200, -0.01, 150.5]]}]
+    assert _trade_rows(tmp_path / ssc.TRADES_FILE) == [{"s": 100, "tr": [[10, 100200, -0.01, 150.5]]}]
     v = _rows(tmp_path / ssc.VENUE_FILE)[0]
     assert v["m"] == 60 and v["lighter"][40] == [99.5, 100.5] and v["paradex"][40] == [99, 101]
 
@@ -145,12 +151,12 @@ def test_row_s_has_no_look_ahead_into_s_plus_1(tmp_path):
     book = _book_rows(tmp_path / ssc.BOOK_FILE)
     assert book == [{"s": 100, "b": [[100, 0.5]], "a": [[200, 0.5]]}]
     assert _rows(tmp_path / ssc.BOOK_FILE)[0]["receive_ts"] == 100.4  # the 101.2 delta is not in row 100
-    assert _rows(tmp_path / ssc.TRADES_FILE) == [{"s": 100, "tr": [[1, 100400, 0.01, 150]]}]
+    assert _trade_rows(tmp_path / ssc.TRADES_FILE) == [{"s": 100, "tr": [[1, 100400, 0.01, 150]]}]
     assert _rows_or_empty(tmp_path / ssc.DERIV_FILE) == []  # received at 101.2 > s+1
     c.close_second(101, now=102.4)
     book = _rows(tmp_path / ssc.BOOK_FILE)
     assert book[-1]["s"] == 101 and book[-1]["b"] == [[101, 0.7], [100, 0.5]]
-    assert _rows(tmp_path / ssc.TRADES_FILE)[-1] == {"s": 101, "tr": [[2, 101200, -0.02, 151]]}
+    assert _trade_rows(tmp_path / ssc.TRADES_FILE)[-1] == {"s": 101, "tr": [[2, 101200, -0.02, 151]]}
     assert _rows(tmp_path / ssc.DERIV_FILE)[-1]["s"] == 101
 
 
@@ -170,7 +176,7 @@ def test_ws_events_log_trades_hb_snapshot_and_controls_with_receive_time(tmp_pat
     assert ev[2]["tr"] == [[9, 99000, 0.5, 150], [8, 98000, -0.1, 149]]
     c.close_second(115, now=116.5)
     # the snapshot is history: never in bfx_trades rows; only the live print is
-    assert _rows(tmp_path / ssc.TRADES_FILE) == [{"s": 115, "tr": [[10, 115100, 0.01, 151]]}]
+    assert _trade_rows(tmp_path / ssc.TRADES_FILE) == [{"s": 115, "tr": [[10, 115100, 0.01, 151]]}]
 
 
 def test_ws_events_file_is_registered_but_not_a_trades_stream():
@@ -348,3 +354,72 @@ def test_book_rows_carry_measured_receive_ts(tmp_path):
     assert row["receive_ts"] <= row["s"] + 1
     assert ssc.book_receive_stamp(100.1234, 1.0)["receive_ts"] == 100.124  # rounded UP, never before the frame
     assert ssc.book_receive_stamp(0.0, 0.0) == {}  # no measured frame time -> no stamp (non-countable downstream)
+
+
+def test_carried_book_row_keeps_the_frame_receive_time_not_the_bucket(tmp_path):
+    """HM #851 nit c: a carried row's receive_ts is the frame it was built from (it is that frame's book)."""
+    c, chans = _quiet_book_collector(tmp_path)
+    frame = _rows_or_empty(tmp_path / ssc.BOOK_FILE)
+    for t in (104.0, 108.0, 110.5):
+        c.on_bfx([1, "hb"], chans, t)
+    c.close_second(110, now=111.3)
+    row = _rows(tmp_path / ssc.BOOK_FILE)[-1]
+    assert row["carried"] is True and row["receive_ts"] < 101 and row["receive_ts"] != 110  # the frame, not s
+    assert frame == [] or frame[-1]["receive_ts"] == row["receive_ts"]
+
+
+def test_trades_deriv_and_quotes_carry_measured_receive_ts(tmp_path):
+    """HM #851 nit b: trades (per print + row = last print), deriv and venue quotes carry wall + mono receive."""
+    ticks = iter([10.0 + i for i in range(50)])
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0, mono=lambda: next(ticks))
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "trades", "chanId": 2}, chans, 100.0, mono=1.0)
+    c.on_bfx({"event": "subscribed", "channel": "status", "chanId": 7, "key": ssc.DERIV_KEY}, chans, 100.0, mono=1.0)
+    c.on_bfx([2, "te", [10, 100200, -0.01, 150.5]], chans, 100.2001, mono=2.0)
+    c.on_bfx([2, "te", [11, 100300, 0.01, 150.6]], chans, 100.3, mono=3.0)
+    deriv = [0] * 30
+    deriv[2], deriv[3], deriv[8], deriv[11], deriv[17] = 150.0, 150.1, 0.0001, 0.0001, 5000.0
+    c.on_bfx([7, deriv], chans, 100.4, mono=4.0)
+    c.on_lighter({"ticker": {"b": {"price": "99.5"}, "a": {"price": "100.5"}}}, 100.5, mono=5.0)
+    c.on_paradex({"bid": "99.0", "ask": "101.0"}, 100.6, mono=6.0)
+    c.close_second(100, now=101.3)
+    tr = _rows(tmp_path / ssc.TRADES_FILE)[0]
+    assert tr["rx"] == [[100.201, 2.0], [100.3, 3.0]] and tr["receive_ts"] == 100.3 and tr["receive_mono"] == 3.0
+    assert tr["receive_ts_source"] == "WS_FRAME"
+    d = _rows_or_empty(tmp_path / ssc.DERIV_FILE)
+    assert d and d[0]["receive_ts"] == 100.4 and d[0]["receive_mono"] == 4.0
+    c.close_second(160, now=161.3)  # roll the minute
+    v = _rows(tmp_path / ssc.VENUE_FILE)[0]
+    assert v["rx"]["lighter"][40] == [100.5, 5.0] and v["rx"]["paradex"][40] == [100.6, 6.0]
+    assert v["lighter"][40] == [99.5, 100.5]
+
+
+def test_ws_loop_reads_wall_and_mono_at_the_same_receive_point(tmp_path):
+    """HM #851 nit a: the handler gets the (wall, mono) pair read together right after recv, before parsing."""
+    reads = []
+    wall = iter([500.0 + i for i in range(20)])
+    mono = iter([7.0 + i for i in range(20)])
+    c = ssc.Collector(str(tmp_path), clock=lambda: (reads.append("w"), next(wall))[1],
+                      mono=lambda: (reads.append("m"), next(mono))[1])
+    got = []
+
+    class _WS:
+        n = 0
+
+        def send(self, _):
+            pass
+
+        def recv(self):
+            _WS.n += 1
+            if _WS.n > 1:
+                c.stop.set()
+                raise TimeoutError("timed out")
+            return "{}"
+
+        def close(self):
+            pass
+
+    c._ws_factory = lambda url: _WS()
+    c._ws_loop("lighter", "wss://x", [], lambda msg, now, mono=None: got.append((now, mono)))
+    assert got and got[0][1] is not None
+    assert got[0] == (500.0, 7.0) and reads[:2] == ["w", "m"]
