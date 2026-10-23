@@ -122,6 +122,113 @@ def first_row_at_or_after(book_at, t: float, horizon_s: float = FIRST_ROW_HORIZO
     return None
 
 
+BOOK_RECEIVE_BEFORE_TRIGGER = "BOOK_RECEIVE_BEFORE_TRIGGER"   # RK 24 Oct (3): FIRST_AFTER row received before the target
+BOOK_FIRST_AFTER_NOT_FIRST = "BOOK_FIRST_AFTER_NOT_FIRST"     # RK 24 Oct (3): an earlier row could have been the first
+FIRST_AFTER_PROBE_STEP_S = 0.25
+
+
+def _book_rows_near(book_at, lo_s: int, hi_s: int) -> list:
+    """Every book row with lo_s <= s <= hi_s, ordered by s. Uses the source's own row list when it exposes one
+    (BookTail.rows_between / book10l_at.rows_between: exact); otherwise probes book_at every 0.25 s (test doubles)."""
+    rows_fn = getattr(book_at, "rows_between", None)
+    if callable(rows_fn):
+        try:
+            return [dict(r) for r in (rows_fn(lo_s, hi_s) or []) if r and lo_s <= int(r["s"]) <= hi_s]
+        except Exception:  # noqa: BLE001
+            return []
+    seen: dict = {}
+    n = int((hi_s + 3 - lo_s) / FIRST_AFTER_PROBE_STEP_S) + 1
+    for k in range(n):
+        b = _safe(book_at, lo_s + k * FIRST_AFTER_PROBE_STEP_S)
+        if b and _f(b.get("s")) is not None and lo_s <= int(float(b["s"])) <= hi_s:
+            seen.setdefault(int(float(b["s"])), b)
+    return [seen[k] for k in sorted(seen)]
+
+
+def _rx(row):
+    v = _f((row or {}).get("receive_ts"))
+    return v if v and v > 0 and str((row or {}).get("receive_ts_source") or "") == RECEIVE_TS_MEASURED else None
+
+
+def first_row_received_at_or_after(book_at, t: float, horizon_s: float = FIRST_ROW_HORIZON_S):
+    """RK 24 Oct (3) FIRST_AFTER: the FIRST book row whose MEASURED receive_ts >= t (t = trigger, or trigger + delay
+    for a delayed leg), searching rows s in [floor(t) - 2, floor(t) + horizon_s]. No other row may be picked. When
+    receive times are missing the row is chosen by second (first_row_at_or_after) and the proof fails closed later.
+    Returns a copy of the row with ``first_after_unproven`` = reason (or None) - set when any earlier candidate row
+    has no measured receive_ts (it could have been the first) - or None if no row exists yet."""
+    import math
+    t = float(t)
+    fs = math.floor(t + 1e-9)
+    rows = _book_rows_near(book_at, fs - 2, fs + int(horizon_s))
+    if not rows:
+        return None
+    gap = False
+    for r in rows:
+        rx = _rx(r)
+        if rx is None:
+            if int(float(r["s"])) >= fs:
+                return {**r, "first_after_unproven": BOOK_RECEIVE_TS_MISSING}  # cannot prove which row was first
+            gap = True  # a pre-trigger-second row with unknown receive time may have been received after t
+            continue
+        if rx >= t - 1e-9:
+            return {**r, "first_after_unproven": BOOK_FIRST_AFTER_NOT_FIRST if gap else None}
+    return None
+
+
+def first_after_proof(book, target_ts: float, fill_ts: float) -> dict:
+    """RK 24 Oct (3), the ONE FIRST_AFTER check (R4): countable only if the walked row has a measured receive_ts,
+    target_ts <= receive_ts <= fill_ts, and it was proven the FIRST row received at/after target_ts."""
+    rx = _rx(book)
+    if rx is None:
+        return {"first_after_ok": False, "first_after_reason": BOOK_RECEIVE_TS_MISSING}
+    if rx < float(target_ts) - 1e-9:
+        return {"first_after_ok": False, "first_after_reason": BOOK_RECEIVE_BEFORE_TRIGGER}
+    if rx > float(fill_ts) + 1e-9:
+        return {"first_after_ok": False, "first_after_reason": BOOK_RECEIVE_AFTER_FILL}
+    why = (book or {}).get("first_after_unproven")
+    return {"first_after_ok": not why, "first_after_reason": why or None}
+
+
+DEPTH_SHORT_PARTIAL = "DEPTH_SHORT_PARTIAL"  # HM C7: a first-row walk the visible 10 levels could not fill
+
+# RK/HM #851 (24 Oct): the no-look-ahead proof is the collector's MEASURED per-row receive time (WS receipt of the last
+# book frame in the row). A row without it (written before #851) or with any other source is non-countable; the
+# bucket + write-lag estimate may only ever appear as the diagnostic label INFERRED_BUCKET_LAG, never countable.
+RECEIVE_TS_MEASURED = "WS_FRAME"
+RECEIVE_TS_INFERRED = "INFERRED_BUCKET_LAG"  # diagnostic only, always non-countable
+RECEIVE_TS_MISSING = "MISSING"
+BOOK_RECEIVE_TS_MISSING = "BOOK_RECEIVE_TS_MISSING"
+BOOK_RECEIVE_AFTER_FILL = "BOOK_RECEIVE_AFTER_FILL"
+
+
+def book_receive_proof(book, t: float, rule: str) -> dict:
+    """ONE shared check (R4) for every book walk: the walked row's measured receive time and whether it proves the
+    fill used no look-ahead. LATEST rule (bot-sent fills): receive_ts <= fill time t. FIRST_AFTER rule (exchange-
+    resident stop / forced exit, HM M2 / RK 17:24 / RK 24 Oct (3)): first_after_proof - target <= receive_ts <= fill
+    time and the row is the FIRST received at/after the target. ``book_receive_unverified`` is the reason (or None).
+
+    receive_ts <= fill_ts holds BY CONSTRUCTION on every countable row (HM 02:55 doc nit): LATEST rows with
+    receive_ts > fill_ts are refused (BOOK_RECEIVE_AFTER_FILL); FIRST_AFTER sets fill_ts = the row's own receipt.
+    ``book_receive_age_ms`` (HM 02:55 nit) is the price age measured from that RECEIPT: (fill_ts - receive_ts) ms;
+    None when the receipt is not measured (the by-second book_age_ms / price_age_s stay as the bucket age)."""
+    rx = _f((book or {}).get("receive_ts"))
+    rx = rx if rx and rx > 0 else None
+    src = str((book or {}).get("receive_ts_source") or "") if rx else RECEIVE_TS_MISSING
+    reason = None
+    if src != RECEIVE_TS_MEASURED:  # missing, unlabelled or INFERRED_BUCKET_LAG: never countable
+        reason = BOOK_RECEIVE_TS_MISSING
+    elif rule == ROW_RULE_LATEST and rx > float(t) + 1e-9:
+        reason = BOOK_RECEIVE_AFTER_FILL
+    elif rule == ROW_RULE_FIRST_AFTER:
+        # RK 24 Oct (3): t is the FIRST_AFTER fill time (the row's receipt); the target is stamped on the row.
+        reason = first_after_proof(book, (book or {}).get("first_after_target_ts", t), t)["first_after_reason"]
+    mono = _f((book or {}).get("receive_mono"))
+    age = round((float(t) - rx) * 1000.0, 3) if rx and src == RECEIVE_TS_MEASURED else None
+    return {"book_receive_ts": rx, "book_receive_mono": mono if rx else None,
+            "book_receive_ts_source": src or RECEIVE_TS_MISSING, "book_receive_unverified": reason,
+            "book_receive_age_ms": age}
+
+
 def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
                delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
@@ -141,23 +248,43 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
     if leg in FIRST_ROW_LEGS:
         # RK 17:18 (2)/(4): the resident stop (and a forced no-book exit) walks the FIRST row completed at or after the
         # fill time - never the pre-trigger row. Full size, price age recorded; no ticker / top fallback, no penalty.
-        book = first_row_at_or_after(book_at, t)
+        # RK 24 Oct (3): the row is the FIRST one RECEIVED at/after t (trigger, or trigger + delay); the fill time
+        # is that row's measured receipt (receive_ts <= fill_ts), the target is kept as fill_target_ts.
+        book = first_row_received_at_or_after(book_at, t)
+        if book is None:
+            # no row received at/after t yet: the by-second row is still priced, but first_after_proof fails it closed
+            legacy = first_row_at_or_after(book_at, t)
+            book = {**legacy, "first_after_unproven": BOOK_FIRST_AFTER_NOT_FIRST} if legacy else None
         base["book_row_rule"] = ROW_RULE_FIRST_AFTER
+        base["fill_target_ts"] = t
         if not book:
             COUNTERS["reject_no_book"] += 1
             return {**base, "status": "REJECT_NO_BOOK", "price": None, "filled_qty": 0.0, "price_source": None}
+        book["first_after_target_ts"] = t
+        frx = _rx(book)
+        if frx is not None and frx >= t:
+            base["fill_ts"] = frx
         ready = float(book["s"]) + 1.0
         price_age = round(ready - t, 3)
         px, filled = _walk(taker_side_levels(side, leg, book), q)
         out = {**base, "book_s": int(book["s"]), "price_age_s": price_age,
                "price_stale": price_age > MAX_BOOK_AGE_S, "depth_snapshot_fill": _snap(book),
-               "book_age_ms": round((t - float(book["s"])) * 1000), "ask_age_ms": round((t - float(book["s"])) * 1000)}
+               "book_age_ms": round((t - float(book["s"])) * 1000), "ask_age_ms": round((t - float(book["s"])) * 1000),
+               **book_receive_proof(book, base["fill_ts"], ROW_RULE_FIRST_AFTER)}
         if leg == FORCED_LEG:
             out["unverified_reason"] = "FORCED_NO_BOOK"
         elif out["price_stale"]:
             out["unverified_reason"] = "STALE_BOOK"
         if px is None:
             return {**out, "status": "NO_FILL_NO_DEPTH", "price": None, "filled_qty": 0.0}
+        if filled + 1e-12 < q:
+            # HM C7: the 10-level row is too shallow for the open qty. The exchange would walk deeper; the paper price
+            # covers only the visible depth -> UNVERIFIED (depth short), never COMPLETE.
+            out["depth_short_qty"] = round(q - filled, 8)
+            out["unverified_reason"] = out.get("unverified_reason") or DEPTH_SHORT_PARTIAL
+            out["depth_short"] = True
+        if out["book_receive_unverified"] and not out.get("unverified_reason"):
+            out["unverified_reason"] = out["book_receive_unverified"]  # RK/HM #851: no measured receive -> UNVERIFIED
         return {**out, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px,
                 "filled_qty": round(filled, 8), "price_source": "BFX_BOOK_10L"}
     base["book_row_rule"] = ROW_RULE_LATEST
@@ -170,14 +297,18 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
             levels = [lv for lv in levels or () if _f(lv[0]) is not None
                       and ((_f(lv[0]) <= cap_px + 1e-9) if buy else (_f(lv[0]) >= cap_px - 1e-9))]
         px, filled = _walk(levels, q)
+        rxp = book_receive_proof(book, t, ROW_RULE_LATEST)
         if px is None:
             st = "NO_FILL_IOC_CAP" if cap_px is not None and taker_side_levels(side, leg, book) else "NO_FILL_NO_DEPTH"
             return {**base, "status": st, "cap_px": cap_px, "depth_snapshot_fill": _snap(book), "price": None, "filled_qty": 0.0,
-                    "book_s": int(book["s"]), "book_age_ms": round((t - float(book["s"])) * 1000)}
-        return {**base, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px,
+                    "book_s": int(book["s"]), "book_age_ms": round((t - float(book["s"])) * 1000), **rxp}
+        return {**base, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px, **rxp,
+                **({"unverified_reason": rxp["book_receive_unverified"]} if rxp["book_receive_unverified"] else {}),
                 "filled_qty": round(filled, 8), "book_s": int(book["s"]),
                 "book_age_ms": round((t - float(book["s"])) * 1000),
                 "ask_age_ms": round((t - float(book["s"])) * 1000),
+                # R17 contract: the walked row's age at the model fill time (s), and the stale flag (> 2 s refused above)
+                "price_age_s": round(t - float(book["s"]), 3), "price_stale": False,
                 "depth_snapshot_fill": _snap(book), "price_source": "BFX_BOOK_10L"}
     if top_at is not None:
         # HM 12:20: top-of-book fallback fills at most the top size (PARTIAL), else rejects; counted.
@@ -219,10 +350,12 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
 
 
 class BookTail:
-    """book_at(t) over the collector's bfx_book_10l_1s.jsonl (rows {"s", "b", "a"}).
+    """book_at(t) over the collector's bfx_book_10l_1s.jsonl (rows {"s", "b", "a", "receive_ts", ...}).
 
-    A row for second s is complete only at s + 1, so at(t) returns the latest row with s + 1 <= t
-    (no look-ahead). Reads only the file tail, and only when cached rows are older than t.
+    A row for second s is complete only at s + 1, so at(t) returns the latest row with s + 1 <= t AND a measured
+    receive_ts <= t (RK/HM #851: no look-ahead proven per row). A row with no receive_ts (pre-#851) is still returned,
+    labelled receive_ts_source MISSING, and the pricer makes the fill non-countable. Reads only the file tail, and
+    only when cached rows are older than t.
     """
 
     def __init__(self, path: str, keep: int = 600, tail_bytes: int = 512 * 1024) -> None:
@@ -248,8 +381,12 @@ class BookTail:
                 sec = int(r["s"])
             except (ValueError, KeyError, TypeError):
                 continue
+            rx = _f(r.get("receive_ts"))
             self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or [],
-                               **({"carried": True} if r.get("carried") else {})}
+                               **({"carried": True} if r.get("carried") else {}),
+                               "receive_ts": rx if rx and rx > 0 else None, "receive_mono": _f(r.get("receive_mono")),
+                               "receive_ts_source": (str(r.get("receive_ts_source") or "")
+                                                     if rx and rx > 0 else RECEIVE_TS_MISSING)}
         if self._rows:
             for sec in sorted(self._rows)[:-self.keep]:
                 del self._rows[sec]
@@ -259,9 +396,17 @@ class BookTail:
         with self._lock:
             if self._max_s is None or self._max_s + 1 < t - 0.5:
                 self._refresh()
-            ok = [sec for sec in self._rows if sec + 1 <= t]
+            ok = [sec for sec, r in self._rows.items()
+                  if sec + 1 <= t and (r.get("receive_ts") is None or r["receive_ts"] <= t)]
             return dict(self._rows[max(ok)]) if ok else None
 
+
+    def rows_between(self, lo_s: int, hi_s: int) -> list:
+        """RK 24 Oct (3): every cached row with lo_s <= s <= hi_s (ordered), for the FIRST_AFTER receive-time search."""
+        with self._lock:
+            if self._max_s is None or self._max_s < hi_s:
+                self._refresh()
+            return [dict(self._rows[k]) for k in sorted(self._rows) if lo_s <= k <= hi_s]
 
     def missing_seconds(self, start: float, end: float) -> int:
         """Whole seconds in [floor(start), floor(end)] with no book row (read-only; refreshes the tail first)."""
@@ -286,6 +431,14 @@ def book10l_at(t: float):
         import os
         _BOOK_TAIL = BookTail(os.path.join(os.getcwd(), BOOK_FILE))
     return _BOOK_TAIL.at(t)
+
+
+def _book10l_rows_between(lo_s: int, hi_s: int) -> list:
+    book10l_at(float(lo_s))  # makes sure the tail exists
+    return _BOOK_TAIL.rows_between(int(lo_s), int(hi_s)) if _BOOK_TAIL is not None else []
+
+
+book10l_at.rows_between = _book10l_rows_between  # RK 24 Oct (3): exact row list for FIRST_AFTER
 
 
 def book10l_missing_seconds(start: float, end: float):
@@ -320,36 +473,102 @@ def quantile_method_of(delay_source: Any) -> str:
     return QM_DEFAULT
 
 
+DELAY_LEGS = ("entry", "exit", "stop")  # F1 legs: entry signal->ack, bot-sent exit trigger->ack, stop fill->confirmed
+PRICED_DELAY_LEGS = ("entry", "exit")     # the stop-placement leg is stamped only (it never times a fill)
+POOL_SCHEMA = "paper_delay_pool_v1"
+
+
 class DelaySampler:
-    """Rolling measured live delay per lane and leg (entry: signal->exchange_ack; exit: trigger->exit ack)."""
+    """F1 pool of MEASURED LIVE ACK delays per lane and leg (entry: Fly signal -> exchange ack; exit: paper exit
+    trigger -> exit ack; stop: entry fill -> STOP_CONFIRMED, stamped only). Live acks are the only samples (never a
+    paper signal->fill). Capped at ``maxlen`` per (lane, leg), one sample per trade and leg, persisted per DATA epoch
+    (to_json / load) and cleared at reset (clear)."""
 
     def __init__(self, maxlen: int = 200) -> None:
         self._lock = threading.Lock()
         self._d: dict = {}
+        self._seen: dict = {}
         self.maxlen = maxlen
 
-    def add(self, lane: str, leg: str, delay_s: float) -> None:
+    def add(self, lane: str, leg: str, delay_s: float, *, measured_ts: Any = None, trade_id: Any = None) -> Optional[float]:
         v = _f(delay_s)
         if v is None or v < 0 or v > 30:
-            return
+            return None
+        key = (str(lane or "").upper(), str(leg))
         with self._lock:
-            self._d.setdefault((lane, leg), deque(maxlen=self.maxlen)).append(v)
+            if trade_id:
+                seen = self._seen.setdefault(key, deque(maxlen=self.maxlen * 2))
+                if str(trade_id) in seen:
+                    return None
+                seen.append(str(trade_id))
+            self._d.setdefault(key, deque(maxlen=self.maxlen)).append((v, _f(measured_ts)))
+        return v
+
+    def has_trade(self, lane: str, leg: str, trade_id: Any) -> bool:
+        with self._lock:
+            return str(trade_id) in (self._seen.get((str(lane or "").upper(), str(leg))) or ())
+
+    def _xs(self, lane: str, leg: str) -> list:
+        with self._lock:
+            return list(self._d.get((str(lane or "").upper(), str(leg))) or ())
 
     def delay(self, lane: str, leg: str = "entry") -> tuple:
         """RK 17:24 / AMEND2 B1: n < 10 -> default (UNVERIFIED_DELAY); 10 <= n < 20 -> MAX of the pool; n >= 20 ->
         q0.90 (nearest-rank). The source string carries the method + n (quantile_method_of() parses it)."""
-        with self._lock:
-            xs = sorted(self._d.get((lane, leg)) or ())
+        xs = sorted(v for v, _ in self._xs(lane, leg))
         if len(xs) < MIN_SAMPLES:
             return DEFAULT_DELAY_S, "default_until_n10"
         if len(xs) < QUANTILE_SWITCH_N:
             return max(MIN_DELAY_S, xs[-1]), f"lane_max_n{len(xs)}"
         return max(MIN_DELAY_S, quantile_nearest_rank(xs, 0.90)), f"lane_q90_n{len(xs)}"
 
+    def pool_ts(self, lane: str, leg: str) -> Optional[float]:
+        """The measured ts of the newest live ack in the pool (None for an empty pool)."""
+        ts = [t for _, t in self._xs(lane, leg) if t]
+        return max(ts) if ts else None
+
+    def describe(self, lane: str, leg: str = "entry") -> dict:
+        """delay_s, delay_source plus the per-row delay stamp (pool_n, pool_ts, quantile_method, delay_unverified,
+        delay_flag) for this lane/leg."""
+        d, src = self.delay(lane, leg)
+        return {"delay_s": d, "delay_source": src, **delay_stamp(src, self.pool_ts(lane, leg))}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+            self._seen.clear()
+
+    def to_json(self, epoch_id: Any) -> dict:
+        with self._lock:
+            return {"schema": POOL_SCHEMA, "epoch_id": epoch_id, "maxlen": self.maxlen,
+                    "pools": {f"{k[0]}|{k[1]}": [[v, t] for v, t in dq] for k, dq in self._d.items()},
+                    "seen": {f"{k[0]}|{k[1]}": list(dq) for k, dq in self._seen.items()}}
+
+    def load(self, payload: Any, epoch_id: Any) -> bool:
+        """Restore a persisted pool. A pool from another DATA epoch (or another schema) is ignored: per-epoch."""
+        if not isinstance(payload, Mapping) or payload.get("schema") != POOL_SCHEMA \
+                or payload.get("epoch_id") != epoch_id:
+            return False
+        with self._lock:
+            self._d.clear()
+            self._seen.clear()
+            for k, rows in (payload.get("pools") or {}).items():
+                lane, _, leg = str(k).partition("|")
+                dq = self._d.setdefault((lane, leg), deque(maxlen=self.maxlen))
+                for r in rows or ():
+                    v = _f(r[0]) if isinstance(r, (list, tuple)) and r else None
+                    if v is not None and 0 <= v <= 30:
+                        dq.append((v, _f(r[1]) if len(r) > 1 else None))
+            for k, ids in (payload.get("seen") or {}).items():
+                lane, _, leg = str(k).partition("|")
+                self._seen[(lane, leg)] = deque((str(i) for i in ids or ()), maxlen=self.maxlen * 2)
+        return True
+
     def snapshot(self) -> dict:
         with self._lock:
-            return {f"{k[0]}|{k[1]}": {"n": len(v), "p50": statistics.median(v) if v else None}
-                    for k, v in self._d.items()}
+            items = {k: [v for v, _ in dq] for k, dq in self._d.items()}
+        return {f"{k[0]}|{k[1]}": {"n": len(v), "p50": statistics.median(v) if v else None,
+                                    "pool_ts": self.pool_ts(*k)} for k, v in items.items()}
 
 
 # ---------------------------------------------------------------- measured slippage (HM 17 Oct)

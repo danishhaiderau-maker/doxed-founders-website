@@ -71,7 +71,10 @@ def exit_truth(rows: Iterable[Mapping[str, Any]], tape_ts: list, tape_rows: list
             if fb_better > EXIT_TRUTH_RED_BP:
                 fb_bad.append({"trade_id": r.get("trade_id"), "lane": r.get("lane") or r.get("research_lane"),
                                "exit_reason": ex.get("exit_reason"), "booked_better_than_fill_touch_bp": round(fb_better, 2)})
-        bid, ask = _f(ex.get("exit_bid")), _f(ex.get("exit_ask"))
+        # R3: the book-top stamp (bfx_book_10l_1s) first; exit_bid/exit_ask only on legacy rows written before it.
+        bid, ask = _f(ex.get("exit_book_top_bid")), _f(ex.get("exit_book_top_ask"))
+        if bid is None or ask is None:
+            bid, ask = _f(ex.get("exit_bid")), _f(ex.get("exit_ask"))
         if bid is None or ask is None:
             i = bisect.bisect_right(tape_ts, ct) - 1
             if i < 0 or ct - tape_ts[i] > 2.0:

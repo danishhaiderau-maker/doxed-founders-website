@@ -156,6 +156,43 @@ def _nonneg(v) -> bool:
     return n is not None and n >= 0
 
 
+def _false(v) -> bool:
+    return v is False or (isinstance(v, str) and v.strip() in ("false", "False"))
+
+
+def liq_failure(row):
+    """RK/HM K1 (24 Oct): a row counts only when the hold path is PROVEN clear of the liquidation distance:
+    liq_unverified is a real False, the mark series was read (liq_mark_rows_n > 0) and nothing reached liq_px
+    (no liq_trigger_ts). liq_unverified=True (liquidation before the stop, stop slipped past liq, no mark) or a
+    missing check fails closed. Returns the failure label or None."""
+    if not isinstance(row, dict):
+        return "LIQ_CHECK_MISSING"
+    lu = row.get("liq_unverified")
+    if _truthy(lu):
+        return "LIQ_UNVERIFIED"
+    if not _false(lu):
+        return "LIQ_CHECK_MISSING"
+    n = _num(row.get("liq_mark_rows_n"))
+    if n is None or n <= 0:
+        return "LIQ_MARKS_MISSING"
+    if not _missing(row.get("liq_trigger_ts")) and str(row.get("liq_trigger_ts")).strip() not in ("None", "nan"):
+        return "LIQ_DISTANCE_REACHED"
+    return None
+
+
+def book_receive_failures(row) -> list:
+    """RK/HM #851 (24 Oct): each priced book row must carry the collector's MEASURED receive time (wall + monotonic,
+    source WS_FRAME). A missing / non-finite stamp or any other source (pre-#851 row, INFERRED_BUCKET_LAG) fails."""
+    out = []
+    for side, label in (("entry", "BOOK_RECEIVE_TS_MISSING"), ("exit", "EXIT_BOOK_RECEIVE_TS_MISSING")):
+        rx, mono = _num(row.get(f"{side}_book_receive_ts")), _num(row.get(f"{side}_book_receive_mono"))
+        if (_exact(row.get(f"{side}_book_receive_ts_source")) not in F.BOOK_RECEIVE_SOURCE_OK
+                or rx is None or rx <= 0 or mono is None or mono < 0
+                or not _nonneg(row.get(f"{side}_book_receive_age_ms"))):  # HM 02:55: age from receipt >= 0 (proof)
+            out.append(label)
+    return out
+
+
 def proof_failures(row) -> list:
     """Every failed countability check against the r17_fields contract (empty list = the row proves book realism)."""
     out = []
@@ -188,6 +225,10 @@ def proof_failures(row) -> list:
     sc = _exact(row.get("stop_coverage"))
     if sc not in F.STOP_COVERAGE_OK:
         out.append("STOP_COVERAGE_MISSING" if _missing(row.get("stop_coverage")) else "STOP_COVERAGE_UNKNOWN")
+    lf = liq_failure(row)
+    if lf:
+        out.append(lf)
+    out.extend(book_receive_failures(row))
     return out
 
 

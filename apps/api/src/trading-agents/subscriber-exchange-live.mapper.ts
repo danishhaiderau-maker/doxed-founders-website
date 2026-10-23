@@ -6,6 +6,8 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
+import { liveRowCountabilityWithLegs, liveRowUncheckedCountability } from './live-row-countability';
+import { liveLegStamps } from './live-trade-export.mapper';
 
 type IntentEnvelope = {
   direction?: 'LONG' | 'SHORT';
@@ -44,6 +46,8 @@ export type SubscriberCycleRow = {
   exchangeFillAt?: Date | null;
   exchangeExitAt?: Date | null;
   negativeEvidence?: string | null;
+  /** RK (1): the participant's execution events, read by the ONE shared liveLegStamps (R4); absent = no legs. */
+  events?: Array<{ eventType: string; payload: unknown }>;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -364,6 +368,13 @@ export function mapSubscriberExchangeLiveBook(input: {
           ? 'Exchange-linked participant lifecycle'
           : 'Neon lifecycle; exchange linkage incomplete',
         negativeEvidence: row.negativeEvidence ?? null,
+        // HM B4: forced closes carry non_countable on the website live row; RK (1)/R17: otherwise every measured
+        // leg (bot-sent: trigger -> Fly send -> relay receive -> ack/fill; resident: trade print -> BFX fill record)
+        // must be present and ordered, via the same liveLegStamps the export uses.
+        ...liveRowCountabilityWithLegs(
+          [row.cycle.showcaseExitReason, row.terminalReason],
+          ...liveLegStamps(row.cycle.intentEnvelope, row.events ?? [], true),
+        ),
       });
     }
   }
@@ -422,6 +433,10 @@ export function mapSubscriberExchangeLiveBook(input: {
   trades.length = 0;
   trades.push(...mergedParticipantRows, ...unmatchedLedger);
 
+  for (const t of trades) {
+    // HM 02:55 blocker 4: rows not built through the leg check (ledger-only closes) default to non-countable.
+    if (t.nonCountable === undefined) Object.assign(t, liveRowUncheckedCountability(t.exitReason));
+  }
   trades.sort((a, b) => {
     const ta = parseMelbourneTimestampMs(a.exchangeExitTime ?? a.time) ?? 0;
     const tb = parseMelbourneTimestampMs(b.exchangeExitTime ?? b.time) ?? 0;

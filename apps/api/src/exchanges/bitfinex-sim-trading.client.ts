@@ -177,8 +177,12 @@ export class BitfinexSimTradingClient {
   async getLedgerFeesSince(
     _creds: ExchangeCredentials,
     _sinceMs: number,
-  ): Promise<{ tradingFeesUsd: number; fundingFeesUsd: number; realizedPnlUsd: number; positionCloseRows: number }> {
-    return { tradingFeesUsd: 0, fundingFeesUsd: 0, realizedPnlUsd: 0, positionCloseRows: 0 };
+  ): Promise<{
+    tradingFeesUsd: number; fundingFeesUsd: number; realizedPnlUsd: number; positionCloseRows: number;
+    verified: boolean; unverifiedRows: number;
+  }> {
+    // Paper book has no exchange ledger: nothing here is verified exchange truth (fail closed, never "0 fees").
+    return { tradingFeesUsd: 0, fundingFeesUsd: 0, realizedPnlUsd: 0, positionCloseRows: 0, verified: false, unverifiedRows: 0 };
   }
 
   async submitLimitOrder(

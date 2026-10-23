@@ -85,6 +85,9 @@ export type AgentLiveTradeRow = {
   negativeEvidence?: string | null;
   /** Canonical source or exchange terminal reason, when it is available. */
   exitReason?: string | null;
+  /** HM B4: forced (force-flat / maintenance / admin) close; never counted in live or paper stats. */
+  nonCountable?: boolean;
+  nonCountableReason?: string | null;
 };
 
 /** Durable, user-visible provenance for the last relay start/stop decision. */

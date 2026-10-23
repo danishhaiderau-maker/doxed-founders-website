@@ -270,6 +270,10 @@ export function buildLiveCopyReports(input: {
           tl.exit_ack_at_ts = t('close_exchange_ack_at');
           tl.exit_confirmed_at_ts = t('close_confirmed_at');
           tl.exit_recorded_at_ts = sec(e.createdAt.getTime());
+          // HM 02:55 / RK (1): the exit order class (BOT_SENT | EXCHANGE_RESIDENT) and the resident-stop legs
+          // (real trade print -> Bitfinex's own fill record) reach Fly's live-vs-paper leg check.
+          tl.exit_trigger_print_at_ts = t('exit_trigger_print_at');
+          tl.exit_fill_record_at_ts = t('exit_fill_record_at') ?? t('exchange_exit_fill_first_at');
           push(e, 'POSITION_CLOSED', {
             // exit_exchange_fill_price is the authenticated Bitfinex close
             // fill; exit_price can be the quote side (11 Oct: 83084 ask vs
@@ -279,6 +283,8 @@ export function buildLiveCopyReports(input: {
               reason: pl.reason ?? pl.exit_reason ?? null,
               paper_exit_price: num(pl.showcase_exit_price),
               exchange_order_id: pl.close_exchange_order_id != null ? String(pl.close_exchange_order_id) : null,
+              exit_order_class: pl.exit_order_class === 'EXCHANGE_RESIDENT' || pl.exit_order_class === 'BOT_SENT'
+                ? pl.exit_order_class : null,
             },
           });
           break;

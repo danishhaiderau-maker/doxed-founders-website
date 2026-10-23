@@ -73,10 +73,12 @@ def test_maker_trade_through_fills_at_limit_capped_by_print():
 def test_maker_queue_depletes_before_fill_and_only_aggressor_side():
     st = om.maker_rest_step("LONG", 100.0, 1.0, 2.0, [{"ts": 1, "px": 100.0, "amt": 1.5},   # buy aggressor: no
                                                       {"ts": 2, "px": 100.0, "amt": -1.5},  # queue 2 -> 0.5
-                                                      {"ts": 3, "px": 100.0, "amt": -0.8}])  # 0.5 queue, 0.3 us
+                                                      {"ts": 3, "px": 100.0, "amt": -0.8}],  # 0.5 queue, 0.3 us
+                            om.REST_FILL_QUEUE_CLEAR)
     assert st["queue_ahead"] == 0.0 and len(st["fills"]) == 1 and abs(st["fills"][0][2] - 0.3) < 1e-12
     assert abs(st["remaining"] - 0.7) < 1e-12
-    sh = om.maker_rest_step("SHORT", 100.0, 1.0, 0.0, [{"ts": 1, "px": 100.0, "amt": -1}, {"ts": 2, "px": 100.2, "amt": 2}])
+    sh = om.maker_rest_step("SHORT", 100.0, 1.0, 0.0, [{"ts": 1, "px": 100.0, "amt": -1}, {"ts": 2, "px": 100.2, "amt": 2}],
+                            om.REST_FILL_QUEUE_CLEAR)
     assert sh["fills"] == [(2, 100.0, 1.0)]
 
 
@@ -111,3 +113,25 @@ def test_no_maker_take_profit_anywhere():
     rab_src = inspect.getsource(rab)
     assert "maker=True" not in rab_src and rab_src.count("maker=False") >= 2
     assert '"maker": True' not in inspect.getsource(stack)
+
+
+def test_c1_default_is_trade_through_and_at_limit_prints_never_fill():
+    st = om.maker_rest_step("LONG", 100.0, 1.0, 0.0, [{"ts": 1, "px": 100.0, "amt": -5}])
+    assert st["fills"] == [] and st["remaining"] == 1.0 and om.REST_FILL_DEFAULT == om.REST_FILL_TRADE_THROUGH
+
+
+def test_c1_unsized_through_print_fills_nothing_and_is_counted():
+    for amt in (None, 0):
+        st = om.maker_rest_step("LONG", 100.0, 2.0, 0.0, [{"ts": 1, "px": 99.0, "amt": amt},
+                                                          {"ts": 2, "px": 100.0, "amt": amt},
+                                                          {"ts": 3, "px": 99.5, "amt": -0.4}])
+        assert st["fills"] == [(3, 100.0, 0.4)] and abs(st["remaining"] - 1.6) < 1e-12
+        assert st["unsized_prints"] == 2
+    # queue_clear: an unsized at-limit print neither depletes the queue nor fills us (no known aggressor)
+    qc = om.maker_rest_step("SHORT", 100.0, 1.0, 0.5, [{"ts": 1, "px": 100.0, "amt": None}], om.REST_FILL_QUEUE_CLEAR)
+    assert qc["fills"] == [] and qc["queue_ahead"] == 0.5 and qc["unsized_prints"] == 1
+
+
+def test_c1_through_print_capped_at_printed_size():
+    st = om.maker_rest_step("SHORT", 100.0, 3.0, 0.0, [{"ts": 1, "px": 100.5, "amt": 1.2}])
+    assert st["fills"] == [(1, 100.0, 1.2)] and abs(st["remaining"] - 1.8) < 1e-12

@@ -19,6 +19,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: "Install API dependencies (for the #842 API specs below)"
+        working-directory: .
+        run: |
+          npm ci
+          npx prisma@6.8.2 generate --schema prisma/schema.prisma
+          npm run build:utils
+      - name: "Run the #842 API specs (Bitfinex ledger layout, exit post-close reconcile, RK1 exit stamps)"
+        # bitfinex-api.client.spec.ts imports bitfinex-ledger-layout.spec.ts; the helpers spec imports
+        # exit-post-close-reconcile.spec.ts and rk1-live-exit-stamps.spec.ts.
+        working-directory: apps/api
+        run: |
+          npx tsx --test src/exchanges/bitfinex-api.client.spec.ts src/trading-agents/signal-subscriber-execution.helpers.spec.ts
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

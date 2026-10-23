@@ -28,10 +28,14 @@ def _epoch():
     paper_fill.FRESH_EPOCH_TS = old
 
 
-PROOF = {"trigger_price_source": "book", "delay_source": "lane_q90_n24", "exit_priced_delay_source": "lane_max_n12",
+PROOF = {"trigger_price_source": "book", "delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_q90_n24", "exit_priced_delay_source": "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_max_n12",
          "entry_walk_bp": 0.4, "exit_walk_bp": 0.6, "exit_legs_unmeasured": 0, "evidence_status": "COMPLETE",
          "entry_book_age_ms": 210, "exit_price_age_s": 0.33, "exit_evidence_status": "COMPLETE",
-         "exit_unverified_reason": None, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK"}
+         "exit_unverified_reason": None, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK",
+         # RK/HM K1: hold path proven clear of the liquidation distance
+         "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None,
+         "entry_book_receive_ts": 1000.2, "entry_book_receive_mono": 50.2, "entry_book_receive_ts_source": "WS_FRAME", "entry_book_receive_age_ms": 120.0,
+         "exit_book_receive_ts": 1100.4, "exit_book_receive_mono": 150.4, "exit_book_receive_ts_source": "WS_FRAME", "exit_book_receive_age_ms": 80.0,}
 
 
 def good_row(**extra):
@@ -75,6 +79,10 @@ def test_rk_list_ids_are_non_countable_and_never_fresh():
     ("delay_source", None, "DELAY_SOURCE_MISSING"),
     ("delay_source", "default_until_n10", "DELAY_NOT_MEASURED"),
     ("delay_source", "lane_max_n9", "DELAY_NOT_MEASURED"),
+    ("delay_source", "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n9", "DELAY_NOT_MEASURED"),
+    ("delay_source", "lane_max_n12", "DELAY_NOT_MEASURED"),  # HM #842 R3 nit: old per-lane label never counts
+    ("delay_source", "lane_q90_n25", "DELAY_NOT_MEASURED"),
+    ("exit_priced_delay_source", "lane_q90_n25", "EXIT_DELAY_NOT_MEASURED"),
     ("exit_priced_delay_source", None, "EXIT_DELAY_NOT_MEASURED"),
     ("exit_priced_delay_source", "default_until_n10", "EXIT_DELAY_NOT_MEASURED"),
     ("entry_walk_bp", None, "ENTRY_NOT_BOOK_WALKED"),
@@ -101,6 +109,23 @@ def test_rk_list_ids_are_non_countable_and_never_fresh():
     ("stop_coverage", "WHATEVER", "STOP_COVERAGE_UNKNOWN"),
     ("stop_coverage", "STOP_COVERAGE_GAP", "STOP_COVERAGE_UNKNOWN"),
     ("stop_coverage", "STOP_COVERAGE_UNVERIFIED", "STOP_COVERAGE_UNKNOWN"),
+    # RK/HM K1: liquidation not proven clear
+    ("liq_unverified", True, "LIQ_UNVERIFIED"),
+    ("liq_unverified", "true", "LIQ_UNVERIFIED"),
+    ("liq_unverified", None, "LIQ_CHECK_MISSING"),
+    ("liq_mark_rows_n", 0, "LIQ_MARKS_MISSING"),
+    ("liq_mark_rows_n", None, "LIQ_MARKS_MISSING"),
+    ("liq_trigger_ts", 1.0e9, "LIQ_DISTANCE_REACHED"),
+    # RK/HM #851: the priced book rows must carry the MEASURED WS receive time (wall + monotonic, WS_FRAME)
+    ("entry_book_receive_ts", None, "BOOK_RECEIVE_TS_MISSING"),
+    ("entry_book_receive_mono", None, "BOOK_RECEIVE_TS_MISSING"),
+    ("entry_book_receive_ts_source", "INFERRED_BUCKET_LAG", "BOOK_RECEIVE_TS_MISSING"),
+    ("entry_book_receive_ts_source", "MISSING", "BOOK_RECEIVE_TS_MISSING"),
+    ("exit_book_receive_ts", None, "EXIT_BOOK_RECEIVE_TS_MISSING"),
+    ("exit_book_receive_mono", float("nan"), "EXIT_BOOK_RECEIVE_TS_MISSING"),
+    ("exit_book_receive_ts_source", None, "EXIT_BOOK_RECEIVE_TS_MISSING"),
+    ("entry_book_receive_age_ms", None, "BOOK_RECEIVE_TS_MISSING"),  # HM 02:55: age from receipt is a proof field
+    ("exit_book_receive_age_ms", -5.0, "EXIT_BOOK_RECEIVE_TS_MISSING"),
 ])
 def test_any_missing_or_unknown_proof_excludes_ids_on_no_list(field, value, reason):
     tid = "gs1-ffffffffffff"
@@ -117,7 +142,8 @@ def test_row_without_any_proof_lists_every_reason():
     assert set(got) == {"TRIGGER_SOURCE_MISSING", "DELAY_SOURCE_MISSING", "EXIT_DELAY_NOT_MEASURED",
                         "ENTRY_NOT_BOOK_WALKED", "ENTRY_EVIDENCE_NOT_COMPLETE", "ENTRY_PRICE_AGE_MISSING",
                         "EXIT_NOT_BOOK_WALKED", "EXIT_LEG_UNMEASURED", "EXIT_PRICE_AGE_MISSING",
-                        "EXIT_EVIDENCE_NOT_COMPLETE", "LEVEL_CROSS_UNKNOWN", "STOP_COVERAGE_MISSING"}
+                        "EXIT_EVIDENCE_NOT_COMPLETE", "LEVEL_CROSS_UNKNOWN", "STOP_COVERAGE_MISSING",
+                        "LIQ_CHECK_MISSING", "BOOK_RECEIVE_TS_MISSING", "EXIT_BOOK_RECEIVE_TS_MISSING"}
 
 
 def test_missing_stop_coverage_alone_excludes():
@@ -142,7 +168,7 @@ def test_841_shaped_closed_row_with_contract_fields_counts():
            "exit_status": "PAPER_FILL", "fill_model": paper_fill.FILL_MODEL, "fill_model_version": 1,
            "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True, "all_legs_book10l": True,
            # _entry_pricing_fields
-           "delay_s": 1.9, "delay_source": "lane_q90_n31", "priced_delay_s": 1.9, "priced_delay_model": "PAPER_MEASURED",
+           "delay_s": 1.9, "delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_q90_n31", "priced_delay_s": 1.9, "priced_delay_model": "PAPER_MEASURED",
            "evidence_status": "COMPLETE",
            # _slippage_row_fields
            "book_slippage_usd_entry": 0.001, "entry_walk_bp": 0.3, "book_slippage_usd_exit": 0.002, "exit_walk_bp": 0.5,
@@ -153,7 +179,10 @@ def test_841_shaped_closed_row_with_contract_fields_counts():
            "exit_unverified_reason": None, "exit_trigger_source": "PROTECTIVE_EXIT_WORKER",
            # contract fields REALISM_V2 copies onto trade_row
            "trigger_price_source": "book", "exit_priced_delay_source": "EXCHANGE_RESIDENT_NO_DELAY",
-           "entry_book_age_ms": 180, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK"}
+           "entry_book_age_ms": 180, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK",
+           "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None,
+           "entry_book_receive_ts": 1000.2, "entry_book_receive_mono": 50.2, "entry_book_receive_ts_source": "WS_FRAME", "entry_book_receive_age_ms": 120.0,
+         "exit_book_receive_ts": 1100.4, "exit_book_receive_mono": 150.4, "exit_book_receive_ts_source": "WS_FRAME", "exit_book_receive_age_ms": 80.0,}
     assert r17.non_countable_reason(row) is None
     assert r17.stamp_on_write(dict(row))["non_countable"] is False
 

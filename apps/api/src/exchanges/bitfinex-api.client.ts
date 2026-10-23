@@ -94,20 +94,50 @@ export type BitfinexLiveAccountMetrics = {
   fundsInWrongWallet: boolean;
 };
 
+/**
+ * Session P&L = exchange realized + unrealized. R7 (HM #842, 24 Oct 2026): ledger trading/funding fees are
+ * reported as separate metrics (BitfinexLiveAccountMetrics.tradingFeesUsd / fundingFeesUsd) and are NEVER
+ * folded into P&L.
+ */
 export function calculateBitfinexSessionPnl(input: {
   realizedPnlUsd: number;
   unrealizedPnlUsd: number;
-  tradingFeesUsd: number;
-  fundingFeesUsd: number;
 }): number {
-  return Number(
-    (
-      input.realizedPnlUsd +
-      input.unrealizedPnlUsd -
-      input.tradingFeesUsd -
-      input.fundingFeesUsd
-    ).toFixed(2),
-  );
+  return Number((input.realizedPnlUsd + input.unrealizedPnlUsd).toFixed(2));
+}
+
+/**
+ * Bitfinex v2 `auth/r/ledgers/hist` row layout (HM #842, 24 Oct 2026):
+ * [0 ID, 1 CURRENCY, 2 WALLET, 3 MTS, 4 null, 5 AMOUNT, 6 BALANCE, 7 null, 8 DESCRIPTION].
+ * The previous readers used [4]/[7] (placeholders, always null) so every amount read as 0.
+ */
+export const BITFINEX_LEDGER_ROW = { ID: 0, CURRENCY: 1, WALLET: 2, MTS: 3, AMOUNT: 5, BALANCE: 6, DESCRIPTION: 8 } as const;
+
+export type BitfinexLedgerRow = { id: unknown; mts: number | null; amount: number; description: string };
+
+/**
+ * One ledger row, or null when it is UNVERIFIED: not an array of the documented length, AMOUNT null / non-numeric /
+ * non-finite, or DESCRIPTION not a string. Fail closed: an unverified row is never read as amount 0.
+ */
+export function parseBitfinexLedgerRow(row: unknown): BitfinexLedgerRow | null {
+  if (!Array.isArray(row) || row.length <= BITFINEX_LEDGER_ROW.DESCRIPTION) return null;
+  const rawAmount = row[BITFINEX_LEDGER_ROW.AMOUNT];
+  if (rawAmount == null || (typeof rawAmount !== 'number' && typeof rawAmount !== 'string')) return null;
+  if (typeof rawAmount === 'string' && !rawAmount.trim()) return null;
+  const amount = Number(rawAmount);
+  if (!Number.isFinite(amount)) return null;
+  const description = row[BITFINEX_LEDGER_ROW.DESCRIPTION];
+  if (typeof description !== 'string') return null;
+  const mts = Number(row[BITFINEX_LEDGER_ROW.MTS]);
+  return { id: row[BITFINEX_LEDGER_ROW.ID], mts: Number.isFinite(mts) && mts > 0 ? mts : null, amount, description };
+}
+
+/** A ledger read containing an unverified row: the position-close set is incomplete, so callers must not use it. */
+export class BitfinexLedgerUnverifiedError extends Error {
+  constructor(readonly unverifiedRows: number) {
+    super(`BITFINEX_LEDGER_UNVERIFIED: ${unverifiedRows} ledger row(s) with null/non-finite AMOUNT or non-string DESCRIPTION`);
+    this.name = 'BitfinexLedgerUnverifiedError';
+  }
 }
 
 export type EnsureDerivativesResult = {
@@ -1155,7 +1185,11 @@ export class BitfinexTradingClient {
     return parseOpenPositionPayload(rows, symbol);
   }
 
-  /** Sum fees and exchange-realized position P&L from one margin-ledger request. */
+  /**
+   * Sum fees and exchange-realized position P&L from one margin-ledger request. Fees are metrics only (R7).
+   * `verified` is true only when the read succeeded and EVERY row parsed (documented layout, finite AMOUNT, string
+   * DESCRIPTION); otherwise callers must treat the sums as unverified (fail closed), never as 0.
+   */
   async getLedgerFeesSince(
     creds: ExchangeCredentials,
     sinceMs: number,
@@ -1164,11 +1198,15 @@ export class BitfinexTradingClient {
     fundingFeesUsd: number;
     realizedPnlUsd: number;
     positionCloseRows: number;
+    verified: boolean;
+    unverifiedRows: number;
   }> {
     let tradingFeesUsd = 0;
     let fundingFeesUsd = 0;
     let realizedPnlUsd = 0;
     let positionCloseRows = 0;
+    let unverifiedRows = 0;
+    let readOk = false;
     try {
       const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/ledgers/hist', {
         wallet: 'margin',
@@ -1177,14 +1215,18 @@ export class BitfinexTradingClient {
         limit: 250,
       });
       if (!Array.isArray(rows)) {
-        return { tradingFeesUsd, fundingFeesUsd, realizedPnlUsd, positionCloseRows };
+        return { tradingFeesUsd, fundingFeesUsd, realizedPnlUsd, positionCloseRows, verified: false, unverifiedRows };
       }
-      for (const row of rows) {
-        if (!Array.isArray(row) || row.length < 8) continue;
-        const amount = Number(row[4] ?? 0);
-        const description = String(row[7] ?? '').toLowerCase();
+      readOk = true;
+      for (const raw of rows) {
+        const parsed = parseBitfinexLedgerRow(raw);
+        if (!parsed) {
+          unverifiedRows += 1;
+          continue;
+        }
+        const amount = parsed.amount;
+        const description = parsed.description.toLowerCase();
         if (
-          Number.isFinite(amount) &&
           amount !== 0 &&
           description.includes('position') &&
           !/fee|funding|transfer|commission|margin funding/i.test(description)
@@ -1205,13 +1247,16 @@ export class BitfinexTradingClient {
         }
       }
     } catch {
-      /* ledger optional */
+      /* ledger optional: unverified, not zero */
+      readOk = false;
     }
     return {
       tradingFeesUsd: Number(tradingFeesUsd.toFixed(4)),
       fundingFeesUsd: Number(fundingFeesUsd.toFixed(4)),
       realizedPnlUsd: Number(realizedPnlUsd.toFixed(4)),
       positionCloseRows,
+      verified: readOk && unverifiedRows === 0,
+      unverifiedRows,
     };
   }
 
@@ -1257,25 +1302,38 @@ export class BitfinexTradingClient {
       });
       if (!Array.isArray(rows)) return [];
       const out: BitfinexPositionCloseLedgerRow[] = [];
-      for (const row of rows) {
-        if (!Array.isArray(row) || row.length < 8) continue;
-        const amount = Number(row[4] ?? 0);
-        if (!Number.isFinite(amount) || amount === 0) continue;
-        const description = String(row[7] ?? '');
+      let unverifiedRows = 0;
+      for (const raw of rows) {
+        const parsed = parseBitfinexLedgerRow(raw);
+        if (!parsed) {
+          unverifiedRows += 1;
+          continue;
+        }
+        const amount = parsed.amount;
+        if (amount === 0) continue;
+        const description = parsed.description;
         const lower = description.toLowerCase();
         if (!/position/i.test(lower)) continue;
         if (/fee|funding|transfer|commission|margin funding/i.test(lower)) continue;
-        const closedAtMs = Number(row[3] ?? 0);
-        const closedAt = Number.isFinite(closedAtMs) && closedAtMs > 0 ? new Date(closedAtMs) : new Date();
+        // A close row without its own MTS cannot be bounded to a close window: unverified, never "now".
+        if (parsed.mts == null) {
+          unverifiedRows += 1;
+          continue;
+        }
+        const closedAtMs = parsed.mts;
+        const closedAt = new Date(closedAtMs);
         out.push({
-          ledgerId: String(row[0] ?? `${closedAtMs}-${amount}`),
+          ledgerId: String(parsed.id ?? `${closedAtMs}-${amount}`),
           closedAt,
           pnlUsd: Number(amount.toFixed(4)),
           description,
         });
       }
+      // Fail closed: one unverified row makes the whole close set unverified (callers fall back / omit evidence).
+      if (unverifiedRows > 0) throw new BitfinexLedgerUnverifiedError(unverifiedRows);
       return out.sort((a, b) => b.closedAt.getTime() - a.closedAt.getTime());
-    } catch {
+    } catch (err) {
+      if (err instanceof BitfinexLedgerUnverifiedError) throw err;
       return [];
     }
   }
@@ -1300,16 +1358,13 @@ export class BitfinexTradingClient {
     // ledger; otherwise a remaining lot can show a profit while the actual net position
     // shows a loss and the headline mixes the two accounting bases. The participant sum
     // remains a fallback only when the exchange ledger is temporarily unavailable/empty.
+    // HM #842: an unverified ledger read (malformed row / read failure) is never used as exchange truth.
     const realizedPnlUsd =
-      fees.positionCloseRows > 0
+      fees.verified && fees.positionCloseRows > 0
         ? fees.realizedPnlUsd
         : (opts?.realizedPnlUsd ?? 0);
-    const sessionPnlUsd = calculateBitfinexSessionPnl({
-      realizedPnlUsd,
-      unrealizedPnlUsd,
-      tradingFeesUsd: fees.tradingFeesUsd,
-      fundingFeesUsd: fees.fundingFeesUsd,
-    });
+    // R7: fees stay metrics (tradingFeesUsd / fundingFeesUsd below), never subtracted from session P&L.
+    const sessionPnlUsd = calculateBitfinexSessionPnl({ realizedPnlUsd, unrealizedPnlUsd });
     const fundsInWrongWallet =
       !position &&
       derivativesAvailableUsd < 5 &&
