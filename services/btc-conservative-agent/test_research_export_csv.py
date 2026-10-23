@@ -29,7 +29,7 @@ def main():
         bot.PATH_REPLAY_FILE,
         bot.CYCLE_3M_UNIVERSE_FILE,
         bot.CHASE_OFFSET_TOUCH_GRID_FILE,
-        bot.ORDER_MULTIVERSE_FILE,
+        # ORDER_MULTIVERSE_FILE: retired by R17 (23 Oct), no longer exported.
         bot.OPPORTUNITY_CAPTURE_FILE,
         "execution_funnel.jsonl",
     }

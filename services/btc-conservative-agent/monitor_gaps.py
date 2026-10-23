@@ -64,6 +64,7 @@ WORKER_EXPECTATIONS: dict[str, tuple] = {
     "live_guardian_loop": (1.0, 30.0),   # #784: beats via shutdown_event.wait(1 s)
     "api_state_cache_refresher": (5.0, 900.0),
     "main_supervisor_loop": (60.0, 0.0),
+    "r5_retention_loop": (600.0, 1800.0),  # R5 disk-cap pass every 10 min
 }
 ONESHOT_WORKERS = ("retired_tile_boundary_worker", "regime_bars_boot_hydrate")
 

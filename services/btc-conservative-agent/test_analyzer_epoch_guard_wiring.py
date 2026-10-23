@@ -176,12 +176,14 @@ GUARDED_READERS = {
         "runtime_hygiene.py",                  # PR-B pre-epoch archiver: moves files, never reads rows
         "research/signal_research_table.py",   # PR-D offline research table (not analyzer input; --since-utc/epoch_id)
         "monitor_streams.py",                  # read-only /api/monitor/streams tail for HM/Strategist (not analyzer input)
+        "rotation_cap.py",                     # R5 disk cap: file-name cap table, stats/unlinks rotations, never reads rows
     },
     "adaptive_entry_decisions.jsonl": {
         "bot.py", "adaptive_entry_funnel.py",
         "runtime_hygiene.py",                  # PR-B pre-epoch archiver: moves files, never reads rows
         "research/signal_research_table.py",   # PR-D offline research table (not analyzer input; --since-utc/epoch_id)
         "monitor_tiles.py",                    # comments only (#477 GS-05/06 fields come from bot memory)
+        "rotation_cap.py",                     # R5 disk cap: file-name cap table, stats/unlinks rotations, never reads rows
     },
     "expired_orders_3factor.csv": {
         "bot.py",                              # Fly writer
