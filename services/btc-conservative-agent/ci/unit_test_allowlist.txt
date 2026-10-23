@@ -57,6 +57,7 @@ test_best_policy_research_dashboard.py
 test_bitfinex_live_switch.py
 test_bitfinex_pair_constraints.py
 test_blindspot_runtime_telemetry.py
+test_book_limit_entry.py
 test_bot_data_epoch_stamping.py
 test_bot_destructive_research_reset.py
 test_bot_orphan_head_reset_boundary.py

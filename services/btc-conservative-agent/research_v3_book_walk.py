@@ -214,6 +214,11 @@ class BookWalkWindow:
                 "b": [[float(p), float(z)] for p, z in lv[0] if p == p],
                 "a": [[float(p), float(z)] for p, z in lv[1] if p == p]}
 
+    def book_at(self, t: float) -> dict[str, Any] | None:
+        """paper_fill / quote_trigger ``book_at``: the latest row complete at ``t`` (``s + 1 <= t``), no look-ahead."""
+        index = int(np.searchsorted(self.book_s + 1, t, side="right")) - 1
+        return self.row(index) if index >= 0 else None
+
     def first_row_ready_at_or_after(self, t: float) -> int | None:
         """Index of the first complete row (``s + 1 >= t``)."""
         index = int(np.searchsorted(self.book_s + 1, t, side="left"))
