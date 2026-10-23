@@ -382,12 +382,13 @@ _STOP_EXIT_REASONS = frozenset({"PHYSICAL_HARD_STOP", "ATR_STOP", "THESIS_FAST_C
 
 
 def _stop_unobservable_in_trade_gap(path: Any, plan: ReplayPlan, atr_pct_at_fill: float, leverage: float,
-                                    exit_index: int, exit_reason: str) -> str | None:
+                                    exit_index: int, exit_reason: str) -> tuple[str, str | None] | None:
     """HM #847 C2: a stop the book touched while trade prints were silent cannot be proven untriggered.
 
-    Book-walk paths expose ``gap_neg_mae`` (running book-side loss over rows inside a long trade gap).
-    If it reaches any of the plan's stop levels before the exit (at or before it when the exit was
-    not itself a stop), the cell is R17_UNPROVEN and never countable.  Other paths: never.
+    Book-walk paths expose ``gap_neg_mae`` (running book-side loss over rows inside a trade gap that the shared
+    ``r17_gap_detector`` flags).  If it reaches any of the plan's stop levels before the exit (at or before it
+    when the exit was not itself a stop), the cell is R17_UNPROVEN and never countable (TOUCH gate).  Returns
+    (reason, clause label of the first touching row).  Other paths: never.
     """
     gap = getattr(path, "gap_neg_mae", None)
     if gap is None or not len(gap):
@@ -399,11 +400,13 @@ def _stop_unobservable_in_trade_gap(path: Any, plan: ReplayPlan, atr_pct_at_fill
     if plan.thesis_cut is not None:
         window_end = int(np.searchsorted(path.age, plan.thesis_window, side="right")) if path.age_sorted else limit
         levels.append((-plan.thesis_cut, min(limit, window_end)))
-    for level, end in levels:
-        if _first_at_least(gap, level, end) is not None:
-            from research_v3_book_walk import STOP_UNOBSERVABLE_REASON
-            return STOP_UNOBSERVABLE_REASON
-    return None
+    hits = [i for i in (_first_at_least(gap, level, end) for level, end in levels) if i is not None]
+    if not hits:
+        return None
+    from r17_gap_detector import clause_label
+    from research_v3_book_walk import STOP_UNOBSERVABLE_REASON
+    clauses = getattr(path, "gap_clause", None)
+    return STOP_UNOBSERVABLE_REASON, (clause_label(int(clauses[min(hits)])) if clauses is not None else None)
 
 
 def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill: float,
@@ -425,10 +428,11 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
     unobservable = _stop_unobservable_in_trade_gap(path, plan, atr_pct_at_fill, leverage, exit_index, exit_reason)
     if unobservable is not None:
         # HM #847 nit: the R17 flag is stamped AT THE CELL (not only via stop_trigger_label).
-        return {"status": "R17_UNPROVEN", "reasons": [unobservable], "exit_reason": None, "net_pnl_usd": None,
+        reason, clause = unobservable
+        return {"status": "R17_UNPROVEN", "reasons": [reason], "exit_reason": None, "net_pnl_usd": None,
                 "profit_retention_ratio": None, "profit_giveback_pct": None,
                 "underwater_observation_ratio": None,
-                "r17_status": "R17_UNPROVEN", "r17_unproven_reason": unobservable}
+                "r17_status": "R17_UNPROVEN", "r17_unproven_reason": reason, "c2_clause": clause}
     terminal_mfe = float(path.mfe[exit_index])
     gross_usd = margin_usd * realized / 100.0
     cell = {

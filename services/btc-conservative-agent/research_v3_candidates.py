@@ -26,6 +26,7 @@ from research_v3_book_walk import (
     R17_UNPROVEN,
     STOP_BASIS_UNVERIFIED,
     STOP_TRIGGER_LABEL,
+    C2_CLAUSE_COUNTS_KEY,
     C2_FLAGGED_KEY,
     STOP_UNOBSERVABLE_REASON,
     PreparedBookWalkArrays,
@@ -40,6 +41,7 @@ from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_f
 from research.fill_model import fill_model_declaration
 from execution_cost_receipt_adapter import build_measured_execution_cost_receipt
 from r17_fields import ENTRY_PRICE_SOURCE_1S, R17_UNPROVEN_ENTRY  # the ONE R17 contract module (R4)
+import r17_gap_detector as _gd  # the ONE R17 gap detector (R4; shared with ENTRY_BOOK_GAP)
 
 
 def protection_screen() -> list[dict[str, Any]]:
@@ -1493,14 +1495,15 @@ class _ProtectionCellStore:
                 "replay_path_basis": basis,
             }
         if state == R17_UNPROVEN:
-            # HM #847 C2 (interim 5 s rule): the stop was touched by the book inside a trade-print gap.
+            # HM #847 C2 (binding rule): the book touched the stop inside a print gap the shared detector flags.
             return {
                 "outcome_state": R17_UNPROVEN,
                 "r17_unproven_reason": STOP_UNOBSERVABLE_REASON,
+                "c2_clauses": _gd.clause_names(self.names[self.c_exit[cell]]),
                 "entry_price_source": ENTRY_PRICE_SOURCE_1S,
                 "net_pnl_usd": None,
                 "unproven_net_pnl_usd": pnl,
-                "exit_reason": self.names[self.c_exit[cell]],
+                "exit_reason": None,
                 "replay_path_basis": basis,
             }
         outcome = {
@@ -1798,12 +1801,19 @@ def _assess_policy(
         "partial_fills": partial_fills,
         "no_fills": no_fills,
         "unsupported_episodes": unsupported,
-        # RK #847 cond 2: cells (this policy x episode) the interim C2 5 s trade-gap rule flagged R17_UNPROVEN.
+        # RK #847 cond 2: cells (this policy x episode) the C2 trade-gap rule flagged R17_UNPROVEN, + per clause.
         C2_FLAGGED_KEY: sum(
             1 for row in rows
             if ((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("r17_unproven_reason")
             == STOP_UNOBSERVABLE_REASON
         ),
+        C2_CLAUSE_COUNTS_KEY: {
+            name: sum(
+                1 for row in rows
+                if name in (((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("c2_clauses") or ())
+            )
+            for name in _gd.CLAUSE_NAMES.values()
+        },
         "receipt_identity": {
             "schema": "candidate_episode_receipt_identity_summary_v1",
             "complete_episodes": sum(
@@ -2083,8 +2093,10 @@ class _EpisodeReplayer:
                             else _ENTRY_UNPROVEN_PREFIX + "FULL_FILL" if status == "COMPLETE"
                             else str(status or "UNSUPPORTED")
                         )
+                        # C2 R17_UNPROVEN cells have no exit; the exit slot carries the clause label
+                        # (``C2:BOOK_HOLE+BOOT``) for the per-clause report counts (HM refinement 3).
                         conservative = replays[replay_key] = (
-                            _KIND_REPLAYED, state, result.get("exit_reason"),
+                            _KIND_REPLAYED, state, result.get("exit_reason") or result.get("c2_clause"),
                             *(_NAN if result.get(name) is None else float(result[name]) for name in (
                                 "net_pnl_usd", "profit_retention_ratio", "profit_giveback_pct",
                                 "underwater_observation_ratio",
@@ -2156,6 +2168,7 @@ def evaluate_protection_screen(
         book_walk = getattr(inputs, "book_walk", None)
     unproven_reasons: dict[str, int] = defaultdict(int)
     unproven_cells: dict[str, int] = defaultdict(int)
+    c2_clauses: dict[str, int] = defaultdict(int)
     unproven_episode: str | None = None
     protections = protection_screen()
     protection_count = len(protections)
@@ -2228,6 +2241,8 @@ def evaluate_protection_screen(
                     state_name = str(store.names[conservative[1]])
                     if state_name == R17_UNPROVEN:  # stop unobservable (the entry is also 1s-priced)
                         unproven_cells[STOP_UNOBSERVABLE_REASON] += 1
+                        for name in _gd.clause_names(store.names[conservative[2]]):
+                            c2_clauses[name] += 1
                     elif state_name.startswith(_ENTRY_UNPROVEN_PREFIX):
                         unproven_cells[R17_UNPROVEN_ENTRY] += 1
                 store.append(entry * protection_count + protection_index, event, first_position,
@@ -2343,7 +2358,7 @@ def evaluate_protection_screen(
 
     mark_source = coverage_summary(
         events_by_basis, episodes_by_basis, unproven_reasons, getattr(book_walk, "receipt", None),
-        horizon_sec=PATH_HORIZON_SEC, unproven_cells=unproven_cells,
+        horizon_sec=PATH_HORIZON_SEC, unproven_cells=unproven_cells, c2_clauses=c2_clauses,
     )
     streaming_receipt = {
         "schema": "protection_replay_streaming_v1",
