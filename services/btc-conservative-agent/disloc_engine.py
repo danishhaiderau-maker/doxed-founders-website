@@ -319,7 +319,7 @@ class DislocEngine:
         # Exits, shadows and evaluation never read it, so a pause cannot freeze open positions.
         self.entries_allowed_fn: Callable[[], Optional[str]] = lambda: None
         # Step B (HM 13:16): fills come from the 10-level book at signal_ts + measured delay.
-        self.delay_fn: Callable[[str, str], tuple] = lambda lane, leg: (None, "default_until_n10")
+        self.delay_fn: Callable[[str, str], tuple] = lambda lane, leg: (None, "DEFAULT_UNMEASURED")
         self.paused_skips: deque = deque(maxlen=200)
         # G14 (HM 12:20): persist every PAUSED skip so the count survives a deploy restart.
         self.paused_append_fn: Callable[[dict], Any] = lambda row: None
@@ -518,7 +518,7 @@ class DislocEngine:
         d, src = self.delay_fn(self.lane, "exit")
         d = max(paper_fill.MIN_DELAY_S, d or paper_fill.DEFAULT_DELAY_S)
         self.position["exit_pending"] = {"reason": reason, "trigger_ts": now, "first_trigger_ts": now, "due_ts": now + d,
-                                         "delay_s": d, "delay_source": src or "default_until_n10",
+                                         "delay_s": d, "delay_source": src or "DEFAULT_UNMEASURED",
                                          "trigger_bid": bid, "trigger_ask": ask,
                                          "prem_at_exit_bp": feat.get("prem_bp"),
                                          "prem_d5_at_exit_bp": feat.get("prem_d5_bp")}
@@ -738,7 +738,7 @@ class DislocEngine:
                 "order_type": "IOC_TAKER_BOOK10L_AT_SIGNAL_PLUS_DELAY",
                 "qty": round(DEFAULT_MARGIN_USD * DEFAULT_LEVERAGE / mid, 8),
                 "ioc_cap_px": ask * (1 + IOC_CAP_BP / 1e4) if side == LONG else bid * (1 - IOC_CAP_BP / 1e4),
-                "ioc_cap_bp": IOC_CAP_BP, "delay_s": d, "delay_source": src or "default_until_n10",
+                "ioc_cap_bp": IOC_CAP_BP, "delay_s": d, "delay_source": src or "DEFAULT_UNMEASURED",
                 "fill_due_ts": signal_ts + d})
             self.order.pop("limit_price", None)
             self._emit(dict(self.order))

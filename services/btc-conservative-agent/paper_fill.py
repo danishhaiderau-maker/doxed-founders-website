@@ -16,7 +16,6 @@ delay_source, book_s and a depth snapshot so the tile-integrity monitor can re-p
 """
 from __future__ import annotations
 
-import statistics
 import threading
 from collections import deque
 from typing import Any, Callable, Mapping, Optional
@@ -85,7 +84,7 @@ RESIDENT_LEG = "exit_resident"  # REALISM_V2: exchange-resident stop leg (delay 
 
 def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
-               delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
+               delay_source: str = "DEFAULT_UNMEASURED", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
                cap_px: Optional[float] = None) -> dict:
     """book_at(t) -> {"s": sec, "b": [[px, sz]...], "a": [...]} for the latest snapshot at or before t."""
     # REALISM_V2: an exchange-resident stop order is already on the exchange; it fills at its trigger instant (no
@@ -95,7 +94,7 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
     t = float(signal_ts) + d
     q = _f(qty) or 0.0
     base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "delay_s": round(d, 3),
-            "delay_source": delay_source if (delay_s or resident) else "default_until_n10", "fill_ts": t, "leg": leg, "qty": q,
+            "delay_source": delay_source if (delay_s or resident) else DELAY_DEFAULT_UNMEASURED, "fill_ts": t, "leg": leg, "qty": q,
             "signal_ts": float(signal_ts), "side": str(side).upper()}
     sig_book = _safe(book_at, float(signal_ts))
     base["depth_snapshot_signal"] = _snap(sig_book)
@@ -137,7 +136,7 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
 
 def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
-               delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
+               delay_source: str = "DEFAULT_UNMEASURED", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
                cap_px: Optional[float] = None) -> dict:
     """Shared pricer; every result carries an explicit ``evidence_status``: COMPLETE only for a fully filled
     book-walk (status FILLED, price from the 10-level book). Anything else is never COMPLETE. NOTE: bot.py
@@ -234,33 +233,101 @@ def book10l_missing_seconds(start: float, end: float):
 
 DELAYS = None  # set by the bot: DelaySampler of measured live delays (empty while live is OFF)
 
+# REALISM_V2 F1 (HM 23 Oct): the delay of every BOT_SENT leg. Never a lane p50, never paper signal->fill.
+DELAY_DEFAULT_UNMEASURED = "DEFAULT_UNMEASURED"  # the 1.5 s placeholder: NOT known to be conservative; UNVERIFIED
+DELAY_MEASURED_LIVE_ACK = "MEASURED_LIVE_ACK"    # this trade's own live copy: exchange ack - paper signal/trigger
+DELAY_LIVE_POOLED_PREFIX = "LIVE_POOLED_"        # + ENTRY / EXIT: pooled live acks of the same leg type
+DELAY_PROXY = "PROXY"                            # e.g. a WS ping round trip: stamped only, never a pricing input
+POOLED_QUANTILE = 0.9  # deterministic high percentile of the pooled live distribution (slow acks hit fast markets)
+LIVE_ACK_SOURCES = frozenset({"LIVE_ACK"})       # the only sample kind add() accepts (paper signal->fill is refused)
+MEASURED_DELAY_SOURCES = frozenset({DELAY_MEASURED_LIVE_ACK, DELAY_LIVE_POOLED_PREFIX + "ENTRY",
+                                    DELAY_LIVE_POOLED_PREFIX + "EXIT"})
+
+
+def _quantile(xs, q: float) -> float:
+    """Deterministic nearest-rank quantile (no interpolation, no randomness)."""
+    ys = sorted(xs)
+    k = min(len(ys) - 1, max(0, int(-(-q * len(ys) // 1)) - 1))
+    return ys[k]
+
+
+def delay_is_measured(source) -> bool:
+    """True only for live-measured delay sources (per-trade ack or pooled live acks). DEFAULT_UNMEASURED and any
+    legacy label (default_until_n10, lane_p50_*) are UNVERIFIED and never count as measured."""
+    return str(source or "") in MEASURED_DELAY_SOURCES
+
 
 class DelaySampler:
-    """Rolling measured live delay per lane and leg (entry: signal->exchange_ack; exit: trigger->exit ack)."""
+    """REALISM_V2 F1 live delay book. Fed ONLY from live executor acks (entry: exchange ack - paper signal; exit:
+    exit ack - paper exit trigger). Per-trade measured delays are kept for that trade's own legs; every other tile
+    uses a deterministic high quantile of the pooled live distribution of the same leg type. With no live acks the
+    1.5 s placeholder is stamped DEFAULT_UNMEASURED. There is no lane p50 and paper signal->fill never enters."""
 
-    def __init__(self, maxlen: int = 200) -> None:
+    def __init__(self, maxlen: int = 500, max_trades: int = 2000) -> None:
         self._lock = threading.Lock()
-        self._d: dict = {}
+        self._pooled: dict = {}
+        self._trade: dict = {}
+        self._proxy = None
         self.maxlen = maxlen
+        self.max_trades = max_trades
+        self.refused = 0
 
-    def add(self, lane: str, leg: str, delay_s: float) -> None:
+    def add(self, lane: str, leg: str, delay_s: float, *, trade_id=None, measured_ts=None,
+            source: str = "LIVE_ACK") -> bool:
         v = _f(delay_s)
-        if v is None or v < 0 or v > 30:
-            return
+        if source not in LIVE_ACK_SOURCES or v is None or v < 0 or v > 30:
+            self.refused += 1
+            return False
+        leg = "exit" if str(leg).lower() == "exit" else "entry"
         with self._lock:
-            self._d.setdefault((lane, leg), deque(maxlen=self.maxlen)).append(v)
+            self._pooled.setdefault(leg, deque(maxlen=self.maxlen)).append(v)
+            if trade_id:
+                if len(self._trade) >= self.max_trades:
+                    self._trade.pop(next(iter(self._trade)))
+                self._trade[(str(trade_id), leg)] = (v, _f(measured_ts), str(lane or "").upper())
+        return True
 
-    def delay(self, lane: str, leg: str = "entry") -> tuple:
+    def add_proxy(self, rtt_s: float, measured_ts=None) -> None:
+        """A public WS round trip: recorded as PROXY context on rows, never used to price."""
+        v = _f(rtt_s)
+        if v is not None and 0 <= v <= 30:
+            self._proxy = (v, _f(measured_ts))
+
+    def describe(self, lane: str, leg: str = "entry", trade_id=None) -> dict:
+        leg = "exit" if str(leg).lower() == "exit" else "entry"
         with self._lock:
-            xs = list(self._d.get((lane, leg)) or ())
-        if len(xs) < MIN_SAMPLES:
-            return DEFAULT_DELAY_S, "default_until_n10"
-        return max(MIN_DELAY_S, statistics.median(xs)), f"lane_p50_n{len(xs)}"
+            own = self._trade.get((str(trade_id), leg)) if trade_id else None
+            xs = list(self._pooled.get(leg) or ())
+            proxy = self._proxy
+        out = {"delay_quantile": None, "delay_n_samples": None, "delay_measured_ts": None,
+               "delay_proxy_s": proxy[0] if proxy else None, "delay_proxy_source": DELAY_PROXY if proxy else None}
+        if own is not None:
+            out.update(delay_s=max(MIN_DELAY_S, own[0]), delay_source=DELAY_MEASURED_LIVE_ACK,
+                       delay_measured_ts=own[1], delay_raw_s=own[0])
+        elif len(xs) >= MIN_SAMPLES:
+            out.update(delay_s=max(MIN_DELAY_S, _quantile(xs, POOLED_QUANTILE)),
+                       delay_source=DELAY_LIVE_POOLED_PREFIX + leg.upper(), delay_quantile=POOLED_QUANTILE,
+                       delay_n_samples=len(xs))
+        else:
+            out.update(delay_s=DEFAULT_DELAY_S, delay_source=DELAY_DEFAULT_UNMEASURED,
+                       delay_n_samples=len(xs))
+        return out
+
+    def delay(self, lane: str, leg: str = "entry", trade_id=None) -> tuple:
+        d = self.describe(lane, leg, trade_id)
+        return d["delay_s"], d["delay_source"]
+
+    def has_trade(self, trade_id, leg: str = "entry") -> bool:
+        with self._lock:
+            return (str(trade_id), "exit" if str(leg).lower() == "exit" else "entry") in self._trade
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {f"{k[0]}|{k[1]}": {"n": len(v), "p50": statistics.median(v) if v else None}
-                    for k, v in self._d.items()}
+            pooled = {k: list(v) for k, v in self._pooled.items()}
+            n_trades = len(self._trade)
+        return {"pooled": {k: {"n": len(v), "q": POOLED_QUANTILE, "value": _quantile(v, POOLED_QUANTILE) if v else None}
+                           for k, v in pooled.items()},
+                "per_trade_n": n_trades, "refused": self.refused, "proxy_s": self._proxy[0] if self._proxy else None}
 
 
 # ---------------------------------------------------------------- measured slippage (HM 17 Oct)

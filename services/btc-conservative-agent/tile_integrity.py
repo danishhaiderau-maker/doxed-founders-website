@@ -179,9 +179,9 @@ def fill_recompute_check(rows: Iterable[Mapping[str, Any]], book_by_sec) -> dict
 
 
 def delay_default_share(rows: Iterable[Mapping[str, Any]]) -> dict:
-    """HM 12:20: share of v1 rows priced with the default delay (delay_source=default_until_n10)."""
+    """HM 12:20: share of v1 rows priced with the default delay (delay_source=DEFAULT_UNMEASURED or the legacy default_until_n10)."""
     v1 = [r for r in rows if (r.get("fill_model_version") or 0) >= 1]
-    d = sum(1 for r in v1 if str(r.get("delay_source") or "").startswith("default"))
+    d = sum(1 for r in v1 if str(r.get("delay_source") or "").lower().startswith("default"))
     return {"n": len(v1), "defaulted": d, "share": round(d / len(v1), 3) if v1 else None}
 
 

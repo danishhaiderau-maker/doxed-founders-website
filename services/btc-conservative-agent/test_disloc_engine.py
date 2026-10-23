@@ -150,7 +150,7 @@ def test_stepb_rows_carry_books_and_delay(monkeypatch):
     f = rows[-1]
     for k in ("signal_book", "fill_book", "delay_s", "delay_source", "depth_snapshot_signal", "depth_snapshot_fill"):
         assert f.get(k) is not None, k
-    assert f["delay_source"] == "default_until_n10" and f["delay_s"] == 1.5
+    assert f["delay_source"] == "DEFAULT_UNMEASURED" and f["delay_s"] == 1.5  # REALISM_V2 F1 label
     assert f["signal_book"]["s"] == 350 and f["fill_book"]["s"] == 351
 
 

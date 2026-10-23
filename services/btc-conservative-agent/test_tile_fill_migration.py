@@ -194,12 +194,14 @@ def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None
                     "_paper_lane_entry_result", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close",
-                    "_paper_entry_rest_drop", *extra_names],
-                   trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
-                   ACTIVE_TILE_REGISTRY=cpc.ACTIVE_TILE_REGISTRY, _is_paper_book_lane=lambda p: True,
-                   _exchange_stop_trigger=(xstop or (lambda pos, a, b: None)),
-                   _normalize_order_side_to_dir=lambda v: "LONG" if str(v).upper() in ("BUY", "LONG") else "SHORT",
-                   **extra)
+                    "_paper_entry_rest_drop", "_paper_lane_entry_core", "_paper_entry_delay", "LIVE_ACK_WAIT_S",
+                    *extra_names],
+                   **{"trades_map": {}, "time": t, "logger": _Log(), "_disloc_delay": lambda lane, leg, trade_id=None: delay,
+                      "ACTIVE_TILE_REGISTRY": cpc.ACTIVE_TILE_REGISTRY, "_is_paper_book_lane": lambda p: True,
+                      "_exchange_stop_trigger": (xstop or (lambda pos, a, b: None)),
+                      "_normalize_order_side_to_dir": lambda v: "LONG" if str(v).upper() in ("BUY", "LONG") else "SHORT",
+                      "_paper_delay_meta": lambda lane, leg, trade_id=None: {}, "_paper_note_exit_trigger": lambda pos, t0: None,
+                      "_paper_trade_live_copied": lambda tid: False, **extra})
 
 
 def test_b2_tp1_gate_never_sleeps_and_prices_after_due(monkeypatch):

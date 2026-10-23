@@ -7231,16 +7231,67 @@ def _paper_entry_quote_gate(order: dict, lane: str, direction: str, signal_ts: f
     return _qt.QUOTE_STALE if q["quote_stale"] else None
 
 
+def _paper_trade_live_copied(trade_id) -> bool:
+    """True when this trade's entry carried a signed live-copy approval (entry_allowed) -> its own ack will come."""
+    if not trade_id:
+        return False
+    try:
+        rows = _get_live_copy_approvals().rows()
+    except Exception:  # noqa: BLE001
+        return False
+    tid = str(trade_id)
+    return any(str(r.get("trade_id") or r.get("correlation_id") or "") == tid and r.get("entry_allowed")
+               for r in reversed(rows))
+
+
+def _paper_entry_delay(order: dict, lane: str, signal_ts: float, now: float, *, force: bool = False):
+    """REALISM_V2 F1: the entry leg's delay, fixed on the order at first use (later acks never re-time a priced leg).
+    A trade with its own live copy waits up to LIVE_ACK_WAIT_S for its exchange ack (MEASURED_LIVE_ACK); returns
+    None while waiting. Stamps the F1 fields and the measured signal->sent hop on the order."""
+    fixed = order.get("_entry_delay")
+    if isinstance(fixed, (list, tuple)) and len(fixed) == 2:
+        return tuple(fixed)
+    tid = order.get("trade_id")
+    copied = _paper_trade_live_copied(tid)
+    wait_until = signal_ts + LIVE_ACK_WAIT_S
+    if order.get("entry_expires_ts"):
+        wait_until = min(wait_until, float(order["entry_expires_ts"]) - 1.0)  # never let the TTL sweep eat the wait
+    if copied and not force and now < wait_until \
+            and _paper_delay_sampler().describe(lane, "entry", tid).get("delay_source") != "MEASURED_LIVE_ACK":
+        return None
+    delay_s, delay_source = _disloc_delay(lane, "entry", tid)
+    meta = _paper_delay_meta(lane, "entry", tid)
+    sent = order.get("order_created_ts") or order.get("created_ts")
+    try:
+        hop = round(float(sent) - float(signal_ts), 3) if sent else None
+    except (TypeError, ValueError):
+        hop = None
+    order["_entry_delay"] = (delay_s, delay_source)
+    order["_entry_delay_meta"] = {**meta, "delay_signal_to_sent_s": hop, "delay_live_copy_expected": copied}
+    return delay_s, delay_source
+
+
 def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
-    """IOC entry at signal_ts + measured delay from the 10-level book; cached on the order.
+    """Entry at signal_ts + the F1 delay from the 10-level book (order-type model); cached on the order.
     Returns None while the fill time has not arrived (unless force)."""
-    import tile_fill as _tf
     cached = order.get("paper_fill_result")
     if isinstance(cached, dict):
         return cached
+    res = _paper_lane_entry_core(order, now, force=force)
+    if isinstance(res, dict) and isinstance(order.get("_entry_delay_meta"), dict):
+        for k, v in order["_entry_delay_meta"].items():
+            res.setdefault(k, v)
+    return res
+
+
+def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
+    import tile_fill as _tf
     lane = str(order.get("research_lane") or "").upper()
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or now)
-    delay_s, delay_source = _disloc_delay(lane, "entry")
+    _d = _paper_entry_delay(order, lane, signal_ts, now, force=force)
+    if _d is None:
+        return None  # a copied trade waiting for its own live ack
+    delay_s, delay_source = _d
     if not force and now < signal_ts + float(delay_s):
         return None
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
@@ -7398,9 +7449,9 @@ def _paper_entry_rest_drop(order: dict, why: str) -> bool:
     if not st.get("fills"):
         return False
     lane = str(order.get("research_lane") or "").upper()
-    delay_s, delay_source = _disloc_delay(lane, "entry")
-    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or 0)
+    delay_s, delay_source = order.get("_entry_delay") or _disloc_delay(lane, "entry", order.get("trade_id"))
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source,
                             _paper_entry_order_model(order, lane), why)
     return True
@@ -7490,7 +7541,7 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     original = float(source_pos.get("policy_original_qty") or source_pos.get("qty") or 0)
     pend = source_pos.get("_tp1_pending")
     if not (isinstance(pend, dict) and pend.get("key") == key):
-        delay_s, delay_source = _disloc_delay(lane, "exit")
+        delay_s, delay_source = _disloc_delay(lane, "exit", source_pos.get("trade_id"))
         marker = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s), "delay_s": float(delay_s),
                   "delay_source": delay_source, "close_fraction": float(close_fraction), "attempts": 0}
         if action is not None:
@@ -7504,7 +7555,8 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     if wall < float(pend["due_ts"]):
         return "WAIT", None
     qty = max(0.0, original * float(pend.get("close_fraction", close_fraction)))
-    res = _tf.exit_fill(direction, qty, float(pend["trigger_ts"]), pend["delay_s"], pend["delay_source"]) if qty > 0 else None
+    res = ({**_tf.exit_fill(direction, qty, float(pend["trigger_ts"]), pend["delay_s"], pend["delay_source"]),
+            **_paper_delay_meta(lane, "exit", source_pos.get("trade_id"))} if qty > 0 else None)
     pend["attempts"] = int(pend.get("attempts") or 0) + 1
     filled = bool(res) and res.get("status") == "FILLED" and float(res.get("price") or 0) > 0
     if not filled and wall < float(pend["due_ts"]) + _tf.EXIT_FORCE_AFTER_S:
@@ -7576,9 +7628,11 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     import tile_fill as _tf
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
-    delay_s, delay_source = _disloc_delay(lane, "exit")
+    delay_s, delay_source = _disloc_delay(lane, "exit", pos.get("trade_id"))
+    _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
-    res = _tf.exit_fill(direction, qty, t0, delay_s, delay_source)
+    res = {**_tf.exit_fill(direction, qty, t0, delay_s, delay_source),
+           **_paper_delay_meta(lane, "exit", pos.get("trade_id"))}
     if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
         return None, {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None}
     marks.update(exit_status="PAPER_FILL", exit_pricing_basis="MODEL_TIME",
@@ -7639,8 +7693,10 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
         price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
     else:
-        delay_s, delay_source = _disloc_delay(lane, "exit")
-        price_fn = lambda: _tf.exit_fill(direction, qty, t0, delay_s, delay_source)  # noqa: E731
+        delay_s, delay_source = _disloc_delay(lane, "exit", pos.get("trade_id"))
+        _xmeta = _paper_delay_meta(lane, "exit", pos.get("trade_id"))
+        _paper_note_exit_trigger(pos, t0)
+        price_fn = lambda: {**_tf.exit_fill(direction, qty, t0, delay_s, delay_source), **_xmeta}  # noqa: E731
     base = {"exit_order_class": cls, "exit_reason_fired": str(exit_reason)}
     if getattr(_PAPER_EXIT_TLS, "no_wait", False):
         out, marks = _paper_forced_exit(pos, now, direction, qty) if cls == _om.BOT_SENT else (None, {})
@@ -7734,8 +7790,12 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
     efs = _entry_fill_sim(pos)
     paper = _is_paper_book_lane(pos)
     _dsrc = str(efs.get("delay_source") or "")  # delay model label (self-contained: tests exec this function alone)
-    _dmodel = (None if not _dsrc else "DEFAULT_1_5S" if _dsrc == "default_until_n10"
+    # REALISM_V2 F1: DEFAULT_UNMEASURED / the legacy default are the 1.5 s placeholder (UNVERIFIED); MEASURED_LIVE_ACK
+    # and LIVE_POOLED_<LEG> are the only live-measured models. A lane p50 was never a live measurement.
+    _dmodel = (None if not _dsrc else "DEFAULT_1_5S" if _dsrc in ("default_until_n10", "DEFAULT_UNMEASURED")
+               else _dsrc if _dsrc == "MEASURED_LIVE_ACK" or _dsrc.startswith("LIVE_POOLED_")
                else "PAPER_MEASURED" if _dsrc.startswith(("lane_p50", "paper_measured", "PAPER_MEASURED")) else "OTHER:" + _dsrc)
+    _xfs = pos.get("exit_fill_sim") if isinstance(pos.get("exit_fill_sim"), dict) else {}
     return {
         "fill_model": efs.get("fill_model") or pos.get("fill_model") or (master or {}).get("fill_model"),
         "fill_model_version": efs.get("fill_model_version"),
@@ -7745,6 +7805,21 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
         # later change of the delay model (analyzers must never pool rows across models). Stamp only; no pricing change.
         "priced_delay_s": efs.get("delay_s"),
         "priced_delay_model": _dmodel,
+        # REALISM_V2 F1 fields on both BOT_SENT legs (the exit leg's are also inside exit_fill_sim).
+        "delay_quantile": efs.get("delay_quantile"),
+        "delay_n_samples": efs.get("delay_n_samples"),
+        "delay_measured_ts": efs.get("delay_measured_ts"),
+        "delay_signal_to_sent_s": efs.get("delay_signal_to_sent_s"),
+        "delay_proxy_s": efs.get("delay_proxy_s"),
+        "delay_proxy_source": efs.get("delay_proxy_source"),
+        "exit_delay_source": _xfs.get("delay_source"),
+        "exit_delay_quantile": _xfs.get("delay_quantile"),
+        "exit_delay_n_samples": _xfs.get("delay_n_samples"),
+        "exit_delay_measured_ts": _xfs.get("delay_measured_ts"),
+        "delay_both_legs_measured": (
+            str(efs.get("delay_source") or "") in ("MEASURED_LIVE_ACK", "LIVE_POOLED_ENTRY")
+            and (str(_xfs.get("delay_source") or "") in ("MEASURED_LIVE_ACK", "LIVE_POOLED_EXIT",
+                                                          "EXCHANGE_RESIDENT_NO_DELAY"))),
         "evidence_status": efs.get("evidence_status"),  # the pricer's own COMPLETE/INCOMPLETE/NO_FILL on the closed row
         "ask_age_ms": efs.get("ask_age_ms"),
         "depth_snapshot_signal": efs.get("depth_snapshot_signal"),
@@ -33417,14 +33492,63 @@ def _disloc_entry_pause_owner():
 _DISLOC_DELAYS = None
 
 
-def _disloc_delay(lane: str, leg: str):
-    """Measured live delay per lane/leg (DelaySampler); default_until_n10 while live is OFF."""
+def _paper_delay_sampler():
     global _DISLOC_DELAYS
     import paper_fill as _pf
     if _DISLOC_DELAYS is None:
         _DISLOC_DELAYS = _pf.DELAYS or _pf.DelaySampler()
         _pf.DELAYS = _DISLOC_DELAYS
-    return _DISLOC_DELAYS.delay(lane, leg)
+    return _DISLOC_DELAYS
+
+
+def _disloc_delay(lane: str, leg: str, trade_id=None):
+    """REALISM_V2 F1: the delay of a BOT_SENT leg -> (delay_s, delay_source). This trade's own live ack
+    (MEASURED_LIVE_ACK), else a high quantile of the pooled live acks of the same leg (LIVE_POOLED_<LEG>), else the
+    1.5 s placeholder stamped DEFAULT_UNMEASURED (UNVERIFIED). Never a lane p50, never paper signal->fill."""
+    return _paper_delay_sampler().delay(lane, leg, trade_id)
+
+
+def _paper_delay_meta(lane: str, leg: str, trade_id=None) -> dict:
+    """The F1 delay fields of a leg (delay_quantile, delay_n_samples, delay_measured_ts, PROXY context)."""
+    try:
+        d = _paper_delay_sampler().describe(lane, leg, trade_id)
+    except Exception:  # noqa: BLE001
+        return {}
+    return {k: d.get(k) for k in ("delay_quantile", "delay_n_samples", "delay_measured_ts", "delay_proxy_s",
+                                  "delay_proxy_source")}
+
+
+_PAPER_EXIT_TRIGGERS: dict = {}  # trade_id -> paper exit trigger ts (the anchor of that trade's live exit ack)
+LIVE_ACK_WAIT_S = 10.0  # a copied entry waits this long for its own live ack before using the pooled / default delay
+
+
+def _paper_note_exit_trigger(pos: dict, t0) -> None:
+    tid = str((pos or {}).get("trade_id") or "")
+    if tid and t0:
+        if len(_PAPER_EXIT_TRIGGERS) > 2000:
+            _PAPER_EXIT_TRIGGERS.pop(next(iter(_PAPER_EXIT_TRIGGERS)))
+        _PAPER_EXIT_TRIGGERS.setdefault(tid, float(t0))
+
+
+def _paper_delay_observe_report(report: dict) -> dict:
+    """REALISM_V2 F1: feed the delay sampler from a verified live executor report (live acks only).
+    entry = exchange_ack_at_ts - fly_signal_at_ts; exit = exit_ack_at_ts - this trade's paper exit trigger.
+    Railway stamps the ack on its clock, Fly stamps the signal on its own (NTP) clock."""
+    import paper_fill as _pf
+    out = {}
+    if not isinstance(report, dict):
+        return out
+    tl = report.get("timeline") if isinstance(report.get("timeline"), dict) else {}
+    cid = str(report.get("correlation_id") or report.get("trade_id") or "")
+    lane = str(report.get("lane") or "").upper()
+    sampler = _paper_delay_sampler()
+    ack, sig = _pf._f(tl.get("exchange_ack_at_ts")), _pf._f(tl.get("fly_signal_at_ts"))
+    if cid and ack and sig and ack >= sig and not sampler.has_trade(cid, "entry"):
+        out["entry"] = sampler.add(lane, "entry", ack - sig, trade_id=cid, measured_ts=ack)
+    xack, trig = _pf._f(tl.get("exit_ack_at_ts")), _PAPER_EXIT_TRIGGERS.get(cid)
+    if cid and xack and trig and xack >= trig and not sampler.has_trade(cid, "exit"):
+        out["exit"] = sampler.add(lane, "exit", xack - float(trig), trade_id=cid, measured_ts=xack)
+    return out
 
 
 def _disloc_bind_runtime(lane: str, evaluator) -> None:
@@ -62188,6 +62312,11 @@ def api_live_copy_execution_report():
     stored, why = _get_live_copy_journal().append(report)
     if not stored:
         return jsonify({"ok": False, "error": why}), 503
+    if why != "DUPLICATE":
+        try:
+            _paper_delay_observe_report(report)  # REALISM_V2 F1: live acks are the only delay samples
+        except Exception as exc:  # noqa: BLE001 - a stored report is never rejected
+            logger.warning(f"[LIVE COPY] delay sampler feed failed: {exc}")
     protection = None
     if report.get("type") == "STOP_CONFIRMED" and why != "DUPLICATE":
         protection = _get_live_copy_protection().record_stop_confirmation(report)

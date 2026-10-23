@@ -48,16 +48,17 @@ def test_top_only_partial_at_top_size_and_counted():
 
 
 def test_default_delay_marked():
-    assert pf.paper_fill("LONG", 1, 99, None, at)["delay_source"] == "default_until_n10"
+    # REALISM_V2 F1: the 1.5 s placeholder is DEFAULT_UNMEASURED (legacy rows carry default_until_n10)
+    assert pf.paper_fill("LONG", 1, 99, None, at)["delay_source"] == "DEFAULT_UNMEASURED"
 
 
 def test_delay_floor_and_sampler():
     assert pf.paper_fill("LONG", 1, 99.9, 0.01, at)["delay_s"] == pf.MIN_DELAY_S
     s = pf.DelaySampler()
-    assert s.delay("L")[1] == "default_until_n10"
+    assert s.delay("L")[1] == "DEFAULT_UNMEASURED"
     for _ in range(10):
         s.add("L", "entry", 0.8)
-    assert s.delay("L") == (0.8, "lane_p50_n10")
+    assert s.delay("L") == (0.8, "LIVE_POOLED_ENTRY")  # pooled live acks, q0.9 (never a lane p50)
 
 
 BANNED = ("market_microstructure_1s", "book_tape_1s")

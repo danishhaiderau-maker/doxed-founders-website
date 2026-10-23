@@ -133,8 +133,10 @@ def test_red_propagates_to_checks_entry():
 
 def test_delay_default_share():
     d = ti.delay_default_share([{"fill_model_version": 1, "delay_source": "default_until_n10"},
-                                {"fill_model_version": 1, "delay_source": "lane_p50_n12"}])
-    assert d == {"n": 2, "defaulted": 1, "share": 0.5}
+                                {"fill_model_version": 1, "delay_source": "lane_p50_n12"},
+                                {"fill_model_version": 1, "delay_source": "DEFAULT_UNMEASURED"},
+                                {"fill_model_version": 1, "delay_source": "LIVE_POOLED_ENTRY"}])
+    assert d == {"n": 4, "defaulted": 2, "share": 0.5}
 
 
 def test_tile_integrity_is_a_monitor_check():
