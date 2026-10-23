@@ -74,6 +74,8 @@ def test_bot_wiring_present():
     # RK: the trigger age is stamped from the order-book row (complete at s + 1), never the ticker bbo_ts
     assert 'pos["exit_trigger_bbo_ts"] = (float(book["s"]) + 1.0) if book and book.get("s") is not None else None' in src
     assert 'state.get("bbo_ts")' not in _bot_function(src, "_stamp_trigger_basis")
+    assert "_stamp_trigger_book_age(pos, book)" in _bot_function(src, "_stamp_trigger_basis")
+    assert "state" not in _bot_function(src, "_stamp_trigger_book_age").split('"""')[-1]
     assert '"exit_trigger_bbo_ts": _ts_or_none(pos.get("exit_trigger_bbo_ts"))' in src
     assert src.count("**_twin_trigger_fields(row)") == 2
     # #809: the decision recorder stamps only the cheap quote (no book read) from values read under state_lock

@@ -5466,6 +5466,13 @@ def _liquidation_stamp(pos: dict, stop_trigger_ts, stop_fill_px) -> dict:
     return out
 
 
+def _stamp_trigger_book_age(pos: dict, book) -> None:
+    """#807 measurement, order-book basis (no ticker): the time the book row a trigger was evaluated on became
+    complete (row s is complete at s + 1). None when no book row is available. The legacy field name is kept for
+    the monitor/export readers; the value never comes from the ticker."""
+    pos["exit_trigger_bbo_ts"] = (float(book["s"]) + 1.0) if book and book.get("s") is not None else None
+
+
 def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: float, meta: dict) -> None:
     """REALISM_V2 F2 stamp on a terminal exit trigger: trigger_basis + source + the 1 s book-top / last-trade view at
     the trigger instant + the full trigger stamp (trade id / receive second / window / version). No ticker."""
@@ -5477,9 +5484,7 @@ def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: fl
         book = None
     trades = _qt.trades_between(float(trigger_ts) - _qt.STALE_S, float(trigger_ts))
     pos.update(_qt.dual_stamp(direction, "exit", trigger_ts, book=book, last_trade=trades[-1] if trades else None))
-    # #807 measurement, order-book basis (no ticker): the time the book row this trigger was evaluated on became
-    # complete (row s is complete at s + 1). None when no book row is available.
-    pos["exit_trigger_bbo_ts"] = (float(book["s"]) + 1.0) if book and book.get("s") is not None else None
+    _stamp_trigger_book_age(pos, book)
     m = meta or {}
     pos["exit_trigger_basis"] = m.get("basis") or _qt.BASIS_BOOK_TOP
     pos["exit_trigger_quote_stale"] = m.get("quote_stale")
