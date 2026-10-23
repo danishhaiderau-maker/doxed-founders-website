@@ -249,8 +249,9 @@ def test_guarded_deploy_requires_post_mutation_generation_and_retries_only_503()
     assert "if not orders and not positions:" in WORKFLOW_SOURCE
 
 
-def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:
-    """Optimization evidence must carry immutable policy and completion proof."""
+def test_exit_policy_snapshot_carries_immutable_policy_fields() -> None:
+    """The policy snapshot is live. The dump_replay and counterfactual halves
+    were dropped: R17 stopped the signal_replay and counterfactual writers."""
     policy_func = _function("get_exit_config_snapshot")
     policy_src = ast.get_source_segment(BOT_SOURCE, policy_func)
     assert policy_src is not None
@@ -263,26 +264,6 @@ def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:
         '"trail_ladder"',
     ):
         assert field in policy_src
-
-    replay_func = _function("dump_replay")
-    replay_src = ast.get_source_segment(BOT_SOURCE, replay_func)
-    assert replay_src is not None
-    assert '"replay_complete": replay_complete' in replay_src
-    assert '"post_exit_complete": post_exit_complete' in replay_src
-    assert '"terminal_provenance"' in replay_src
-    assert "and required_post_exit_tick is not None" in replay_src
-    assert '"best_bid" if' in replay_src and 'else "best_ask"' in replay_src
-
-    evidence_func = _function("build_counterfactual_observability_fields")
-    evidence_src = ast.get_source_segment(BOT_SOURCE, evidence_func)
-    assert evidence_src is not None
-    assert 'replay.get("replay_complete") is True' in evidence_src
-    assert 'fields["analysis_cohorts"] = assessment' in evidence_src
-    assert 'REAL_COPY_PARAMETER_OPTIMISATION' in evidence_src
-    assert '"analysis_eligible": False' in evidence_src
-    assert '"ACTUAL_BITFINEX_PNL_MISSING"' in evidence_src
-    assert '"bitfinex_evidence": bitfinex_evidence' in evidence_src
-    assert '"required_post_exit_horizons_complete"' in evidence_src
 
 
 if __name__ == "__main__":

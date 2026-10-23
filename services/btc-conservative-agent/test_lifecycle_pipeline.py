@@ -123,25 +123,43 @@ def test_pipeline_requires_reindexed_completion_before_materialization(tmp_path,
     assert len(completion_rows) == 1
 
 
-def test_incomplete_is_unknown_and_late_evidence_redirties(tmp_path, monkeypatch):
+def _completion_rows(root: Path) -> list:
+    path = root / "v3" / "ledgers" / "lifecycle.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if "bundle_completion" in line]
+
+
+def test_incomplete_is_retired_r17_and_late_evidence_cannot_resurrect_completion(tmp_path, monkeypatch):
+    """R17: POST_EXIT_PATH is retired, so a lifecycle without post-observation
+    stops at QUALIFICATION_HORIZON_RETIRED_R17. Late lifecycle evidence re-dirties
+    it, but it lands on the same stage and never appends a completion."""
     _patch_provenance(monkeypatch)
-    rows = _ready_rows()[:-1]
-    for row in rows:
+    counter_before = lifecycle_pipeline.lifecycle_qualification_retired_r17_count()
+    for row in _ready_rows()[:-1]:
         _append(tmp_path, row)
     first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
-    assert first["results"][0]["stage"] == "QUALIFICATION_EVIDENCE_RETRY_QUEUED"
-    assert "POST_OBSERVATION" in " ".join(first["results"][0]["blockers"])
+    assert first["results"][0]["stage"] == lifecycle_pipeline.QUALIFICATION_RETIRED_R17_STAGE
+    assert first["results"][0]["qualification_horizon"]["retired"] == "R17"
+    assert first["qualification_retired_r17_count"] == 1
+    assert first["completion_appended_count"] == 0
     assert first["scan"]["pending_dirty_lifecycles"] == 0
+    assert lifecycle_pipeline.lifecycle_qualification_retired_r17_count() == counter_before + 1
 
-    _append(tmp_path, _ready_rows()[-1])
-    second = _run_until(
-        tmp_path, lambda report: report["completion_appended_count"] == 1, now=NOW,
-    )
-    assert second["completion_appended_count"] == 1
-    assert second["scan"]["pending_dirty_lifecycles"] == 1
+    # Late evidence for the same lifecycle (another lifecycle-ledger row).
+    _append(tmp_path, _row("lifecycle", "late-note", terminal=True, terminal_no_fill=True,
+                           observed_ts=12_000.0))
+    second = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
+    assert second["results"][0]["stage"] == lifecycle_pipeline.QUALIFICATION_RETIRED_R17_STAGE
+    assert second["completion_appended_count"] == 0
+    assert second["bundle_count"] == 0
+    assert _completion_rows(tmp_path) == []
+    assert lifecycle_pipeline.lifecycle_qualification_retired_r17_count() == counter_before + 2
 
 
 def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path, monkeypatch):
+    """Deferral and promotion of the transfer stage are live; at maturity the
+    promoted lifecycle stops at the R17 stage instead of queueing retries."""
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(lifecycle_pipeline, "QUALIFICATION_HORIZON_SEC", 100.0)
     rows = _ready_rows()[:-1]
@@ -170,14 +188,16 @@ def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path
     due = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=20_050.0)
     assert due["candidate_count"] == 1
     assert due["scan"]["promoted_qualification_retries"] == 1
-    assert due["results"][0]["stage"] == "QUALIFICATION_EVIDENCE_RETRY_QUEUED"
+    assert due["results"][0]["stage"] == lifecycle_pipeline.QUALIFICATION_RETIRED_R17_STAGE
+    assert due["results"][0]["transfer_stage"] == "TRANSFER_BUNDLE_MATERIALIZED_OR_VERIFIED"
+    assert due["completion_appended_count"] == 0
 
-    # The mature attempt explicitly scheduled its own later retry.  The
-    # consumed maturity retry must not remain immediately due.
+    # The retired stage removes the retry: nothing is promoted again.
     again = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-        tmp_path, now=20_050.0,
+        tmp_path, now=20_050.0 + 10 * lifecycle_pipeline.QUALIFICATION_RETRY_SEC,
     )
     assert again["scan"]["promoted_qualification_retries"] == 0
+    assert again["candidate_count"] == 0
 
 
 def test_due_retry_without_terminal_candidate_is_claimed_once(tmp_path, monkeypatch):
