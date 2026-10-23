@@ -345,6 +345,9 @@ def _pf_ns():
           "_LIVE_GUARDIAN_FORCE_FLAT_RETRY_SEC": (0, 0, 0)}
     ns["_disarm_live_control"] = lambda reason: ns["DIS"].append(reason)
     ns["_live_guardian_force_flat"] = lambda reason, now=None, **kw: ns["FF"].append((reason, kw.get("disarmed", False))) and None
+    ns["_LIVE_GUARDIAN_STATE"] = {}
+    ns["PERSISTS"] = []
+    ns["_live_guardian_persist"] = lambda: ns["PERSISTS"].append(dict(ns["_LIVE_GUARDIAN_STATE"])) or True
     exec(_SRC[a:b], ns)
     return ns
 
@@ -459,3 +462,34 @@ def test_hm3_every_force_flat_caller_disarms_first():
         body = _SRC[_SRC.index(fn):]
         body = body[:body.index("\ndef ", 5)]
         assert body.index("_disarm_live_control(") < body.index("_live_guardian_force_flat("), fn
+
+
+def test_hm5_unconfirmed_position_flatten_is_persisted_red_even_if_the_force_flat_then_succeeds():
+    ns = _pf_ns()
+    rec = ns["_live_guardian_position_flatten"]({"trade_id": "t5", "tile": "gs1"}, NOW, spawn=lambda fn: None)
+    order = []
+    ns["_disarm_live_control"] = lambda reason: order.append(("disarm", dict(ns["_LIVE_GUARDIAN_STATE"]).get("red_alert", {}).get("code")))
+    ns["_live_guardian_force_flat"] = lambda reason, now=None, **kw: order.append(("ff",)) or {"ok": True, "readback": "FLAT_NO_STOPS"}
+    ns["_live_guardian_position_flatten_worker"](rec, post=lambda r: {"ok": False, "verdict": "NOT_FLAT"}, sleep=lambda s: None)
+    red = ns["_LIVE_GUARDIAN_STATE"]["red_alert"]
+    assert red["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED" and red["trade_id"] == "t5" and red["readback"] == "NOT_FLAT"
+    assert order[0] == ("disarm", "LIQ_CLAMP_FLATTEN_UNCONFIRMED")          # latched before the escalation
+    assert ns["PERSISTS"] and ns["PERSISTS"][-1]["red_alert"]["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED"
+    # the escalation force-flat "succeeded" - the RED stays
+    assert ns["_LIVE_GUARDIAN_STATE"]["red_alert"]["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED"
+    # spawn failure is RED too
+    ns = _pf_ns()
+    def boom(fn):
+        raise RuntimeError("no thread")
+    ns["_live_guardian_position_flatten"]({"trade_id": "t6"}, NOW, spawn=boom)
+    assert ns["_LIVE_GUARDIAN_STATE"]["red_alert"]["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED" and ns["PERSISTS"]
+    # a confirmed position flatten is NOT red
+    ns = _pf_ns()
+    rec = ns["_live_guardian_position_flatten"]({"trade_id": "t7"}, NOW, spawn=lambda fn: None)
+    ns["_live_guardian_position_flatten_worker"](rec, post=lambda r: {"ok": True, "verdict": "FLAT_NO_STOPS"}, sleep=lambda s: None)
+    assert "red_alert" not in ns["_LIVE_GUARDIAN_STATE"]
+
+
+def test_hm5_force_flat_worker_success_never_clears_red():
+    body = _SRC[_SRC.index("def _live_guardian_force_flat_worker"):_SRC.index("def _live_guardian_force_flat(")]
+    assert 'pop("red_alert"' not in body and "red_alert\"] = None" not in body

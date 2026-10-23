@@ -62515,6 +62515,20 @@ def _live_guardian_position_flatten_post(reason: str) -> dict:
             "ok": 200 <= r.status_code < 300 and body.get("ok") is True and body.get("verdict") == "FLAT_NO_STOPS"}
 
 
+def _live_guardian_position_flatten_red(rec: dict, now) -> None:
+    """HM5 (24 Oct, #852): an unconfirmed (or never started) position-only flatten is a PERSISTED RED
+    LIQ_CLAMP_FLATTEN_UNCONFIRMED, latched BEFORE the escalation force-flat and kept even if that force-flat succeeds (the
+    force-flat worker never clears red_alert; only fresh exchange evidence FLAT_NO_STOPS does, recorded in red_alert_cleared)."""
+    _LIVE_GUARDIAN_STATE["red_alert"] = {"ts": now, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "reason": rec.get("reason"),
+                                         "trade_id": rec.get("trade_id"), "tile": rec.get("tile"),
+                                         "readback": rec.get("readback") or "UNCONFIRMED", "attempts": rec.get("attempts"),
+                                         "error": rec.get("error")}
+    try:
+        _live_guardian_persist()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[LIVE GUARDIAN] persist RED LIQ_CLAMP_FLATTEN_UNCONFIRMED failed: {str(exc)[:120]}")
+
+
 def _live_guardian_position_flatten_worker(rec: dict, post=None, sleep=None) -> dict:
     post = post or _live_guardian_position_flatten_post
     sleep = sleep or time.sleep
@@ -62534,6 +62548,7 @@ def _live_guardian_position_flatten_worker(rec: dict, post=None, sleep=None) -> 
         logger.warning(f"[LIVE GUARDIAN] LIQ_CLAMP_FLATTEN position-only OK (no disarm) reason={rec['reason']} [PIPELINE ENFORCEMENT]")
     else:
         reason = "AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"
+        _live_guardian_position_flatten_red(rec, rec["done_ts"])
         logger.critical(f"[LIVE GUARDIAN] position-only flatten UNCONFIRMED readback={rec['readback']} - escalating: disarm ALL + "
                         f"force-flat [PIPELINE ENFORCEMENT]")
         try:
@@ -62560,6 +62575,7 @@ def _live_guardian_position_flatten(v: dict, now=None, spawn=None) -> dict | Non
     except Exception as exc:  # noqa: BLE001
         rec.update(ok=False, done_ts=now, error=f"spawn failed: {str(exc)[:160]}")
         nreason = "AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED"
+        _live_guardian_position_flatten_red(rec, now)
         try:   # HM3: the flatten thread did not start -> disarm ALL first, then force-flat
             _disarm_live_control(nreason)
         except Exception as dexc:  # noqa: BLE001
