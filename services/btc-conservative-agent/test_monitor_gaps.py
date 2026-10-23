@@ -198,11 +198,11 @@ def test_regime_comparator():
 def test_custody_lag():
     clock = Clock()
     c = mg.CustodyLag(clock=clock)
-    out = c.observe({"laptop_acked_seq": 6571, "custody_through_seq": 6511, "prune_mode": "dry_run",
-                     "pruned_through_seq": 6400})
-    assert out["custody_lag_segments"] == 60 and "CUSTODY_LAG_GT_30" in out["alerts"]
-    assert out["prune_safe"] is True
-    assert c.observe({"laptop_acked_seq": 10, "custody_through_seq": 10})["level"] == "GREEN"
+    out = c.observe({"laptop_acked_seq": 6511, "shipped_seq": 6571, "custody_through_seq": 6511, "prune_mode": "dry_run"})
+    # HM C5: lag alone is not an alert (no AMBER ladder); prune_mode is never read
+    assert out["ack_lag_segments"] == 60 and out["alerts"] == [] and out["level"] == "GREEN"
+    assert out["prune_mode"] == "off"
+    assert c.observe({"laptop_acked_seq": 10, "shipped_seq": 10})["level"] == "GREEN"
 
 
 def test_new_routes_are_monitor_token_readable():
@@ -259,55 +259,49 @@ def test_arming_word_is_unknown_unless_state_is_clean_boolean():
         assert "live arming state unknown" in text and "DISARMED" not in text and "ARMED" not in text.replace("DISARMED", ""), bad
 
 
-def test_custody_stalled_amber_after_2h_red_after_6h_with_since_time_and_reason():
+def test_c5_laptop_ack_stall_single_red_after_2h_keyed_on_ack_vs_shipped():
     import time as _t
     now = 2_000_000_000.0
     iso = lambda ts: _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(ts))
     c = mg.CustodyLag(clock=lambda: now)
-    base = {"laptop_acked_seq": 1150, "custody_through_seq": 1036, "shipped_seq": 1153}
-    out = c.observe({**base, "custody_received_at": iso(now - 30 * 60)})
-    assert "CUSTODY_STALLED" not in out["alerts"] and out["custody_stalled_s"] == 1800.0
-    for minutes in (65, 70, 75, 119):     # normal hourly parity cadence must stay GREEN
-        out = c.observe({**base, "custody_received_at": iso(now - minutes * 60)})
-        assert "CUSTODY_STALLED" not in out["alerts"] and out["custody_stall_reason"] is None, minutes
-    out = c.observe({**base, "custody_received_at": iso(now - 2 * 3600 - 60)})
-    assert "CUSTODY_STALLED" in out["alerts"] and out["level"] == "AMBER"
-    assert out["custody_last_advanced_utc"] == iso(now - 2 * 3600 - 60)
-    assert out["custody_stall_reason"] == "LAPTOP_PARITY_OR_ANALYZER_BEHIND_ACK"
-    out = c.observe({**base, "custody_received_at": iso(now - 7 * 3600)})
-    assert out["level"] == "RED" and "CUSTODY_STALLED" in out["alerts"]
-    # shipped not ahead of custody (nothing new to custody): never stalled
-    out = c.observe({"laptop_acked_seq": 1036, "custody_through_seq": 1036, "shipped_seq": 1036, "custody_received_at": iso(now - 7 * 3600)})
-    assert "CUSTODY_STALLED" not in out["alerts"] and out["level"] == "GREEN"
-    # ack itself stuck at custody
-    s = mg.custody_stall({"laptop_acked_seq": 1036, "custody_through_seq": 1036, "shipped_seq": 1153,
-                          "custody_received_at": iso(now - 3 * 3600)}, now)
-    assert s["custody_stall_reason"] == "LAPTOP_ACK_NOT_ADVANCING"
+    base = {"laptop_acked_seq": 1036, "shipped_seq": 1153}
+    for minutes in (5, 30, 65, 119):     # normal ACK cadence must stay GREEN
+        out = c.observe({**base, "laptop_ack_advanced_at": iso(now - minutes * 60)})
+        assert out["alerts"] == [] and out["level"] == "GREEN" and out["custody_stall_reason"] is None, minutes
+    out = c.observe({**base, "laptop_ack_advanced_at": iso(now - 2 * 3600 - 60)})
+    assert out["alerts"] == ["LAPTOP_ACK_NOT_ADVANCING"] and out["level"] == "RED"   # single RED, no AMBER step
+    assert out["custody_last_advanced_utc"] == iso(now - 2 * 3600 - 60) and out["laptop_ack_stall_red"] is True
+    assert out["custody_stall_reason"] == "LAPTOP_ACK_NOT_ADVANCING"
+    # ACK caught up with shipped (nothing new to ACK): never stalled, however old
+    out = c.observe({"laptop_acked_seq": 1153, "shipped_seq": 1153, "laptop_ack_advanced_at": iso(now - 9 * 3600)})
+    assert out["alerts"] == [] and out["level"] == "GREEN"
 
 
-def test_custody_stall_fields_without_receipt_and_last_error():
-    s = mg.custody_stall({"shipped_seq": 5, "prune_last_plan": {"deny_reasons": ["PARITY_STALE"]}}, 1000.0)
-    assert s["custody_stall_reason"] == "NO_CUSTODY_RECEIPT" and s["custody_stalled_s"] is None
-    assert s["custody_last_error"] == "PARITY_STALE" and s["custody_last_advanced_utc"] is None
-    assert mg.custody_stall({"custody_through_seq": 3, "last_error": "boom"}, 1000.0)["custody_last_error"] == "SHIPPER: boom"
-    # custody blockers win over the shipper's general last_error
-    assert mg.custody_stall({"custody_through_seq": 3, "last_error": "boom", "prune_last_plan": {"deny_reasons": ["PARITY_SEQ_NOT_ACKED"]}},
-                            1000.0)["custody_last_error"] == "PARITY_SEQ_NOT_ACKED"
-
-
-def test_custody_stall_skipped_when_prune_mode_off():
+def test_c5_ack_stall_ignores_prune_mode_and_custody_receipts():
+    import time as _t
     now = 2_000_000_000.0
-    c = mg.CustodyLag(clock=lambda: now)
-    out = c.observe({"laptop_acked_seq": 1150, "custody_through_seq": 1036, "shipped_seq": 1153, "prune_mode": "off",
-                     "custody_received_at": "2026-01-01T00:00:00Z"})
-    assert "CUSTODY_STALLED" not in out["alerts"] and out["custody_stalled_s"] is None
-    assert out["custody_last_advanced_utc"] is None and out["custody_stall_reason"] == "PRUNE_MODE_OFF"
+    iso = lambda ts: _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(ts))
+    for mode in ("off", "dry_run", "enforce", None):
+        s = mg.custody_stall({"laptop_acked_seq": 1, "shipped_seq": 9, "prune_mode": mode,
+                              "laptop_ack_advanced_at": iso(now - 3 * 3600)}, now)
+        assert s["custody_stall_reason"] == "LAPTOP_ACK_NOT_ADVANCING", mode
+    # an old custody receipt alone means nothing any more
+    s = mg.custody_stall({"laptop_acked_seq": 1, "shipped_seq": 9, "custody_received_at": iso(now - 9 * 3600)}, now)
+    assert s["custody_stall_reason"] is None and s["custody_stalled_s"] is None
+    assert mg.custody_stall({"shipped_seq": 3, "last_error": "boom"}, 1000.0)["custody_last_error"] == "SHIPPER: boom"
+
+
+def test_c5_shipper_records_ack_advance_time(tmp_path):
+    ship = (ROOT / "research_segment_shipper.py").read_text(encoding="utf-8")
+    assert "laptop_ack_advanced_at" in ship
+    src = (ROOT / "monitor_gaps.py").read_text(encoding="utf-8")
+    body = src[src.index("def custody_stall("):src.index("class CustodyLag")]
+    assert "prune_mode" not in body.split('"""', 2)[2]   # never keyed on prune_mode (docstring aside)
 
 
 def test_status_shipper_carries_custody_stall_fields():
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     body = src[src.index("def _volume_transfer_snapshot"):src.index("def _volume_health_snapshot")]
     assert "_mg_custody.custody_stall(transfer, now)" in body
-    assert '"custody_received_at"' in src[src.index("_SEGMENT_STATUS_FIELDS = ("):][:1200]
-    ship = (ROOT / "research_segment_shipper.py").read_text(encoding="utf-8")
-    assert '"custody_received_at": (custody or {}).get("received_at")' in ship
+    fields = src[src.index("_SEGMENT_STATUS_FIELDS = ("):][:1500]
+    assert '"laptop_ack_advanced_at"' in fields and '"shipped_seq"' in fields and '"laptop_acked_seq"' in fields

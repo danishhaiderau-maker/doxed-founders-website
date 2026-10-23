@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from research_v3_future_paths import mature_future_market_paths
 from research_v3_store import V3EvidenceStore
 
 
@@ -12,12 +13,19 @@ WORKER = HERE / "research_v3_future_paths_worker.py"
 BOT = HERE / "bot.py"
 
 
-def test_worker_isolated_result_and_truthful_missing_source(tmp_path):
+def test_worker_retired_r17_writes_no_segment_and_never_no_fill(tmp_path):
+    """R17: market_segments writers are retired. The worker (and the
+    maturation it wraps) reports "disabled: R17", writes no segment and never
+    classifies an opportunity NO_FILL. bot.main() no longer starts the loop."""
     store = V3EvidenceStore(tmp_path, epoch_id="epoch-worker")
     store.append("opportunity", {
         "record_id": "opportunity:1", "episode_id": "episode:1",
         "signal_ts": 1_700_000_000, "symbol": "BTCUSD",
     })
+    direct = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id="epoch-worker", now_ts=1_700_009_000, max_batch=8,
+    )
+    assert direct["status"] == "disabled: R17" and direct["writes"] == []
     result = tmp_path / "v3" / "receipts" / "future-path-worker-test.json"
     completed = subprocess.run([
         sys.executable, str(WORKER), "--data-dir", str(tmp_path),
@@ -27,10 +35,14 @@ def test_worker_isolated_result_and_truthful_missing_source(tmp_path):
     assert completed.returncode == 0
     payload = json.loads(result.read_text(encoding="utf-8"))
     assert payload["schema"] == "all_opportunity_future_path_worker_result_v1"
-    assert payload["unknown_count"] == 1
-    ledger = (tmp_path / "v3" / "ledgers" / "market_segment.jsonl").read_text()
-    assert "SOURCE_TAPE_MISSING" in ledger
-    assert "NO_FILL" not in ledger
+    assert payload["status"] == "disabled: R17"
+    assert payload["retired"] == "R17"
+    assert payload["unknown_count"] == 0 and payload["complete_count"] == 0
+    ledger = tmp_path / "v3" / "ledgers" / "market_segment.jsonl"
+    assert not ledger.exists() or "NO_FILL" not in ledger.read_text()
+    assert not list((tmp_path / "v3" / "market_segments").glob("*/*.json"))
+    bot_source = BOT.read_text(encoding="utf-8")
+    assert "FUTURE_PATH_WORKER_RETIRED_R17 = True" in bot_source
 
 
 def test_worker_has_hard_cpu_memory_and_batch_guards():

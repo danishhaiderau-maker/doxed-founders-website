@@ -1,7 +1,8 @@
 """Analyzer input-fidelity blockers: which inputs carry no usable data, and why.
 
 Each item says whether an analyzer input is usable (OK), usable with a
-measured gap (DEGRADED), or unusable (BLOCKED), with a stable reason code, a
+measured gap (DEGRADED), unusable (BLOCKED), or fed only by a source retired
+under R17 (RETIRED, "source retired (R17)"; never BLOCKED), with a stable reason code, a
 human reason, eligible/total counts and the evidence behind the verdict.
 ``side`` names who must act: ANALYZER (fixable in this repo's analyzer) or
 COLLECTION (needs a collector/runtime change on Fly).  Nothing here relaxes a
@@ -67,6 +68,18 @@ def _read_trades(data_dir: Path) -> list[dict[str, Any]]:
         return []
 
 
+# HM C9 (R17): the signal_replay and counterfactual writers are retired. An input whose only source is
+# retired reads RETIRED / SOURCE_RETIRED_R17 "source retired (R17)": never BLOCKED, and it does not move level.
+RETIRED = "RETIRED"
+SOURCE_RETIRED_R17 = "SOURCE_RETIRED_R17"
+SOURCE_RETIRED_LABEL = "source retired (R17)"
+
+
+def _retired(input_name, *, evidence=None, total=0):
+    return _item(input_name, RETIRED, SOURCE_RETIRED_R17, SOURCE_RETIRED_LABEL,
+                 eligible=0, total=total, side=None, evidence=evidence)
+
+
 def _item(input_name, status, reason_code, reason, *, eligible=None, total=None, side=None, evidence=None):
     return {
         "input": input_name,
@@ -95,7 +108,11 @@ def current_epoch(data_dir: Path) -> tuple[str | None, str]:
 
 # --------------------------------------------------------------------------- exit ladder
 def _no_eligible_exit_ladder_item(cohort: Mapping, eligible: int, registry_trades: int, evidence: dict) -> dict:
+    """No countable trade: RETIRED when no current-registry trade has a replay at all (the replay writer is
+    retired under R17); BLOCKED R17_UNPROVEN_OUTSIDE_BOOK_COVERAGE when replays exist but none is book-covered."""
     unproven = int(cohort.get("r17_unproven_count") or 0)
+    if not int(cohort.get("current_registry_trades_with_replay") or 0):
+        return _retired("exit_ladder_simulator", evidence=evidence, total=registry_trades)
     if unproven:
         return _item(
             "exit_ladder_simulator", "BLOCKED", "R17_UNPROVEN_OUTSIDE_BOOK_COVERAGE",
@@ -283,8 +300,7 @@ def signal_replay_item(report_dir: Path, *, cohort: Mapping[str, Any] | None = N
     health = _load_json(report_dir / DATA_HEALTH_REPORT) or {}
     replay = health.get("signal_replay") if isinstance(health.get("signal_replay"), Mapping) else None
     if replay is None:
-        return _item("signal_replay", "BLOCKED", "DATA_HEALTH_SIGNAL_REPLAY_MISSING",
-                     "data_health_report.json has no signal_replay section.", side="ANALYZER")
+        return _retired("signal_replay")
     distinct = int(replay.get("distinct_trades") or 0)
     complete = int(replay.get("distinct_complete") or 0)
     reasons = dict(replay.get("row_reasons") or {})
@@ -303,8 +319,7 @@ def signal_replay_item(report_dir: Path, *, cohort: Mapping[str, Any] | None = N
             "complete_and_eligible": cohort.get("eligible_count"),
         }
     if not distinct:
-        return _item("signal_replay", "BLOCKED", "NO_SIGNAL_REPLAY_ROWS", "No signal replay rows.",
-                     eligible=0, total=0, side="COLLECTION", evidence=evidence)
+        return _retired("signal_replay", evidence=evidence)
     ratio = complete / distinct
     if ratio >= 0.9:
         return _item("signal_replay", "OK", None, "Replay completeness healthy.",
@@ -398,8 +413,7 @@ def counterfactual_item(report_dir: Path, data_dir: Path, epoch_id: str | None) 
     }
     total = len(raw)
     if not total:
-        return _item("counterfactual_stream", "BLOCKED", "NO_COUNTERFACTUAL_ROWS", "No counterfactual rows.",
-                     eligible=0, total=0, side="COLLECTION", evidence=evidence)
+        return _retired("counterfactual_stream", evidence=evidence)
     if all(native[key] == total for key in COUNTERFACTUAL_JOIN_KEYS):
         return _item("counterfactual_stream", "OK", None, "Counterfactual rows carry their join keys.",
                      eligible=total, total=total, evidence=evidence)

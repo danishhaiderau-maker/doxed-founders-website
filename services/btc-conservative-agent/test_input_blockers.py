@@ -248,6 +248,15 @@ class InputBlockersTest(unittest.TestCase):
         self.assertEqual(item["evidence"]["paper_cohort"]["eligible_count"], 0)
         self.assertEqual(item["evidence"]["paper_cohort"]["r17_unproven_count"], 2)
 
+    def test_exit_ladder_without_any_replay_is_retired_not_blocked(self):
+        # HM #847 C3: no current-registry replay at all => the source is retired (R17), never BLOCKED.
+        _write_fixture(self.report, self.data, book_tape=False)
+        (self.data / "signal_replay.jsonl").write_text("", encoding="utf-8")
+        item = ib.exit_ladder_item(self.report, self.data, EPOCH)
+        self.assertEqual((item["status"], item["reason_code"], item["reason"]),
+                         ("RETIRED", "SOURCE_RETIRED_R17", "source retired (R17)"))
+        self.assertEqual(item["evidence"]["paper_cohort"]["current_registry_trades_with_replay"], 0)
+
     def test_exit_ladder_with_paper_cohort_receipt_is_degraded_on_partial_coverage(self):
         _write_fixture(self.report, self.data)
         report = json.loads((self.report / ib.EXIT_LADDER_REPORT).read_text(encoding="utf-8"))
@@ -329,3 +338,30 @@ class InputBlockersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceRetiredR17Test(unittest.TestCase):
+    """HM C9: inputs fed only by R17-retired writers read "source retired (R17)", never BLOCKED."""
+
+    def test_signal_replay_without_rows_or_section_is_retired_not_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp)
+            item = ib.signal_replay_item(report_dir)
+            self.assertEqual((item["status"], item["reason_code"], item["reason"]),
+                             ("RETIRED", "SOURCE_RETIRED_R17", "source retired (R17)"))
+            (report_dir / ib.DATA_HEALTH_REPORT).write_text(json.dumps({"signal_replay": {"distinct_trades": 0}}))
+            item = ib.signal_replay_item(report_dir)
+            self.assertEqual(item["status"], "RETIRED")
+            self.assertNotEqual(item["reason_code"], "NO_SIGNAL_REPLAY_ROWS")
+
+    def test_counterfactual_without_rows_is_retired_not_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            item = ib.counterfactual_item(Path(tmp), Path(tmp), EPOCH)
+            self.assertEqual((item["status"], item["reason"]), ("RETIRED", "source retired (R17)"))
+
+    def test_retired_items_do_not_raise_the_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = ib.collect_input_blockers(Path(tmp), Path(tmp), write=False)
+        retired = {i["input"] for i in doc["items"] if i["status"] == "RETIRED"}
+        self.assertTrue({"signal_replay", "counterfactual_stream"} <= retired)
+        self.assertNotIn("NO_SIGNAL_REPLAY_ROWS", json.dumps(doc))

@@ -11,7 +11,7 @@ import collector_v22
 from collector_v22 import build_research_event, event_already_written, event_replay_eligibility, write_research_event_once
 from collector_v22_provisional import load_provisional_events, remove_provisional_event, upsert_provisional_event
 from collector_v22_schema import EVENT_INDEX_FILE, RESEARCH_EVENTS_FILE
-from collector_v22_schema import OBS_INSUFFICIENT_PATH, OBS_WAITING_120M
+from collector_v22_schema import OBS_INSUFFICIENT_PATH
 from opportunity_capture_v22 import analyze_v22_events
 from replay_eligibility import validate_replay_eligibility
 
@@ -51,10 +51,27 @@ def _mature_event(event_id="integrity-event"):
     )
 
 
+def _negative_event(event_id="integrity-negative"):
+    """R17: positive v22 events are retired, so write-once integrity is
+    exercised with a terminal negative-evidence (INSUFFICIENT_PATH) event."""
+    return build_research_event(
+        trade_id=event_id,
+        epoch_id="epoch-integrity",
+        signal_ts=SIGNAL_TS,
+        signal_price=100000.0,
+        candles_1m=[_bar(i) for i in range(-60, 10)],
+        submitted=False,
+        rejected=True,
+        ticket_closed=True,
+        evaluation_ts=SIGNAL_TS + 300 * 60,
+    )
+
+
 class CollectorIntegrityTests(unittest.TestCase):
     def test_crash_after_jsonl_append_before_index_does_not_duplicate(self):
         with tempfile.TemporaryDirectory() as root:
-            event = _mature_event("crash-window")
+            event = _negative_event("crash-window")
+            self.assertEqual(event["observation_status"], OBS_INSUFFICIENT_PATH)
             self.assertFalse(event_already_written("crash-window", data_dir=root))
             real_insert = collector_v22._insert_index_line
             with mock.patch.object(collector_v22, "_insert_index_line", side_effect=OSError("crash after append")):
@@ -70,7 +87,7 @@ class CollectorIntegrityTests(unittest.TestCase):
 
     def test_corrupt_or_missing_index_rebuilds_from_durable_rows(self):
         with tempfile.TemporaryDirectory() as root:
-            event = _mature_event("repair-index")
+            event = _negative_event("repair-index")
             self.assertTrue(write_research_event_once(event, data_dir=root)[0])
             index_path = os.path.join(root, EVENT_INDEX_FILE)
             with open(index_path, "w", encoding="utf-8") as handle:
@@ -88,11 +105,23 @@ class CollectorIntegrityTests(unittest.TestCase):
             upsert_provisional_event("restart-mature", source, epoch_id="epoch-integrity", data_dir=root)
             restored = load_provisional_events(epoch_id="epoch-integrity", data_dir=root)
             self.assertEqual(restored["restart-mature"], source)
-            event = _mature_event("restart-mature")
+            event = _negative_event("restart-mature")
             self.assertTrue(write_research_event_once(event, data_dir=root)[0])
             self.assertTrue(remove_provisional_event("restart-mature", data_dir=root))
             self.assertEqual(load_provisional_events(epoch_id="epoch-integrity", data_dir=root), {})
             self.assertEqual(write_research_event_once(event, data_dir=root), (False, "duplicate event_id"))
+
+    def test_r17_retired_positive_event_is_refused_counted_and_provisional_removed(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = {"trade_id": "r17-retired", "created_ts_ts": SIGNAL_TS, "status": "REJECTED"}
+            upsert_provisional_event("r17-retired", source, epoch_id="epoch-integrity", data_dir=root)
+            before = collector_v22.v22_retired_r17_count()
+            event = _mature_event("r17-retired")
+            self.assertEqual(event["canonical_tape"]["path_1m_status"], collector_v22.RETIRED_R17)
+            self.assertEqual(write_research_event_once(event, data_dir=root),
+                             (False, collector_v22.V22_RETIRED_R17))
+            self.assertEqual(collector_v22.v22_retired_r17_count(), before + 1)
+            self.assertFalse(os.path.exists(os.path.join(root, RESEARCH_EVENTS_FILE)))
 
     def test_writer_and_replay_reject_same_pre_signal_gap(self):
         event = _mature_event("pre-gap")
@@ -475,7 +504,7 @@ class CollectorIntegrityTests(unittest.TestCase):
         self.assertFalse(event["replay_eligibility"]["eligible"])
         self.assertEqual(event["replay_outcomes"], [])
 
-    def test_not_yet_due_incomplete_hold_stays_waiting(self):
+    def test_not_yet_due_hold_terminalizes_retired_r17(self):
         candles = []
         for i in range(-60, 101):
             row = _bar(i)
@@ -487,8 +516,12 @@ class CollectorIntegrityTests(unittest.TestCase):
             signal_price=100000.0, candles_1m=candles, ticket_closed=True,
             evaluation_ts=SIGNAL_TS + 100 * 60,
         )
-        self.assertEqual(event["observation_status"], OBS_WAITING_120M)
-        self.assertFalse(event["immutable"])
+        # R17: no stored 1m path, so the hold cannot keep the event waiting;
+        # it terminalizes FUNNEL_COMPLETE and is replay-ineligible (retired).
+        self.assertEqual(event["observation_status"], "FUNNEL_COMPLETE")
+        self.assertEqual(event["canonical_tape"]["path_1m_status"], collector_v22.RETIRED_R17)
+        self.assertEqual(event["replay_eligibility"]["reasons"], ["MISSING_1M_TAPE"])
+        self.assertTrue(collector_v22.is_r17_retired_event(event))
 
     def test_terminal_negative_write_once_survives_crash_and_analyzer_excludes_it(self):
         with tempfile.TemporaryDirectory() as root:
@@ -506,10 +539,17 @@ class CollectorIntegrityTests(unittest.TestCase):
             self.assertEqual(write_research_event_once(event, data_dir=root), (False, "duplicate event_id"))
             report = analyze_v22_events(data_dir=root)
             integrity = report["replay_integrity"]
+            # R17: the negative row is retired (no stored 1m path), so it is
+            # labelled "source retired (R17)" and never scored or counted as
+            # an ineligible primary; the durable row itself is untouched.
             self.assertEqual(integrity["eligible_events"], 0)
-            self.assertEqual(integrity["ineligible_events"], 1)
-            self.assertEqual(integrity["observation_statuses"][OBS_INSUFFICIENT_PATH], 1)
-            self.assertGreater(sum(integrity["blockers"].values()), 0)
+            self.assertEqual(integrity["ineligible_events"], 0)
+            self.assertEqual(integrity["ranking_denominator"], 0)
+            self.assertEqual(report["source_retired"]["rows"], 1)
+            self.assertEqual(report["source_retired"]["label"], "source retired (R17)")
+            self.assertEqual(report["source_retired"]["reason"], "MISSING_1M_TAPE")
+            self.assertEqual(event["observation_status"], OBS_INSUFFICIENT_PATH)
+            self.assertTrue(collector_v22.is_r17_retired_event(event))
 
 
 if __name__ == "__main__":

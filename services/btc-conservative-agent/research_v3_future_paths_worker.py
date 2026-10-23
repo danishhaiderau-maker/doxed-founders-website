@@ -52,7 +52,7 @@ def main() -> int:
                 "mature_selected", "complete_count", "unknown_count",
                 "source_tape_present", "cursor",
                 "terminal_append_dispositions", "terminal_append_authority",
-                "terminal_append_attempted_count",
+                "terminal_append_attempted_count", "status", "retired",
             )},
         }
         temporary = result_path.with_suffix(f".{os.getpid()}.tmp")

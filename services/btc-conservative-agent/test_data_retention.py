@@ -49,7 +49,9 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(policy.deletable_rotation("chase_offset_touch_grid.jsonl.1"))
         self.assertFalse(policy.deletable_rotation("chase_offset_touch_grid.jsonl.1", fly=True))
         self.assertEqual(policy.classify("order_multiverse_entry_grid.jsonl.3"), policy.OTHER)
-        self.assertFalse(policy.deletable_rotation("order_multiverse_entry_grid.jsonl.3", fly=True))
+        # R17 (23 Oct): the entry-grid writer is retired, so it left FLY_KEEP.
+        self.assertNotIn("order_multiverse_entry_grid.jsonl", policy.FLY_KEEP_ROTATION_BASES)
+        self.assertTrue(policy.deletable_rotation("order_multiverse_entry_grid.jsonl.3", fly=True))
 
 
 class ArchiveTests(unittest.TestCase):

@@ -100,7 +100,10 @@ def _patch_provenance(monkeypatch):
     )
 
 
-def test_bridge_lifecycle_progresses_transfer_then_qualification(tmp_path, monkeypatch):
+def test_bridge_lifecycle_materialises_transfer_then_stops_at_retired_r17(tmp_path, monkeypatch):
+    """R17: the transfer bundle is still materialised from the bridge, but the
+    POST_EXIT_PATH qualification source is retired, so no completion row or
+    completion bundle is ever produced and the stage is RETIRED_R17."""
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(lifecycle_pipeline, "QUALIFICATION_HORIZON_SEC", 4.0)
     _write_tape(tmp_path / "market_microstructure_1s.jsonl", 100, 107)
@@ -141,28 +144,17 @@ def test_bridge_lifecycle_progresses_transfer_then_qualification(tmp_path, monke
         lifecycle_horizon_sec=4.0,
     )
 
+    stages = []
     for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
-        completion = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        later = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
             tmp_path, now=300.0
         )
-        if completion["completion_appended_count"] == 1:
-            break
-    assert completion["completion_appended_count"] == 1
-    assert completion["bundle_count"] == 0
-    assert completion["results"][0]["stage"] == "COMPLETION_PENDING_REINDEX"
-
-    for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
-        qualified = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-            tmp_path, now=300.0
-        )
-        if qualified["bundle_count"] == 1:
-            break
-    assert qualified["bundle_count"] == 1, json.dumps(qualified, indent=2)
-    assert qualified["results"][0]["stage"] == "BUNDLE_MATERIALIZED_OR_VERIFIED"
-    bundle = qualified["results"][0]["bundle"]
-    assert bundle["manifest"]["schema"] == "research_lifecycle_bundle_v1"
-    assert bundle["manifest"]["completion"]["ready"] is True
-    assert verify_bundle(bundle["path"])["passed"] is True
+        assert later["completion_appended_count"] == 0
+        assert later["bundle_count"] == 0
+        stages.extend(item["stage"] for item in later["results"])
+    assert lifecycle_pipeline.QUALIFICATION_RETIRED_R17_STAGE in stages, stages
+    assert "COMPLETION_PENDING_REINDEX" not in stages
+    assert "BUNDLE_MATERIALIZED_OR_VERIFIED" not in stages
 
     # The early transfer snapshot is immutable and never upgraded into a
     # qualification, ranking, profitability, or cleanup authority.
@@ -170,6 +162,7 @@ def test_bridge_lifecycle_progresses_transfer_then_qualification(tmp_path, monke
         tmp_path, now=301.0
     )
     assert repeated["candidate_count"] == 0
+    assert verify_bundle(transfer["path"])["passed"] is True
     assert transfer["manifest"]["qualification_ready"] is False
     assert transfer["manifest"]["ranking_eligible"] is False
     assert transfer["manifest"]["source_cleanup_authorized"] is False

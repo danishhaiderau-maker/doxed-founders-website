@@ -54,7 +54,6 @@ test_baseline_pre_entry_join_integration.py
 test_baseline_row_index_exit.py
 test_bbo_refresh_nonblocking.py
 test_best_policy_research_dashboard.py
-test_bilateral_future_path_chain.py
 test_bitfinex_live_switch.py
 test_bitfinex_pair_constraints.py
 test_blindspot_runtime_telemetry.py
@@ -228,7 +227,6 @@ test_full_reset_no_archive.py
 test_full_reset_segment_retire.py
 test_future_path_attempt_integration.py
 test_future_path_attempt_receipt.py
-test_future_path_blocked_append_observation.py
 test_generation_receipt.py
 test_genome_episode_hygiene.py
 test_genome_grid_study.py
@@ -462,6 +460,7 @@ test_research_segments_custody.py
 test_research_segments_epoch.py
 test_research_segments_promotion.py
 test_research_segments_prune.py
+test_research_segments_r5_prune.py
 test_research_segments_volume.py
 test_research_timing_capture.py
 test_research_timing_startup.py
@@ -612,3 +611,10 @@ test_offline_sim_floor_source.py
 test_funding_raw_fields.py
 test_nonaccum_execute.py
 test_live_vs_paper.py
+test_disk_alert.py
+test_r5_retention.py
+test_r5_keep.py
+test_rotation_cap.py
+test_taker_counterfactual_r17.py
+test_signal_replay_r17.py
+test_v22_retired_r17.py

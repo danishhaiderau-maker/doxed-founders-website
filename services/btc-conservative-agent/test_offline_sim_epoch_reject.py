@@ -95,20 +95,17 @@ def test_unreadable_floor_skips_every_rotated_shard_and_parses_none(tmp_path, mo
     assert set(rows) == {"a1"} and st["shards_skipped_floor_unreadable"] == 1 and st["lines_parsed"] == 1   # only the active line
 
 
-def test_system_health_check_is_red_when_the_floor_was_unreadable():
+def test_system_health_check_is_red_when_the_floor_is_unreadable_and_says_source_retired():
+    """HM C9 (R17): the loader is retired, so no stuck AMBER "no loader call yet"; the floor itself still gates RED."""
     import bot
     real = bot._offline_sim_epoch_floor_detail
     try:
         bot._offline_sim_epoch_floor_detail = lambda: (1792263671.26, "fresh_start_epoch.json:cwd", None)
-        bot._OFFLINE_SIM_LOAD_STATS.clear()
-        assert bot._offline_sim_epoch_check()["status"] == "AMBER"
-        bot._OFFLINE_SIM_LOAD_STATS.update(floor_unreadable=True)
-        assert bot._offline_sim_epoch_check()["status"] == "RED"
-        bot._OFFLINE_SIM_LOAD_STATS.update(floor_unreadable=False, shards_seen=2)
-        assert bot._offline_sim_epoch_check()["status"] == "GREEN"
-        # the health check re-reads the floor itself every cycle: an unreadable floor is RED whatever the loader last saw
+        check = bot._offline_sim_epoch_check()
+        assert check["status"] == "GREEN" and "source retired (R17)" in check["observed"]
+        assert "no loader call yet" not in check["observed"]
         bot._offline_sim_epoch_floor_detail = lambda: (None, None, "no floor")
         assert bot._offline_sim_epoch_check()["status"] == "RED"
+        assert not hasattr(bot, "_load_offline_sim_jsonl_revisions")
     finally:
         bot._offline_sim_epoch_floor_detail = real
-        bot._OFFLINE_SIM_LOAD_STATS.clear()

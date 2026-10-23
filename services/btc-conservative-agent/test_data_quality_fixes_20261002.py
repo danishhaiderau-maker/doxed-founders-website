@@ -86,46 +86,45 @@ def test_counterfactual_join_fields_fall_back_without_guessing(bot):
     assert set(missing["join_keys_missing"]) == {"signal_ts", "shared_ai_call_id", "epoch_id"}
 
 
-def test_counterfactual_builders_spread_join_fields():
-    assert SOURCE.count("**counterfactual_join_fields(") == 2
-    assert SOURCE.count("_counterfactual_snapshot_with_join_keys(") == 3
-
-
-# --------------------------------------------------------------------------
-# Signal replay completion
-# --------------------------------------------------------------------------
 def test_expiry_sweep_waits_for_post_exit_grace():
     assert "POST_EXIT_REPLAY_GRACE_SEC" in SOURCE
     i = SOURCE.index('_buf_float(buf.get("post_exit_deadline_ts"), 0) + POST_EXIT_REPLAY_GRACE_SEC')
     assert i > 0
 
 
-def test_shutdown_dumps_are_labelled_censored():
-    assert SOURCE.count('dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")') == 2
-    dump = _function_source("dump_replay")
-    for key in ('"dumped_ts"', '"dump_seq"', '"dump_reason"', '"censored"', '"natural_completion_reason"'):
-        assert key in dump
-
-
-def test_dump_replay_censored_row(bot, tmp_path, monkeypatch):
+def test_dump_replay_writes_no_signal_replay_file_r17(bot, tmp_path, monkeypatch):
+    """C9 / R17: the signal_replay writer is stopped. A real dump_replay of a
+    censored and of a completed buffer, in a tmp cwd, creates no
+    signal_replay.jsonl* file anywhere and still counts the dumps."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bot, "SIGNAL_REPLAY_FILE", str(tmp_path / "signal_replay.jsonl"))
-    tid = "shadow-test-censor"
+    synced = []
+    monkeypatch.setattr(bot, "_sync_order_multiverse", lambda *a, **k: synced.append((a, k)))
     now = time.time()
+    buffers = {
+        "shadow-test-censor": {"start_ts": now - 30, "start_price": 100000.0, "direction": "LONG",
+                               "lane": "shadow", "ticks": [{"t": 1.0, "price": 100000.0}],
+                               "closed": False},
+        "shadow-test-closed": {"start_ts": now - 30, "start_price": 100000.0, "direction": "LONG",
+                               "lane": "shadow", "ticks": [{"t": 1.0, "price": 100000.0}],
+                               "closed": True, "virtual_fill_t": 1.0, "virtual_entry": 100000.0},
+    }
+    before = bot.write_counter
     with bot.replay_lock:
-        bot.replay_buffers[tid] = {"start_ts": now - 30, "start_price": 100000.0, "direction": "LONG",
-                                   "lane": "shadow", "ticks": [{"t": 1.0, "price": 100000.0}],
-                                   "closed": False}
+        bot.replay_buffers.update(buffers)
     try:
-        bot.dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
-        bot.dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
+        bot.dump_replay("shadow-test-censor", terminal_reason="CENSORED_PROCESS_SHUTDOWN")
+        bot.dump_replay("shadow-test-censor", terminal_reason="CENSORED_PROCESS_SHUTDOWN")
+        bot.dump_replay("shadow-test-closed")
+        seqs = {tid: bot.replay_buffers[tid]["dump_seq"] for tid in buffers}
     finally:
         with bot.replay_lock:
-            bot.replay_buffers.pop(tid, None)
-    rows = [json.loads(line) for line in open(tmp_path / "signal_replay.jsonl", encoding="utf-8")]
-    assert [r["dump_seq"] for r in rows] == [1, 2]
-    assert all(r["censored"] is True for r in rows)
-    assert rows[0]["replay_completion_reason"] == "CENSORED_PROCESS_SHUTDOWN"
-    assert rows[0]["natural_completion_reason"] == "INCOMPLETE_BUFFER"
+            for tid in buffers:
+                bot.replay_buffers.pop(tid, None)
+    assert sorted(p.name for p in tmp_path.rglob("signal_replay.jsonl*")) == []
+    assert not any("signal_replay" in p.name for p in tmp_path.rglob("*"))
+    assert seqs == {"shadow-test-censor": 2, "shadow-test-closed": 1}
+    assert bot.write_counter == before + 3
 
 
 # --------------------------------------------------------------------------

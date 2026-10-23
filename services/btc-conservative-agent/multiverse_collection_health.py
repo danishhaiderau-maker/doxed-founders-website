@@ -7,6 +7,11 @@ They stay on disk untouched; this report marks them
 measures the post-fix stream (rows with ``canonical_tape.path_source``):
 empty-path rate, terminal status mix, entry-grid dedupe integrity and
 discovery touch-grid coverage of tile calls.
+
+R17: the 1m candle/ticker path is unverifiable and retired, so rows written
+since then carry ``path_1m=[]`` with ``path_1m_status=RETIRED_R17``. Those rows
+are labelled "source retired (R17)": not a collection defect, not alarmed on,
+and excluded from every cohort computation.
 """
 from __future__ import annotations
 
@@ -25,6 +30,8 @@ REPORT_FILE = "multiverse_collection_health_report.json"
 MULTIVERSE_FILE = "order_multiverse.jsonl"
 TOUCH_GRID_FILE = "chase_offset_touch_grid.jsonl"
 DEFECT_REASON = "MULTIVERSE_EMPTY_PATH_COLLECTION_DEFECT"
+RETIRED_R17 = "RETIRED_R17"
+SOURCE_RETIRED_LABEL = "source retired (R17)"
 NEVER_RECORDED_REASON = "PATH_SOURCE_NEVER_RECORDED"
 NEVER_RECORDED_QUARANTINE_REASON = "MULTIVERSE_PATH_SOURCE_NEVER_RECORDED"
 LATE_MATURATION_REASON = "MULTIVERSE_LATE_MATURATION_BACKFILL"
@@ -93,7 +100,8 @@ def _compact_row(row: Mapping[str, Any], line_bytes: int) -> dict:
         "never_recorded": (tape.get("coverage") or {}).get("reason") == NEVER_RECORDED_REASON
         if isinstance(tape.get("coverage"), Mapping) else False,
         "signal_ts": envelope.get("signal_ts"),
-        "empty_path": not tape.get("path_1m"),
+        "empty_path": not (tape.get("path_1m") or tape.get("path_1m_bars")),
+        "retired_r17": tape.get("path_1m_status") == RETIRED_R17 and not tape.get("path_1m"),
         "post_fix": source is not None,
         "window_state": (source or {}).get("window_state"),
         "tape_bars": (source or {}).get("tape_bars"),
@@ -209,6 +217,8 @@ def build_multiverse_collection_report(data_dir: str, *, epoch_id: Optional[str]
     rows = _latest_by_trade(rows)
     if epoch_id:
         rows = [row for row in rows if row["epoch_id"] == str(epoch_id)]
+    retired = [row for row in rows if row.get("retired_r17")]
+    rows = [row for row in rows if not row.get("retired_r17")]
     grid_digests: set = set()
     for path in rotation_family(data_dir, GRID_FILE):
         grid_digests |= _file_grid_digests(path)
@@ -258,10 +268,19 @@ def build_multiverse_collection_report(data_dir: str, *, epoch_id: Optional[str]
     return {
         "schema": SCHEMA,
         "epoch_id": epoch_id,
-        "status": "ALARM" if alarms else ("NO_POST_FIX_ROWS" if not post_fix else "OK"),
+        "status": "ALARM" if alarms else (
+            "OK" if post_fix else ("SOURCE_RETIRED_R17" if retired else "NO_POST_FIX_ROWS")
+        ),
         "alarms": alarms,
-        "rows_total": len(rows),
-        "rows_by_epoch": dict(Counter(row["epoch_id"] or "UNKNOWN" for row in rows)),
+        "rows_total": len(rows) + len(retired),
+        "rows_by_epoch": dict(Counter(row["epoch_id"] or "UNKNOWN" for row in rows + retired)),
+        "source_retired": {
+            "reason": RETIRED_R17,
+            "label": SOURCE_RETIRED_LABEL,
+            "rows": len(retired),
+            "basis": "R17: unverifiable 1m candle/ticker path discarded; replay-ineligible (MISSING_1M_TAPE)",
+            "action": "NOT_A_DEFECT_NOT_SCORED_SOURCE_ROWS_UNMODIFIED",
+        },
         "legacy_cache_only_rows": _cohort(legacy),
         "post_fix_rows": post_cohort,
         "post_fix_path_source_states": dict(Counter(str(row["window_state"]) for row in post_fix)),

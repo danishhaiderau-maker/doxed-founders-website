@@ -61,6 +61,21 @@ _PROVENANCE_FIELDS = (
 )
 QUALIFICATION_RETRY_SEC = 60.0
 QUALIFICATION_HORIZON_SEC = 7200.0
+QUALIFICATION_RETIRED_R17_STAGE = "QUALIFICATION_HORIZON_RETIRED_R17"
+QUALIFICATION_RETIRED_R17_LABEL = (
+    "R17: POST_EXIT_PATH source retired; lifecycles stop at transfer, no completion/qualification"
+)
+_QUALIFICATION_RETIRED_R17_COUNT = 0
+
+
+def lifecycle_qualification_retired_r17_count() -> int:
+    """Process-lifetime count of lifecycles that stopped at the R17 stage."""
+    return _QUALIFICATION_RETIRED_R17_COUNT
+
+
+def _note_qualification_retired_r17() -> None:
+    global _QUALIFICATION_RETIRED_R17_COUNT
+    _QUALIFICATION_RETIRED_R17_COUNT += 1
 EMERGENCY_NONTERMINAL_RETRY_SEC = 1800.0
 
 
@@ -473,6 +488,15 @@ def _process_incremental_lifecycle_pipeline(
                                 max_runtime_sec=min(5.0, max(0.1, runtime_limit / 4.0)),
                             )
                             item["qualification_horizon"] = horizon
+                            if horizon.get("retired") == "R17":
+                                # R17: POST_EXIT_PATH segments are retired; do
+                                # not loop retries on a source that is gone.
+                                _note_qualification_retired_r17()
+                                _remove_retry(connection, key)
+                                _clear_dirty(connection, key)
+                                item["stage"] = QUALIFICATION_RETIRED_R17_STAGE
+                                results.append(item)
+                                continue
                             if horizon.get("write", {}).get("written") or horizon.get("write", {}).get("duplicate"):
                                 _remove_retry(connection, key)
                                 item["stage"] = "QUALIFICATION_HORIZON_PENDING_REINDEX"
@@ -587,6 +611,7 @@ def _process_incremental_lifecycle_pipeline(
         ),
         "stage_counts": dict(sorted(stage_counts.items())[:32]),
         "blocker_counts": dict(sorted(blocker_counts.items())[:32]),
+        "qualification_retired_r17_count": stage_counts.get(QUALIFICATION_RETIRED_R17_STAGE, 0),
         "results": results,
         "scan": {
             "ledgers": scan_receipts,

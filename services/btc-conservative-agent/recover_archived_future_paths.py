@@ -181,10 +181,23 @@ def _atomic_write_new(path: Path, payload: bytes, *, root: Path) -> bool:
     return True
 
 
+# R17 (23 Oct): market_segments writers are retired (HM R17 (B)1). The
+# segment rows were copies of L1 microstructure, which paper_fill bans; no
+# fill, exit or tile decision reads them. Callers get "disabled: R17".
+SEGMENT_WRITES_RETIRED_R17 = True
+R17_DISABLED = "disabled: R17"
+
+
 def recover_archived_future_paths(
     *, canonical_root: str | Path, archive_tape: str | Path, epoch_id: str,
     expected_size: int, expected_sha256: str, apply: bool = False,
 ) -> dict[str, Any]:
+    if SEGMENT_WRITES_RETIRED_R17:
+        return {
+            "schema": "archived_future_path_recovery_status_v2",
+            "epoch_id": str(epoch_id), "status": R17_DISABLED, "retired": "R17",
+            "apply": bool(apply), "recovered_count": 0, "status_receipt_written": False,
+        }
     root = Path(canonical_root).resolve()
     if root.name != "canonical-research-data":
         raise ValueError("ARCHIVE_RECOVERY_ROOT_NOT_CANONICAL")

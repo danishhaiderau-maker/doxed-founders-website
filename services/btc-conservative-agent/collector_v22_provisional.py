@@ -10,6 +10,37 @@ from typing import Any, Mapping, Optional
 PROVISIONAL_STORE_FILE = "research_events_v22.provisional.json"
 PROVISIONAL_STORE_SCHEMA = "research_event_provisional_store_v1"
 _LOCK = threading.RLock()
+# HM C1 (re-review, R5): hard cap on the provisional journal. Retirement and the
+# refused-source release keep it small; the cap is the backstop. On overflow the
+# oldest entries (by signal time) are evicted and counted in the store, never a wait.
+PROVISIONAL_MAX_EVENTS = max(100, int(os.getenv("COLLECTOR_V22_PROVISIONAL_MAX_EVENTS") or 2000))
+
+
+def _source_ts(row: Any) -> float:
+    source = row.get("source") if isinstance(row, dict) else None
+    if not isinstance(source, dict):
+        return 0.0
+    for field in ("created_ts_ts", "signal_ts", "created_ts"):
+        try:
+            value = float(source.get(field) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _enforce_cap_unlocked(store: dict, keep_key: str, max_events: int) -> int:
+    events = store["events"]
+    over = len(events) - max_events
+    if over <= 0:
+        return 0
+    victims = sorted((k for k in events if k != keep_key), key=lambda k: (_source_ts(events[k]), k))[:over]
+    for key in victims:
+        del events[key]
+    store["cap_evicted_total"] = int(store.get("cap_evicted_total") or 0) + len(victims)
+    store["cap_max_events"] = max_events
+    return len(victims)
 
 # These fields define causal identity or point-in-time evidence.  A later
 # maturation rebuild may add lifecycle state, but it must never erase an
@@ -93,6 +124,7 @@ def upsert_provisional_event(event_id: str, source: Mapping[str, Any], *, epoch_
                     merged[field] = prior_value
             incoming = merged
         store["events"][key] = {"event_id": key, "epoch_id": epoch, "source": incoming}
+        _enforce_cap_unlocked(store, key, PROVISIONAL_MAX_EVENTS)
         _atomic_write_unlocked(path, store)
     try:
         from research_v3_bridge import dual_write_provisional_source

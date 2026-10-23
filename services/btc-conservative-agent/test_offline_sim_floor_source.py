@@ -8,7 +8,7 @@ sys.path.insert(0, str(HERE))
 
 def _fn():
     src = (HERE / "bot.py").read_text(encoding="utf-8")
-    m = re.search(r"def _offline_sim_epoch_floor_detail\(\):.*?\n\n\n(?=def _load_offline)", src, re.S)
+    m = re.search(r"def _offline_sim_epoch_floor_detail\(\):.*?\n\n\n(?=# HM C9 \(R17\): _load_offline_sim_jsonl_revisions)", src, re.S)
     ns = {"os": os, "logger": type("L", (), {"warning": staticmethod(lambda *a, **k: None)}),
           "_fresh_epoch_identity_from_session": lambda: (None, None, None)}
     ns["__builtins__"] = __builtins__
