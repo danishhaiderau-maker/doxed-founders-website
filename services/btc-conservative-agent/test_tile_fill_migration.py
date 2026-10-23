@@ -518,6 +518,27 @@ def test_resid_a_inline_close_never_waits(monkeypatch):
     assert "_PAPER_EXIT_TLS.no_wait = True" in seg and seg.index("no_wait = True") < seg.index("close_position(pos, reason)")
 
 
+def test_hm_r4_inline_forced_model_time_marks_carry_exit_evidence(monkeypatch):
+    """HM R4 (#845 review): the inline (no-wait) BOT_SENT MODEL_TIME close stamps exit_price_age_s, exit_evidence_status
+    and exit_unverified_reason from the shared pricer's result, like the threaded path (no missing R17 evidence)."""
+    _use_book(monkeypatch)
+    clk = _Clock(5000.0)
+    ns = _lane_ns(clk)
+    ns["_PAPER_EXIT_TLS"].no_wait = True
+    try:
+        pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 5000.0}
+        (_, sim), marks = ns["_paper_lane_exit"](pos, "DEPLOY_FORCE_FLAT")
+    finally:
+        ns["_PAPER_EXIT_TLS"].no_wait = False
+    assert marks["exit_pricing_basis"] == "MODEL_TIME" and marks["exit_order_class"] == "BOT_SENT"
+    for k in ("exit_price_age_s", "exit_evidence_status", "exit_unverified_reason", "exit_book_row_rule",
+              "exit_depth_short_qty", "exit_book_age_ms"):
+        assert k in marks, k
+    assert marks["exit_evidence_status"] == sim.get("evidence_status")
+    assert marks["exit_price_age_s"] == sim.get("price_age_s")
+    assert marks["exit_unverified_reason"] == sim.get("unverified_reason")
+
+
 def test_resid_b_close_position_applies_marks_after_claim_only():
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     seg = _func_src(src, "close_position")

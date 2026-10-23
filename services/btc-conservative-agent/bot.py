@@ -7921,7 +7921,13 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     res = _paper_stamp_pool(_tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
     if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
         return None, {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None}
+    # HM R4 (#845 review): the inline MODEL_TIME marks carry the same exit evidence as the threaded path (price age,
+    # evidence status / unverified reason, book-row rule, depth short) - never left missing on the closed row.
     marks.update(exit_status="PAPER_FILL", exit_pricing_basis="MODEL_TIME",
+                 exit_price_age_s=res.get("price_age_s"), exit_book_row_rule=res.get("book_row_rule"),
+                 exit_evidence_status=res.get("evidence_status"),
+                 exit_unverified_reason=res.get("unverified_reason"),
+                 exit_depth_short_qty=res.get("depth_short_qty"),
                  **_paper_exit_model_times(t0, res, time.time(), 1))
     marks.update(_liquidation_stamp(pos, t0, res.get("price")))  # HM C4: every terminal close
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
