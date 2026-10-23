@@ -54,6 +54,9 @@ CONTRACT = {
     "exit_book_receive_ts": "finite number > 0: MEASURED WS receive time of the exit book row",
     "exit_book_receive_mono": "finite number >= 0",
     "exit_book_receive_ts_source": "WS_FRAME",
+    # HM 02:55 nit: proof that the walked row was RECEIVED no later than the fill (receive_ts <= fill_ts by construction)
+    "entry_book_receive_age_ms": "finite number >= 0 (ms): entry fill time - entry_book_receive_ts (age from receipt)",
+    "exit_book_receive_age_ms": "finite number >= 0 (ms): exit fill time - exit_book_receive_ts (age from receipt)",
     "liq_unverified": "False (real bool or 'false') AND liq_mark_rows_n > 0 AND no liq_trigger_ts: the hold path is "
                       "proven clear of the liquidation distance (RK/HM K1, 24 Oct); True or missing fails",
     "liq_mark_rows_n": "number > 0 (the BFXCI mark series over the hold was read)",

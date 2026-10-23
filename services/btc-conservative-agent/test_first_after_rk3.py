@@ -99,3 +99,16 @@ def test_no_row_received_after_trigger_yet_fails_closed(tmp_path):
 
 def test_book10l_exposes_exact_row_list():
     assert callable(getattr(pf.book10l_at, "rows_between", None))
+
+
+def test_hm0255_book_receive_age_is_measured_from_the_receipt_and_rx_le_fill():
+    """HM 02:55 nits: receive_ts <= fill_ts by construction; the age field is fill time - measured receipt (ms)."""
+    import paper_fill as pf
+    ok = pf.book_receive_proof({"s": 100, "receive_ts": 100.4, "receive_ts_source": pf.RECEIVE_TS_MEASURED,
+                                "receive_mono": 5.0}, 100.9, pf.ROW_RULE_LATEST)
+    assert ok["book_receive_unverified"] is None and ok["book_receive_age_ms"] == 500.0
+    late = pf.book_receive_proof({"s": 100, "receive_ts": 101.0, "receive_ts_source": pf.RECEIVE_TS_MEASURED},
+                                 100.9, pf.ROW_RULE_LATEST)
+    assert late["book_receive_unverified"] == pf.BOOK_RECEIVE_AFTER_FILL  # rx > fill is never countable
+    none = pf.book_receive_proof({"s": 100}, 100.9, pf.ROW_RULE_LATEST)
+    assert none["book_receive_age_ms"] is None and none["book_receive_unverified"] == pf.BOOK_RECEIVE_TS_MISSING

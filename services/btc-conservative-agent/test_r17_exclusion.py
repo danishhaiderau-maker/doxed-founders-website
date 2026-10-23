@@ -34,8 +34,8 @@ PROOF = {"trigger_price_source": "book", "delay_source": "lane_q90_n24", "exit_p
          "exit_unverified_reason": None, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK",
          # RK/HM K1: hold path proven clear of the liquidation distance
          "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None,
-         "entry_book_receive_ts": 1000.2, "entry_book_receive_mono": 50.2, "entry_book_receive_ts_source": "WS_FRAME",
-         "exit_book_receive_ts": 1100.4, "exit_book_receive_mono": 150.4, "exit_book_receive_ts_source": "WS_FRAME",}
+         "entry_book_receive_ts": 1000.2, "entry_book_receive_mono": 50.2, "entry_book_receive_ts_source": "WS_FRAME", "entry_book_receive_age_ms": 120.0,
+         "exit_book_receive_ts": 1100.4, "exit_book_receive_mono": 150.4, "exit_book_receive_ts_source": "WS_FRAME", "exit_book_receive_age_ms": 80.0,}
 
 
 def good_row(**extra):
@@ -120,6 +120,8 @@ def test_rk_list_ids_are_non_countable_and_never_fresh():
     ("exit_book_receive_ts", None, "EXIT_BOOK_RECEIVE_TS_MISSING"),
     ("exit_book_receive_mono", float("nan"), "EXIT_BOOK_RECEIVE_TS_MISSING"),
     ("exit_book_receive_ts_source", None, "EXIT_BOOK_RECEIVE_TS_MISSING"),
+    ("entry_book_receive_age_ms", None, "BOOK_RECEIVE_TS_MISSING"),  # HM 02:55: age from receipt is a proof field
+    ("exit_book_receive_age_ms", -5.0, "EXIT_BOOK_RECEIVE_TS_MISSING"),
 ])
 def test_any_missing_or_unknown_proof_excludes_ids_on_no_list(field, value, reason):
     tid = "gs1-ffffffffffff"
@@ -175,8 +177,8 @@ def test_841_shaped_closed_row_with_contract_fields_counts():
            "trigger_price_source": "book", "exit_priced_delay_source": "EXCHANGE_RESIDENT_NO_DELAY",
            "entry_book_age_ms": 180, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK",
            "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None,
-           "entry_book_receive_ts": 1000.2, "entry_book_receive_mono": 50.2, "entry_book_receive_ts_source": "WS_FRAME",
-         "exit_book_receive_ts": 1100.4, "exit_book_receive_mono": 150.4, "exit_book_receive_ts_source": "WS_FRAME",}
+           "entry_book_receive_ts": 1000.2, "entry_book_receive_mono": 50.2, "entry_book_receive_ts_source": "WS_FRAME", "entry_book_receive_age_ms": 120.0,
+         "exit_book_receive_ts": 1100.4, "exit_book_receive_mono": 150.4, "exit_book_receive_ts_source": "WS_FRAME", "exit_book_receive_age_ms": 80.0,}
     assert r17.non_countable_reason(row) is None
     assert r17.stamp_on_write(dict(row))["non_countable"] is False
 

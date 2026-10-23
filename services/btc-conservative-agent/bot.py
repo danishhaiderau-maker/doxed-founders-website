@@ -8195,7 +8195,9 @@ def _book_receive_row_fields(side: str, sim) -> dict:
     sim = sim if isinstance(sim, dict) else {}
     return {f"{side}_book_receive_ts": sim.get("book_receive_ts"),
             f"{side}_book_receive_mono": sim.get("book_receive_mono"),
-            f"{side}_book_receive_ts_source": sim.get("book_receive_ts_source")}
+            f"{side}_book_receive_ts_source": sim.get("book_receive_ts_source"),
+            # HM 02:55 nit: the price age measured from the RECEIPT (fill time - receive_ts, ms)
+            f"{side}_book_receive_age_ms": sim.get("book_receive_age_ms")}
 
 
 def _delay_leg_unverified(sim) -> bool:

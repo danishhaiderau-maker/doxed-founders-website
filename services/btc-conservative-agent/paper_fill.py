@@ -205,7 +205,12 @@ def book_receive_proof(book, t: float, rule: str) -> dict:
     """ONE shared check (R4) for every book walk: the walked row's measured receive time and whether it proves the
     fill used no look-ahead. LATEST rule (bot-sent fills): receive_ts <= fill time t. FIRST_AFTER rule (exchange-
     resident stop / forced exit, HM M2 / RK 17:24 / RK 24 Oct (3)): first_after_proof - target <= receive_ts <= fill
-    time and the row is the FIRST received at/after the target. ``book_receive_unverified`` is the reason (or None)."""
+    time and the row is the FIRST received at/after the target. ``book_receive_unverified`` is the reason (or None).
+
+    receive_ts <= fill_ts holds BY CONSTRUCTION on every countable row (HM 02:55 doc nit): LATEST rows with
+    receive_ts > fill_ts are refused (BOOK_RECEIVE_AFTER_FILL); FIRST_AFTER sets fill_ts = the row's own receipt.
+    ``book_receive_age_ms`` (HM 02:55 nit) is the price age measured from that RECEIPT: (fill_ts - receive_ts) ms;
+    None when the receipt is not measured (the by-second book_age_ms / price_age_s stay as the bucket age)."""
     rx = _f((book or {}).get("receive_ts"))
     rx = rx if rx and rx > 0 else None
     src = str((book or {}).get("receive_ts_source") or "") if rx else RECEIVE_TS_MISSING
@@ -218,8 +223,10 @@ def book_receive_proof(book, t: float, rule: str) -> dict:
         # RK 24 Oct (3): t is the FIRST_AFTER fill time (the row's receipt); the target is stamped on the row.
         reason = first_after_proof(book, (book or {}).get("first_after_target_ts", t), t)["first_after_reason"]
     mono = _f((book or {}).get("receive_mono"))
+    age = round((float(t) - rx) * 1000.0, 3) if rx and src == RECEIVE_TS_MEASURED else None
     return {"book_receive_ts": rx, "book_receive_mono": mono if rx else None,
-            "book_receive_ts_source": src or RECEIVE_TS_MISSING, "book_receive_unverified": reason}
+            "book_receive_ts_source": src or RECEIVE_TS_MISSING, "book_receive_unverified": reason,
+            "book_receive_age_ms": age}
 
 
 def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
