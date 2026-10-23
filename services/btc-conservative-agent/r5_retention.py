@@ -176,7 +176,13 @@ def _drop_transfer_pointers(root: Path, removed_names: set[str]) -> int:
             if not bundle_id.startswith("transfer-") or len(bundle_id) != len("transfer-") + 64:
                 continue
             target = bundle_root / bundle_id[-64:-62] / bundle_id
-            dangling = not target.exists() and not (bundle_root / ".staging" / bundle_id).exists()
+            # HM C8 (re-review): staging FIRST, then target. lifecycle_bundles writes the
+            # pointer, then os.replace(staging -> target); checking target first could
+            # see neither if the replace lands between the two checks and drop the
+            # pointer of a just-published bundle.
+            dangling = (bundle_id not in removed_names
+                        and not (bundle_root / ".staging" / bundle_id).exists()
+                        and not target.exists())
             if bundle_id in removed_names or dangling:
                 try:
                     os.unlink(entry.path)

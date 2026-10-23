@@ -250,3 +250,28 @@ def test_bundles_rk_1810_keep_needed_unshipped_below_cap_drop_oldest_at_cap(tmp_
     assert "BUNDLE_CAP_REACHED" in {r["reason"] for r in disk_alert.red_conditions(now=now)}
     receipts = tmp_path / "cap_receipts.jsonl"
     assert receipts.exists() and "lifecycle-n1" in receipts.read_text()
+
+
+def test_c8_pointer_survives_publish_landing_between_the_checks(tmp_path, monkeypatch):
+    """HM C8 re-review: lifecycle_bundles writes the pointer, then os.replace(staging -> target).
+    If the replace lands while the sweep is checking, the pointer must survive."""
+    from pathlib import Path as _P
+    sha = "bb" + "5" * 62
+    bid = "transfer-" + sha
+    base = tmp_path / "v3" / "lifecycle_transfer_bundles"
+    staging = base / ".staging" / bid
+    staging.mkdir(parents=True)
+    target = base / sha[:2] / bid
+    target.parent.mkdir(parents=True)
+    pointer = _pointer(tmp_path, "id-publishing", bid)
+    real_exists = _P.exists
+
+    def exists(self):
+        result = real_exists(self)
+        if self == target and not result and real_exists(staging):
+            os.replace(staging, target)  # the publish lands right after target was seen missing
+        return result
+
+    monkeypatch.setattr(_P, "exists", exists)
+    assert r5._drop_transfer_pointers(tmp_path, set()) == 0
+    assert pointer.exists() and (target.exists() or staging.exists())
