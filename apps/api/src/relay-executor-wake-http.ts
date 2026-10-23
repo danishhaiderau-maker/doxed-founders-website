@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { RelayExecutorWakeRequest } from './trading-agents/signal-subscriber-execution.service';
 import { isMirrorableLaneTradeId } from '@dcf/utils';
 import { isActiveLiveCopyTileTradeId } from './trading-agents/live-copy-approval';
+import { boundedExitLegMs } from './trading-agents/exit-leg-time';
 
 /**
  * LIVE-FIX-1480 root cause: since Option 1 (approval-backed copy) the
@@ -73,10 +74,14 @@ export function parseExecutorWakeRequest(
       sourceEventAtMs: close.sourceEventAtMs,
       platformReceivedAtMs: close.platformReceivedAtMs,
       // RK (1): optional measured stamps; malformed values are dropped (row stays non-countable), never rejected.
-      exitTriggerAtMs: typeof close.exitTriggerAtMs === 'number' && Number.isFinite(close.exitTriggerAtMs)
-        && close.exitTriggerAtMs > 0 ? close.exitTriggerAtMs : null,
-      flySendStartedAtMs: typeof close.flySendStartedAtMs === 'number' && Number.isFinite(close.flySendStartedAtMs)
-        && close.flySendStartedAtMs > 0 ? close.flySendStartedAtMs : null,
+      // HM #842 R3: bounded to this close's own event/receive window (us/ns/NaN/negative/far-future -> null),
+      // so no downstream toISOString() can throw after the Bitfinex close.
+      exitTriggerAtMs: boundedExitLegMs(close.exitTriggerAtMs, {
+        sourceEventAtMs: close.sourceEventAtMs, platformReceivedAtMs: close.platformReceivedAtMs,
+      }),
+      flySendStartedAtMs: boundedExitLegMs(close.flySendStartedAtMs, {
+        sourceEventAtMs: close.sourceEventAtMs, platformReceivedAtMs: close.platformReceivedAtMs,
+      }),
     };
   } else if (raw.signedClose != null) return null;
   let signedOpen: RelayExecutorWakeRequest['signedOpen'];
