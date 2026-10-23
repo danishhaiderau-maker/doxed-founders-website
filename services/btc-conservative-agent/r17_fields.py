@@ -77,7 +77,9 @@ LIVE_FUNDING_CONTRACT = {
     "funding_status": "PRICED (every crossed settlement tied to exactly one category-29 ledger entry) | NO_CROSSING (no "
                       "00/08/16 UTC settlement in (entry fill, exit fill] per tile_fill.settlements_crossed -> a countable 0); "
                       "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
-                      "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING fail",
+                      "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
+                      "UNVERIFIED_LEDGER_POSITION_MISMATCH (ledger sum vs positions/hist FUNDING) | "
+                      "UNVERIFIED_POSITION_FUNDING_MISSING fail",
     "funding_verified": "True only for PRICED / NO_CROSSING",
     "funding_usd_raw": "COST-positive USD = -sum(ledger amounts used); 0.0 for NO_CROSSING; null when unverified",
     "funding_ts_fallbacks": "[] unless the exit ts is not the Bitfinex exit fill record AND lies within 60 s of a settlement",
@@ -90,9 +92,13 @@ LIVE_FUNDING_CONTRACT = {
     "funding_settlement_status": "per crossed settlement: LEDGER | NO_ENTRY | UNTIED | AMBIGUOUS",
     "funding_position_id": "the Bitfinex position id (positions/hist, unique match to the fills) or null",
     "funding_readback_at_ts": "epoch s of the ledger read (RK 4); null when the read was deferred",
-    "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (read-only key)",
-    "funding_readback_error": "redacted code (READ_KEY_MISSING / HTTP_<n> / TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL / "
-                              "READ_DEFERRED) or null; never a key, signature or response body",
+    "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (BFX_FUNDING_READ_KEY, own 12 req/min cap)",
+    "funding_readback_error": "redacted code (KEY_GATE:<gate> / HTTP_<n> / TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL / "
+                              "RATE_BUDGET_EXHAUSTED / READ_DEFERRED) or null; never a key, signature or response body",
+    "funding_key_gate": "OK, else READ_KEY_MISSING | READ_KEY_NOT_SEPARATE | KEY_HAS_WRITE:<scopes> | "
+                        "KEY_PERMISSIONS_READ_FAILED:<code> (RK 03:38: BFX_FUNDING_READ_KEY/SECRET, a separate Fly-only "
+                        "key, permission read-back with NO write right; any refusal -> every row UNVERIFIED)",
+    "funding_position_funding": "positions/hist FUNDING [4] of the tied position (cross-check vs the ledger)",
     "funding_fee_anomaly": "True when the read returned a fee-like / non-funding row: flagged for HM, NEVER applied (R7); "
                            "not a gate",
     "funding_fee_anomaly_ledger_ids": "their ledger ids",

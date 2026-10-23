@@ -11,7 +11,11 @@ import tile_fill
 
 S = 1792310400.0                       # a 00/08/16 UTC settlement instant
 assert S % tile_fill.FUNDING_INTERVAL_S == 0
-POS = (194481758, S - 600.0, S + 600.0)  # the Bitfinex position open across S
+POS = (194481758, S - 600.0, S + 600.0, -0.025)  # the Bitfinex position open across S (+ its positions/hist FUNDING)
+
+
+def _pos(funding):
+    return POS[:3] + (funding,)
 KEY, SECRET = "k" * 43, "s" * 43
 
 
@@ -54,7 +58,7 @@ def test_untied_entries_are_unverified():
     assert out["funding_status"] == "UNVERIFIED_POSITION_UNRESOLVED"
     out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=(9, S + 1, S + 60))   # position opened after S
     assert out["funding_status"] == "UNVERIFIED_ENTRY_UNTIED"
-    out = lfl.verify(S - 60, S + 60, ledger_rows=[_row(1, S + 4, -0.05, rate=0.0001)], position=POS,
+    out = lfl.verify(S - 60, S + 60, ledger_rows=[_row(1, S + 4, -0.05, rate=0.0001)], position=_pos(-0.05),
                      live_notional_usd=250.0)                                         # charged on 500 USD: merged lot
     assert out["funding_status"] == "UNVERIFIED_ENTRY_UNTIED"
     out = lfl.verify(S - 60, S + 60, ledger_rows=[_row(1, S + 4, -0.02), _row(2, S + 5, -0.02)], position=POS)
@@ -87,7 +91,7 @@ def test_fee_entry_is_flagged_never_applied():
 
 def test_paper_mismatch_does_not_exclude_the_live_row():
     rows = [_row(1, S + 4, -0.9, rate=0.0036)]
-    fund = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS, paper_funding_usd=0.01, live_notional_usd=250.0)
+    fund = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.9), paper_funding_usd=0.01, live_notional_usd=250.0)
     assert fund["funding_live_minus_paper_usd"] == pytest.approx(0.89) and fund["funding_verified"] is True
     chain = {"correlation_id": "c1", "fill_price": 100.0, "fill_at_ts": S - 60, "exit_price": 100.5, "closed": True}
     assert lv.live_funding_failure(chain, fund) is None
@@ -118,42 +122,124 @@ def test_non_fill_exit_stamp_next_to_a_settlement_is_a_ts_fallback():
 
 def test_position_match_is_unique_or_none():
     r = ["tBTCF0:USTF0", "CLOSED", 0, 100.0, 0, 0, None, None, None, None, None, 5, int((S - 60) * 1000), int((S + 60) * 1000)]
-    assert lfl.match_position([r], S - 60, S + 60) == (5, S - 60, S + 60)
+    assert lfl.match_position([r], S - 60, S + 60) == (5, S - 60, S + 60, 0.0)
     assert lfl.match_position([r, list(r[:11]) + [6] + r[12:]], S - 60, S + 60) is None
     assert lfl.match_position([r], S - 600, S + 60) is None
 
 
-def test_reader_never_uses_the_trading_key_and_never_logs_secrets(caplog):
-    assert lfl.read_credentials({"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET}) is None
-    assert lfl.read_credentials({"BFX_READ_API_KEY": KEY, "BFX_READ_API_SECRET": SECRET})[2] == "BFX_READ_API_KEY"
-    sent = []
+PERMS_RO = [["account", 1, 0], ["history", 1, 0], ["orders", 1, 0], ["positions", 1, 0], ["funding", 1, 0],
+            ["settings", 1, 0], ["wallets", 1, 0], ["withdraw", 0, 0], ["ui_withdraw", 0, 0]]   # real shape (24 Oct probe)
+_PROW = ["tBTCF0:USTF0", "CLOSED", 0, 100.0, -0.025, 0, None, None, None, None, None, 5, int((S - 60) * 1000),
+         int((S + 60) * 1000)]
+CHAIN = {"correlation_id": "c1", "fill_price": 100.0, "fill_qty": 2.5, "fill_at_ts": S - 60,
+         "exit_fill_record_at_ts": S + 60, "closed": True}
 
+
+def _fake(perms=PERMS_RO, sent=None, prow=_PROW):
     def post(path, body, creds):
-        sent.append((path, body))
+        (sent if sent is not None else []).append((path, body))
+        if path == lfl.PERMISSIONS_PATH:
+            if isinstance(perms, Exception):
+                raise perms
+            return perms
         if path == lfl.LEDGER_PATH:
             return [_row(1, S + 4, -0.025)]
-        r = ["tBTCF0:USTF0", "CLOSED", 0, 100.0, 0, 0, None, None, None, None, None, 5, int((S - 60) * 1000), int((S + 60) * 1000)]
-        return [r]
+        return [prow]
+    return post
 
+
+def _ok_creds():
+    return (KEY, SECRET, "BFX_FUNDING_READ_KEY"), None
+
+
+def _reader(**kw):
+    kw.setdefault("budget", lfl.RateBudget(100))
+    kw.setdefault("creds_status_fn", _ok_creds)
+    return lfl.Reader(clock=lambda: S + 500, **kw)
+
+
+def test_key_must_be_the_separate_funding_read_key():
+    assert lfl.credential_status({"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET}) == (None, "READ_KEY_MISSING")
+    assert lfl.credential_status({"BFX_READ_API_KEY": KEY, "BFX_READ_API_SECRET": SECRET}) == (None, "READ_KEY_MISSING")
+    ok = lfl.credential_status({"BFX_FUNDING_READ_KEY": KEY, "BFX_FUNDING_READ_SECRET": SECRET, "BITFINEX_API_KEY": "other"})
+    assert ok[1] is None and ok[0][2] == "BFX_FUNDING_READ_KEY"
+    same = lfl.credential_status({"BFX_FUNDING_READ_KEY": KEY, "BFX_FUNDING_READ_SECRET": SECRET, "BITFINEX_API_KEY": KEY})
+    assert same == (None, "READ_KEY_NOT_SEPARATE")
+    out = _reader(creds_status_fn=lambda: (None, "READ_KEY_NOT_SEPARATE")).begin()(CHAIN, None)
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_READ_FAILED" and out["funding_key_gate"] == "READ_KEY_NOT_SEPARATE"
+
+
+def test_key_with_any_write_right_refuses_to_run_and_stamps_unverified():
+    for scope in ("orders", "wallets", "withdraw", "positions", "funding"):
+        perms = [[s_, 1, 1 if s_ == scope else 0] for s_, _, _ in PERMS_RO]
+        sent = []
+        rd = _reader(post=_fake(perms, sent))
+        out = rd.begin()(CHAIN, None)
+        assert out["funding_verified"] is False and out["funding_key_gate"] == f"KEY_HAS_WRITE:{scope}"
+        assert out["funding_readback_error"] == f"KEY_GATE:KEY_HAS_WRITE:{scope}"
+        assert [p for p, _ in sent] == [lfl.PERMISSIONS_PATH]          # no ledger read at all
+        rd._gate_at = -1e12                                               # write rights refuse for good (no re-check)
+        rd(CHAIN, None)
+        assert [p for p, _ in sent] == [lfl.PERMISSIONS_PATH]
+    assert lfl.check_permissions(("k", "s", "x"), post=lambda *a: PERMS_RO) is None
+
+
+def test_permission_read_failure_refuses_to_run():
+    for bad in (lfl.ReadError("HTTP_500"), [], [["orders"]], {"x": 1}):
+        sent = []
+        out = _reader(post=_fake(bad, sent)).begin()(CHAIN, None)
+        assert out["funding_verified"] is False and out["funding_key_gate"].startswith("KEY_PERMISSIONS_READ_FAILED:")
+        assert [p for p, _ in sent] == [lfl.PERMISSIONS_PATH]
+
+
+def test_rate_budget_is_this_keys_own_global_cap():
+    t = [0.0]
+    b = lfl.RateBudget(3, clock=lambda: t[0])
+    assert [b.acquire() for _ in range(4)] == [True, True, True, False]
+    t[0] = 61.0
+    assert b.acquire() is True
+    assert lfl.GLOBAL_MAX_REQ_PER_MIN <= 15 and lfl.GLOBAL_BUDGET is not None
+    sent = []
+    out = _reader(post=_fake(sent=sent), budget=lfl.RateBudget(1)).begin()(CHAIN, None)   # permissions used the 1 slot
+    assert out["funding_readback_error"] == "RATE_BUDGET_EXHAUSTED" and out["funding_verified"] is False
+    assert [p for p, _ in sent] == [lfl.PERMISSIONS_PATH]
+    # the cap is enforced in this module's own Reader._post, never in the relay path (no relay import here)
+    src = (lfl.__file__ and open(lfl.__file__).read())
+    assert "relay" not in "".join(l for l in src.splitlines() if l.startswith(("import", "from")))
+
+
+def test_ledger_vs_positions_hist_mismatch_is_non_countable():
+    rows = [_row(1, S + 4, -0.025)]
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.04), live_notional_usd=250.0)
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH" and rx.funding_failure(out) == "FUNDING_UNVERIFIED"
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS[:3] + (None,), live_notional_usd=250.0)
+    assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_MISSING"
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=(5, S + 10, S + 3600, -0.3))   # no crossing yet funded
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=(5, S + 10, S + 3600, 0.0))
+    assert out["funding_status"] == "NO_CROSSING" and out["funding_verified"] is True
+    out = _reader(post=_fake(prow=_PROW[:4] + [-0.07] + _PROW[5:])).begin()(CHAIN, None)
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
+
+
+def test_reader_happy_path_caches_and_never_logs_secrets(caplog, monkeypatch):
+    for k in ("BITFINEX_API_KEY", "BFX_READ_API_KEY", "BFX_FUNDING_READ_KEY"):
+        monkeypatch.delenv(k, raising=False)
     caplog.set_level(logging.DEBUG)
-    rd = lfl.Reader(creds_fn=lambda: (KEY, SECRET, "BFX_READ_API_KEY"), post=post, clock=lambda: S + 500)
-    chain = {"correlation_id": "c1", "fill_price": 100.0, "fill_qty": 2.5, "fill_at_ts": S - 60,
-             "exit_fill_record_at_ts": S + 60, "closed": True}
-    out = rd.begin()(chain, 0.02)
-    assert out["funding_status"] == "PRICED" and out["funding_readback_at_ts"] == S + 500
-    assert sent[0][1]["category"] == 29 and [p for p, _ in sent] == [lfl.LEDGER_PATH, lfl.POSITIONS_PATH]
-    rd(chain, 0.02)
-    assert len(sent) == 2                                       # verified read-back is cached
-    blob = json.dumps(out) + caplog.text
+    sent = []
+    rd = _reader(post=_fake(sent=sent))
+    out = rd.begin()(CHAIN, 0.02)
+    assert out["funding_status"] == "PRICED" and out["funding_readback_at_ts"] == S + 500 and out["funding_key_gate"] == "OK"
+    assert out["funding_ledger_ids"] == [1] and out["funding_position_id"] == 5 and out["funding_position_funding"] == -0.025
+    assert [p for p, _ in sent] == [lfl.PERMISSIONS_PATH, lfl.LEDGER_PATH, lfl.POSITIONS_PATH]
+    assert sent[1][1]["category"] == 29
+    rd(CHAIN, 0.02)
+    assert len(sent) == 3                                       # permissions once, verified read-back cached
+    out2 = _reader(post=_fake(lfl.ReadError("HTTP_401"))).begin()(CHAIN, None)
+    out3 = _reader(creds_status_fn=lambda: (None, "READ_KEY_MISSING")).begin()(CHAIN, None)
+    assert out3["funding_readback_error"] == "KEY_GATE:READ_KEY_MISSING"
+    blob = json.dumps([out, out2, out3]) + caplog.text
     assert KEY not in blob and SECRET not in blob
-
-    def boom(path, body, creds):
-        raise lfl.ReadError("HTTP_401")
-    out = lfl.Reader(creds_fn=lambda: (KEY, SECRET, "x"), post=boom).begin()(chain, None)
-    assert out["funding_status"] == "UNVERIFIED_LEDGER_READ_FAILED" and out["funding_readback_error"] == "HTTP_401"
-    out = lfl.Reader(creds_fn=lambda: None).begin()(chain, None)
-    assert out["funding_readback_error"] == "READ_KEY_MISSING"
-    assert KEY not in json.dumps(out) + caplog.text and SECRET not in caplog.text
 
 
 def test_real_post_redacts_transport_errors(monkeypatch):
