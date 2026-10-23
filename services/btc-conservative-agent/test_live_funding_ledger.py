@@ -1291,6 +1291,33 @@ def test_pid_only_from_a_stamped_position_block_with_the_expected_source():
     assert lcma._report_pid_side({"fill": {"side": "LONG"}, "position": dict(_stamp(5, None))}) == ("5", None)
 
 
+# ---- HM N1 (#849): pid is a positive int or a canonical ASCII-decimal str only; never raises ---------------------------
+def test_pid_strict_ascii_decimal_no_leading_zero_and_never_raises():
+    blk = lambda pid: {"position": dict(_stamp(5, "LONG"), bitfinex_position_id=pid)}
+    # '²' and '５' are str.isdigit() but int() of them raises / normalises; '007' and '0' are not canonical ids
+    for bad in ("\u00b2", "\uff15", "007", "0", "-1", "00", "+5", "5 ", "1_000", "\u0665", -1, 0,
+                True, False, 1.0, 5.0, 1.5, float("nan"), float("inf"), b"5", bytearray(b"5"), [5], {"v": 5}, None):
+        assert lcma._stamped_pid(bad) is None, repr(bad)
+        assert lcma._report_pid_side(blk(bad)) == (None, None), repr(bad)
+    assert lcma._stamped_pid(7) == "7" and lcma._stamped_pid("7") == "7" and lcma._stamped_pid("194481758") == "194481758"
+    assert lcma._stamped_pid("10") == "10" and lcma._stamped_pid(10) == "10"
+    # never raises on hostile shapes either: a Mapping whose .get raises, a non-str side
+    class Boom(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("boom")
+    assert lcma._report_pid_side(Boom()) == (None, None)
+    assert lcma._report_pid_side({"position": Boom(_stamp(5, "LONG"))}) == (None, None)
+    assert lcma._report_pid_side({"position": dict(_stamp(5, None), position_side=7)}) == ("5", None)
+    # the shared attach (funding job feed + live-vs-paper route) keeps going: a bad pid is just no pid
+    chains = {"accounts": {("c1", "UNKNOWN"): {"correlation_id": "c1"}}}
+    reports = [dict(blk("\u00b2"), correlation_id="c1"), dict(blk("007"), correlation_id="c1"),
+               dict(blk(True), correlation_id="c1"), dict(blk(1.0), correlation_id="c1")]
+    out = lcma._with_pid_side(chains, reports)
+    assert out == [{"correlation_id": "c1", "bitfinex_position_id": None, "position_side": None}]
+    out = lcma._with_pid_side(chains, reports + [dict(blk(9), correlation_id="c1")])
+    assert out[0]["bitfinex_position_id"] == "9" and out[0]["position_side"] == "LONG"
+
+
 def test_pid_attach_carriers_end_to_end_and_conflicting_stamps_fail_closed(tmp_path, monkeypatch):
     ap = lcc.ApprovalLedger(path=tmp_path / "approvals.jsonl", clock=lambda: S + 500)
     jr = lcc.ExecutionJournal(path=tmp_path / "reports.jsonl", clock=lambda: S + 500)

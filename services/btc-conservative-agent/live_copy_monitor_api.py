@@ -407,11 +407,12 @@ PID_STAMP_SOURCE = "POST_STOP_POSITIONS_READBACK"
 
 
 def _stamped_pid(v):
-    """A real Bitfinex POSITION_ID: positive int (bool rejected) or an all-digit string; else None."""
+    """A real Bitfinex POSITION_ID: a positive int (bool rejected) or a canonical ASCII-decimal string (HM N1: isascii()
+    and isdigit(), no leading zero, so no '²' / '５' / '007' / '0'); anything else -> None. Pure; never raises."""
     if type(v) is int:
         return str(v) if v > 0 else None
-    if isinstance(v, str) and v.isdigit() and int(v) > 0:
-        return str(int(v))
+    if type(v) is str and v and v.isascii() and v.isdigit() and v[0] != "0":
+        return v
     return None
 
 
@@ -420,16 +421,20 @@ def _report_pid_side(report) -> tuple:
     stamp with status == STAMPED and source == POST_STOP_POSITIONS_READBACK. Never inferred and never taken from the
     top level, fill / close / exit / order blocks or a generic ``position_id`` key: anything else -> (None, None)
     (pid None -> UNVERIFIED_POSITION_ID_MISSING; side None -> no pin)."""
-    pos = report.get("position") if isinstance(report, Mapping) else None
-    if not isinstance(pos, Mapping):
+    try:                                    # HM N1: a malformed report never raises (no 500, no skipped tick)
+        pos = report.get("position") if isinstance(report, Mapping) else None
+        if not isinstance(pos, Mapping):
+            return None, None
+        if pos.get("status") != PID_STAMP_STATUS_OK or pos.get("source") != PID_STAMP_SOURCE:
+            return None, None
+        pid = _stamped_pid(pos.get("bitfinex_position_id"))
+        if pid is None:
+            return None, None
+        v = pos.get("position_side")
+        v = v.upper() if type(v) is str else None
+        return pid, (v if v in ("LONG", "SHORT") else None)
+    except Exception:
         return None, None
-    if pos.get("status") != PID_STAMP_STATUS_OK or pos.get("source") != PID_STAMP_SOURCE:
-        return None, None
-    pid = _stamped_pid(pos.get("bitfinex_position_id"))
-    if pid is None:
-        return None, None
-    v = str(pos.get("position_side") or "").upper()
-    return pid, (v if v in ("LONG", "SHORT") else None)
 
 
 def _closed_live_chains():
