@@ -17,6 +17,21 @@ POS = (194481758, S - 600.0, S + 600.0, -0.025)  # the Bitfinex position open ac
 def _pos(funding):
     return POS[:3] + (funding,)
 KEY, SECRET = "k" * 43, "s" * 43
+# HM R4 F1: an RK+HM-confirmed sign (+1: positions/hist FUNDING == the signed ledger sum). Tests that price a non-zero
+# entry pass it explicitly; without it every non-zero row is UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN.
+ACTIVE = {"status": "ACTIVE", "position_funding_sign": 1, "confirmed_by_rk_ref": "RK-test", "confirmed_by_hm_ref": "HM-test"}
+
+
+@pytest.fixture(autouse=True)
+def _pin_file(tmp_path, monkeypatch):
+    """Every test gets its own (empty -> NONE) persisted pin state; never the real data volume."""
+    path = str(tmp_path / "live_funding_sign_pin.json")
+    monkeypatch.setenv(lfl.SIGN_PIN_ENV, path)
+    return path
+
+
+def _activate():
+    lfl._write_sign_pin(dict(ACTIVE))
 
 
 def _row(lid, ts, amount, rate=0.0001, desc=None, currency="USTF0"):
@@ -37,7 +52,7 @@ def test_no_settlement_in_window_is_a_countable_zero_without_any_entry():
 def test_settlement_with_its_entry_uses_the_ledger_value_and_records_the_gap():
     rows = [_row(10500585082, S + 4, -0.025, rate=0.0001)]           # paid 0.025 USD funding (ledger amount < 0)
     out = lfl.verify(S - 60, S + 60, ledger_rows=rows, read_at_ts=S + 120, position=POS, paper_funding_usd=0.02,
-                     live_notional_usd=250.0)
+                     live_notional_usd=250.0, sign_pin=ACTIVE)
     assert out["funding_status"] == "PRICED" and out["funding_verified"] is True
     assert out["funding_usd_raw"] == 0.025                            # cost-positive, the paper convention
     assert out["funding_ledger_ids"] == [10500585082] and out["funding_ledger_mts"] == [S + 4]
@@ -83,7 +98,7 @@ def test_read_failure_is_unverified():
 
 def test_fee_entry_is_flagged_never_applied():
     rows = [_row(1, S + 4, -0.025, rate=0.0001), _row(77, S + 30, -0.5, desc="Trading fees for 0.001 BTCF0 (BTCF0:USTF0)")]
-    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS, live_notional_usd=250.0)
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS, live_notional_usd=250.0, sign_pin=ACTIVE)
     assert out["funding_fee_anomaly"] is True and out["funding_fee_anomaly_ledger_ids"] == [77]
     assert out["funding_usd_raw"] == 0.025 and out["funding_ledger_ids"] == [1]       # the fee is not in the funding
     assert out["funding_status"] == "PRICED" and rx.funding_failure(out, live=True) is None      # a flag for HM, not a gate
@@ -91,7 +106,8 @@ def test_fee_entry_is_flagged_never_applied():
 
 def test_paper_mismatch_does_not_exclude_the_live_row():
     rows = [_row(1, S + 4, -0.9, rate=0.0036)]
-    fund = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.9), paper_funding_usd=0.01, live_notional_usd=250.0)
+    fund = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.9), paper_funding_usd=0.01, live_notional_usd=250.0,
+                      sign_pin=ACTIVE)
     assert fund["funding_live_minus_paper_usd"] == pytest.approx(0.89) and fund["funding_verified"] is True
     chain = {"correlation_id": "c1", "fill_price": 100.0, "fill_at_ts": S - 60, "exit_price": 100.5, "closed": True}
     assert lv.live_funding_failure(chain, fund) is None
@@ -256,6 +272,7 @@ def test_job_spends_at_most_the_budget_while_gets_hammer_the_cache():
             for ch in chains:
                 job.lookup(ch, None)
 
+    _activate()
     gs = [threading.Thread(target=getter) for _ in range(16)]
     [g.start() for g in gs]
     job.TICK_S = 0.001
@@ -285,6 +302,7 @@ def test_429_backs_off_and_resumes():
     def rec(path, body, creds):
         sent.append(path)
         return post(path, body, creds)
+    _activate()
     job = _job(post=rec, clock=lambda: t[0])
     out = _read(job)
     assert out["funding_status"] == "PENDING_READBACK" and job._backoff_until == S + 500 + job.BACKOFF_BASE_S
@@ -348,14 +366,17 @@ def test_get_route_makes_zero_network_calls(monkeypatch):
 
 def test_ledger_vs_positions_hist_mismatch_is_non_countable():
     rows = [_row(1, S + 4, -0.025)]
-    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.04), live_notional_usd=250.0)
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.04), live_notional_usd=250.0, sign_pin=ACTIVE)
     assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH" and rx.funding_failure(out, live=True) == "FUNDING_UNVERIFIED"
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.04), live_notional_usd=250.0)
+    assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"            # no sign yet: not a mismatch
     out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS[:3] + (None,), live_notional_usd=250.0)
     assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_MISSING"
     out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=(5, S + 10, S + 3600, -0.3))   # no crossing yet funded
     assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
     out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=(5, S + 10, S + 3600, 0.0))
     assert out["funding_status"] == "NO_CROSSING" and out["funding_verified"] is True
+    _activate()
     out = _read(_job(post=_fake(prow=_PROW[:4] + [-0.07] + _PROW[5:])))
     assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
 
@@ -364,6 +385,7 @@ def test_job_happy_path_caches_and_never_logs_secrets(caplog, monkeypatch):
     for k in ("BITFINEX_API_KEY", "BFX_READ_API_KEY", "BFX_FUNDING_READ_KEY"):
         monkeypatch.delenv(k, raising=False)
     caplog.set_level(logging.DEBUG)
+    _activate()
     sent = []
     job = _job(post=_fake(sent=sent))
     assert job.lookup(CHAIN, 0.02)["funding_status"] == "PENDING_READBACK" and sent == []
@@ -392,6 +414,7 @@ def test_failed_row_read_is_unverified_then_retried():
         if path == lfl.LEDGER_PATH and state["fail"]:
             raise lfl.ReadError("HTTP_500")
         return _fake()(path, body, creds)
+    _activate()
     job = _job(post=post, clock=lambda: t[0])
     out = _read(job)
     assert out["funding_status"] == "UNVERIFIED_LEDGER_READ_FAILED" and out["funding_readback_error"] == "HTTP_500"
@@ -649,15 +672,15 @@ S2 = S + 8 * 3600
 MIXED_POS = (194481758, S - 600.0, S2 + 600.0)
 
 
-def _mixed(pf, rates=None, rows=None):
+def _mixed(pf, rates=None, rows=None, pin=ACTIVE):
     rows = [_row(1, S + 4, -0.025, rate=0.0001)] if rows is None else rows
     rates = {S2: _rate(Decimal("0"))[S]} if rates is None else rates
     return lfl.verify(S - 60, S2 + 60, ledger_rows=rows, read_at_ts=S2 + 500, position=MIXED_POS + (pf,),
-                      live_notional_usd=250.0, settlement_rates=rates)
+                      live_notional_usd=250.0, settlement_rates=rates, sign_pin=pin)
 
 
 def test_amend_mixed_hold_with_matching_sum_counts():
-    for pf in (-0.025, 0.025, -0.025 + 5e-9):                    # sign of positions/hist FUNDING not yet observed
+    for pf in (-0.025, -0.025 + 5e-9):                            # SIGNED match under the ACTIVE sign (+1)
         out = _mixed(pf)
         assert out["funding_status"] == "PRICED" and out["funding_verified"] is True, out["funding_status"]
         assert out["funding_settlement_status"] == ["LEDGER", "ZERO_RATE"] and out["funding_usd_raw"] == 0.025
@@ -704,6 +727,197 @@ def test_amend_entry_and_zero_rate_for_the_same_settlement_never_double_counts()
         return _dhist(Decimal("0"), t=S2)
     ch = dict(CHAIN, fill_at_ts=S - 60, exit_fill_record_at_ts=S2 + 60)
     prow = _PROW[:4] + [-0.025] + _PROW[5:12] + [int((S - 60) * 1000), int((S2 + 60) * 1000)]
+    _activate()
     out = _read(_job(post=_fake(prow=prow), get=get, clock=lambda: S2 + 500), ch)
     assert out["funding_status"] == "PRICED" and out["funding_settlement_status"] == ["LEDGER", "ZERO_RATE"]
     assert gets == [int(S2 * 1000) - 300000]
+
+
+# ---- RK ruling 04:09 + HM R4 F1/F2 (+ RK 04:12): SIGNED match, POSITION_FUNDING_SIGN unproven until RK+HM confirm a pin
+def test_F1_wrong_sign_is_never_countable_inverts_the_old_size_only_test():
+    out = _mixed(0.025)                                           # +0.025 vs a ledger of -0.025: was PRICED (old :660)
+    assert out["funding_status"] == "UNVERIFIED_ZERO_RATE_POSITION_CHECK"         # sign set: a plain signed mismatch
+    assert out["funding_verified"] is False and rx.funding_failure(out, live=True) == "FUNDING_UNVERIFIED"
+    out = _mixed(0.025, pin=None)
+    assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN" and out["funding_verified"] is False
+    out = lfl.verify(S - 60, S + 60, ledger_rows=[_row(1, S + 4, -0.025)], position=_pos(0.025), live_notional_usd=250.0,
+                     sign_pin=ACTIVE)                             # tied-only path, same signed rule
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
+    neg = dict(ACTIVE, position_funding_sign=-1)                 # a -1 sign is the only way +0.025 can match -0.025
+    assert _mixed(0.025, pin=neg)["funding_status"] == "PRICED"
+    assert _mixed(-0.025, pin=neg)["funding_verified"] is False
+
+
+def test_F1_sign_unproven_until_an_rk_and_hm_confirmed_active_pin():
+    assert lfl.POSITION_FUNDING_SIGN is None and lfl.position_funding_sign(None) is None
+    rows = [_row(1, S + 4, -0.025)]
+    for pin in (None, {"status": "NONE"}, dict(ACTIVE, status="PROPOSED"), dict(ACTIVE, confirmed_by_hm_ref=None),
+                dict(ACTIVE, confirmed_by_rk_ref=" "), dict(ACTIVE, position_funding_sign=0),
+                {"status": "DISAGREEMENT"}, {"status": "UNREADABLE"}):
+        out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS, live_notional_usd=250.0, sign_pin=pin)
+        assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN", pin
+        assert out["funding_position_funding_sign"] is None and out["funding_sign_pin_refs"] is None
+        chain = dict(CHAIN, fill_at_ts=S - 60, exit_fill_record_at_ts=S + 60)
+        assert lv.live_funding_failure(chain, out) == "LIVE_FUNDING_UNVERIFIED:UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS, live_notional_usd=250.0, sign_pin=ACTIVE)
+    assert out["funding_status"] == "PRICED" and out["funding_position_funding_sign"] == 1
+    assert out["funding_sign_pin_refs"] == {"rk": "RK-test", "hm": "HM-test"}
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(-0.025 - 2e-8), live_notional_usd=250.0,
+                     sign_pin=ACTIVE)                             # F2: 1e-8, no relative tolerance
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
+    out = lfl.verify(S - 60, S + 60, ledger_rows=[_row(1, S + 4, -100.0, rate=0.4)], position=_pos(-100.00001),
+                     live_notional_usd=250.0, sign_pin=ACTIVE)   # 1e-5 off on 100 USD: the old 0.1% would have passed
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS,
+                     live_notional_usd=250.0, sign_pin={"status": "DISAGREEMENT"})
+    assert out["funding_sign_pin_flag"] == lfl.SIGN_PIN_DISAGREEMENT
+
+
+def test_F1_both_zero_passes_without_any_sign():
+    out = lfl.verify(S - 60, S + 60, ledger_rows=[], position=_pos(0.0), settlement_rates=_rate(Decimal("0")))
+    assert out["funding_status"] == "PRICED" and out["funding_position_funding_sign"] is None    # zero-rate path
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=(5, S + 10, S + 3600, 0.0))
+    assert out["funding_status"] == "NO_CROSSING" and out["funding_verified"] is True             # no-crossing
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=(5, S + 10, S + 3600, 2e-8))
+    assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"                          # F2: 1e-8 (was 1e-6)
+
+
+# pure (a)/(b)/(c) proposal on one real-shaped closed LONG position: rate +0.0001 -> the long pays -> entry < 0
+def _wrow(lid, ts, amount, balance, desc="Funding Event BTCF0:USTF0 (0.00010000) on wallet margin"):
+    return [lid, "USTF0", "margin", int(ts * 1000), None, amount, balance, None, desc]
+
+
+ENTRY = lfl._parse_row(_wrow(1, S + 4, -0.025, 249.975))
+WALLET = {1: [_wrow(0, S - 3600, 5.0, 250.0, desc="Transfer"), _wrow(1, S + 4, -0.025, 249.975)]}
+RATES = {S: {"rate": Decimal("0.0001"), "row_mts": T_MS - 4000, "error": None}}
+
+
+def test_F1_propose_agree_records_the_single_sign():
+    c = lfl.propose_sign_pin([(ENTRY, S)], WALLET, RATES, "LONG", -0.025)
+    assert c["result"] == "AGREE" and c["position_funding_sign"] == 1 and c["flag"] is None
+    assert c["a"][0]["balance"] == 249.975 and c["a"][0]["prev_balance"] == 250.0 and c["a"][0]["ok"] is True
+    assert c["b"][0]["expected_sign"] == -1 and c["b"][0]["ok"] is True
+    assert c["c"]["position_funding_raw"] == -0.025 and c["c"]["ledger_amount_raw"] == -0.025 and c["c"]["sign"] == 1
+    c = lfl.propose_sign_pin([(ENTRY, S)], WALLET, RATES, "LONG", 0.025)     # positions/hist cost-positive -> -1
+    assert c["result"] == "AGREE" and c["position_funding_sign"] == -1
+
+
+def test_F1_propose_disagreement_on_each_check():
+    up = {1: [_wrow(0, S - 3600, 5.0, 249.9), _wrow(1, S + 4, -0.025, 249.975)]}           # (a) balance ROSE
+    c = lfl.propose_sign_pin([(ENTRY, S)], up, RATES, "LONG", -0.025)
+    assert c["result"] == "DISAGREE" and c["disagree"] == ["a"] and c["flag"] == lfl.SIGN_PIN_DISAGREEMENT
+    c = lfl.propose_sign_pin([(ENTRY, S)], WALLET, RATES, "SHORT", -0.025)                   # (b) a short receives
+    assert c["result"] == "DISAGREE" and c["disagree"] == ["b"] and c["position_funding_sign"] is None
+    zero = {S: dict(RATES[S], rate=Decimal("0"))}                                             # (b) entry at a 0 rate
+    assert lfl.propose_sign_pin([(ENTRY, S)], WALLET, zero, "LONG", -0.025)["disagree"] == ["b"]
+    c = lfl.propose_sign_pin([(ENTRY, S)], WALLET, RATES, "LONG", -0.03)                     # (c) no sign fits
+    assert c["result"] == "DISAGREE" and c["disagree"] == ["c"] and c["c"]["sign"] is None
+
+
+def test_F1_propose_insufficient_never_pins_or_flags():
+    two = lfl._parse_row(_wrow(2, S2 + 4, -0.025, 249.95))
+    c = lfl.propose_sign_pin([(ENTRY, S), (two, S2)], WALLET, RATES, "LONG", -0.05)           # needs a SINGLE entry
+    assert c["result"] == "INSUFFICIENT" and "SINGLE_TIED_NONZERO_ENTRY_REQUIRED" in c["missing"]
+    for wallet, rates, side, pf, miss in (
+            ({1: [_wrow(1, S + 4, -0.025, 249.975)]}, RATES, "LONG", -0.025, "a:NO_PREVIOUS_BALANCE"),
+            ({1: {"error": "HTTP_500"}}, RATES, "LONG", -0.025, "a:WALLET_READ_FAILED:HTTP_500"),
+            ({1: [_wrow(0, S + 4, 1.0, 250.0), _wrow(1, S + 4, -0.025, 249.975)]}, RATES, "LONG", -0.025, "a:SAME_MTS_ROWS"),
+            (WALLET, {}, "LONG", -0.025, "b:RATE_UNREAD:NOT_READ"),
+            (WALLET, RATES, None, -0.025, "b:SIDE_UNKNOWN"),
+            (WALLET, RATES, "LONG", None, "c:POSITION_FUNDING_MISSING")):
+        c = lfl.propose_sign_pin([(ENTRY, S)], wallet, rates, side, pf)
+        assert c["result"] == "INSUFFICIENT" and miss in c["missing"] and c["flag"] is None, miss
+
+
+def _pin_post(prow_funding=-0.025, sent=None, prev_balance=250.0, ledger=None):
+    prow = _PROW[:4] + [prow_funding] + _PROW[5:]
+
+    def post(path, body, creds):
+        (sent if sent is not None else []).append((path, body))
+        if path == lfl.PERMISSIONS_PATH:
+            return PERMS_RO
+        if path == lfl.LEDGER_PATH and "category" in body:
+            return ledger or [_wrow(1, S + 4, -0.025, 249.975)]
+        if path == lfl.LEDGER_PATH:                               # the unfiltered wallet read for check (a)
+            return [_wrow(1, S + 4, -0.025, 249.975), _wrow(0, S - 3600, 5.0, prev_balance, desc="Transfer")]
+        return [prow]
+    return post
+
+
+PIN_CHAIN = dict(CHAIN, position_side="LONG")
+
+
+def test_F1_job_proposes_never_activates_and_cli_needs_rk_and_hm_refs(_pin_file, caplog, capsys):
+    caplog.set_level(logging.INFO)
+    gets = []
+    job = _job(post=_pin_post(), get=lambda p, q: gets.append(q) or _dhist(Decimal("0.0001")))
+    out = _read(job, PIN_CHAIN)
+    assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN" and out["funding_verified"] is False
+    st = lfl.load_sign_pin(_pin_file)
+    assert st["status"] == "PROPOSED" and st["position_funding_sign"] == 1 and st["pid"] == 5
+    assert st["ledger_id"] == 1 and st["position_funding_raw"] == -0.025 and st["ledger_amount_raw"] == -0.025
+    assert st["ledger_balance"] == 249.975 and st["ledger_prev_balance"] == 250.0 and st["side"] == "LONG"
+    assert st["rate"] == "0.0001" and st["trade_id"] == "c1" and st["settlement_ts"] == [S]
+    assert "[LIVE FUNDING SIGN PIN PROPOSED]" in caplog.text and len(gets) == 1
+    for _ in range(3):                                            # never auto-activated
+        job._cache.clear()
+        job.submit(PIN_CHAIN)
+        job.run_once()
+    assert lfl.load_sign_pin(_pin_file)["status"] == "PROPOSED"
+    assert job.lookup(PIN_CHAIN, None)["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"
+    assert lfl.main(["sign-pin", "confirm", "--rk-ref", "RK 04:12"]) == 2                  # HM ref missing
+    assert lfl.main(["sign-pin", "confirm", "--hm-ref", "HM R5"]) == 2                     # RK ref missing
+    assert lfl.load_sign_pin(_pin_file)["status"] == "PROPOSED"
+    assert lfl.main(["sign-pin", "confirm", "--rk-ref", "RK 04:12", "--hm-ref", "HM R5"]) == 0
+    st = lfl.load_sign_pin(_pin_file)
+    assert st["status"] == "ACTIVE" and st["confirmed_by_rk_ref"] == "RK 04:12" and st["confirmed_by_hm_ref"] == "HM R5"
+    job._cache.clear()
+    out = _read(job, PIN_CHAIN)
+    assert out["funding_status"] == "PRICED" and out["funding_sign_pin_refs"] == {"rk": "RK 04:12", "hm": "HM R5"}
+    with pytest.raises(lfl.SignPinError):
+        lfl.activate_sign_pin("x", "y")                                                     # only PROPOSED activates
+    assert lfl.main(["sign-pin", "reject", "--ref", "HM undo"]) == 0
+    assert lfl.load_sign_pin(_pin_file)["status"] == "NONE" and lfl.load_sign_pin(_pin_file)["history"]
+
+
+def test_F1_job_disagreement_pins_nothing_and_flags(_pin_file, caplog):
+    caplog.set_level(logging.INFO)
+    job = _job(post=_pin_post(prev_balance=249.9), get=lambda p, q: _dhist(Decimal("0.0001")))
+    out = _read(job, PIN_CHAIN)
+    assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"
+    assert out["funding_sign_pin_flag"] == lfl.SIGN_PIN_DISAGREEMENT
+    st = lfl.load_sign_pin(_pin_file)
+    assert st["status"] == "DISAGREEMENT" and st["position_funding_sign"] is None
+    assert st["disagreements"][0]["disagree"] == ["a"] and "SIGN_PIN_DISAGREEMENT" in caplog.text
+    with pytest.raises(lfl.SignPinError):
+        lfl.activate_sign_pin("RK", "HM")                                                   # a disagreement never activates
+    sent = []
+    job2 = _job(post=_pin_post(sent=sent), get=_no_get)          # frozen: no new proposal read while DISAGREEMENT
+    out = _read(job2, PIN_CHAIN)
+    assert out["funding_sign_pin_flag"] == lfl.SIGN_PIN_DISAGREEMENT
+    assert [b for p, b in sent if p == lfl.LEDGER_PATH and "category" not in b] == []
+
+
+def test_F1_job_multi_entry_row_spends_no_pin_read(_pin_file):
+    sent = []
+    ledger = [_wrow(1, S + 4, -0.025, 249.975), _wrow(2, S2 + 4, -0.025, 249.95)]
+    prow = _PROW[:4] + [-0.05] + _PROW[5:12] + [int((S - 60) * 1000), int((S2 + 60) * 1000)]
+
+    def post(path, body, creds):
+        if path == lfl.POSITIONS_PATH:
+            sent.append((path, {}))
+            return [prow]
+        return _pin_post(sent=sent, ledger=ledger)(path, body, creds)
+    ch = dict(PIN_CHAIN, exit_fill_record_at_ts=S2 + 60)
+    out = _read(_job(post=post, get=_no_get, clock=lambda: S2 + 500), ch)
+    assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN"
+    assert lfl.load_sign_pin(_pin_file)["status"] == "NONE"
+    assert [b for p, b in sent if p == lfl.LEDGER_PATH and "category" not in b] == []
+
+
+def test_F1_pin_state_lives_outside_reset_paths(monkeypatch, tmp_path):
+    monkeypatch.delenv(lfl.SIGN_PIN_ENV, raising=False)
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    assert lfl.sign_pin_path() == str(tmp_path / "live_funding_sign_pin.json")
+    (tmp_path / "live_funding_sign_pin.json").write_text("{not json")
+    assert lfl.load_sign_pin()["status"] == "UNREADABLE" and lfl.position_funding_sign(lfl.load_sign_pin()) is None

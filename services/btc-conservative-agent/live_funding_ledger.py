@@ -29,6 +29,7 @@ import decimal
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import threading
@@ -39,6 +40,8 @@ import urllib.request
 from typing import Any, Callable, Mapping
 
 import tile_fill
+
+log = logging.getLogger("live_funding_ledger")
 
 LIVE_FUNDING_MODEL = "LIVE_LEDGER_V1"
 LEDGER_CATEGORY_FUNDING = 29
@@ -53,7 +56,6 @@ OTHER_KEY_ENVS = ("BITFINEX_API_KEY", "BFX_API_KEY", "BITFINEX_READ_API_KEY", "B
 PERMISSIONS_PATH = "v2/auth/r/permissions"
 GLOBAL_MAX_REQ_PER_MIN = 12   # this key's own conservative process-wide cap (Bitfinex REST ~90/min); never the relay's
 GATE_RETRY_S = 300.0          # a failed permission READ is retried at most this often; write rights refuse for good
-POSITION_FUNDING_TOL_USD = 1e-6
 NONCE_MS_SCALE = 10_000      # scripts/self_aware/fees.py: never ahead of the shared nonce scale
 TIE_TOL_S = 120.0            # ledger MTS vs settlement instant (observed +3..+5 s)
 POSITION_TOL_S = 10.0        # positions/hist create/update vs the real entry/exit fill ts
@@ -69,7 +71,7 @@ DERIV_NEXT_FUNDING_TS_IDX = 7     # NEXT_FUNDING_EVT_TIMESTAMP_MS
 DERIV_CURRENT_FUNDING_IDX = 11    # CURRENT_FUNDING (paper FUNDING_SOURCE_V2: last row before the settlement)
 RATE_WINDOW_BEFORE_S = 300
 RATE_WINDOW_AFTER_S = 120
-ZERO_POSITION_FUNDING_TOL = 1e-8  # |positions/hist FUNDING| vs |sum of tied ledger entries| (RK amendment 04:07)
+ZERO_POSITION_FUNDING_TOL = 1e-8  # = SIGNED_MATCH_TOL_USD (RK 04:07 + 04:09, HM R4 F2: one 1e-8 tolerance everywhere)
 RATE_RETRY_MAX = 5                # a row whose rate read failed is re-read at most this many times
 _FUNDING_DESC = re.compile(r"^Funding Event\s+(\S+)\s+\(([-0-9.eE+]+)\)")
 _FEE_DESC = re.compile(r"fee|commission|rebate", re.I)
@@ -223,6 +225,240 @@ def read_settlement_rate(t: float, get=_get_public) -> dict:
     return out
 
 
+# ---- RK ruling 24 Oct 04:09 + HM R4 F1/F2 + RK 04:12: the SIGNED match and its sign pin --------------------------
+# A size-only (abs(pf) vs abs(led)) match is a VIOLATION (R17). The sign relation between positions/hist [4] FUNDING
+# ("Funding amount", docs silent on sign) and the ledger [5] AMOUNT ("Amount changed", a signed balance delta) is
+# UNPROVEN: POSITION_FUNDING_SIGN = None. A row's FUNDING cross-check passes iff (signed, no abs on either side)
+#   (i)  |pf| <= 1e-8 AND |led| <= 1e-8 (both zero: no sign needed), or
+#   (ii) the sign is ACTIVE (+1 / -1, from the persisted pin state) AND |pf - sign * led| <= 1e-8.
+# Otherwise UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN (sign unset, led != 0) or UNVERIFIED_LEDGER_POSITION_MISMATCH /
+# UNVERIFIED_ZERO_RATE_POSITION_CHECK (sign set, or led == 0 so no sign can match). Same rule on the zero-rate path and
+# the tied-only path, same 1e-8 tolerance (F2: no relative tolerance).
+#
+# The pin is NOT circular. The background job PROPOSES it (never activates it) from ONE real closed live position with a
+# SINGLE tied non-zero category-29 entry, only when three INDEPENDENT checks agree:
+#   (a) the entry's sign == the sign of that ledger row's BALANCE change: BALANCE [6] minus the previous BALANCE of the
+#       same currency + wallet, both from the ledger itself (an unfiltered read ending at the entry MTS);
+#   (b) the entry's sign == who pays whom from the PUBLISHED settlement rate (deriv status hist, the zero-rate read) and
+#       the position side. Bitfinex: "a positive funding rate requires contract buyers - aka long traders - to pay the
+#       contract sellers - or short traders. The opposite is true for a negative funding rate"
+#       (https://blog.bitfinex.com/education/why-choose-bitfinex-to-trade-crypto-derivatives-futures/ , section
+#       "Perpetual settlements"). So rate > 0: LONG pays (entry < 0), SHORT receives (entry > 0); rate < 0: reversed;
+#       a non-zero entry at a published rate of exactly 0 contradicts the rate.
+#   (c) positions/hist [4] FUNDING == sign * the ledger amount within 1e-8 for exactly one sign in {+1, -1}.
+# All three agree -> a PROPOSED pin (position_funding_sign, ledger id, pid, both raw values, BALANCE, rate, side,
+# timestamps) is persisted and logged for the tracker. It becomes ACTIVE only through the explicit step
+# ``python live_funding_ledger.py sign-pin confirm --rk-ref <RK ruling ref> --hm-ref <HM confirmation ref>``
+# (``activate_sign_pin``), which records both refs; nothing activates it automatically. Any check that disagrees ->
+# nothing is set, the row stays UNVERIFIED and is flagged SIGN_PIN_DISAGREEMENT, and the state records the
+# disagreement (no further proposals until RK/HM clear it with ``sign-pin reject --ref``).
+POSITION_FUNDING_SIGN = None   # unproven; the effective sign is only ever an ACTIVE persisted pin (+1 / -1)
+SIGNED_MATCH_TOL_USD = 1e-8
+SIGN_PIN_ENV = "LIVE_FUNDING_SIGN_PIN_PATH"
+SIGN_PIN_FILENAME = "live_funding_sign_pin.json"
+SIGN_PIN_STATUSES = ("NONE", "PROPOSED", "ACTIVE", "DISAGREEMENT", "UNREADABLE")
+SIGN_PIN_DISAGREEMENT = "SIGN_PIN_DISAGREEMENT"
+LEDGER_BALANCE_IDX = 6
+WALLET_READ_LIMIT = 100
+
+
+class SignPinError(Exception):
+    """An HM admin step on the sign pin was refused (wrong state / missing confirmation ref)."""
+
+
+def sign_pin_path() -> str:
+    """The persisted pin state. Lives on the data volume root (BOT_DATA_DIR, the same root as platform_health_state.json),
+    NOT under runtime/ or research/: research / fresh-collection resets delete only ``all_research_wipe_paths`` and the
+    epoch quarantine, never this file - a reset must not drop an RK+HM-confirmed sign. Override: LIVE_FUNDING_SIGN_PIN_PATH."""
+    raw = (os.getenv(SIGN_PIN_ENV) or "").strip()
+    if raw:
+        return os.path.abspath(raw)
+    root = (os.getenv("BOT_DATA_DIR") or "").strip() or os.getcwd()
+    return os.path.abspath(os.path.join(root, SIGN_PIN_FILENAME))
+
+
+def load_sign_pin(path: str | None = None) -> dict:
+    """The pin state (a local file read, never network). Missing -> NONE; corrupt / unknown -> UNREADABLE (no active
+    sign and no new proposal: an unreadable state is never overwritten automatically)."""
+    path = path or sign_pin_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except FileNotFoundError:
+        return {"status": "NONE"}
+    except Exception:  # noqa: BLE001
+        return {"status": "UNREADABLE"}
+    if not isinstance(st, dict) or st.get("status") not in SIGN_PIN_STATUSES:
+        return {"status": "UNREADABLE"}
+    return st
+
+
+def _write_sign_pin(state: dict, path: str | None = None) -> None:
+    path = path or sign_pin_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2, sort_keys=True, default=str)
+    os.replace(tmp, path)
+
+
+def position_funding_sign(pin=None):
+    """+1 / -1 only for an ACTIVE pin confirmed by BOTH an RK ruling ref and an HM confirmation ref; else
+    POSITION_FUNDING_SIGN (None: unproven)."""
+    if isinstance(pin, Mapping) and pin.get("status") == "ACTIVE" and pin.get("position_funding_sign") in (1, -1) \
+            and str(pin.get("confirmed_by_rk_ref") or "").strip() and str(pin.get("confirmed_by_hm_ref") or "").strip():
+        return pin["position_funding_sign"]
+    return POSITION_FUNDING_SIGN
+
+
+def activate_sign_pin(rk_ref: str, hm_ref: str, path: str | None = None, now: float | None = None) -> dict:
+    """The explicit RK+HM step: PROPOSED -> ACTIVE, recording both confirmation refs. The only way a sign is set."""
+    rk, hm = str(rk_ref or "").strip(), str(hm_ref or "").strip()
+    if not rk or not hm:
+        raise SignPinError("RK_AND_HM_CONFIRMATION_REFS_REQUIRED")
+    st = load_sign_pin(path)
+    if st.get("status") != "PROPOSED" or st.get("position_funding_sign") not in (1, -1):
+        raise SignPinError(f"NOT_PROPOSED:{st.get('status')}")
+    st.update(status="ACTIVE", confirmed_by_rk_ref=rk, confirmed_by_hm_ref=hm,
+              confirmed_at_ts=time.time() if now is None else now)
+    _write_sign_pin(st, path)
+    log.warning("[LIVE FUNDING SIGN PIN ACTIVE] position_funding_sign=%s trade_id=%s pid=%s ledger_id=%s rk_ref=%s hm_ref=%s",
+                st.get("position_funding_sign"), st.get("trade_id"), st.get("pid"), st.get("ledger_id"), rk, hm)
+    return st
+
+
+def reject_sign_pin(hm_ref: str, path: str | None = None, now: float | None = None) -> dict:
+    """RK/HM admin step: clear a PROPOSED / ACTIVE / DISAGREEMENT state (kept in ``history``) so a new proposal can run."""
+    ref = str(hm_ref or "").strip()
+    if not ref:
+        raise SignPinError("HM_CONFIRMATION_REF_REQUIRED")
+    st = load_sign_pin(path)
+    if st.get("status") in ("NONE", "UNREADABLE"):
+        raise SignPinError(f"NOTHING_TO_REJECT:{st.get('status')}")
+    hist = list(st.pop("history", []) or [])
+    hist.append(dict(st, rejected_by_ref=ref, rejected_at_ts=time.time() if now is None else now))
+    new = {"status": "NONE", "history": hist}
+    _write_sign_pin(new, path)
+    return new
+
+
+def _sgn(x) -> int:
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+
+def _side_sign(side) -> int:
+    s = str(side or "").strip().upper()
+    return 1 if s in ("LONG", "BUY") else (-1 if s in ("SHORT", "SELL") else 0)
+
+
+def read_wallet_ledger(entry_ts: float, creds=None, post=_post) -> list:
+    """Every ledger row (no category filter) up to and including the entry MTS: the source of check (a)'s previous
+    balance. Same READ-ONLY key, same endpoint; raises ReadError (redacted)."""
+    creds = creds or read_credentials()
+    if not creds:
+        raise ReadError("READ_KEY_MISSING")
+    return post(LEDGER_PATH, {"end": int(round(entry_ts * 1000)) + 1, "limit": WALLET_READ_LIMIT}, creds)
+
+
+def _balance_check(p, rows) -> dict:
+    """(a) for one tied entry: sign(amount) vs sign(BALANCE[6] - previous BALANCE of the same currency + wallet)."""
+    out = {"ledger_id": p["id"], "amount": p["amount"], "balance": None, "prev_ledger_id": None, "prev_balance": None,
+           "balance_change": None, "ok": None, "missing": None}
+    if not isinstance(rows, list):
+        out["missing"] = "a:WALLET_READ_FAILED:" + str((rows or {}).get("error") if isinstance(rows, Mapping) else "NOT_READ")
+        return out
+    same = [r for r in rows if isinstance(r, list) and len(r) > LEDGER_BALANCE_IDX and r[1] == p["currency"]
+            and r[2] == p["wallet"] and _f(r[3]) is not None]
+    me = [r for r in same if r[0] == p["id"]]
+    if len(me) != 1:
+        out["missing"] = "a:ENTRY_NOT_IN_WALLET_READ"
+        return out
+    mts = _f(me[0][3])
+    if any(r[0] != p["id"] and _f(r[3]) == mts for r in same):
+        out["missing"] = "a:SAME_MTS_ROWS"           # balance order inside one ms is not provable
+        return out
+    older = [r for r in same if _f(r[3]) < mts]
+    if not older:
+        out["missing"] = "a:NO_PREVIOUS_BALANCE"
+        return out
+    last = max(_f(r[3]) for r in older)
+    prev = [r for r in older if _f(r[3]) == last]
+    if len(prev) != 1:
+        out["missing"] = "a:PREVIOUS_ROW_AMBIGUOUS"
+        return out
+    bal, pbal = _f(me[0][LEDGER_BALANCE_IDX]), _f(prev[0][LEDGER_BALANCE_IDX])
+    out.update(balance=bal, prev_ledger_id=prev[0][0], prev_balance=pbal)
+    if bal is None or pbal is None:
+        out["missing"] = "a:BALANCE_MISSING"
+        return out
+    change = round(bal - pbal, 12)
+    out["balance_change"] = change
+    out["ok"] = _sgn(change) != 0 and _sgn(change) == _sgn(p["amount"])
+    return out
+
+
+def _rate_direction_check(p, t, rec, side) -> dict:
+    """(b) for one tied entry: sign(amount) vs the published settlement rate x position side (longs pay on rate > 0)."""
+    out = {"ledger_id": p["id"], "settlement_ts": t, "rate": None, "rate_row_mts": None, "side": side,
+           "expected_sign": None, "ok": None, "missing": None}
+    if not isinstance(rec, Mapping) or rec.get("error") or rec.get("rate") is None:
+        out["missing"] = "b:RATE_UNREAD:" + str((rec or {}).get("error") if isinstance(rec, Mapping) else "NOT_READ")
+        return out
+    out.update(rate=_rate_text(rec["rate"]), rate_row_mts=rec.get("row_mts"))
+    sd = _side_sign(side)
+    if not sd:
+        out["missing"] = "b:SIDE_UNKNOWN"
+        return out
+    try:
+        rs = _sgn(decimal.Decimal(str(rec["rate"])))
+    except (decimal.InvalidOperation, ValueError):
+        out["missing"] = "b:RATE_UNPARSEABLE"
+        return out
+    expected = -sd * rs                 # rate > 0: long (sd=+1) pays -> entry < 0; short receives -> entry > 0
+    out["expected_sign"] = expected
+    out["ok"] = expected != 0 and _sgn(p["amount"]) == expected
+    return out
+
+
+def propose_sign_pin(entries, wallet_rows, rates, side, position_funding) -> dict:
+    """Pure: checks (a), (b), (c) on one row. ``entries`` = [(parsed tied ledger entry, settlement ts)] - exactly ONE
+    non-zero entry is required (else INSUFFICIENT); ``wallet_rows`` = {ledger id: unfiltered ledger read or
+    {"error": code}}; ``rates`` = {settlement ts: read_settlement_rate record}. result AGREE (all three hold; the
+    proposed ``position_funding_sign`` is the one sign that satisfies (c)), DISAGREE (a check contradicts:
+    SIGN_PIN_DISAGREEMENT) or INSUFFICIENT (evidence missing, nothing contradicts: no pin, no flag)."""
+    entries = [(p, t) for p, t in entries if p["amount"] != 0]
+    a = [_balance_check(p, wallet_rows.get(p["id"])) for p, _t in entries]
+    b = [_rate_direction_check(p, t, rates.get(t), side) for p, t in entries]
+    led = sum(p["amount"] for p, _t in entries)
+    pf = _f(position_funding)
+    c = {"position_funding_raw": position_funding, "ledger_amount_raw": entries[0][0]["amount"] if entries else None,
+         "sign": None, "diff": None, "ok": None, "missing": None}
+    if pf is None:
+        c["missing"] = "c:POSITION_FUNDING_MISSING"
+    elif entries:
+        fits = [sg for sg in (1, -1) if abs(pf - sg * led) <= SIGNED_MATCH_TOL_USD]
+        c["ok"] = len(fits) == 1
+        if c["ok"]:
+            c.update(sign=fits[0], diff=round(pf - fits[0] * led, 12))
+        else:
+            c["diff"] = [round(pf - led, 12), round(pf + led, 12)]
+    checks = a + b + [c]
+    missing = [x["missing"] for x in checks if x["missing"]]
+    if len(entries) != 1:
+        missing = ["SINGLE_TIED_NONZERO_ENTRY_REQUIRED"] + missing
+    if any(x["ok"] is False for x in checks):
+        result = "DISAGREE"
+    elif missing:
+        result = "INSUFFICIENT"
+    else:
+        result = "AGREE"
+    rec = (rates.get(entries[0][1]) or {}) if len(entries) == 1 else {}
+    return {"result": result, "position_funding_sign": c["sign"] if result == "AGREE" else None,
+            "flag": SIGN_PIN_DISAGREEMENT if result == "DISAGREE" else None, "a": a, "b": b, "c": c,
+            "disagree": sorted({k for k, xs in (("a", a), ("b", b), ("c", [c])) if any(x["ok"] is False for x in xs)}),
+            "missing": missing, "side": side, "rate": _rate_text(rec.get("rate")) if rec else None}
+
+
 def _rate_text(v):
     """The rate as returned, as text (Decimal in fixed notation, so 0.00000000 stays 0.00000000 - never a float)."""
     if v is None:
@@ -307,9 +543,11 @@ def _grid(ts: float) -> float:
 
 def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, read_at_ts=None, position=None,
            paper_funding_usd=None, exit_ts_source="exit_fill_record_at_ts", live_notional_usd=None, key_gate=None,
-           settlement_rates=None) -> dict:
+           settlement_rates=None, sign_pin=None, sign_pin_check=None) -> dict:
     """Pure decision for one live row. ``position`` = (position_id, create_ts, update_ts[, position_funding]) or None.
-    ``settlement_rates`` = {settlement ts: read_settlement_rate(...) + read_at_ts} for the no-entry settlements."""
+    ``settlement_rates`` = {settlement ts: read_settlement_rate(...) + read_at_ts} for the no-entry settlements.
+    ``sign_pin`` = the persisted pin state (only an RK+HM-confirmed ACTIVE pin sets POSITION_FUNDING_SIGN);
+    ``sign_pin_check`` = this row's (a)/(b)/(c) proposal check, if the job ran one."""
     a, b = _f(entry_fill_ts), _f(exit_fill_ts)
     crossed = tile_fill.settlements_crossed(a, b) if a is not None and b is not None else []
     out = {"funding_model": LIVE_FUNDING_MODEL, "funding_status": None, "funding_verified": False,
@@ -321,7 +559,14 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
            "funding_paper_usd": _f(paper_funding_usd), "funding_live_minus_paper_usd": None,
            "funding_exit_ts_source": exit_ts_source, "funding_key_gate": key_gate,
            "funding_position_funding": (position[3] if position and len(position) > 3 else None),
-           "funding_ts_fallbacks": [], "funding_settlement_rate_readbacks": []}
+           "funding_ts_fallbacks": [], "funding_settlement_rate_readbacks": [],
+           "funding_position_funding_sign": position_funding_sign(sign_pin),
+           "funding_sign_pin_status": (sign_pin or {}).get("status") or "NONE",
+           "funding_sign_pin_refs": ({"rk": sign_pin.get("confirmed_by_rk_ref"), "hm": sign_pin.get("confirmed_by_hm_ref")}
+                                     if position_funding_sign(sign_pin) is not None else None),
+           "funding_sign_pin_flag": (sign_pin_check or {}).get("flag") or
+                                    (SIGN_PIN_DISAGREEMENT if (sign_pin or {}).get("status") == "DISAGREEMENT" else None),
+           "funding_sign_pin_check": sign_pin_check}
     if exit_ts_source != "exit_fill_record_at_ts" and b is not None and abs(b - _grid(b)) <= EXIT_TS_FALLBACK_NEAR_S:
         out["funding_ts_fallbacks"] = [f"exit_ts:{exit_ts_source}"]  # a non-fill exit stamp next to a settlement
     if a is None:   # HM (E): no real entry fill ts -> explicit fallback flag, never a guessed window (non-countable)
@@ -390,23 +635,28 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
                funding_settlement_status=statuses, funding_settlement_rate_readbacks=rate_proof)
     led = sum(p["amount"] for p in used)
     zero_idx = [i for i, st in enumerate(statuses) if st == "ZERO_RATE"]
-    if not problems and zero_idx:
-        # RK amended condition 2: positions/hist FUNDING for the pid must EQUAL the sum of the tied ledger entries within
-        # 1e-8 (no entries -> ~0). Magnitudes compared: the positions/hist FUNDING sign is not yet observed live.
-        pf = position[3] if position is not None and len(position) > 3 else None
-        if pf is None or not abs(abs(pf) - abs(led)) <= ZERO_POSITION_FUNDING_TOL:
-            for i in zero_idx:
-                statuses[i] = "ZERO_RATE_POSITION_CHECK"
-            for rp in rate_proof:
-                if rp["status"] == "ZERO_RATE":
-                    rp["status"] = "ZERO_RATE_POSITION_CHECK"
+    pf = position[3] if position is not None and len(position) > 3 else None
+    if not problems and position is not None:
+        # HM R4 F1/F2 + RK 04:09: one SIGNED rule for the zero-rate path, the tied-only path and no-crossing rows, 1e-8,
+        # no abs() on either side. Both zero needs no sign; anything else needs the ACTIVE POSITION_FUNDING_SIGN.
+        sign = position_funding_sign(sign_pin)
+        if pf is None:
+            if zero_idx:
+                _zero_rate_position_check(statuses, rate_proof, zero_idx)
+                problems.append("UNVERIFIED_ZERO_RATE_POSITION_CHECK")
+            elif crossed:
+                problems.append("UNVERIFIED_POSITION_FUNDING_MISSING")
+        elif abs(pf) <= SIGNED_MATCH_TOL_USD and abs(led) <= SIGNED_MATCH_TOL_USD:
+            pass                                                    # (i) both zero
+        elif sign is not None and abs(pf - sign * led) <= SIGNED_MATCH_TOL_USD:
+            pass                                                    # (ii) signed match under the ACTIVE sign
+        elif sign is None and abs(led) > SIGNED_MATCH_TOL_USD:
+            problems.append("UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN")
+        elif zero_idx:
+            _zero_rate_position_check(statuses, rate_proof, zero_idx)
             problems.append("UNVERIFIED_ZERO_RATE_POSITION_CHECK")
-    elif not problems and position is not None:   # RK 03:38: ledger vs positions/hist must agree, else non-countable
-        pf = position[3] if len(position) > 3 else None
-        if pf is None and crossed:
-            problems.append("UNVERIFIED_POSITION_FUNDING_MISSING")
-        elif pf is not None and abs(abs(pf) - abs(led)) > POSITION_FUNDING_TOL_USD + 1e-3 * abs(led):
-            problems.append("UNVERIFIED_LEDGER_POSITION_MISMATCH")   # magnitudes: positions/hist sign not yet observed
+        else:
+            problems.append("UNVERIFIED_LEDGER_POSITION_MISMATCH")
     if problems:
         out["funding_status"] = problems[0]
         return out
@@ -415,6 +665,14 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
     if out["funding_paper_usd"] is not None:                      # RK (3): realism metric, never an exclusion
         out["funding_live_minus_paper_usd"] = round(live - out["funding_paper_usd"], 10)
     return out
+
+
+def _zero_rate_position_check(statuses, rate_proof, zero_idx):
+    for i in zero_idx:
+        statuses[i] = "ZERO_RATE_POSITION_CHECK"
+    for rp in rate_proof:
+        if rp["status"] == "ZERO_RATE":
+            rp["status"] = "ZERO_RATE_POSITION_CHECK"
 
 
 def _zero_rate_status(t, rec, position):
@@ -438,6 +696,13 @@ def chain_exit_fill(chain: Mapping[str, Any]):
         if v is not None:
             return v, k
     return None, None
+
+
+def _chain_side(chain: Mapping[str, Any]):
+    """The position side for check (b): the chain's ``position_side`` (the live copy mirrors its paper twin's signal side,
+    attached by live_copy_monitor_api._closed_live_chains) or ``side``; None when unknown (then no pin is proposed)."""
+    v = chain.get("position_side") or chain.get("side")
+    return str(v).upper() if v else None
 
 
 def _row_inputs(chain: Mapping[str, Any]):
@@ -471,7 +736,8 @@ class FundingReadbackJob:
     MAX_PENDING = 5000
 
     def __init__(self, creds_status_fn: Callable = credential_status, post=_post, clock=time.time,
-                 budget: RateBudget | None = None, chains_fn: Callable | None = None, get=_get_public):
+                 budget: RateBudget | None = None, chains_fn: Callable | None = None, get=_get_public,
+                 sign_pin_path: str | None = None):
         self._creds_status_fn, self._raw_post, self._clock, self._raw_get = creds_status_fn, post, clock, get
         self._budget_rl = budget or GLOBAL_BUDGET
         self.chains_fn = chains_fn
@@ -482,6 +748,8 @@ class FundingReadbackJob:
         self._backoff_until, self._backoff_n = 0.0, 0
         self._thread, self._owner, self._stop = None, None, threading.Event()
         self.requests_made = 0
+        self._sign_pin_path = sign_pin_path      # None -> sign_pin_path() (resolved when the owner thread loads it)
+        self._pin: dict = {"status": "NONE"}     # in-memory copy; the owner thread reloads the file every tick
 
     # ---- GET side: pure cache reads, never any I/O -------------------------------------------------------------
     def lookup(self, chain: Mapping[str, Any], paper_funding_usd=None):
@@ -496,7 +764,7 @@ class FundingReadbackJob:
         with self._lock:
             gate, hit = self._gate, self._cache.get(key)
             if gate in (None, "OK") and self._stale_locked(hit, now):
-                self._enqueue_locked(key, a, b, pid, hit)
+                self._enqueue_locked(key, a, b, pid, hit, notional=notional, side=_chain_side(chain))
         if hit is not None and hit["error"] is None:
             return self._result(hit, a, b, kw)
         if gate not in (None, "OK"):     # the job refuses to read: every row is UNVERIFIED
@@ -509,10 +777,16 @@ class FundingReadbackJob:
 
     __call__ = lookup
 
-    @staticmethod
-    def _result(hit, a, b, kw):
+    def _result(self, hit, a, b, kw):
         return verify(a, b, ledger_rows=hit["rows"], read_error=hit["error"], read_at_ts=hit["read_at_ts"],
-                      position=hit["position"], key_gate="OK", settlement_rates=hit.get("rates"), **kw)
+                      position=hit["position"], key_gate="OK", settlement_rates=hit.get("rates"),
+                      sign_pin=self._pin, sign_pin_check=hit.get("pin_check"), **kw)
+
+    def sign_pin_state(self) -> dict:
+        return dict(self._pin)
+
+    def _pin_file(self) -> str:
+        return self._sign_pin_path or sign_pin_path()
 
     def _stale_locked(self, hit, now) -> bool:
         if hit is None:
@@ -526,18 +800,22 @@ class FundingReadbackJob:
         chain = chain or {}
         if not _closed(chain):
             return
-        a, b, _src, _n, pid, key = _row_inputs(chain)
+        a, b, _src, notional, pid, key = _row_inputs(chain)
         if a is None or b is None or b < a:
             return
         with self._lock:
             hit = self._cache.get(key)
             if self._stale_locked(hit, self._clock()):
-                self._enqueue_locked(key, a, b, pid, hit)
+                self._enqueue_locked(key, a, b, pid, hit, notional=notional, side=_chain_side(chain))
+            elif key in self._pending and self._pending[key].get("side") is None:
+                self._pending[key]["side"] = _chain_side(chain)
 
-    def _enqueue_locked(self, key, a, b, pid, hit=None):
+    def _enqueue_locked(self, key, a, b, pid, hit=None, notional=None, side=None):
         if key not in self._pending and len(self._pending) < self.MAX_PENDING:
             self._pending[key] = {"a": a, "b": b, "pid": pid, "rows": None, "read_at_ts": None, "pos_done": False,
-                                  "position": None, "rates": None, "attempts": (hit or {}).get("attempts", 0) + 1}
+                                  "position": None, "rates": None, "attempts": (hit or {}).get("attempts", 0) + 1,
+                                  "trade_id": key[0], "notional": notional, "side": side, "pin_done": False,
+                                  "pin_wallet": {}, "pin_rates": {}, "pin_check": None}
 
     # ---- owner side: the single thread that performs every network call ----------------------------------------
     def start(self) -> bool:
@@ -592,6 +870,7 @@ class FundingReadbackJob:
         now = self._clock()
         if now < self._backoff_until:
             return
+        self._pin = load_sign_pin(self._pin_file())   # local file only; picks up an HM confirm / reject between ticks
         if callable(self.chains_fn):
             try:
                 for ch in self.chains_fn() or []:
@@ -658,18 +937,104 @@ class FundingReadbackJob:
                         rec["read_at_ts"] = self._clock()
                         work["rates"][t] = rec
                         self._backoff_n = 0
+            if not work.get("pin_done"):
+                self._sign_pin_step(work)
+                work["pin_done"] = True
             self._finish(key, work, None)
         except ReadError as exc:
             if str(exc) in ("HTTP_429", "NOT_OWNER_THREAD"):
                 raise
             self._finish(key, work, str(exc))
 
+    def _sign_pin_step(self, work):
+        """RK 04:09 / HM R4 F1: while NO pin state exists, the first closed live row with a SINGLE tied non-zero entry
+        gathers the independent evidence for checks (a)/(b) - one unfiltered ledger read and the published rate of that
+        settlement, same owner thread, same budget - and proposes a sign (PROPOSED, never ACTIVE) or raises
+        SIGN_PIN_DISAGREEMENT. Rows with more than one non-zero entry never propose (and spend no read)."""
+        if self._pin.get("status") != "NONE":
+            return
+        res = verify(work["a"], work["b"], ledger_rows=work["rows"], read_at_ts=work["read_at_ts"],
+                     position=work["position"], live_notional_usd=work.get("notional"), settlement_rates=work["rates"])
+        if res["funding_status"] != "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN":
+            return
+        parsed = {p["id"]: p for p in (_parse_row(r) for r in work["rows"] or []) if p}
+        entries = [(parsed[x["ledger_id"]], x["settlement_ts"]) for x in res["funding_usd_by_settlement"]
+                   if x.get("ledger_id") is not None and parsed[x["ledger_id"]]["amount"] != 0]
+        wallet, prates = work.setdefault("pin_wallet", {}), work.setdefault("pin_rates", {})
+        for p, t in (entries if len(entries) == 1 else []):
+            if p["id"] not in wallet:
+                try:
+                    wallet[p["id"]] = read_wallet_ledger(p["ts"], creds=self._creds, post=self._post)
+                except ReadError as exc:
+                    if str(exc) in ("HTTP_429", "NOT_OWNER_THREAD"):
+                        raise
+                    wallet[p["id"]] = {"error": str(exc)}
+                self._backoff_n = 0
+            if t not in prates:
+                rec = read_settlement_rate(t, get=self._get)
+                rec["read_at_ts"] = self._clock()
+                prates[t] = rec
+                self._backoff_n = 0
+        pf = work["position"][3] if work["position"] is not None and len(work["position"]) > 3 else None
+        check = propose_sign_pin(entries, wallet, prates, work.get("side"), pf)
+        pos = work["position"]
+        check.update(trade_id=work.get("trade_id"), pid=pos[0], position_create_ts=pos[1], position_update_ts=pos[2],
+                     entry_fill_ts=work["a"], exit_fill_ts=work["b"], ledger_ids=[p["id"] for p, _t in entries],
+                     ledger_mts=[p["ts"] for p, _t in entries], settlement_ts=[t for _p, t in entries],
+                     checked_at_ts=self._clock())
+        work["pin_check"] = check
+        self._record_sign_pin(check)
+
+    def _record_sign_pin(self, check):
+        if check["result"] == "INSUFFICIENT":
+            log.info("[LIVE FUNDING SIGN PIN] evidence insufficient trade_id=%s missing=%s (no pin, no flag)",
+                     check.get("trade_id"), check.get("missing"))
+            return
+        path = self._pin_file()
+        cur = load_sign_pin(path)
+        if cur.get("status") != "NONE":      # never overwrite an existing / HM-edited / unreadable state
+            self._pin = cur
+            return
+        a0 = (check.get("a") or [{}])[0]
+        keep = {k: check.get(k) for k in ("trade_id", "pid", "ledger_ids", "ledger_mts", "settlement_ts",
+                                          "position_create_ts", "position_update_ts", "entry_fill_ts", "exit_fill_ts",
+                                          "side", "rate")}
+        keep.update(ledger_id=(check.get("ledger_ids") or [None])[0],
+                    position_funding_raw=check["c"].get("position_funding_raw"),
+                    ledger_amount_raw=check["c"].get("ledger_amount_raw"),
+                    ledger_balance=a0.get("balance"), ledger_prev_balance=a0.get("prev_balance"),
+                    ledger_prev_id=a0.get("prev_ledger_id"))
+        if check["result"] == "AGREE":
+            state = dict(keep, status="PROPOSED", position_funding_sign=check["position_funding_sign"],
+                         proposed_at_ts=check["checked_at_ts"], checks={k: check[k] for k in ("a", "b", "c")},
+                         confirmed_by_rk_ref=None, confirmed_by_hm_ref=None, confirmed_at_ts=None,
+                         history=cur.get("history") or [])
+            tag = ("[LIVE FUNDING SIGN PIN PROPOSED] awaiting RK+HM confirmation "
+                   "(sign-pin confirm --rk-ref <RK ref> --hm-ref <HM ref>)")
+        else:
+            state = {"status": "DISAGREEMENT", "position_funding_sign": None, "flag": SIGN_PIN_DISAGREEMENT,
+                     "disagreements": [dict(keep, disagree=check["disagree"], checks={k: check[k] for k in ("a", "b", "c")},
+                                            flagged_at_ts=check["checked_at_ts"])],
+                     "history": cur.get("history") or []}
+            tag = "[LIVE FUNDING SIGN_PIN_DISAGREEMENT] nothing pinned; HM review"
+        try:
+            _write_sign_pin(state, path)
+        except OSError as exc:
+            log.warning("[LIVE FUNDING SIGN PIN] state write failed (%s); nothing pinned", type(exc).__name__)
+            return
+        self._pin = state
+        log.warning("%s position_funding_sign=%s trade_id=%s pid=%s ledger_id=%s pf_raw=%s ledger_amount_raw=%s "
+                    "ledger_balance=%s rate=%s side=%s disagree=%s path=%s", tag, state.get("position_funding_sign"),
+                    keep["trade_id"], keep["pid"], keep["ledger_id"], keep["position_funding_raw"],
+                    keep["ledger_amount_raw"], keep["ledger_balance"], keep["rate"], keep["side"],
+                    check.get("disagree"), path)
+
     def _finish(self, key, work, error):
         rates = None if error else (work.get("rates") or {})
         rec = {"rows": None if error else work["rows"], "position": None if error else work["position"],
                "error": error, "read_at_ts": work["read_at_ts"] or self._clock(), "rates": rates,
                "rate_failed": bool(rates) and any(r.get("error") for r in rates.values()),
-               "attempts": work.get("attempts", 1)}
+               "attempts": work.get("attempts", 1), "pin_check": None if error else work.get("pin_check")}
         with self._lock:
             self._cache[key] = rec
             self._pending.pop(key, None)
@@ -680,3 +1045,36 @@ class _BudgetEmpty(Exception):
 
 
 DEFAULT_JOB = FundingReadbackJob()
+
+
+def main(argv=None) -> int:
+    """HM admin CLI (the explicit step; the job never activates a pin):
+    python live_funding_ledger.py sign-pin show
+    python live_funding_ledger.py sign-pin confirm --rk-ref <RK ruling ref> --hm-ref <HM ref>   # PROPOSED -> ACTIVE
+    python live_funding_ledger.py sign-pin reject --ref <RK/HM ref>          # clear PROPOSED/ACTIVE/DISAGREEMENT"""
+    import argparse
+    ap = argparse.ArgumentParser(prog="live_funding_ledger")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("sign-pin")
+    sp.add_argument("action", choices=("show", "confirm", "reject"))
+    sp.add_argument("--ref", default="")
+    sp.add_argument("--rk-ref", default="")
+    sp.add_argument("--hm-ref", default="")
+    sp.add_argument("--path", default=None)
+    args = ap.parse_args(argv)
+    try:
+        if args.action == "show":
+            st = load_sign_pin(args.path)
+        elif args.action == "confirm":
+            st = activate_sign_pin(args.rk_ref, args.hm_ref, path=args.path)
+        else:
+            st = reject_sign_pin(args.ref, path=args.path)
+    except SignPinError as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 2
+    print(json.dumps({"path": args.path or sign_pin_path(), "state": st}, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

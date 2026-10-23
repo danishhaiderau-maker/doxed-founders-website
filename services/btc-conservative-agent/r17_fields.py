@@ -83,7 +83,9 @@ LIVE_FUNDING_CONTRACT = {
                       "00/08/16 UTC settlement in (entry fill, exit fill] per tile_fill.settlements_crossed -> a countable 0); "
                       "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
                       "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
-                      "UNVERIFIED_LEDGER_POSITION_MISMATCH (ledger sum vs positions/hist FUNDING) | "
+                      "UNVERIFIED_LEDGER_POSITION_MISMATCH (SIGNED: |pf - POSITION_FUNDING_SIGN * ledger sum| > 1e-8) | "
+                      "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN (RK 04:09 + HM R4 F1: a non-zero tied entry while "
+                      "POSITION_FUNDING_SIGN is unset - no RK+HM-confirmed ACTIVE pin) | "
                       "UNVERIFIED_POSITION_FUNDING_MISSING | UNVERIFIED_ZERO_RATE_READ_FAILED | "
                       "UNVERIFIED_ZERO_RATE_MISSING | UNVERIFIED_ZERO_RATE_POSITION_CHECK | PENDING_READBACK (HM B/C: not read yet by the background "
                       "job) fail",
@@ -107,7 +109,7 @@ LIVE_FUNDING_CONTRACT = {
                                          "funding ts == the settlement, confirmed by the flip) is exactly 0 as returned "
                                          "(Decimal parse, never rounded, never from a neighbour) AND positions/hist "
                                          "FUNDING for the pid EQUALS the sum of the tied ledger entries within 1e-8 "
-                                         "(RK amendment 04:07; magnitudes, sign unobserved; no entries -> ~0). Every "
+                                         "(RK amendment 04:07 + RK 04:09 / HM R4 F1: SIGNED, never magnitudes - both ~0, or |pf - POSITION_FUNDING_SIGN * sum| <= 1e-8 under an ACTIVE sign). Every "
                                          "crossed settlement needs exactly one proof: a tied entry, or (no entry only) "
                                          "an exact-0 rate read - an entry present means no rate read is used; read in "
                                          "the background job under the "
@@ -123,7 +125,25 @@ LIVE_FUNDING_CONTRACT = {
     "funding_key_gate": "OK, else READ_KEY_MISSING | READ_KEY_NOT_SEPARATE | KEY_HAS_WRITE:<scopes> | "
                         "KEY_PERMISSIONS_READ_FAILED:<code> (RK 03:38: BFX_FUNDING_READ_KEY/SECRET, a separate Fly-only "
                         "key, permission read-back with NO write right; any refusal -> every row UNVERIFIED)",
-    "funding_position_funding": "positions/hist FUNDING [4] of the tied position (cross-check vs the ledger)",
+    "funding_position_funding": "positions/hist FUNDING [4] of the tied position, raw (cross-check vs the ledger). "
+                                "HM R4 F1/F2: verified iff |pf| <= 1e-8 AND |ledger sum| <= 1e-8, or the sign is ACTIVE and "
+                                "|pf - POSITION_FUNDING_SIGN * ledger sum| <= 1e-8 (signed, no abs, no relative tolerance); "
+                                "same rule on the zero-rate, tied-only and no-crossing paths",
+    "funding_position_funding_sign": "+1 / -1 from an ACTIVE pin confirmed by BOTH an RK and an HM ref, else null "
+                                     "(POSITION_FUNDING_SIGN = None: unproven -> non-zero rows UNVERIFIED)",
+    "funding_sign_pin_status": "NONE | PROPOSED | ACTIVE | DISAGREEMENT | UNREADABLE (persisted live_funding_sign_pin.json "
+                               "on the BOT_DATA_DIR root, outside every reset path; LIVE_FUNDING_SIGN_PIN_PATH overrides)",
+    "funding_sign_pin_refs": "{rk, hm} confirmation refs of the ACTIVE pin, else null",
+    "funding_sign_pin_flag": "SIGN_PIN_DISAGREEMENT when checks (a)/(b)/(c) disagreed (nothing pinned, row UNVERIFIED), "
+                             "else null",
+    "funding_sign_pin_check": "this row's proposal check, if run (only while no pin state exists, only for ONE closed "
+                              "live position with a SINGLE tied non-zero cat-29 entry): {result AGREE|DISAGREE|"
+                              "INSUFFICIENT, position_funding_sign, a: [{ledger_id, amount, balance [6], prev_ledger_id, "
+                              "prev_balance, balance_change, ok}], b: [{settlement_ts, rate, rate_row_mts, side, "
+                              "expected_sign (Bitfinex: rate > 0 -> longs pay shorts), ok}], c: {position_funding_raw, "
+                              "ledger_amount_raw, sign, diff, ok}, trade_id, pid, ledger_ids, ledger_mts, settlement_ts, "
+                              "checked_at_ts}. AGREE persists a PROPOSED pin; ACTIVE only via `live_funding_ledger.py "
+                              "sign-pin confirm --rk-ref <RK> --hm-ref <HM>`, never automatically",
     "funding_fee_anomaly": "True when the read returned a fee-like / non-funding row: flagged for HM, NEVER applied (R7); "
                            "not a gate",
     "funding_fee_anomaly_ledger_ids": "their ledger ids",
