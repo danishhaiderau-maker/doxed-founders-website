@@ -158,3 +158,41 @@ def test_every_appended_family_is_classified():
     unclassified = sorted(f for f in families if not rotation_cap.is_classified(f))
     assert unclassified == []
     assert os.path.basename("x") == "x"
+
+
+# ---- RK 23 Oct ~21:12: 1 s tape is days-capped (14 d), tied to the GS-FADE3 AMEND1-3 preregs ----
+TAPE = "market_microstructure_1s.jsonl"
+DAY = 86400.0
+
+
+def test_tape_cap_is_days_based_above_60mb_per_day():
+    days, per_day = rotation_cap.CAP_DAYS[TAPE]
+    assert days >= 14 and per_day > 60 * rotation_cap.MB
+    rot, cap_bytes = rotation_cap.CAP_ALLOW[TAPE]
+    assert cap_bytes == int(days * per_day) and rot >= 10_000  # count never binds; age + byte backstop do
+
+
+def test_tape_cap_comment_names_the_fade3_prereg_set():
+    src = (HERE / "rotation_cap.py").read_text("utf-8")
+    for token in ("GS-FADE3-TP30", "AMEND1", "AMEND2", "AMEND3", "CLOSE or are KILLED", "NEVER prices a fill"):
+        assert token in src
+
+
+def test_tape_keeps_14_days_of_rotations_and_drops_older(tmp_path):
+    now = 100 * DAY
+    active = _make(tmp_path, TAPE, 20)
+    for i in range(1, 21):  # .1 oldest: 20 days old ... .20: 1 day old
+        os.utime(tmp_path / f"{TAPE}.{i}", (now - (21 - i) * DAY, now - (21 - i) * DAY))
+    deleted = []
+    for _ in range(5):
+        deleted += rotation_cap.enforce_cap(str(active), now=now)["deleted"]
+    # rotations older than 14 days (ages 20..15 d -> .1-.6) go; 14 d and younger stay
+    assert deleted == [f"{TAPE}.{i}" for i in range(1, 7)]
+    assert len(rotation_cap.list_rotations(str(active))) == 14
+
+
+def test_tape_byte_backstop_still_binds_when_young(tmp_path):
+    now = 100 * DAY
+    active = _make(tmp_path, TAPE, 4, size=100)
+    res = rotation_cap.enforce_cap(str(active), max_bytes=250, now=now)
+    assert res["deleted"] == [f"{TAPE}.1", f"{TAPE}.2"] and res["cap_days"] == 14.0

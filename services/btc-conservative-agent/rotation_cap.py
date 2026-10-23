@@ -92,6 +92,25 @@ CAP_ALLOW: dict[str, tuple[int, int]] = {name: DEFAULT_CAP for name in _DEFAULT_
 # read ".1", the oldest), so the grid can be capped like everything else.
 CAP_ALLOW["chase_offset_touch_grid.jsonl"] = (10, 200 * MB)
 
+# Days-based caps (RK binding conditions, 23 Oct 2026 ~21:12 AEDT).
+# market_microstructure_1s is the 1 s book/BBO tape. It feeds indicators,
+# features and coverage ONLY (e.g. the tape_minute_bars rebuild, 14-day
+# DEFAULT_RETENTION_MINUTES); it NEVER prices a fill, stop, TP or exit.
+# Rotations younger than ``days`` are kept; older ones go. The byte backstop is
+# days x mb_per_day, sized above RK's ~60 MB/day so the age rule binds first;
+# only past that backstop does the oldest rotation go regardless of age (R5:
+# a cap never waits, and the disk never fills).
+# TIED TO THE GS-FADE3-TP30 PREREG SET (frozen 17:37 AEDT 23 Oct): base
+# 94d32aa1, AMEND1 rev3 2f41d3d4, AMEND2 rev3 60d175f0, AMEND3 632dcf34
+# (/workspace/grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND*-20261023.md).
+# When those tests CLOSE or are KILLED, shrink this back to what the remaining
+# preregistered tests need (see SHARED-TRACKER).
+CAP_DAYS: dict[str, tuple[float, int]] = {
+    "market_microstructure_1s.jsonl": (14.0, 80 * MB),
+}
+for _name in CAP_DAYS:
+    CAP_ALLOW[_name] = (10_000, int(CAP_DAYS[_name][0] * CAP_DAYS[_name][1]))
+
 # Classified but never capped.
 CAP_EXEMPT: dict[str, str] = {
     "pre_entry_evidence_handoffs.jsonl": "custody handoff evidence (HM)",
@@ -207,19 +226,24 @@ def enforce_cap(
     cap_rot, cap_bytes = detail
     cap_rot = int(max_rotations if max_rotations is not None else cap_rot)
     cap_bytes = int(max_bytes if max_bytes is not None else cap_bytes)
+    days = CAP_DAYS.get(os.path.basename(str(active_path)))
+    clock_now = float(now if now is not None else time.time())
     rotations = list_rotations(active_path)
     sizes: dict[str, int] = {}
+    mtimes: dict[str, float] = {}
     for _, path in rotations:
         try:
-            sizes[path] = os.path.getsize(path)
+            st = os.stat(path)
+            sizes[path], mtimes[path] = st.st_size, st.st_mtime
         except OSError:
-            sizes[path] = 0
+            sizes[path], mtimes[path] = 0, 0.0
     total = sum(sizes.values())
     remaining = list(rotations)
     freed = 0
     active_abs = os.path.abspath(active_path)
     while remaining and len(result["deleted"]) < max(0, int(max_unlinks)):
-        if len(remaining) <= cap_rot and total <= cap_bytes:
+        aged_out = bool(days) and clock_now - mtimes.get(remaining[0][1], 0.0) > days[0] * 86400
+        if len(remaining) <= cap_rot and total <= cap_bytes and not aged_out:
             break
         _, victim = remaining.pop(0)
         if os.path.abspath(victim) == active_abs:  # defensive; regex excludes it
@@ -239,6 +263,8 @@ def enforce_cap(
         "freed_bytes": freed, "backlog": len(remaining) > cap_rot or total > cap_bytes,
         "cap": [cap_rot, cap_bytes],
     })
+    if days:
+        result["cap_days"] = days[0]
     if result["deleted"] and receipt_writer is not None:
         try:
             receipt_writer(os.path.dirname(os.path.abspath(active_path)), {
