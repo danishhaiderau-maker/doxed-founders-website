@@ -100,6 +100,8 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     state["ledger_loss_usd"] = round(ledger_loss, 4)
     if ledger_loss >= DAILY_LOSS_CAP_USD:
         out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} in the last 24 h ({len(ledger_today)} fresh-epoch rows)"})
+    # 4b. HM G6 per-tile / account-wide daily (UTC) realised loss caps from the prereg (live_tile_gate), fresh-epoch rows only
+    out.extend(_ltg.daily_loss_violations(live, now))
     m = mirror if isinstance(mirror, Mapping) else None
     if m is None or m.get("ok") is not True:
         # a blind exchange read while live is open is itself unsafe, but a single failed read must not flap: require 30 s

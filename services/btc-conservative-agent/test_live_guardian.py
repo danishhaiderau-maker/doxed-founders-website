@@ -406,3 +406,52 @@ def test_tile_key_mismatch_entry_order_without_its_tile_chain_after_grace():
     st3 = {}
     g.evaluate([], legacy, st3, NOW, lane_needle="")
     assert "TILE_KEY_MISMATCH" not in codes(g.evaluate([], legacy, st3, NOW + 30, lane_needle=""))
+
+
+# ---- HM G6 daily realised loss caps (prereg AMEND3 D3: $0.05 per tile, $0.10 total, UTC day) ----
+import live_tile_gate as ltg  # noqa: E402
+
+DAY0 = 1_800_000_000.0 - (1_800_000_000.0 % 86400)      # 00:00 UTC of NOW's day
+
+
+def lc(tid, pnl, at):
+    return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at}
+
+
+def test_g6_caps_are_pinned_to_the_prereg_values():
+    assert ltg.DAILY_LOSS_CAP_PER_TILE_USD == 0.05 and ltg.DAILY_LOSS_CAP_TOTAL_USD == 0.10
+    assert "632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9" in ltg.DAILY_LOSS_CAP_SOURCE
+
+
+def test_g6_per_tile_cap_trips_at_five_cents_and_names_the_tile():
+    v = g.evaluate([lc("gs1-a", -0.03, NOW - 10), lc("gs1-b", -0.02, NOW - 5)], MIR, {}, NOW)
+    tile = [x for x in v if x["code"] == ltg.VIOL_TILE_LOSS_CAP]
+    assert tile and tile[0]["tile"] == "gs1"
+    assert ltg.VIOL_TOTAL_LOSS_CAP not in codes(v)
+    assert not ltg.daily_loss_violations([lc("gs1-a", -0.049, NOW - 10)], NOW)
+
+
+def test_g6_total_cap_trips_across_tiles_when_no_single_tile_does():
+    rows = [lc("gs1-a", -0.04, NOW - 10), lc("gs6-a", -0.04, NOW - 9), lc("gb1-a", -0.02, NOW - 8)]
+    v = ltg.daily_loss_violations(rows, NOW)
+    assert codes(v) == {ltg.VIOL_TOTAL_LOSS_CAP}
+
+
+def test_g6_uses_the_utc_day_and_wins_offset_losses_on_the_same_day():
+    # yesterday's loss does not count today; a same-day win offsets a same-day loss
+    assert not ltg.daily_loss_violations([lc("gs1-a", -0.09, DAY0 - 1)], NOW)
+    assert not ltg.daily_loss_violations([lc("gs1-a", -0.06, NOW - 20), lc("gs1-b", 0.02, NOW - 10)], NOW)
+    # a closed row with pnl but no close time counts as today (conservative)
+    assert ltg.daily_loss_violations([{"correlation_id": "gs1-x", "closed": True, "pnl_usd": -0.05}], NOW)
+
+
+def test_g6_unattributed_loss_counts_towards_total_and_errors_fail_safe():
+    v = ltg.daily_loss_violations([lc("zzz-a", -0.10, NOW - 1)], NOW)
+    assert codes(v) == {ltg.VIOL_TOTAL_LOSS_CAP}
+    v = ltg.daily_loss_violations([None], NOW)          # malformed input -> violation, never silently passes
+    assert v and v[0]["code"].endswith("_ERROR")
+
+
+def test_g6_is_checked_even_when_the_exchange_mirror_is_blind():
+    v = g.evaluate([lc("gs1-a", -0.05, NOW - 3)], {"ok": False, "error": "x"}, {}, NOW)
+    assert ltg.VIOL_TILE_LOSS_CAP in codes(v)

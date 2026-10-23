@@ -47,6 +47,16 @@ PENDING_EXPOSURE_SEC = 300.0      # same bound the guardian uses for a sent-but-
 INFLIGHT_APPROVAL_SEC = 180.0     # relay placement bound (FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC): approved, not yet reported
 MIRROR_MAX_AGE_SEC = 20.0
 
+# HM G6 daily REALISED live loss caps, pinned to the frozen GS-FADE3-TP30 prereg set (AMEND3 sha 632dcf34..., D3:
+# "Daily loss cap: $0.05 per tile and $0.10 in total (UTC day)") and HM LIVE-CHECK-RECIPE G6. Not configurable (no env
+# override): a change needs a new prereg amendment with RK PASS. Breach => the guardian disarms ALL live tiles + force-flat
+# (RK ruling 24 Oct). Disarm-only: these caps never size or skip an entry.
+DAILY_LOSS_CAP_PER_TILE_USD = 0.05
+DAILY_LOSS_CAP_TOTAL_USD = 0.10
+DAILY_LOSS_CAP_SOURCE = "PREREG-GS-FADE3-TP30-AMEND3-20261023.md sha256 632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9 D3"
+VIOL_TILE_LOSS_CAP = "LIVE_TILE_DAILY_LOSS_CAP"
+VIOL_TOTAL_LOSS_CAP = "LIVE_TOTAL_DAILY_LOSS_CAP"
+
 SKIP_MUTEX = "LIVE_SKIPPED_MUTEX"
 DENY_TILE_KEY_UNKNOWN = "LIVE_TILE_KEY_UNKNOWN"
 DENY_TILE_CAP = "LIVE_TILE_MARGIN_CAP"
@@ -244,3 +254,47 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         return (not reasons), reasons, info
     except Exception as exc:  # noqa: BLE001 - any error refuses the live entry (paper unaffected)
         return False, [f"{DENY_GATE_ERROR}:{type(exc).__name__}"], {}
+
+
+def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
+                        registry: Mapping[str, Mapping] | None = None) -> tuple[dict, float, int]:
+    """({tile_key|None: loss_usd}, total_loss_usd, n_rows) for live chains CLOSED in the current UTC day.
+
+    Realised pnl only (``pnl_usd`` as reported by the executor; no fees added or removed, R7). Loss = -sum(pnl), so wins
+    on the same tile/day offset losses. A closed row with pnl but no close time counts as closed now (conservative, same
+    as the guardian). Rows whose tile cannot be attributed count only towards the total."""
+    day = utc_day(now)
+    per: dict = {}
+    n = 0
+    for c in chains or []:
+        if not c.get("closed"):
+            continue
+        pnl = _f(c.get("pnl_usd"))
+        if pnl is None:
+            continue
+        t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
+        t = now if t is None or t <= 0 else t
+        if t > now + 60 or utc_day(t) != day:
+            continue
+        k = chain_tile_key(c, registry)
+        per[k] = per.get(k, 0.0) - pnl
+        n += 1
+    return per, sum(per.values()), n
+
+
+def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
+                          registry: Mapping[str, Mapping] | None = None) -> list:
+    """HM G6 loss caps as guardian violations ([{code, tile, detail}]). Fail safe: any error is itself a violation."""
+    try:
+        per, total, n = daily_realised_loss(chains, now, registry)
+        out = []
+        for k, loss in sorted(per.items(), key=lambda kv: str(kv[0])):
+            if k is not None and loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9:
+                out.append({"code": VIOL_TILE_LOSS_CAP, "tile": k,
+                            "detail": f"{k} realised loss ${loss:.4f} >= ${DAILY_LOSS_CAP_PER_TILE_USD:.2f} UTC {utc_day(now)}"})
+        if total >= DAILY_LOSS_CAP_TOTAL_USD - 1e-9:
+            out.append({"code": VIOL_TOTAL_LOSS_CAP, "tile": None,
+                        "detail": f"total realised loss ${total:.4f} >= ${DAILY_LOSS_CAP_TOTAL_USD:.2f} UTC {utc_day(now)} ({n} rows)"})
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return [{"code": f"{VIOL_TOTAL_LOSS_CAP}_ERROR", "tile": None, "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}]
