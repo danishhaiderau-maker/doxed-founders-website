@@ -73,8 +73,20 @@ test('LIVE-FIX-1200: CURE-1 never relinks a DISLOC fill onto a GS-01 position', 
 test('LIVE-FIX-1246: taker entry fill is promoted (stop placed) at ACK, before limit chase', () => {
   const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
   const probe = src.indexOf("'POST_ACK_FAST_FILL'");
-  const chase = src.indexOf('if (participant && !promotedAtAck)');
-  assert.ok(probe > 0 && chase > probe);
+  // Anchor on the chase guard's opening only (no dependence on the if's closing paren);
+  // capture the DISLOC skip clause so its truth table can be checked.
+  const chaseRe = /if \(participant && !promotedAtAck && !\((dislocEntryMode && dislocEntryMode !== 'LIMIT')\)/g;
+  const chases = [...src.matchAll(chaseRe)];
+  assert.equal(chases.length, 1, 'exactly one post-ack limit-chase guard');
+  const chase = chases[0].index!;
+  assert.ok(probe > 0, 'post-ack fast-fill probe exists');
+  assert.ok(chase > probe, 'post-ack probe precedes the limit chase');
+  // The chase is skipped only for non-LIMIT DISLOC modes; LIMIT and non-DISLOC (null) still chase.
+  const skip = new Function('dislocEntryMode', `return Boolean(${chases[0][1]});`) as (m: string | null) => boolean;
+  assert.equal(skip(null), false);
+  assert.equal(skip('LIMIT'), false);
+  assert.equal(skip('IOC_MARKET'), true);
+  assert.equal(skip('IOC_CAP'), true);
 });
 
 test('LIVE-FIX-1445: submit-response fill only for EXECUTED full fills', async () => {
@@ -104,9 +116,26 @@ test('LIVE-FIX-1445: speculative claim is used only on an exact input match and 
   assert.ok(src.includes('if (!spec.ok) throw spec.error;')); // P2002 from the speculative claim -> claim-lost, no submit
   assert.ok(src.includes("void unusedSpeculative.then((spec) => this.releaseSpeculativeClaim(spec))"));
   // fence + deterministic CID still precede the only exchange write
-  const fence = src.indexOf("eventType: 'ENTRY_SUBMISSION_UNKNOWN'");
-  const submit = src.indexOf('const orderId = await this.activeTrading.submitLimitOrder(creds, {');
-  assert.ok(fence > 0 && submit > fence);
+  // Anchor on the placeEntry fence WRITE (schema entry_submission_fence_v1, phase SUBMITTING),
+  // not the first ENTRY_SUBMISSION_UNKNOWN text (that is the recovery findFirst read).
+  const fenceRe = /await this\.prisma\.signalCycleEvent\.create\(\{\s*data: \{\s*cycleId,\s*participantId: claimParticipantId,\s*eventType: 'ENTRY_SUBMISSION_UNKNOWN',\s*payload: \{\s*schema: 'entry_submission_fence_v1',\s*phase: 'SUBMITTING',\s*trade_id: tradeId,/g;
+  const fences = [...src.matchAll(fenceRe)];
+  assert.equal(fences.length, 1, 'exactly one placeEntry SUBMITTING fence write');
+  const fence = fences[0].index!;
+  assert.ok(fences[0][0].startsWith('await this.prisma.signalCycleEvent.create('), 'matched index is the fence write');
+  const recoveryRead = src.indexOf("eventType: 'ENTRY_SUBMISSION_UNKNOWN' }");
+  assert.ok(recoveryRead > 0 && recoveryRead !== fence + fences[0][0].indexOf('eventType'), 'recovery read is not the anchor');
+  assert.ok(!/findFirst|findMany|findUnique/.test(fences[0][0]), 'anchor is not a read');
+  // Both entry submits (DISLOC IOC_MARKET and limit/IOC_CAP) come after the fence and before the
+  // catch-path SUBMIT_RESULT_UNKNOWN fence update.
+  const resultFence = src.indexOf("'ACKED_PERSISTENCE_UNKNOWN' : 'SUBMIT_RESULT_UNKNOWN'", fence);
+  const market = src.indexOf('submitMarketEntry(creds, {', fence);
+  const limit = src.indexOf('submitLimitOrder(creds, {', fence);
+  assert.ok(resultFence > fence, 'result-unknown fence follows');
+  assert.ok(market > fence && market < resultFence, 'submitMarketEntry after the fence');
+  assert.ok(limit > fence && limit < resultFence, 'submitLimitOrder after the fence');
+  assert.ok(src.lastIndexOf('submitMarketEntry(creds, {', fence) < src.lastIndexOf('async placeEntryInner(', fence), 'no market submit in placeEntryInner before the fence');
+  assert.ok(src.lastIndexOf('submitLimitOrder(creds, {', fence) < src.lastIndexOf('async placeEntryInner(', fence), 'no limit submit in placeEntryInner before the fence');
 });
 
 test('LIVE-FIX-1460: one-statement lock+claim; duplicate claim -> P2002 (no second order)', async () => {
