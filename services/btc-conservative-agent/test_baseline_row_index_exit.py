@@ -52,3 +52,52 @@ def test_init_failure_removes_temp_dir(monkeypatch):
         VerifiedLedgerRowIndex()
     assert seen and not seen[0].exists()
     monkeypatch.setattr(VerifiedLedgerRowIndex, "_create_schema", real_create)
+
+
+class _BadTemporary:
+    """TemporaryDirectory whose cleanup() raises (HM #847 N1)."""
+
+    def __init__(self, real):
+        self._real = real
+        self.name = real.name
+
+    def cleanup(self):
+        raise OSError("cleanup failed")
+
+
+def test_body_exception_is_not_masked_by_cleanup_failure_and_temp_removed():
+    with pytest.raises(ValueError, match="body"):
+        with VerifiedLedgerRowIndex() as index:
+            root = Path(index._temporary.name)
+            index._temporary = _BadTemporary(index._temporary)
+            raise ValueError("body")
+    assert not root.exists()
+
+
+def test_init_exception_is_not_masked_by_cleanup_failure(monkeypatch):
+    import tempfile
+
+    real_tmp = tempfile.TemporaryDirectory
+    seen = []
+
+    def bad_tmp(*args, **kwargs):
+        wrapped = _BadTemporary(real_tmp(*args, **kwargs))
+        seen.append(Path(wrapped.name))
+        return wrapped
+
+    def boom(self):
+        raise RuntimeError("schema failed")
+
+    monkeypatch.setattr("research.baseline_execution_context.tempfile.TemporaryDirectory", bad_tmp)
+    monkeypatch.setattr(VerifiedLedgerRowIndex, "_create_schema", boom)
+    with pytest.raises(RuntimeError, match="schema failed"):
+        VerifiedLedgerRowIndex()
+    assert seen and not seen[0].exists()
+
+
+def test_cleanup_failure_on_clean_exit_still_raises():
+    with pytest.raises(OSError, match="cleanup failed"):
+        with VerifiedLedgerRowIndex() as index:
+            bad = _BadTemporary(index._temporary)
+            index._temporary = bad
+    bad._real.cleanup()

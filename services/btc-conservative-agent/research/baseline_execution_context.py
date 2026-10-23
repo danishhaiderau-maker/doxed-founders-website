@@ -66,7 +66,7 @@ class VerifiedLedgerRowIndex:
                 if getattr(self, "_connection", None) is not None:
                     self._connection.close()
             finally:
-                self._temporary.cleanup()
+                self._cleanup_temporary(propagating=True)
             raise
         self.sources: dict[str, str] = {}
         self._source_snapshots: dict[str, tuple[Path, tuple]] = {}
@@ -94,8 +94,17 @@ class VerifiedLedgerRowIndex:
                 if exc_type is None:
                     raise
         finally:
-            self._temporary.cleanup()
+            self._cleanup_temporary(propagating=exc_type is not None)
         return False
+
+    def _cleanup_temporary(self, *, propagating: bool) -> None:
+        """Remove the disposable index; a cleanup failure never masks an exception already propagating."""
+        try:
+            self._temporary.cleanup()
+        except Exception:  # noqa: BLE001
+            if not propagating:
+                raise
+            shutil.rmtree(self._temporary.name, ignore_errors=True)
 
     @staticmethod
     def _file_identity(path: Path) -> tuple:
