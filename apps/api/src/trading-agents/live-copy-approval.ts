@@ -170,15 +170,21 @@ export function verifyFlyLiveCopyApproval(
 }
 
 /** True when the approval's lane is an active tile whose prefix owns the trade id. */
-export function approvalTileMatchesTrade(a: FlyLiveCopyApproval, tradeId: string | null | undefined): boolean {
+export function approvalTileMatchesTrade(
+  a: FlyLiveCopyApproval,
+  tradeId: string | null | undefined,
+  opts: { requireTileKey?: boolean } = { requireTileKey: true },
+): boolean {
   const lane = String(a?.research_lane ?? '').trim().toUpperCase();
   const prefix = LIVE_COPY_TILE_PREFIXES[lane];
   const tid = String(tradeId ?? '').trim().toLowerCase();
   if (!prefix || !tid || isRetiredLiveCopyTileTradeId(tid)) return false;
   const [head, ...rest] = tid.split('-');
   if (!(head === prefix && rest.length > 0 && String(a.trade_id).toLowerCase() === tid)) return false;
-  // Two-tile live gate: a signed tile key (Fly live_tile_gate) must name this trade's tile. Absent = pre-gate Fly (allowed).
-  if (a.tile_key != null || a.tile_key_code != null) {
+  // Two-tile live gate: a signed tile key (Fly live_tile_gate) must name this trade's tile. RK 24 Oct: MANDATORY for a
+  // live ENTRY (untagged = refused). Only non-entry continuations of an already-approved trade may be untagged (so a
+  // pre-gate lot's exits still flow).
+  if (opts.requireTileKey !== false || a.tile_key != null || a.tile_key_code != null) {
     const code = LIVE_TILE_KEY_CODES[head];
     if (code == null || String(a.tile_key ?? '').toLowerCase() !== head || Number(a.tile_key_code) !== code) return false;
   }
@@ -227,7 +233,7 @@ export function approvalPermitsIngest(
 ): boolean {
   if (isRetiredLiveCopyTileTradeId(tradeId)) return false;
   const v = verifyFlyLiveCopyApproval(approvalRaw, secret, { tradeId, event, nowMs });
-  return v.ok && approvalTileMatchesTrade(v.approval, tradeId);
+  return v.ok && approvalTileMatchesTrade(v.approval, tradeId, { requireTileKey: LIVE_COPY_ENTRY_EVENTS.has(event) });
 }
 
 /**

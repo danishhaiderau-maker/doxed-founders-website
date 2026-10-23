@@ -120,6 +120,13 @@ import {
   desiredLiveCopyCoordinationState,
 } from './signal-subscriber-execution.service';
 
+/** Two-tile gate: Fly signs the trade's tile key (mandatory for live entries). */
+function testTileKey(tradeId: string) {
+  const head = String(tradeId).split('-')[0].toLowerCase();
+  const code = ({ rnd: 1, gs1: 2, gb1: 3, gb2: 4, gs6: 5, dsl: 6, dsf: 7 } as Record<string, number>)[head];
+  return code == null ? {} : { tile_key: head, tile_key_code: code };
+}
+
 /** A Fly approval as live_copy_control.sign_approval would emit it (test key). */
 function signTestFlyApproval(tradeId: string, secret: string, over: Record<string, unknown> = {}) {
   const approval = {
@@ -127,7 +134,7 @@ function signTestFlyApproval(tradeId: string, secret: string, over: Record<strin
     event: 'ORDER_PLACED', research_lane: 'FAMILY_GS01_XV_PREMIUM_ATR_TP', relay_eligible: true,
     eligibility_source: 'OPERATOR', entry_allowed: true, output_on: true, tile_live_on: true,
     created_at_ts: Date.now() / 1000, max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT',
-    hard_stop_bp: 35, exchange_stop_bp: 35, liquidation_bp: 50, ...over,
+    hard_stop_bp: 35, exchange_stop_bp: 35, liquidation_bp: 50, ...testTileKey(tradeId), ...over,
   };
   const signedBody = JSON.stringify(approval);
   const key = createHmac('sha256', secret).update('fly-live-copy-approval-v1').digest();

@@ -64,11 +64,14 @@ test('per-entry admission: mutex then net=0', () => {
   assert.deepEqual(liveEntryAdmission({ otherLiveParticipants: 0, positionQty: Number.NaN }), { ok: false, reason: ACCOUNT_NOT_FLAT });
 });
 
-test('approval tile key must match the trade tile when present; absent is allowed (pre-gate Fly)', () => {
+test('approval tile key is MANDATORY for a live entry (RK) and must match the trade tile; continuations may be untagged', () => {
   const lane = Object.entries(LIVE_COPY_TILE_PREFIXES).find(([, p]) => p === 'gs1')?.[0];
   assert.ok(lane);
   const base = { research_lane: lane, trade_id: 'gs1-x1' } as Record<string, unknown>;
-  assert.equal(approvalTileMatchesTrade(base as never, 'gs1-x1'), true);
+  assert.equal(approvalTileMatchesTrade(base as never, 'gs1-x1'), false);   // untagged entry refused (default)
+  assert.equal(approvalTileMatchesTrade(base as never, 'gs1-x1', { requireTileKey: true }), false);
+  assert.equal(approvalTileMatchesTrade(base as never, 'gs1-x1', { requireTileKey: false }), true);   // exit continuation
+  assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs6', tile_key_code: 5 } as never, 'gs1-x1', { requireTileKey: false }), false);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs1', tile_key_code: 2 } as never, 'gs1-x1'), true);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs6', tile_key_code: 5 } as never, 'gs1-x1'), false);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs1', tile_key_code: 5 } as never, 'gs1-x1'), false);

@@ -53,7 +53,11 @@ MIRROR_MAX_AGE_SEC = 20.0
 # (RK ruling 24 Oct). Disarm-only: these caps never size or skip an entry.
 DAILY_LOSS_CAP_PER_TILE_USD = 0.05
 DAILY_LOSS_CAP_TOTAL_USD = 0.10
-DAILY_LOSS_CAP_SOURCE = "PREREG-GS-FADE3-TP30-AMEND3-20261023.md sha256 632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9 D3"
+DAILY_LOSS_CAP_SOURCE = (
+    "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND3-20261023.md L22 (D3: \"Daily loss cap: $0.05 per tile and "
+    "$0.10 in total (UTC day)\") sha256 632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9; "
+    "HM grokbot/health-monitor/LIVE-CHECK-RECIPE.md L94-107 (G6)"
+)
 VIOL_TILE_LOSS_CAP = "LIVE_TILE_DAILY_LOSS_CAP"
 VIOL_TOTAL_LOSS_CAP = "LIVE_TOTAL_DAILY_LOSS_CAP"
 
