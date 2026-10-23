@@ -103,6 +103,8 @@ def keep_reason(relpath: str, *, scope: str) -> str | None:
     parts = lower.split("/")
     name = parts[-1]
     base = ROTATION_RE.sub(lambda m: m.group("base"), name)
+    if name.startswith("live_guardian_state.json"):   # B5 (#852): the live-guardian RED/disarm latch, every scope
+        return "LIVE_GUARDIAN_LATCH"
     if ".git" in parts or lower.endswith(CODE_SUFFIXES) or name in ("dockerfile", "makefile"):
         return "CODE"
     if any(t in lower for t in SECRET_TOKENS):

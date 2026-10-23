@@ -493,3 +493,39 @@ def test_hm5_unconfirmed_position_flatten_is_persisted_red_even_if_the_force_fla
 def test_hm5_force_flat_worker_success_never_clears_red():
     body = _SRC[_SRC.index("def _live_guardian_force_flat_worker"):_SRC.index("def _live_guardian_force_flat(")]
     assert 'pop("red_alert"' not in body and "red_alert\"] = None" not in body
+
+
+# ------------------------------------------------------------------ B5: live_guardian_state.json is out of every reset/wipe plan
+def _wipe_ns():
+    import glob as _glob, os
+    a = _SRC.index("# B5 (24 Oct, #852): the persisted live-guardian latch")
+    b = _SRC.index("def _reset_runtime_log_handlers")
+    ns = {"os": os, "glob": _glob, "logger": logging.getLogger("t")}
+    exec(_SRC[a:b], ns)
+    return ns
+
+
+def test_b5_fresh_collection_plan_and_delete_never_touch_live_guardian_state(tmp_path):
+    ns = _wipe_ns()
+    latch = tmp_path / "live_guardian_state.json"
+    latch.write_text('{"red_alert": {"code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED"}}')
+    other = tmp_path / "signal_replay.jsonl"
+    other.write_text("x")
+    # every planner feeding all_research_wipe_paths tries to include it -> filtered out of the plan
+    for k in ("research_wipe_file_paths", "_research_wipe_rotated_jsonl_paths", "_analyzer_output_wipe_globs",
+              "_wipe_reports_recursive", "_pathway_validation_artifact_paths", "_legacy_redundant_log_paths"):
+        ns[k] = lambda *a, **kw: [str(latch), str(latch) + ".tmp", str(other)]
+    plan = ns["all_research_wipe_paths"](include_validation_artifacts=True, include_legacy_logs=True)
+    assert plan == [str(other)]
+    # and the deleter refuses it even if a caller passes it directly
+    deleted, errors = ns["_delete_paths"]([str(latch), str(other)])
+    assert deleted == [str(other)] and errors == [] and latch.exists()
+    assert ns["RESET_NEVER_DELETE_BASENAMES"] >= {"live_guardian_state.json"}
+
+
+def test_b5_the_persist_file_name_matches_the_protected_name_and_wipe_routes_go_through_the_guarded_planner():
+    assert '_LIVE_GUARDIAN_PERSIST_FILE = "live_guardian_state.json"' in _SRC
+    body = _SRC[_SRC.index("def _delete_paths"):_SRC.index("def _reset_runtime_log_handlers")]
+    assert body.index("_reset_never_delete(path)") < body.index("os.remove(path)")
+    reset = _SRC[_SRC.index("live_paths = all_research_wipe_paths("):]
+    assert reset.index("all_research_wipe_paths(") < reset.index("_delete_paths(live_paths)")

@@ -36015,6 +36015,15 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     return sorted(set(found))
 
 
+# B5 (24 Oct, #852): the persisted live-guardian latch (RED, auto_disarm_latched, in-flight force-flat, liq events) is
+# NEVER part of any reset/wipe plan: a Fresh Collection / wipe_fly_only must not silently clear a RED or a disarm latch.
+RESET_NEVER_DELETE_BASENAMES = frozenset({"live_guardian_state.json", "live_guardian_state.json.tmp"})
+
+
+def _reset_never_delete(path) -> bool:
+    return os.path.basename(str(path or "")) in RESET_NEVER_DELETE_BASENAMES
+
+
 def all_research_wipe_paths(
     include_validation_artifacts: bool = True,
     include_legacy_logs: bool = False,
@@ -36027,7 +36036,7 @@ def all_research_wipe_paths(
         paths |= set(_pathway_validation_artifact_paths())
     if include_legacy_logs:
         paths |= set(_legacy_redundant_log_paths())
-    return sorted(paths)
+    return sorted(p for p in paths if not _reset_never_delete(p))   # B5
 
 def _delete_paths(paths) -> tuple:
     deleted = []
@@ -36037,6 +36046,9 @@ def _delete_paths(paths) -> tuple:
         if not path or path in seen:
             continue
         seen.add(path)
+        if _reset_never_delete(path):   # B5: hard keep, whatever the caller planned
+            logger.warning(f"[RESET] refusing to delete {os.path.basename(path)} (live guardian latch) [PIPELINE ENFORCEMENT]")
+            continue
         try:
             if os.path.exists(path):
                 os.remove(path)
