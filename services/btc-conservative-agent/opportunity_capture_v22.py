@@ -7,7 +7,12 @@ from collections import Counter
 from typing import Any, Iterable, Mapping, Optional
 
 from collector_storage import project_capacity
-from collector_v22 import BYTES_PER_EVENT_TYPICAL, RESEARCH_EVENTS_FILE, research_event_generation_paths
+from collector_v22 import (
+    BYTES_PER_EVENT_TYPICAL,
+    RESEARCH_EVENTS_FILE,
+    is_r17_retired_event,
+    research_event_generation_paths,
+)
 from collector_v22_schema import (
     COLLECTOR_VERSION,
     PRIMARY_ACCEPTED_FILLED,
@@ -51,7 +56,11 @@ def analyze_v22_events(
     root = data_dir or os.getcwd()
     path = events_path or os.path.join(root, RESEARCH_EVENTS_FILE)
     paths = [path] if events_path else research_event_generation_paths(root)
-    rows = [r for candidate in paths for r in _load_jsonl(candidate) if _version_ok(r, min_collector_version)]
+    all_rows = [r for candidate in paths for r in _load_jsonl(candidate) if _version_ok(r, min_collector_version)]
+    # R17: the 1m candle/ticker path is unverifiable and retired. Such rows are
+    # labelled "source retired (R17)" (MISSING_1M_TAPE) and never scored.
+    retired = [r for r in all_rows if is_r17_retired_event(r)]
+    rows = [r for r in all_rows if not is_r17_retired_event(r)]
     filled = [r for r in rows if r.get("primary_outcome") == PRIMARY_ACCEPTED_FILLED]
     unfilled = [r for r in rows if r.get("primary_outcome") == PRIMARY_ACCEPTED_UNFILLED]
     rejected = [r for r in rows if r.get("primary_outcome") == PRIMARY_REJECTED]
@@ -64,7 +73,7 @@ def analyze_v22_events(
         for reason in (receipt.get("reasons") or ["UNKNOWN_REPLAY_BLOCKER"])
     )
     observation_statuses = Counter(str(row.get("observation_status") or "UNKNOWN") for row in rows)
-    events_per_day = max(5.0, len(rows)) if len(rows) < 7 else len(rows) / 7.0
+    events_per_day = max(5.0, len(all_rows)) if len(all_rows) < 7 else len(all_rows) / 7.0
     capacity = project_capacity(
         data_dir=root,
         bytes_per_event_typical=BYTES_PER_EVENT_TYPICAL,
@@ -74,7 +83,13 @@ def analyze_v22_events(
         "schema": "collector_v22_analyzer_report_v1",
         "collector_version": COLLECTOR_VERSION,
         "filter": f"collector_version>={min_collector_version}",
-        "empty_epoch": not rows,
+        "empty_epoch": not all_rows,
+        "source_retired": {
+            "rows": len(retired),
+            "label": "source retired (R17)",
+            "reason": "MISSING_1M_TAPE",
+            "note": "R17: unverifiable 1m candle/ticker path discarded; rows are not scored as primaries",
+        },
         "primaries": {
             PRIMARY_ACCEPTED_FILLED: {
                 "n": len(filled),

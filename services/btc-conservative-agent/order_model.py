@@ -33,9 +33,11 @@ DEFAULT_PROTECTION_BP = 5.0
 DEFAULT_TAKER_TTL_S = 3.0
 # HM 17:26 R6: PER-TILE registry options on the shared helpers (GS-FADE3-TP30 AMEND1 model). Defaults keep every
 # existing tile's behaviour; a tile opts in through its registry spec "realism_options" and every row stamps them.
-REST_FILL_QUEUE_CLEAR = "queue_clear"       # default: at-limit prints deplete the queue, then fill us
-REST_FILL_TRADE_THROUGH = "trade_through"   # only prints strictly through the limit fill us (conservative)
+REST_FILL_QUEUE_CLEAR = "queue_clear"       # opt-in: at-limit prints deplete the queue, then fill us
+REST_FILL_TRADE_THROUGH = "trade_through"   # DEFAULT (HM C1): only prints strictly through the limit fill us
 REST_FILL_BASES = (REST_FILL_QUEUE_CLEAR, REST_FILL_TRADE_THROUGH)
+REST_FILL_DEFAULT = REST_FILL_TRADE_THROUGH  # HM C1 23 Oct: the conservative basis is the default for every tile
+UNSIZED_PRINT = "UNSIZED_PRINT_UNVERIFIED"  # a print with no |amt| fills nothing and flags the rest UNVERIFIED
 STOP_TRIGGER_TRADES = "trades"  # RK 17:24 BINDING: the only resident-stop trigger basis (first trade at/through)
 STOP_TRIGGER_BASES = (STOP_TRIGGER_TRADES,)
 LIQ_MODEL = "MARK_BFXCI_ISOLATED_V1"  # mark-price liquidation check on bfx_deriv_status_1s (UNVALIDATED)
@@ -194,14 +196,14 @@ def tile_options(spec: Optional[Mapping[str, Any]]) -> dict:
     """The tile's realism options (registry spec ``realism_options``), validated, with defaults + per-row flags.
 
     resident_stop_trigger_basis: trades (the only basis, RK 17:24 BINDING; anything else is ignored).
-    entry_rest_fill_basis: queue_clear (default) | trade_through. stop_basis_unverified is True and
+    entry_rest_fill_basis: trade_through (default, HM C1) | queue_clear (opt-in). stop_basis_unverified is True and
     stop_basis_verified False on every row (plain STOP basis undocumented for derivatives) unless the spec declares
     it verified; funding_unverified is True unless the spec declares a verified funding source."""
     o = (spec or {}).get("realism_options") or {}
-    rb = str(o.get("entry_rest_fill_basis") or REST_FILL_QUEUE_CLEAR).lower()
+    rb = str(o.get("entry_rest_fill_basis") or REST_FILL_DEFAULT).lower()
     verified = bool(o.get("stop_basis_verified"))
     return {"resident_stop_trigger_basis": STOP_TRIGGER_TRADES,
-            "entry_rest_fill_basis": rb if rb in REST_FILL_BASES else REST_FILL_QUEUE_CLEAR,
+            "entry_rest_fill_basis": rb if rb in REST_FILL_BASES else REST_FILL_DEFAULT,
             "time_exit_basis": "CLOCK", "stop_basis_unverified": not verified, "stop_basis_verified": verified,
             "funding_unverified": not bool(o.get("funding_verified"))}
 
@@ -246,28 +248,37 @@ def queue_ahead_at(direction: Any, limit_px: Any, book: Optional[Mapping[str, An
 
 
 def maker_rest_step(direction: Any, limit_px: Any, remaining: float, queue_ahead: float,
-                    trades: Iterable[Mapping[str, Any]], fill_basis: str = REST_FILL_QUEUE_CLEAR) -> dict:
+                    trades: Iterable[Mapping[str, Any]], fill_basis: str = REST_FILL_DEFAULT) -> dict:
     """Advance a resting entry limit over trade prints (oldest first). A print THROUGH the limit (sell below a buy
-    limit / buy above a sell limit) fills us (trade-through); with ``fill_basis`` queue_clear (default) a print AT the
-    limit on the aggressor side first depletes the queue ahead, then fills us; with trade_through (per-tile option)
-    at-limit prints never fill us. Partials allowed. Returns fills [(ts, px, qty)], remaining, queue_ahead."""
+    limit / buy above a sell limit) fills us (trade-through), capped at that print's printed |amt|; with
+    ``fill_basis`` trade_through (default, HM C1) at-limit prints never fill us; with queue_clear (opt-in) a print AT
+    the limit on the aggressor side first depletes the queue ahead, then fills us. HM C1: a print whose amt is None
+    or 0 has no known size or aggressor: it fills NOTHING and is counted in ``unsized_prints`` (the caller stamps
+    UNSIZED_PRINT_UNVERIFIED). Partials allowed. Returns fills [(ts, px, qty)], remaining, queue_ahead,
+    unsized_prints."""
     d, lp = _dir(direction), _f(limit_px)
     rem = max(0.0, float(remaining or 0))
     q = max(0.0, float(queue_ahead or 0))
     fills = []
+    unsized = 0
     if d is None or lp is None or rem <= 0:
-        return {"fills": fills, "remaining": rem, "queue_ahead": q}
+        return {"fills": fills, "remaining": rem, "queue_ahead": q, "unsized_prints": 0}
     for tr in trades or ():
         px, ts, amt = _f(tr.get("px")), _f(tr.get("ts")), _f(tr.get("amt"))
         if px is None or ts is None or rem <= 0:
             continue
         size = abs(amt) if amt else 0.0
-        # aggressor: Bitfinex signed amount, negative = sell aggressor (hits bids), positive = buy aggressor
-        hits_us = (amt is None or amt < 0) if d == "LONG" else (amt is None or amt > 0)
         through = px < lp - 1e-9 if d == "LONG" else px > lp + 1e-9
         at = abs(px - lp) <= 1e-9
+        if size <= 0:
+            # HM C1: no printed size -> size 0 (never the whole remainder) and no known aggressor (never "hits us").
+            if through or at:
+                unsized += 1
+            continue
+        # aggressor: Bitfinex signed amount, negative = sell aggressor (hits bids), positive = buy aggressor
+        hits_us = amt < 0 if d == "LONG" else amt > 0
         if through:
-            take = rem if not size else min(rem, size)
+            take = min(rem, size)  # capped at the print's printed |amt|
             fills.append((ts, lp, take))
             rem -= take
         elif at and hits_us and size > 0 and fill_basis != REST_FILL_TRADE_THROUGH:
@@ -279,7 +290,7 @@ def maker_rest_step(direction: Any, limit_px: Any, remaining: float, queue_ahead
             take = min(rem, avail)
             fills.append((ts, lp, take))
             rem -= take
-    return {"fills": fills, "remaining": round(rem, 12), "queue_ahead": q}
+    return {"fills": fills, "remaining": round(rem, 12), "queue_ahead": q, "unsized_prints": unsized}
 
 
 def vwap(fills: Iterable) -> tuple:

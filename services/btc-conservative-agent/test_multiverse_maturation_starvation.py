@@ -11,7 +11,6 @@ written (no CONTROL_V1 entry-grid intent, analyzer entry specs 304 -> 4).
 import ast
 import os
 import sys
-import tempfile
 import types
 import unittest
 from collections import Counter
@@ -24,7 +23,6 @@ os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
-from chase_offset_touch_grid import CHASE_POLICIES, OFFSET_PCT_GRID
 from collector_v22_schema import MAX_ENTRY_WINDOW_SEC, MAX_HOLD_PERIOD_SEC
 
 T0 = 1_790_935_000.0
@@ -237,47 +235,6 @@ def _bars(signal_ts, start_min, end_min, price=86000.0):
 class ControlV1EmissionCountTests(unittest.TestCase):
     """One decision -> exactly one CONTROL_V1 event carrying the full entry grid."""
 
-    def test_one_full_grid_event_per_decision_only_after_path_window(self):
-        signal_ts = 1_790_950_000.0
-        source = _taker_row("xvp-emission", signal_ts, 0.0)
-        source.pop("_finalize_at")
-        source.update({"signal_price": 86000.0, "final_direction": "LONG", "qty": 0.00029})
-        appended = []
-        with _SavedCollectorState(), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
-            clock = {"now": signal_ts + 600.0}
-
-            def path(ts):
-                end = int((clock["now"] - signal_ts) // 60)
-                return _bars(signal_ts, -70, end), {"window_state": "COMPLETE", "late_backfill": False}
-
-            with mock.patch.object(bot, "_data_sync_runtime_root", return_value=Path(root)), \
-                 mock.patch.object(bot, "_collector_v22_epoch_id", return_value="epoch-mv-test"), \
-                 mock.patch.object(bot, "_collector_source_in_current_epoch", return_value=True), \
-                 mock.patch.object(bot, "storage_blocks_new_events", return_value=False), \
-                 mock.patch.object(bot, "_execution_trade_is_terminal", return_value=False), \
-                 mock.patch.object(bot, "_collector_path_candles_1m", side_effect=path), \
-                 mock.patch.object(bot, "_append_order_multiverse_row",
-                                   side_effect=lambda record, obs: appended.append(record)), \
-                 mock.patch.object(bot, "_schedule_collector_v22_provisional_merge"), \
-                 mock.patch.object(bot.time, "time", side_effect=lambda: clock["now"]):
-                bot._order_multiverse_pending_src["xvp-emission"] = dict(source)
-                bot._collector_v22_last_merge = clock["now"]
-                bot._maybe_complete_pending_order_multiverse(from_worker=True)
-                self.assertEqual(appended, [])
-                self.assertEqual(bot._order_multiverse_maturation_attempts.get("xvp-emission", 0), 0)
-
-                clock["now"] = signal_ts + MAX_ENTRY_WINDOW_SEC + MAX_HOLD_PERIOD_SEC + 300.0
-                bot._collector_v22_last_merge = clock["now"]
-                for _ in range(3):
-                    bot._maybe_complete_pending_order_multiverse(from_worker=True)
-        self.assertEqual(len(appended), 1)
-        event = appended[0]
-        self.assertEqual(event["envelope"]["policy_id"], "CONTROL_V1")
-        self.assertEqual(len(event["entry_children"]), len(OFFSET_PCT_GRID) * len(CHASE_POLICIES))
-        self.assertEqual(
-            {child["entry_policy_id"] for child in event["entry_children"]},
-            {f"OFFSET_{offset:.2f}_CHASE_{policy['id']}" for offset in OFFSET_PCT_GRID for policy in CHASE_POLICIES},
-        )
 
 
 def _bot_function_source(name):

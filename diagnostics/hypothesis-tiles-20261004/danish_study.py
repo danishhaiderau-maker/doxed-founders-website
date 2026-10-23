@@ -134,7 +134,7 @@ def main() -> int:
     ap.add_argument("--cap", type=int, default=3)
     a = ap.parse_args()
     mirror = Path(a.mirror)
-    es._TAPE = gg.load_tape(mirror, Path(a.tier_a))
+    es._TAPE = es.load_tape_or_blocked(mirror, Path(a.tier_a))
     sig = es.ai_signals(mirror, es._TAPE, "AI_COMMITTED", fade=True)
     horizon = TTL + gg.PATH_END_SEC + 60
     ok = [s for s in sig if es._TAPE.t0 <= s.start and s.start + horizon <= es._TAPE.end and spread_ok(s)]

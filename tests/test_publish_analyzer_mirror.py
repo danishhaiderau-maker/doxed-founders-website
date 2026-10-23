@@ -70,6 +70,30 @@ def _validate(bundle_path):
 def test_bundle_passes_the_fly_receiver_and_discloses_every_exclusion(tmp_path, monkeypatch):
     monkeypatch.setattr(pub, "MAX_MEMBER_BYTES", 64)
     root = _report_root(tmp_path, extra_reports=(("huge_report.json", b"x" * 100),))
+    extra = tmp_path / "supplemental_report.json"
+    extra.write_text('{"rows": []}', encoding="utf-8")
+    genome = tmp_path / "genome_grid_report.json"
+    genome.write_text('{"rows": []}', encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    built = pub.build_bundle(root, work, supplemental=[extra, genome])
+    manifest, embedded = _validate(built["bundle_path"])
+    paths = {row["path"] for row in manifest["files"]}
+    assert "reports/tile_report.json" in paths and "reports/supplemental_report.json" in paths
+    assert "reports/shadow.jsonl.gz" not in paths and "reports/huge_report.json" not in paths
+    assert "reports/genome_grid_report.json" not in paths
+    subset = json.loads(embedded)["mirror_publication"]
+    reasons = {row["path"]: row["reason"] for row in subset["excluded"]}
+    assert reasons == {"reports/shadow.jsonl.gz": "SUFFIX_NOT_ACCEPTED_BY_FLY", "reports/huge_report.json": "MEMBER_OVER_50MB",
+                       "reports/genome_grid_report.json": "R3_QUARANTINED"}
+    source_sha = hashlib.sha256((root / "report_manifest.json").read_bytes()).hexdigest()
+    assert subset["source_report_manifest_sha256"] == source_sha == manifest["original_report_manifest_sha256"]
+    assert manifest["mirror_subset"] is True and manifest["analyzer_generated_at"] == GENERATED_AT
+
+
+def test_r3_quarantined_reports_are_never_published(tmp_path):
+    """R3: genome grid / exit-ladder outputs price on 1s tape or ticker ticks."""
+    root = _report_root(tmp_path, extra_reports=(("exit_ladder_simulator_report.json", b'{"profiles": []}'),))
     genome = tmp_path / "genome_grid_report.json"
     genome.write_text('{"rows": []}', encoding="utf-8")
     work = tmp_path / "work"
@@ -77,14 +101,22 @@ def test_bundle_passes_the_fly_receiver_and_discloses_every_exclusion(tmp_path, 
     built = pub.build_bundle(root, work, supplemental=[genome])
     manifest, embedded = _validate(built["bundle_path"])
     paths = {row["path"] for row in manifest["files"]}
-    assert "reports/tile_report.json" in paths and "reports/genome_grid_report.json" in paths
-    assert "reports/shadow.jsonl.gz" not in paths and "reports/huge_report.json" not in paths
-    subset = json.loads(embedded)["mirror_publication"]
-    reasons = {row["path"]: row["reason"] for row in subset["excluded"]}
-    assert reasons == {"reports/shadow.jsonl.gz": "SUFFIX_NOT_ACCEPTED_BY_FLY", "reports/huge_report.json": "MEMBER_OVER_50MB"}
-    source_sha = hashlib.sha256((root / "report_manifest.json").read_bytes()).hexdigest()
-    assert subset["source_report_manifest_sha256"] == source_sha == manifest["original_report_manifest_sha256"]
-    assert manifest["mirror_subset"] is True and manifest["analyzer_generated_at"] == GENERATED_AT
+    assert not {"reports/exit_ladder_simulator_report.json", "reports/genome_grid_report.json"} & paths
+    reasons = {row["path"]: row["reason"] for row in json.loads(embedded)["mirror_publication"]["excluded"]}
+    assert reasons["reports/exit_ladder_simulator_report.json"] == "R3_QUARANTINED"
+    assert reasons["reports/genome_grid_report.json"] == "R3_QUARANTINED"
+
+
+def test_r3_quarantine_lists_match_the_producer_module():
+    sys.path.insert(0, str(ROOT / "services" / "btc-conservative-agent"))
+    from research import r3_quarantine
+
+    assert pub.R3_QUARANTINED_FILES == r3_quarantine.QUARANTINED_FILES
+    import self_aware.analyzer_sections as sections
+    import self_aware.contracts as contracts
+
+    assert sections.GENOME_GRID_R3_QUARANTINED is contracts.GENOME_GRID_R3_QUARANTINED is \
+        r3_quarantine.is_active("GENOME_GRID")
 
 
 def test_a_generation_rewritten_during_snapshot_is_refused(tmp_path):

@@ -4061,7 +4061,12 @@ def _simulate_ticks_fast_cut_ladder(
     fill_t=None, mfe_protect_pct=None, hard_stop_margin_pct=HARD_STOP_MARGIN_PCT,
 ):
     """Tick walk: fast cut + profit ladder only (no thesis flip — needs live scores).
-    Replay ticks from bot v1.1.18+ use executable depth marks; older ticks used last trade."""
+    Replay ticks from bot v1.1.18+ use executable depth marks; older ticks used last trade.
+
+    R3 WARNING: this walks signal_replay ticker/BBO ticks. exit_ladder_simulator_report is
+    quarantined (research/r3_quarantine.py EXIT_LADDER_SIM); the other callers (stop_* sweeps,
+    qualified_exit_policy_grid_report, _sim_replay_pnl_*, fast_cut_* reports) are flagged for the
+    RK rebuild on paper_fill + quote_trigger and must not feed countable evidence."""
     if not ticks or not entry or entry <= 0:
         return None
     dir_factor = 1 if str(direction).upper() == "LONG" else -1
@@ -4806,7 +4811,12 @@ def qualified_exit_policy_grid_report():
         "selected_on_train": selected,
         "conclusions_allowed": conclusions_allowed,
         "live_policy_change_allowed": conclusions_allowed,
-        "verdict": "QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed else "INSUFFICIENT_QUALIFIED_HOLDOUT",
+        # HM C9 (R17): signal_replay and counterfactual writers are retired, so with no replay rows the grid
+        # is "source retired (R17)", never INSUFFICIENT_QUALIFIED_HOLDOUT.
+        "verdict": ("QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed
+                    else "SOURCE_RETIRED_R17" if not all_replays and not qualified
+                    else "INSUFFICIENT_QUALIFIED_HOLDOUT"),
+        "source_status": "source retired (R17)" if not all_replays and not qualified else None,
         "preliminary_descriptive_estimate": {
             "status": "DESCRIPTIVE_ONLY" if selected else "NO_ESTIMATE",
             "selected_on_train": selected,
@@ -4988,7 +4998,12 @@ def qualified_chase_policy_report():
         "selected_holdout": validation,
         "descriptive_conclusion_allowed": descriptive_qualified,
         "live_policy_change_allowed": False,
-        "verdict": "QUALIFIED_DESCRIPTIVE_HOLDOUT" if descriptive_qualified else "INSUFFICIENT_QUALIFIED_HOLDOUT",
+        # HM C9 (R17): with no natural rows the only producer left was the retired counterfactual entry replay.
+        "verdict": ("QUALIFIED_DESCRIPTIVE_HOLDOUT" if descriptive_qualified
+                    else "SOURCE_RETIRED_R17" if not rows
+                    else "INSUFFICIENT_QUALIFIED_HOLDOUT"),
+        "source_status": "source retired (R17)" if not rows else None,
+        "counterfactual_source": "source retired (R17)",
         "question_outputs": {
             "chase": {
                 "status": "QUALIFIED_DESCRIPTIVE" if descriptive_qualified else "PRELIMINARY_ONLY" if rows else "NO_EVIDENCE",
@@ -14151,6 +14166,9 @@ def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tap
         "slippage_usd": slippage_usd, "slippage_model": slippage_model or None,
         "fee_profile": first.get("fee_profile"), "entry_fee_rate": entry_fee_rate,
         "exit_fee_rate": exit_fee_rate, "points": points,
+        # HM #848 C4 / RK R3: priced on market_microstructure_1s -> never countable (r17_exclusion rejects it)
+        "entry_price_source": "MARKET_MICROSTRUCTURE_1S", "r17_entry_status": "R17_UNPROVEN_ENTRY",
+        "r17_entry_reason": "ENTRY_PRICED_ON_1S_TAPE",
         "conservative_evaluator_receipt": evaluator,
     }
 
@@ -18860,16 +18878,31 @@ def exit_ladder_simulator_report(trades=None, session=None):
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LADDER SIMULATOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
+    from research import r3_quarantine
+
+    if r3_quarantine.is_active("EXIT_LADDER_SIM"):
+        # R3: this simulator replays signal_replay ticker/BBO ticks through the
+        # fast-cut ladder. Run nothing and write nothing until it is rebuilt on
+        # paper_fill + quote_trigger (R4).
+        print(f"   exit ladder simulator: {r3_quarantine.STATUS} — not run, no report written. "
+              f"{PIPELINE_ENFORCEMENT_TAG}")
+        return r3_quarantine.disabled_payload(
+            "EXIT_LADDER_SIM", generated_at=datetime.now(timezone.utc).isoformat(), scope=scope,
+        )
+
     from research.exit_ladder_paper_cohort import filter_for_exit_ladder
 
     raw_replays = _load_jsonl_replays()
     trades, replays, ladder_cohort = filter_for_exit_ladder(
         trades, raw_replays, epoch_id=_fresh_epoch_provenance().get("fresh_epoch_id"),
+        data_dir=os.path.dirname(os.path.abspath(_agent_data_path(SIGNAL_REPLAY_FILE))),
     )
     print(
         f"   exit ladder simulator: {ladder_cohort['cohort']} eligibility "
         f"{ladder_cohort['eligible_count']}/{ladder_cohort['current_registry_trades']} "
-        f"(exclusions={ladder_cohort['exclusion_reason_counts']}). {PIPELINE_ENFORCEMENT_TAG}"
+        f"(exclusions={ladder_cohort['exclusion_reason_counts']}; "
+        f"R17_UNPROVEN={ladder_cohort['r17_unproven_count']} {ladder_cohort['r17_unproven_reasons']}). "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
     )
     raw_replays_available = len(raw_replays)
     executed_ids = set()
@@ -20165,7 +20198,11 @@ def _save_rolling_snapshot():
             shutil.copy2(src, dst)
             return True
 
+        from research.r3_quarantine import quarantined_file as _r3_quarantined
+
         for fname in ANALYZER_JSON_REPORT_FILES:
+            if _r3_quarantined(fname):
+                continue  # R3: never snapshot a quarantined producer's stale output
             if os.path.isfile(fname) and _copy(fname, os.path.join(dest, os.path.basename(fname))):
                 copied += 1
         rep_dir = REPORTS_DIR
@@ -20173,6 +20210,8 @@ def _save_rolling_snapshot():
             snap_rep = os.path.join(dest, "reports")
             os.makedirs(snap_rep, exist_ok=True)
             for p in glob.glob(os.path.join(rep_dir, "*.json")):
+                if _r3_quarantined(p):
+                    continue
                 _copy(p, os.path.join(snap_rep, os.path.basename(p)))
         for txt in (
             EXECUTIVE_SUMMARY_FILE, RESEARCH_FINDINGS_FILE, REPORT_MANIFEST_FILE,
@@ -22064,7 +22103,9 @@ def write_report_manifest(
         baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
-        from research.entry_baseline_replay import write_replay_report
+        from research.entry_baseline_replay import replay_health, write_replay_report
+
+        baseline_replay["health"] = replay_health(baseline_replay)
 
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
         replay_sidecar = write_replay_report(
@@ -22082,6 +22123,8 @@ def write_report_manifest(
             "analysis_provenance": analysis_provenance,
             "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
             "summaries": baseline_replay.get("summaries"),
+            "status": baseline_replay["health"]["status"],
+            "health": baseline_replay["health"],
             "episode_receipts_sidecar": replay_sidecar,
         })
     except Exception as exc:
@@ -22121,7 +22164,13 @@ def write_report_manifest(
         })
     except Exception as exc:
         lifecycle_bundle_inventory_error = f"{type(exc).__name__}: {exc}"
+    from research.r3_quarantine import quarantined_file as _r3_quarantined
+
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
+        if _r3_quarantined(fname):
+            # R3: quarantined producers are never members of a generation,
+            # even if a stale working copy is still on disk.
+            continue
         if fname == DYNAMIC_POLICY_ANALYSIS_REPORT_FILE:
             # Built below from this invocation's discovery, never a stale file.
             continue

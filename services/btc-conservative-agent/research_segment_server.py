@@ -17,7 +17,7 @@ Routes (all require ``X-Bot-Admin-Token``; fail closed when unset):
     GET  /api/research-segments/<prefix>/custody     latest laptop custody receipt
     POST /api/research-segments/<prefix>/custody     laptop custody receipt (write-once per seq)
     GET  /api/research-segments/<prefix>/prune-mode  pruning mode + last plan/result
-    POST /api/research-segments/<prefix>/prune-mode  {"mode": "off"|"dry_run"|"enforce"}
+    POST /api/research-segments/<prefix>/prune-mode  409 CUSTODY_PRUNE_RETIRED_R5 (HM C4, R5)
 
 Files are immutable, so nothing is rehashed per request: the segment ETag is
 the ``segment_sha256`` declared by its manifest and the manifest ETag is its
@@ -210,6 +210,13 @@ class SegmentServer:
             "prune_last_at": status.get("prune_last_at"),
             "prune_deleted_bytes_total": status.get("prune_deleted_bytes_total"),
             "prune_last_plan": status.get("prune_last_plan"),
+            # HM C5/C6 (23 Oct): R5 segment retention (no custody gate) and the laptop ACK clock.
+            "r5_segment_red": status.get("r5_segment_red") or {},
+            "r5_segment_over_cap": status.get("r5_segment_over_cap"),
+            "r5_segment_last_deleted": status.get("r5_segment_last_deleted"),
+            "r5_segment_last_at": status.get("r5_segment_last_at"),
+            "r5_segment_store_bytes": status.get("r5_segment_store_bytes"),
+            "laptop_ack_advanced_at": status.get("laptop_ack_advanced_at"),
         }
         payload.update(self._sync_view(payload))
         return self._respond(start_response, "200 OK", payload)
@@ -442,6 +449,10 @@ class SegmentServer:
             raw, error = self._read_body(environ, MAX_MODE_BODY_BYTES)
             if error:
                 return self._respond(start_response, error, {"error": "MODE_BODY_SIZE"})
+            if prune.CUSTODY_PRUNE_RETIRED:  # HM C4: custody-gated prune retired under R5
+                return self._respond(start_response, "409 Conflict", {
+                    "error": prune.CUSTODY_PRUNE_RETIRED_REASON, "mode": "off",
+                    "retention": "R5: cap/age, no custody gate (r5_segment_pass + rotation_cap)"})
             try:
                 requested = json.loads(raw).get("mode")
                 prune.write_mode(self.state_dir, requested, clock=self.clock)

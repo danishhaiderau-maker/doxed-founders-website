@@ -28,7 +28,25 @@ def _grid(generated_at=None, **over):
     return rep
 
 
+def test_genome_grid_api_r3_quarantined_never_reads_report(tmp_path, monkeypatch):
+    path = tmp_path / "genome_grid_report.json"
+    path.write_text(json.dumps(_grid()), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "GENOME_GRID_REPORT_PATH", path)
+    monkeypatch.setattr(dashboard, "_API_RESPONSE_CACHE", {})
+    client = dashboard.app.test_client()
+    body = client.get("/api/genome-grid").get_json()
+    assert body["status"] == "R3_QUARANTINED" and "top_100_by_world" not in body
+    assert client.get("/api/research").get_json()["status"] == "R3_QUARANTINED"
+    body = client.get("/api/research/top_100_policies").get_json()
+    assert body["status"] == "R3_QUARANTINED" and body["rows"] == []
+    checks = ds.genome_grid_checks(body, {}, 0.0)
+    assert [c["id"] for c in checks] == ["genome_grid_present"] and "R3_QUARANTINED" in checks[0]["observed"]
+
+
 def test_genome_grid_api_unavailable_then_ok(tmp_path, monkeypatch):
+    q = dashboard._r3_quarantine
+    monkeypatch.setattr(q, "ACTIVE", set(q.ACTIVE) - {"GENOME_GRID"})
+    monkeypatch.setattr(dashboard, "_API_RESPONSE_CACHE", {})
     path = tmp_path / "genome_grid_report.json"
     monkeypatch.setattr(dashboard, "GENOME_GRID_REPORT_PATH", path)
     client = dashboard.app.test_client()

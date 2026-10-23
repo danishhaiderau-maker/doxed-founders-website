@@ -16,13 +16,14 @@ BASE = "51d926f93"
 # #839 F2/F3 (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result (realism-v2 shared trigger helper / entry quote stamping; R4 pricing intent unchanged for tiles 1-5 except the reviewed realism changes).
 # #840 order model (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core (live order-type model: resident stop, BOT_SENT market exits, model-time exits).
 # #841 RK fixes (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core, paper_fill.py:paper_fill (trades-only stops, first-row-at-or-after resident fill, BFX truncation, liquidation stamp).
+# #842 book exits (23 Oct 2026): intentional pin move for bot.py:get_mark_price, bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay, paper_fill.py:_paper_fill_core (every lane exits on book rows via the shared pricer; no ticker).
 PINNED = {
     "bot.py": {
-        "get_mark_price": "f9c6c2b6cd40d0e9b558ee8b31d73f0a5b0079fc8162ba667a0b8265eba1c707",
-        "_paper_lane_entry_result": "b59bfb4cad002141917823c983b0b73591fe510df7998a34b576b682dfc43b8a",
-        "_tp1_gate": "02d113f32f656a59cc96ad0f1be35e42564e4f9274707f478fc6f1fa07cdae51",
-        "_paper_lane_exit": "1bb5eee23ca7d48b6fe54be33a521861315f67b7bb29cb78b36d877f24e6e734",
-        "_disloc_delay": "bd27730709158b9bfdcc944c6f303603aa9c2b2f7ccf63d91fc4c485b9bbb9f4"
+        "get_mark_price": "b03f13d6030996983221371bede76b67fd2f610c03922e9aa3f142ece840b9c6",
+        "_paper_lane_entry_result": "a227911677f4b9c9f80b0bec463171fe9e06e4190d2ddac5e1d51005193ef05d",
+        "_tp1_gate": "49ad3cb852da75e99879f00713e6a43d6b2b1f315f4d8e6066b6ced711b17062",
+        "_paper_lane_exit": "39f0f42b7c4259ce2a64e3af253704a9862898a2d0f586a6fa09954c74e5cdfa",
+        "_disloc_delay": "abbdf95f84130c322712ff3193a42d6eca11fc1683ddead40d894c79b2c04d86"
     },
     "paper_fill.py": {
         "_f": "c70d10da2af1181b4d56905d296e71c2b6da8603ab5d7e9a22c0ad0b0b6e303f",
@@ -30,7 +31,7 @@ PINNED = {
         "_safe": "577c4d1a9927bea25660a9a46802c84fabf3b5d44889bfed82a86e0f042cd002",
         "_snap": "e19ffc0d73e86ae849dff85c6bec6c1e6219883f5c3e1897a2d9666e1bef9f29",
         "taker_side_levels": "2e794b626132b0f1320049fa51683053c6ba948e3b8292aa2bc4a84209efa05b",
-        "_paper_fill_core": "1906314b267651c90cff4dc38fa87e7f248e8a068473aafcdb2b64f0789b59eb",
+        "_paper_fill_core": "02200d0214fd576ad405e90b314a19bef86f4183896f9ebfd88c4c38c940f389",
         "paper_fill": "3205191a41fde2cafbbdd1ebd4f500ccefe44668e5fbb792c6fc03943d008057",
         "book10l_at": "9bfbe8e684e475716e132b2105d7ad27eb43a3fc681db481601698f8b20f62d9",
         "book10l_missing_seconds": "3683b425ea5cf93da7aec4fcebbd26e26e9e5baaf75c52f672ae01d1b2f5b38d",

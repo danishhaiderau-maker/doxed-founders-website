@@ -43,6 +43,12 @@ SCHEMA = "analyzer_mirror_bundle_v2"
 RECEIPT_SCHEMA = "analyzer_mirror_publish_v1"
 ALLOWED_SUFFIXES = frozenset((".html", ".txt", ".json", ".log"))
 MAX_MEMBER_BYTES = 50 * 1024 * 1024
+# R3 quarantine (mirrors services/btc-conservative-agent/research/r3_quarantine.py):
+# producers that price on ticker / 1s tape are never published to the Strategist.
+R3_QUARANTINED_FILES = frozenset((
+    "genome_grid_report.json", "genome_grid_rows.jsonl.gz", "research_api_cache.sqlite3",
+    "research_api_summary.json", "exit_ladder_simulator_report.json",
+))
 # Fly allows 150 MB expanded / 50 MB compressed; keep headroom for the manifests.
 EXPANDED_BUDGET_BYTES = 140 * 1024 * 1024
 MAX_COMPRESSED_BYTES = 48 * 1024 * 1024
@@ -96,6 +102,8 @@ def select_members(report_root: Path, manifest: dict[str, Any], supplemental: li
     expanded = 0
 
     def admit(rel: str, source: Path, declared_size: int | None) -> tuple[bool, str | None, int]:
+        if Path(rel).name in R3_QUARANTINED_FILES:
+            return False, "R3_QUARANTINED", source.stat().st_size if source.is_file() else 0
         if not source.is_file():
             return False, "MISSING", 0
         size = source.stat().st_size

@@ -151,6 +151,10 @@ def _posix_limits(cpu_limit_sec: int, rss_limit_bytes: int) -> Callable[[], None
     return apply
 
 
+
+def _nonneg_int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
 class LifecyclePipelineRuntime:
     """Exactly-one parent scheduler for a bounded credential-free subprocess."""
 
@@ -242,6 +246,9 @@ class LifecyclePipelineRuntime:
             "last_worker_failure_unix": None,
             "last_result": None,
             "last_success_unix": None,
+            # HM C11 (R17): cumulative lifecycles that stopped at QUALIFICATION_HORIZON_RETIRED_R17 across worker
+            # cycles (the worker is a subprocess, so its module counter never reaches the bot process).
+            "qualification_retired_r17_total": 0,
             "pressure": False,
             "emergency": False,
             "overlap_code": None,
@@ -480,6 +487,7 @@ class LifecyclePipelineRuntime:
             "bytes_indexed": scan.get("bytes_indexed"),
             "caught_up": sources_caught_up,
             "stage_counts": dict(pipeline.get("stage_counts") or {}),
+            "qualification_retired_r17_count": _nonneg_int(pipeline.get("qualification_retired_r17_count")),
             "blocker_counts": dict(pipeline.get("blocker_counts") or {}),
             "backlog_pending": backlog_pending,
             "idempotency_bootstrap_pending": bootstrap_pending,
@@ -511,6 +519,8 @@ class LifecyclePipelineRuntime:
                 "last_error_code": None,
                 "last_worker_failure": None,
                 "last_result": summary, "last_success_unix": self.clock(),
+                "qualification_retired_r17_total": _nonneg_int(self._status.get("qualification_retired_r17_total"))
+                + summary["qualification_retired_r17_count"],
                 "receipt_bootstrap": receipt_bootstrap,
                 "overlap_code": None, "source_cleanup_authorized": False,
             })

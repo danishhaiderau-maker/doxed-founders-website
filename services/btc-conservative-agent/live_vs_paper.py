@@ -39,6 +39,14 @@ def _sign(side) -> float:
     return -1.0 if str(side or "").upper() in ("SHORT", "SELL") else 1.0
 
 
+def _anchor_drift(side, paper_anchor, live_fill, traded: bool) -> dict:
+    import order_model as _om
+    out = _om.anchor_drift(side, paper_anchor, live_fill)
+    if not traded:
+        out["stop_anchor_drift_status"] = "LIVE_NOT_TRADED"
+    return out
+
+
 def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] | None, intent: Mapping[str, Any] | None = None,
              skip_reason: str | None = None) -> dict:
     chain, twin, intent = chain or {}, twin or {}, intent or {}
@@ -82,6 +90,10 @@ def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] 
         **{f"paper_{k}": twin.get(f"paper_{k}") for k in _tm.ENTRY_QUOTE_KEYS + _tm.ENTRY_BOOK_KEYS},
         "live_limit_price_sent": _tm.live_limit_price_sent(chain),
         "closed": bool(chain.get("closed")),
+        # HM G5/B2: one pair row per live signal; the twin status says whether both sides exist, and the stop-anchor
+        # drift (paper anchors the exchange stop on the paper fill, live on the live fill) is measured from the pair.
+        "twin_status": ("PAIRED" if chain and twin else "NO_PAPER_TWIN" if chain else "PAPER_ONLY"),
+        **_anchor_drift(twin.get("side"), twin.get("exchange_stop_anchor_px") or p_in, l_in, traded),
     }
     row["missing"] = sorted(k for k in ("paper_fill_ts", "live_exit_price", "live_exit_ts", "funding_usd_paper", "funding_usd_live",
                                          "fill_to_stop_ms") if traded and row.get(k) is None)
@@ -92,7 +104,7 @@ def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, 
           paper_signal_ids: Iterable[str] = (), skip_reasons: Mapping[str, str] | None = None, lane_filter=None, limit: int = 200) -> dict:
     """Rows for every live chain plus every paper signal live never traded (with a reason code)."""
     intents, skip_reasons = intents or {}, skip_reasons or {}
-    rows, seen = [], set()
+    rows, seen, live_ids = [], set(), set()
     for ch in chains:
         cid = str(ch.get("correlation_id") or "")
         if not cid or cid in seen:
@@ -100,6 +112,7 @@ def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, 
         if lane_filter and not lane_filter(ch, twins.get(cid)):
             continue
         seen.add(cid)
+        live_ids.add(cid)
         rows.append(pair_row(cid, ch, twins.get(cid), intents.get(cid), skip_reasons.get(cid)))
     live_spans = [(_f(c.get("fill_at_ts")), _f(c.get("exit_at_ts")) or (None if not c.get("closed") else _f(c.get("closed_at_ts"))), str(c.get("correlation_id")))
                   for c in chains if _f(c.get("fill_at_ts"))]
@@ -117,10 +130,16 @@ def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, 
         rows.append(pair_row(cid, None, twins.get(cid), intents.get(cid), skip_reasons.get(cid)))
     rows = rows[-limit:]
     traded = [r for r in rows if r["live_traded"]]
+    live_rows = [r for r in rows if r["twin_status"] != "PAPER_ONLY"]
     by_reason: dict = {}
     for r in rows:
         if not r["live_traded"]:
             by_reason[r["live_not_traded_reason"]] = by_reason.get(r["live_not_traded_reason"], 0) + 1
     return {"schema": SCHEMA, "n_signals": len(rows), "n_live_traded": len(traded), "n_paper_only": len(rows) - len(traded),
             "paper_only_by_reason": by_reason, "n_missing_fields": sum(1 for r in traded if r["missing"]), "rows": rows,
+            # HM G5: exactly one pair row per live signal (duplicate chains collapse by correlation id);
+            # n_live_signals is counted before the row limit
+            "n_live_signals": len(live_ids), "n_live_pair_rows": len(live_rows),
+            "n_no_paper_twin": sum(1 for r in live_rows if r["twin_status"] == "NO_PAPER_TWIN"),
+            "one_pair_row_per_live_signal": len(live_rows) == len({r["trade_id"] for r in live_rows}),
             "note": "read-only; no summary computed here (HM). Null = not reported by the executor/paper ledger (see missing). Funding only, no fees."}

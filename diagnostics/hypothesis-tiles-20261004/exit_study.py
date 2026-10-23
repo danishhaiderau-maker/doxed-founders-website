@@ -621,6 +621,16 @@ def run_tile(name, signals, base_entry, latency, cap, base_min, *, session_gate=
     return res
 
 
+def load_tape_or_blocked(mirror, tier_a):
+    """HM #848 nit: the 1s tape is R3-quarantined; report BLOCKED (exit 3) instead of a traceback."""
+    from research.r3_quarantine import R3QuarantinedSource  # noqa: PLC0415
+    try:
+        return gg.load_tape(mirror, tier_a)
+    except R3QuarantinedSource as exc:
+        print(json.dumps({"status": "BLOCKED_R3_QUARANTINE", "reason": str(exc)}), file=sys.stderr)
+        raise SystemExit(3) from None
+
+
 def main() -> int:
     global _TAPE
     ap = argparse.ArgumentParser()
@@ -634,7 +644,7 @@ def main() -> int:
     a = ap.parse_args()
     mirror = Path(a.mirror)
     t0 = time.time()
-    _TAPE = gg.load_tape(mirror, Path(a.tier_a))
+    _TAPE = load_tape_or_blocked(mirror, Path(a.tier_a))
     print(f"tape {time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime(_TAPE.t0))} .. "
           f"{time.strftime('%Y-%m-%dT%H:%MZ', time.gmtime(_TAPE.end))} ({time.time()-t0:.0f}s)", flush=True)
     out: dict[str, Any] = {"schema": "hypothesis_tiles_entry_exit_study_v1",

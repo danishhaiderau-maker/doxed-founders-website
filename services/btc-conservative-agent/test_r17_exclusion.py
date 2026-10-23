@@ -331,3 +331,109 @@ def test_fly_dashboard_shows_r17_label_per_tile():
     lane = bad["research_lane"].upper()
     text = ns["_dashboard_r17_tile_text"]([{"lane": lane, "label": "GS1"}])
     assert text.startswith("GS1: 1 countable, R17_UNPROVEN: 1 of 2 rows excluded (STOP_COVERAGE_MISSING=1)")
+
+
+# RK #847 condition 1 / R3: an entry priced on the 1s tape (research_v3_candidates' CONSERVATIVE entry via
+# evaluate_limit_fill on market_microstructure_1s) is never countable. The reason lives in the SAME contract
+# module (r17_fields.FORBIDDEN + r17_exclusion.proof_failures); there is no second filter.
+@pytest.mark.parametrize("field,value", [
+    ("entry_price_source", "MARKET_MICROSTRUCTURE_1S"),
+    ("entry_price_source", " market_microstructure_1s "),
+    ("entry_price_source", "BOOK_TAPE_1S"),
+    ("entry_price_source", "TICKER"),
+    ("r17_entry_status", "R17_UNPROVEN_ENTRY"),
+    ("r17_unproven_reason", "R17_UNPROVEN_ENTRY"),
+])
+def test_entry_priced_on_1s_tape_is_never_countable_even_with_full_proof(field, value):
+    row = good_row(trade_id="gs1-dddddddddddd", **{field: value})
+    assert r17.non_countable_reason(row) == "R17_UNPROVEN:ENTRY_PRICED_ON_1S_TAPE"
+    assert r17.stamp_on_write(dict(row))["fresh_eligible"] is False
+    assert paper_fill.row_fresh_eligible(row) is False
+
+
+def test_book_entry_price_source_is_not_flagged():
+    for value in ("BFX_BOOK_10L", "book", None, ""):
+        assert r17.non_countable_reason(good_row(entry_price_source=value)) is None
+
+
+def test_entry_priced_on_1s_tape_reason_lives_in_the_one_contract_module():
+    import r17_fields
+    import research_v3_candidates
+    assert r17_fields.REASON_ENTRY_PRICED_ON_1S_TAPE == "ENTRY_PRICED_ON_1S_TAPE"
+    assert set(r17_fields.FORBIDDEN) == {"entry_price_source", *r17_fields.ENTRY_STATUS_FIELDS}
+    # the stamper imports the constants from the contract module; it does not define its own (R4)
+    assert research_v3_candidates.R17_UNPROVEN_ENTRY is r17_fields.R17_UNPROVEN_ENTRY
+    import book_limit_entry
+    assert book_limit_entry.R17_UNPROVEN_ENTRY is r17_fields.R17_UNPROVEN_ENTRY
+    # #848: the entry is book-priced now; no 1s source constant is left in the stamper
+    assert book_limit_entry.ENTRY_PRICE_SOURCE_BOOK not in r17_fields.ENTRY_PRICE_SOURCES_1S
+    for name in ("research_v3_candidates.py", "book_limit_entry.py"):
+        src = (ROOT / name).read_text()
+        assert 'R17_UNPROVEN_ENTRY = "' not in src and 'ENTRY_PRICE_SOURCE_1S' not in src
+
+
+def _rows_as_research_v3_candidates_emits_them():
+    """The receipt and the outcome research_v3_candidates really emits for a 1s-priced CONSERVATIVE entry."""
+    import test_research_v3_candidates as T
+    import research_v3_candidates as C
+    src = T.conservative_source(visible_qty=0.25)
+    receipt = C._conservative_child_receipt(src, src["entry_children"][0])
+    store = C._ProtectionCellStore()
+    cell = (C._KIND_REPLAYED, C._ENTRY_UNPROVEN_PREFIX + "PARTIAL_FILL", "ATR_TP", 1.5, 0.5, 0.1, 0.2)
+    diag = (C._KIND_NO_FILL, None, None, float("nan"))
+    store.append(0, 0, 0, 0, store.encode_conservative(cell), store.encode_diagnostic(diag))
+    outcome = store.conservative_outcome(0, "BOOK_WALK", {})
+    receipt = dict(receipt)
+    # #848 prices the entry on the book, so a fresh receipt is no longer 1s-priced; stamp it the way pre-#848
+    # (legacy, still on disk) receipts are, so the test exercises exactly those rows.
+    import r17_fields
+    receipt["entry_price_source"] = r17_fields.ENTRY_PRICE_SOURCE_1S
+    return {"receipt": receipt, "outcome": dict(outcome)}
+
+
+@pytest.mark.parametrize("which", ["receipt", "outcome"])
+def test_845_fail_closed_rule_alone_already_rejects_1s_priced_entries(which, monkeypatch):
+    """Defence in depth: with the ENTRY_PRICED_ON_1S_TAPE check switched OFF, #845's positive contract by itself
+    still rejects the rows research_v3_candidates emits for a 1s-priced entry (no book trigger, no measured delay,
+    no book walk, no stop coverage)."""
+    row = _rows_as_research_v3_candidates_emits_them()[which]
+    with_check = r17.proof_failures(row)
+    assert "ENTRY_PRICED_ON_1S_TAPE" in with_check
+    monkeypatch.setattr(r17, "entry_priced_on_1s_tape", lambda _row: False)
+    alone = r17.proof_failures(row)
+    assert "ENTRY_PRICED_ON_1S_TAPE" not in alone
+    assert {"TRIGGER_SOURCE_MISSING", "DELAY_SOURCE_MISSING", "ENTRY_PRICE_AGE_MISSING",
+            "STOP_COVERAGE_MISSING"} <= set(alone)
+    assert r17.non_countable_reason(row).startswith("R17_UNPROVEN:")
+
+
+def test_entry_proof_failures_is_the_entry_subset_of_proof_failures():
+    """HM #848 C3: research entry receipts gate on the same entry rule the row check uses (one module)."""
+    assert r17.entry_proof_failures(good_row()) == []
+    bad = good_row(trigger_price_source="ticker", delay_source="default", evidence_status="INCOMPLETE",
+                   entry_book_age_ms=None, entry_price_source="market_microstructure_1s")
+    entry = r17.entry_proof_failures(bad)
+    assert entry == ["TRIGGER_NOT_BOOK", "DELAY_NOT_MEASURED", "ENTRY_EVIDENCE_NOT_COMPLETE",
+                     "ENTRY_PRICE_AGE_MISSING", "ENTRY_PRICED_ON_1S_TAPE"]
+    assert set(entry) <= set(r17.proof_failures(bad))
+    exit_only = good_row(exit_walk_bp=None, stop_coverage=None)
+    assert r17.entry_proof_failures(exit_only) == [] and r17.proof_failures(exit_only)
+
+
+def test_c4_every_1s_limit_fill_receipt_is_stamped_unproven_in_one_place():
+    """HM #848 C4: conservative_limit_fill (1s tape) stamps R17_UNPROVEN_ENTRY + ENTRY_PRICED_ON_1S_TAPE for every
+    caller (analyzer v62, entry_baseline_replay, policy_evidence_evaluator, latency_schedule_replay,
+    conservative_fill_cohort); the analyzer tape join carries it at top level too."""
+    import r17_fields
+    from research.conservative_limit_fill import evaluate_limit_fill
+    r = evaluate_limit_fill([], direction="LONG", requested_qty=1.0, chase_schedule=[])
+    assert r["entry_price_source"] == r17_fields.ENTRY_PRICE_SOURCE_1S
+    assert r["r17_entry_status"] == r17_fields.R17_UNPROVEN_ENTRY
+    assert r["r17_entry_reason"] == r17_fields.REASON_ENTRY_PRICED_ON_1S_TAPE
+    assert "ENTRY_PRICED_ON_1S_TAPE" in r17.proof_failures(good_row(**{k: r[k] for k in (
+        "entry_price_source", "r17_entry_status")}))
+    src = (ROOT / "analyzer_research_engine_v62.py").read_text()
+    join = src[src.index('"schema": "analyzer_compressed_chase_tape_join_v2"'):]
+    join = join[:join.index('"conservative_evaluator_receipt": evaluator')]
+    assert '"r17_entry_status": "R17_UNPROVEN_ENTRY"' in join and '"ENTRY_PRICED_ON_1S_TAPE"' in join
+    assert r17_fields.R17_UNPROVEN_ENTRY == "R17_UNPROVEN_ENTRY" and r17_fields.ENTRY_PRICE_SOURCE_1S == "MARKET_MICROSTRUCTURE_1S"

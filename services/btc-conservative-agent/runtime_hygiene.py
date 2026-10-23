@@ -61,6 +61,7 @@ PRE_EPOCH_LEDGERS = (
     "trade_outcome.jsonl", "fill_markouts.jsonl", "execution_funnel.jsonl",
     "signal_replay.jsonl", "post_exit_replay.jsonl", "shadow_outcome.jsonl", "shadow_exit_paths.jsonl",
     "taker_signal_counterfactuals.jsonl", "adaptive_entry_decisions.jsonl",
+    "cap_receipts.jsonl", "v22_discard_receipts.jsonl",
 )
 # Restart-recovery or hash-sealed state: never moved by this module.
 NEVER_MOVE = frozenset({

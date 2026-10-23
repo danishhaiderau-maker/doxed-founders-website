@@ -72,3 +72,29 @@ def test_grid_fails_closed_without_real_copy_cohort():
 if __name__ == "__main__":
     test_grid_fails_closed_without_real_copy_cohort()
     print("PASS: qualified exit grid fails closed")
+
+
+def test_grid_reads_source_retired_r17_without_replays():
+    """HM C9: with the signal_replay writer retired, the grid says "source retired (R17)", not INSUFFICIENT."""
+    originals = (
+        analyzer._load_jsonl_replays,
+        analyzer._analysis_eligible_trade_ids,
+        analyzer._load_jsonl_by_trade_id,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        analyzer._set_analyzer_report_subdir(tmp)
+        try:
+            analyzer._load_jsonl_replays = lambda: {}
+            analyzer._analysis_eligible_trade_ids = lambda cohort: (set(), {}, 0)
+            analyzer._load_jsonl_by_trade_id = lambda _path: {}
+            report = analyzer.qualified_exit_policy_grid_report()
+        finally:
+            (
+                analyzer._load_jsonl_replays,
+                analyzer._analysis_eligible_trade_ids,
+                analyzer._load_jsonl_by_trade_id,
+            ) = originals
+            analyzer._set_analyzer_report_subdir(None)
+    assert report["verdict"] == "SOURCE_RETIRED_R17"
+    assert report["source_status"] == "source retired (R17)"
+    assert report["live_policy_change_allowed"] is False

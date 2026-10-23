@@ -13,18 +13,7 @@ from collector_v22 import build_research_event, terminal_observation
 from collector_v22_schema import OBS_DATA_ERROR, OBS_INSUFFICIENT_PATH, OBS_SOURCE_UNAVAILABLE
 from microstructure_tape import SCHEMA as TAPE_SCHEMA
 from multiverse_collection_health import DEFECT_REASON, build_multiverse_collection_report
-from multiverse_entry_grid import (
-    GRID_FILE,
-    STATUS_GRID_MISSING,
-    STATUS_HYDRATED,
-    STATUS_INLINE,
-    hydrate_entry_children,
-    load_grid_index,
-    load_order_multiverse,
-    make_anchor,
-    split_entry_grid,
-)
-from replay_eligibility import validate_replay_eligibility
+from multiverse_entry_grid import make_anchor, split_entry_grid
 from tape_minute_bars import (
     WINDOW_AVAILABLE,
     WINDOW_BEFORE_TAPE,
@@ -160,18 +149,6 @@ def test_window_entirely_before_tape_finalizes_data_error_not_eternal_pending():
     assert event["ranking_eligible"] is False
 
 
-def test_partially_recorded_pre_tape_window_keeps_truthful_insufficient_path():
-    candles = [_bar(i) for i in range(20, 181)]
-    event = build_research_event(
-        trade_id="partial-pre-tape", epoch_id="epoch-t", signal_ts=SIGNAL_TS, signal_price=100000.0,
-        candles_1m=candles, submitted=True, rejected=False, ticket_closed=True,
-        evaluation_ts=SIGNAL_TS + 181 * 60,
-        path_source={"window_state": WINDOW_BEFORE_TAPE},
-    )
-    assert event["observation_status"] == OBS_INSUFFICIENT_PATH
-    assert event["canonical_tape"]["path_1m"]
-
-
 def test_loaded_source_proving_a_hole_still_finalizes_insufficient():
     candles = [_bar(i) for i in range(-60, 181) if i != -30]
     event = build_research_event(
@@ -184,20 +161,6 @@ def test_loaded_source_proving_a_hole_still_finalizes_insufficient():
     assert event["canonical_tape"]["path_source"]["window_state"] == WINDOW_AVAILABLE
 
 
-def test_complete_tape_path_resolves_terminal():
-    candles = [_bar(i) for i in range(-60, 190)]
-    event = build_research_event(
-        trade_id="full", epoch_id="epoch-t", signal_ts=SIGNAL_TS, signal_price=100000.0,
-        candles_1m=candles, submitted=False, rejected=True, ticket_closed=True,
-        evaluation_ts=SIGNAL_TS + 190 * 60,
-        path_source={"window_state": WINDOW_AVAILABLE},
-    )
-    assert terminal_observation(event["observation_status"])
-    assert event["observation_status"] != OBS_INSUFFICIENT_PATH
-    assert event["canonical_tape"]["path_1m"]
-
-
-# --------------------------------------------------------------- entry grid
 def _tile_event(trade_id: str, signal_ts: float, anchor: dict) -> dict:
     candles = [_bar(i, high=100000.0 + 5 * (i % 40), low=100000.0 - 5 * (i % 40)) for i in range(-60, 190)]
     return build_research_event(
@@ -207,36 +170,6 @@ def _tile_event(trade_id: str, signal_ts: float, anchor: dict) -> dict:
         evaluation_ts=SIGNAL_TS + 190 * 60, path_source={"window_state": WINDOW_AVAILABLE},
         entry_grid_anchor=anchor,
     )
-
-
-def test_tiles_of_one_call_share_one_grid_and_hydrate_identically(tmp_path):
-    anchor = make_anchor(shared_ai_call_id="call-1", signal_ts=SIGNAL_TS, signal_price=100000.0,
-                         direction="SHORT", ttl_sec=1800.0)
-    first = _tile_event("tile-a", SIGNAL_TS + 3, anchor)
-    second = _tile_event("tile-b", SIGNAL_TS + 11, anchor)
-    assert first["entry_children"] == second["entry_children"]
-    assert first["entry_grid_anchor"] == anchor
-    for event in (first, second):
-        assert validate_replay_eligibility(event)["eligible"] in (True, False)
-        reasons = validate_replay_eligibility(event).get("reasons") or []
-        assert "FILL_BEFORE_SIGNAL" not in reasons
-
-    row_a, grid_a = split_entry_grid(first)
-    row_b, grid_b = split_entry_grid(second)
-    assert grid_a["grid_sha256"] == grid_b["grid_sha256"]
-    assert "entry_children" not in row_a and row_a["entry_children_ref"]["entry_children_count"] == 300
-    assert len(json.dumps(row_a)) < 0.3 * len(json.dumps(first))
-
-    with (tmp_path / GRID_FILE).open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(grid_a) + "\n")
-    with (tmp_path / "order_multiverse.jsonl").open("w", encoding="utf-8") as handle:
-        for row in (row_a, row_b, dict(first, trade_id="legacy-inline")):
-            handle.write(json.dumps(row) + "\n")
-    rows = list(load_order_multiverse(str(tmp_path)))
-    assert [row["entry_children_status"] for row in rows] == [STATUS_HYDRATED, STATUS_HYDRATED, STATUS_INLINE]
-    assert rows[0]["entry_children"] == first["entry_children"]
-    assert hydrate_entry_children(row_a, {})["entry_children_status"] == STATUS_GRID_MISSING
-    assert set(load_grid_index(str(tmp_path))) == {grid_a["grid_sha256"]}
 
 
 def test_entry_children_memo_returns_independent_copies():
@@ -275,67 +208,52 @@ def test_collection_alert_keys_have_policies():
 
 
 # --------------------------------------------------------------- analyzer
-def test_analyzer_report_quarantines_empty_path_rows_and_measures_post_fix(tmp_path):
+def test_analyzer_report_labels_r17_retired_rows_and_quarantines_legacy_defects(tmp_path):
+    """R17: every v22 row now has an empty path_1m (RETIRED_R17). The report
+    labels such rows "source retired (R17)" - not a collection defect, no
+    alarm, no cohort math - while a pre-R17 empty-path row stays quarantined."""
     anchor = make_anchor(shared_ai_call_id="call-1", signal_ts=SIGNAL_TS, signal_price=100000.0,
                          direction="SHORT", ttl_sec=1800.0)
-    good = _tile_event("tile-good", SIGNAL_TS + 3, anchor)
-    good_row, grid = split_entry_grid(dict(good, event=good["observation_status"]))
+    retired = [_tile_event(f"tile-{i}", SIGNAL_TS + 3 + i, anchor) for i in range(6)]
+    for row in retired:
+        assert row["canonical_tape"]["path_1m"] == []
+        assert row["canonical_tape"]["path_1m_status"] == "RETIRED_R17"
     legacy = build_research_event(
         trade_id="legacy-empty", epoch_id="epoch-t", signal_ts=SIGNAL_TS - 7200, signal_price=100000.0,
         candles_1m=[], submitted=True, rejected=False, ticket_closed=True,
         shared_ai_call_id="call-0", evaluation_ts=SIGNAL_TS,
     )
     assert legacy["observation_status"] == OBS_SOURCE_UNAVAILABLE
-    # Emulate a pre-fix row: finalized INSUFFICIENT_PATH with an empty path and no path_source.
+    # Emulate a pre-fix, pre-R17 row: INSUFFICIENT_PATH, empty path, no path_source/status.
     legacy.update(observation_status=OBS_INSUFFICIENT_PATH)
-    legacy["canonical_tape"].pop("path_source")
-    dangling = dict(good_row, trade_id="tile-dangling",
-                    entry_children_ref=dict(good_row["entry_children_ref"], grid_sha256="0" * 64))
-    pre_tape = build_research_event(
-        trade_id="pre-tape", epoch_id="epoch-t", signal_ts=SIGNAL_TS - 86400, signal_price=100000.0,
-        candles_1m=[], submitted=True, rejected=False, ticket_closed=True,
-        shared_ai_call_id="call-old", evaluation_ts=SIGNAL_TS,
-        path_source={"window_state": WINDOW_BEFORE_TAPE},
-    )
-    # Tape-sourced row that matured after the fix but whose call predates arming.
-    early_row = json.loads(json.dumps(good_row, default=str))
-    early_row["trade_id"] = "tile-early"
-    early_row["envelope"]["signal_ts"] = SIGNAL_TS - 3600
-    early_row["entry_grid_anchor"]["shared_ai_call_id"] = "call-early"
+    legacy["canonical_tape"].pop("path_source", None)
+    legacy["canonical_tape"].pop("path_1m_status", None)
     with (tmp_path / "order_multiverse.jsonl").open("w", encoding="utf-8") as handle:
-        for row in (legacy, good_row, dangling, pre_tape, early_row):
+        for row in [legacy] + retired:
             handle.write(json.dumps(row, default=str) + "\n")
-    with (tmp_path / GRID_FILE).open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(grid) + "\n")
-    with (tmp_path / "chase_offset_touch_grid.jsonl").open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps({"shared_ai_call_id": "call-0", "discovery_shadow_only": True,
-                                 "signal_ts": SIGNAL_TS - 7200}) + "\n")
-        handle.write(json.dumps({"shared_ai_call_id": "call-1", "discovery_shadow_only": True,
-                                 "signal_ts": SIGNAL_TS,
-                                 "tile_admission_basis": "SCORE_LED_ADMISSION"}) + "\n")
 
     report = build_multiverse_collection_report(str(tmp_path))
+    assert report["source_retired"]["rows"] == 6
+    assert report["source_retired"]["label"] == "source retired (R17)"
+    assert report["source_retired"]["reason"] == "RETIRED_R17"
     assert report["quarantine"]["reason"] == DEFECT_REASON
     assert report["quarantine"]["rows"] == 1
-    assert report["quarantined_trade_ids"] == ["legacy-empty", "pre-tape"]
-    assert report["source_never_recorded"]["rows"] == 1
-    assert report["source_never_recorded"]["status_counts"] == {OBS_DATA_ERROR: 1}
-    assert report["legacy_cache_only_rows"]["empty_path_rate"] == 1.0
-    assert report["post_fix_rows"]["rows"] == 3
-    assert report["post_fix_rows"]["empty_path_rate"] == 0.0
-    assert report["entry_grid"]["missing_grid_references"] == 1
-    assert "MULTIVERSE_ENTRY_GRID_REFERENCE_MISSING" in report["alarms"]
-    coverage = report["touch_grid_coverage"]
-    assert coverage["arm_fix_signal_ts"] == SIGNAL_TS
-    assert coverage["post_fix"] == {"tile_calls": 1, "discovery_grid_calls": 1, "coverage": 1.0}
-    # call-early matured with a tape path yet was never armed: pre-arm cohort, no alarm.
-    assert coverage["legacy"] == {"tile_calls": 2, "discovery_grid_calls": 1, "coverage": 0.5}
-    assert "TOUCH_GRID_COVERAGE_LOW" not in report["alarms"]
-    assert coverage["discovery_calls_by_admission_basis"] == {
-        "SCORE_LED_ADMISSION": 1, "AI_APPROVE_LEGACY": 1,
-    }
+    assert report["quarantined_trade_ids"] == ["legacy-empty"]
+    assert report["post_fix_rows"]["rows"] == 0
+    assert report["legacy_cache_only_rows"]["rows"] == 1
+    assert report["alarms"] == []
+    assert report["rows_total"] == 7
+    assert report["touch_grid_coverage"]["post_fix"]["tile_calls"] == 0
 
-
+    only_retired = tmp_path / "only"
+    only_retired.mkdir()
+    with (only_retired / "order_multiverse.jsonl").open("w", encoding="utf-8") as handle:
+        for row in retired:
+            handle.write(json.dumps(row, default=str) + "\n")
+    report = build_multiverse_collection_report(str(only_retired))
+    assert report["status"] == "SOURCE_RETIRED_R17"
+    assert report["quarantine"]["rows"] == 0
+    assert report["alarms"] == []
 def test_analyzer_registers_collection_health_report():
     import analyzer_research_engine_v62 as engine
     from research_reset_inventory import ANALYZER_REPORT_FILES
@@ -388,6 +306,9 @@ def test_analyzer_labels_late_matured_rows_without_excluding_them(tmp_path):
         event = _tile_event(trade_id, SIGNAL_TS + 3, anchor)
         row, _grid = split_entry_grid(dict(event, event=event["observation_status"]))
         row = json.loads(json.dumps(row, default=str))
+        # Pre-R17 rows already on disk carried a 1m path; R17 only labels new rows.
+        row["canonical_tape"]["path_1m"] = [_bar(i) for i in range(0, 3)]
+        row["canonical_tape"].pop("path_1m_status", None)
         source = row["canonical_tape"].setdefault("path_source", {})
         source["window_end_ts"] = SIGNAL_TS + 10_800
         if lag is None:

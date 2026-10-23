@@ -115,7 +115,7 @@ def build_generation_receipt(
         fallback = window.get("mark_fallback_events", marks.get("fallback_events"))
         reasons.append(
             f"protection replay {window.get('reason') or marks.get('reason') or 'degraded'} "
-            f"({fallback} events off side-correct 1s marks)"
+            f"({fallback} events R17_UNPROVEN outside book coverage)"
         )
     if blockers_level != GREEN:
         blocked = [

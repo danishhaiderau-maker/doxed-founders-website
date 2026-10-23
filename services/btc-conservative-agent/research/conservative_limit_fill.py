@@ -20,6 +20,7 @@ try:
     )
 except ImportError:  # direct script/test execution
     from quantity_execution import apply_quantity_constraints, validate_signed_quantity_constraints
+import r17_fields as _r17f
 
 
 EVIDENCE_SCHEMA = "market_microstructure_1s_v1"
@@ -134,6 +135,17 @@ def _normalise_schedule(schedule: Sequence[Mapping[str, Any]]) -> tuple[list[dic
     return normalised, hashlib.sha256(encoded).hexdigest()
 
 
+def _stamp_r17_unproven(receipt: dict[str, Any]) -> dict[str, Any]:
+    """HM #848 C4 / RK R3: every receipt this module emits is decided and priced on market_microstructure_1s, so it
+    is stamped R17_UNPROVEN_ENTRY + ENTRY_PRICED_ON_1S_TAPE here, once, for every caller (analyzer v62, entry
+    baseline replay, policy evidence evaluator, latency schedule replay, conservative fill cohort).
+    r17_exclusion.entry_priced_on_1s_tape then rejects any row carrying it."""
+    receipt["entry_price_source"] = _r17f.ENTRY_PRICE_SOURCE_1S
+    receipt["r17_entry_status"] = _r17f.R17_UNPROVEN_ENTRY
+    receipt["r17_entry_reason"] = _r17f.REASON_ENTRY_PRICED_ON_1S_TAPE
+    return receipt
+
+
 def evaluate_limit_fill(rows, *, direction, requested_qty, chase_schedule,
                         aggressor_window_sec=3, symbol=None, quantity_constraints=None, fill_model=FILL_MODEL):
     return _evaluate_limit_fill(rows, direction=direction, requested_qty=requested_qty,
@@ -160,9 +172,9 @@ def _evaluate_limit_fill(rows, *, fill_model: str = FILL_MODEL, **kwargs) -> dic
     if fill_model not in FILL_MODELS:
         receipt = _base_receipt(kwargs.get("direction"), kwargs.get("requested_qty"), kwargs.get("aggressor_window_sec", 3))
         receipt.update(fill_model=str(fill_model), fill_model_role=None)
-        return _unsupported(receipt, "UNKNOWN_FILL_MODEL")
+        return _stamp_r17_unproven(_unsupported(receipt, "UNKNOWN_FILL_MODEL"))
     rows = list(rows)
-    receipt = _evaluate_core(rows, realistic=fill_model == FILL_MODEL, **kwargs)
+    receipt = _stamp_r17_unproven(_evaluate_core(rows, realistic=fill_model == FILL_MODEL, **kwargs))
     if fill_model != FILL_MODEL:
         return receipt
     shadow = _evaluate_core(rows, realistic=False, **kwargs)

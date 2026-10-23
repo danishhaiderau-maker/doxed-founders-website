@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
-import { assertBotAdminToken, parseBitfinexKeyPermissions, readLiveExchangeExposure } from './live-copy-ops.service';
+import {
+  assertBotAdminToken,
+  exchangeExposureBlockers,
+  parseBitfinexKeyPermissions,
+  readLiveExchangeExposure,
+} from './live-copy-ops.service';
 
 test('parses Bitfinex key permissions and exposes withdraw/trade flags', () => {
   const p = parseBitfinexKeyPermissions([['account', 1, 0], ['orders', 1, 1], ['withdraw', 0, 0], ['wallets', 1, 0]]);
@@ -46,4 +53,33 @@ test('R8-live: exchange net position and open orders are read live via /v2/auth/
   const bad = await readLiveExchangeExposure(creds, failing);
   assert.equal(bad.net_position_btc, null);
   assert.equal(bad.open_order_count, null);
+});
+
+test('HM C5: flat account with both reads OK has no exchange blockers', () => {
+  assert.deepEqual(exchangeExposureBlockers({ net_position_btc: 0, open_order_count: 0, position_error: null, orders_error: null }), []);
+});
+
+test('HM C5: a non-zero net position blocks with EXCHANGE_NOT_FLAT', () => {
+  assert.deepEqual(exchangeExposureBlockers({ net_position_btc: -0.002, open_order_count: 0, position_error: null, orders_error: null }), ['EXCHANGE_NOT_FLAT']);
+  assert.deepEqual(exchangeExposureBlockers({ net_position_btc: 0.001, open_order_count: 0 }), ['EXCHANGE_NOT_FLAT']);
+});
+
+test('HM C5: any open order blocks with EXCHANGE_NOT_FLAT', () => {
+  assert.deepEqual(exchangeExposureBlockers({ net_position_btc: 0, open_order_count: 2, position_error: null, orders_error: null }), ['EXCHANGE_NOT_FLAT']);
+});
+
+test('HM C5: a read error on either endpoint blocks with EXCHANGE_READ_FAILED (never assumed flat)', async () => {
+  const creds = { apiKey: 'k', apiSecret: 's' } as never;
+  const failing = (async () => { throw new Error('boom'); }) as never;
+  assert.deepEqual(exchangeExposureBlockers(await readLiveExchangeExposure(creds, failing)), ['EXCHANGE_READ_FAILED']);
+  assert.deepEqual(exchangeExposureBlockers({ net_position_btc: null, open_order_count: 0, position_error: 'x' }), ['EXCHANGE_READ_FAILED']);
+  assert.deepEqual(exchangeExposureBlockers({ net_position_btc: 0, open_order_count: null, orders_error: 'x' }), ['EXCHANGE_READ_FAILED']);
+  assert.deepEqual(exchangeExposureBlockers(null), ['EXCHANGE_READ_FAILED']);
+  // an open position read OK with the orders read failing reports both
+  assert.deepEqual(exchangeExposureBlockers({ net_position_btc: 0.01, open_order_count: null, orders_error: 'x' }), ['EXCHANGE_READ_FAILED', 'EXCHANGE_NOT_FLAT']);
+});
+
+test('HM C5: accountCheck pushes the exchange blockers into ready_for_live_copy', () => {
+  const src = readFileSync(resolve(__dirname, 'live-copy-ops.service.ts'), 'utf8');
+  assert.ok(src.includes('blockers.push(...exchangeExposureBlockers(checks.exchange'));
 });
