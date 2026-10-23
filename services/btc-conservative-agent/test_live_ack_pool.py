@@ -280,3 +280,21 @@ def test_hm0255_n1_b1_lane_pool_never_prices_a_row(gd, tmp_path, monkeypatch):
     assert src.startswith("POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC") and not src.startswith("lane_")
     d, src = ns["_disloc_delay"]("GS-01", "entry")
     assert src == "default_until_n10" and pf.delay_stamp(src)["delay_unverified"]
+
+
+def test_rk2_paper_exit_pooled_by_order_type_fails_closed_below_n10(gd, tmp_path, monkeypatch):
+    """RK (2): a paper BOT_SENT exit = own trigger->send + pooled EXIT_RO_MKT send->ack (n<10 fail closed, MAX at
+    10-19); a measured own leg is countable, a missing one is default_own_s2s_missing (UNVERIFIED)."""
+    ns = _fresh(tmp_path, monkeypatch)
+    pool = ns["_cross_lane_pool"]()
+    _fill(pool, [_close(10 + i) for i in range(9)])
+    d, src = ns["_disloc_delay"]("GSB1", "exit", pool_key="EXIT_RO_MKT", own_signal_to_send_s=0.3)
+    assert "default" in src and pf.delay_stamp(src)["delay_unverified"]
+    _fill(pool, [_close(30)])
+    own = ns["_paper_own_s2s_exit"](1000.0, 1000.3)
+    d, src = ns["_disloc_delay"]("GSB1", "exit", pool_key="EXIT_RO_MKT", own_signal_to_send_s=own)
+    assert src == "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_max_n10" and not pf.delay_stamp(src)["delay_unverified"]
+    assert d == pytest.approx(0.3 + pool.pooled("EXIT_RO_MKT")["pooled_send_to_ack_s"])
+    d, src = ns["_disloc_delay"]("GSB1", "exit", pool_key="EXIT_RO_MKT",
+                                 own_signal_to_send_s=ns["_paper_own_s2s_exit"](1000.0, None))
+    assert "default_own_s2s_missing" in src

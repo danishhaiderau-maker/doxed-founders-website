@@ -7830,7 +7830,9 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     original = float(source_pos.get("policy_original_qty") or source_pos.get("qty") or 0)
     pend = source_pos.get("_tp1_pending")
     if not (isinstance(pend, dict) and pend.get("key") == key):
-        delay_s, delay_source = _disloc_delay(lane, "exit")
+        # RK (2): the gate is this leg's send code point; own trigger -> send measured per row, pooled EXIT_RO_MKT
+        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+                                              own_signal_to_send_s=_paper_own_s2s_exit(now, time.time()))
         marker = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s), "delay_s": float(delay_s),
                   "delay_source": delay_source, "close_fraction": float(close_fraction), "attempts": 0}
         if action is not None:
@@ -7918,9 +7920,9 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     import tile_fill as _tf
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
-    # HM 01:43 item 4: now - t0 is pricing lag, not a measured exit send -> own signal->send unmeasured (fail closed)
+    # RK (2): own trigger -> send code point (exit_sent_ts), never now - t0 (pricing lag); missing -> fail closed
     delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
-                                          own_signal_to_send_s=None)
+                                          own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
     _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
     res = _paper_stamp_pool(_tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -8022,9 +8024,10 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
         price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
     else:
-        # HM 01:43 item 4: now - t0 is pricing lag (the thread waits for the book row), not a measured exit send
+        # RK (2): own trigger -> send code point (exit_sent_ts, stamped by close_position before pricing); never
+        # now - t0 (pricing lag: the thread waits for the book row). Pooled send->ack by order type (EXIT_RO_MKT).
         delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
-                                              own_signal_to_send_s=None)
+                                              own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
         _paper_note_exit_trigger(pos, t0)
         price_fn = lambda: _paper_stamp_pool(  # noqa: E731
             _tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -33995,11 +33998,6 @@ def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_se
     a leg with no pool key fails closed (default delay, UNVERIFIED -> non-countable)."""
     import paper_fill as _pf
     _paper_delay_sampler()  # restores the per-epoch pool file (the cross-lane pool is persisted with it)
-    if pool_key is None and leg == "exit" and own_signal_to_send_s is None:
-        # the one bare exit caller is _tp1_gate (R4 byte-pinned): a bot-sent reduce-only market exit. HM 01:43 item 4:
-        # its own signal -> Fly intent is NOT measured for a paper row (there is no paper send; 0.0 was assumed), so it
-        # stays None -> the pooled label carries "default_own_s2s_missing" -> UNVERIFIED -> non-countable.
-        pool_key = _live_ack_pool.KEY_EXIT_RO_MKT
     if pool_key is None:
         return _pf.DEFAULT_DELAY_S, "default_until_n10"
     pool = _cross_lane_pool()
@@ -34051,6 +34049,18 @@ def _paper_own_s2s_entry(order: dict):
     except (TypeError, ValueError):
         return None
     return round(sent - sig, 6) if sig > 0 and sent >= sig else None
+
+
+def _paper_own_s2s_exit(t0, sent_ts):
+    """RK (2): a paper BOT_SENT exit's OWN trigger -> send, measured per row: the exit trigger (exit_trigger_ts) to
+    the close path's send code point (close_position stamps exit_sent_ts before pricing, the same point for live-
+    relayed and paper rows; _tp1_gate's marker for a partial leg). None when either is missing or the send precedes
+    the trigger (-> the pooled label carries default_own_s2s_missing -> UNVERIFIED -> non-countable)."""
+    try:
+        a, b = float(t0 or 0), float(sent_ts or 0)
+    except (TypeError, ValueError):
+        return None
+    return round(b - a, 6) if a > 0 and b >= a else None
 
 
 def _paper_entry_pool_key(order: dict, lane: str):
