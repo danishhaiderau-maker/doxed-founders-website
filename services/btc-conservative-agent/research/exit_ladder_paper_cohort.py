@@ -24,7 +24,9 @@ from typing import Any, Callable, Iterable, Mapping
 
 from research.analysis_eligibility import _EXCLUDED_PROVENANCE
 
-SCHEMA = "paper_exit_ladder_cohort_v1"
+# v2 (HM #847 C4): the receipt carries book_coverage_loaded / r17_unproven_count. A v1 receipt (or any receipt
+# without book_coverage_loaded=True) predates the R17 book-coverage gate and is recomputed, never trusted.
+SCHEMA = "paper_exit_ladder_cohort_v2"
 COHORT = "PAPER_RESEARCH_CURRENT_REGISTRY_EPOCH"
 SIGNAL_REPLAY_FILE = "signal_replay.jsonl"
 R17_UNPROVEN = "R17_UNPROVEN"

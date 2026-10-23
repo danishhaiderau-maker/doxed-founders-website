@@ -99,7 +99,8 @@ class PaperExitLadderCohortTest(unittest.TestCase):
         trades, kept, receipt = filter_for_exit_ladder(frame, replays, epoch_id=EPOCH, book_coverage=_covered)
         self.assertEqual(list(trades["trade_id"]), [f"{PREFIX}-ok"])
         self.assertEqual(list(kept), [f"{PREFIX}-ok"])
-        self.assertEqual(receipt["schema"], "paper_exit_ladder_cohort_v1")
+        self.assertEqual(receipt["schema"], "paper_exit_ladder_cohort_v2")
+        self.assertIs(receipt["book_coverage_loaded"], True)
 
     def test_replay_outside_book_coverage_is_r17_unproven_and_excluded(self):
         rows = [_trade(f"{PREFIX}-covered"), _trade(f"{PREFIX}-late"), _trade(f"{PREFIX}-nospan")]
@@ -248,6 +249,21 @@ class InputBlockersTest(unittest.TestCase):
         self.assertEqual(item["evidence"]["paper_cohort"]["eligible_count"], 0)
         self.assertEqual(item["evidence"]["paper_cohort"]["r17_unproven_count"], 2)
 
+    def test_stale_or_coverage_less_cohort_receipt_is_recomputed_not_trusted(self):
+        # HM #847 C4: a v1 receipt, or a v2 one without book_coverage_loaded=True, predates the R17 gate.
+        _write_fixture(self.report, self.data, book_tape=False)
+        for receipt in ({"schema": "paper_exit_ladder_cohort_v1", "eligible_count": 2, "current_registry_trades": 2},
+                        {"schema": "paper_exit_ladder_cohort_v2", "eligible_count": 2, "current_registry_trades": 2},
+                        {"schema": "paper_exit_ladder_cohort_v2", "eligible_count": 2, "current_registry_trades": 2,
+                         "book_coverage_loaded": False}):
+            report = json.loads((self.report / ib.EXIT_LADDER_REPORT).read_text(encoding="utf-8"))
+            report.update({"replays_matched_executed": 2, "cohort_receipt": receipt})
+            (self.report / ib.EXIT_LADDER_REPORT).write_text(json.dumps(report), encoding="utf-8")
+            item = ib.exit_ladder_item(self.report, self.data, EPOCH)
+            self.assertFalse(item["evidence"]["report_uses_paper_cohort"], receipt)
+            self.assertNotEqual(item["status"], "OK", receipt)
+            self.assertEqual(item["evidence"]["paper_cohort"]["r17_unproven_count"], 2, receipt)
+
     def test_exit_ladder_without_any_replay_is_retired_not_blocked(self):
         # HM #847 C3: no current-registry replay at all => the source is retired (R17), never BLOCKED.
         _write_fixture(self.report, self.data, book_tape=False)
@@ -262,7 +278,8 @@ class InputBlockersTest(unittest.TestCase):
         report = json.loads((self.report / ib.EXIT_LADDER_REPORT).read_text(encoding="utf-8"))
         report.update({
             "replays_matched_executed": 1,
-            "cohort_receipt": {"schema": "paper_exit_ladder_cohort_v1", "eligible_count": 1,
+            "cohort_receipt": {"schema": "paper_exit_ladder_cohort_v2", "eligible_count": 1,
+                               "book_coverage_loaded": True,
                                "current_registry_trades": 2, "eligible_trade_ids": [f"{PREFIX}-ok"]},
         })
         (self.report / ib.EXIT_LADDER_REPORT).write_text(json.dumps(report), encoding="utf-8")

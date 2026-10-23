@@ -127,9 +127,18 @@ def _no_eligible_exit_ladder_item(cohort: Mapping, eligible: int, registry_trade
     )
 
 
+def _current_paper_cohort(report: Mapping) -> Mapping | None:
+    """The report's cohort receipt only if it is the current schema AND was built with book coverage loaded."""
+    from research.exit_ladder_paper_cohort import SCHEMA as PAPER_SCHEMA
+
+    cohort = report.get("cohort_receipt") if isinstance(report.get("cohort_receipt"), Mapping) else None
+    if cohort is None or cohort.get("schema") != PAPER_SCHEMA or cohort.get("book_coverage_loaded") is not True:
+        return None
+    return cohort
+
+
 def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, replay_index=None) -> dict:
     from research.exit_ladder_paper_cohort import (
-        SCHEMA as PAPER_SCHEMA,
         build_paper_exit_ladder_cohort,
         load_book_coverage,
         load_replay_index,
@@ -151,8 +160,8 @@ def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, 
                       "paper_cohort": {k: v for k, v in cohort.items() if k != "eligible_trade_ids"}},
         )
     report = _load_json(report_dir / EXIT_LADDER_REPORT) or {}
-    cohort = report.get("cohort_receipt") if isinstance(report.get("cohort_receipt"), Mapping) else None
-    if cohort is None or cohort.get("schema") != PAPER_SCHEMA:
+    cohort = _current_paper_cohort(report)
+    if cohort is None:
         index = replay_index if replay_index is not None else load_replay_index(data_dir)
         book_coverage, coverage_receipt = load_book_coverage(data_dir, index)
         cohort = build_paper_exit_ladder_cohort(_read_trades(data_dir), index, epoch_id=epoch_id,
@@ -509,7 +518,7 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
     exit_ladder = exit_ladder_item(
         report_dir, data_dir, epoch_id,
         replay_index=None if (not r3_quarantine.is_active("EXIT_LADDER_SIM")
-                              and (_load_json(report_dir / EXIT_LADDER_REPORT) or {}).get("cohort_receipt"))
+                              and _current_paper_cohort(_load_json(report_dir / EXIT_LADDER_REPORT) or {}))
         else load_replay_index(data_dir),
     )
     items = [
