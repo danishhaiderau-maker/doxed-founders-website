@@ -38,6 +38,18 @@ _SKIP_SUFFIXES = (".malformed_rows.jsonl",)
 
 
 NO_FRESH_FLOOR = "FRESH_FLOOR_MISSING"
+MANIFEST_MISSING = "DATA_EPOCH_MANIFEST_MISSING"
+# Placeholder epoch id of a fail-closed guard whose data_epoch.json is missing or invalid while a fresh-start floor
+# exists: it never matches a real epoch, so every receipt and purity check that compares epoch ids goes RED.
+MANIFEST_MISSING_EPOCH_ID = "ce-19700101-manifest-missing"
+# HM 19 Oct (fe334474 #5): an epoch can be REQUIRED. Then "nothing declared" (no data_epoch.json and no readable
+# fresh_start_epoch.json anywhere) fails closed instead of admitting every row under a GREEN status.
+EPOCH_REQUIRED_UNDECLARED = "FRESH_EPOCH_REQUIRED_NOT_DECLARED"
+REQUIRE_EPOCH_ENV = "BTC_REQUIRE_FRESH_EPOCH"
+REQUIRE_EPOCH_MARKER = "fresh_epoch_required.json"
+FRESH_FLOOR_FILE = "fresh_start_epoch.json"
+LAPTOP_MIRROR_TREE = r"C:\DoxxedCrypto\fly-mirror-segments\tree"
+AGENT_DIR = Path(__file__).resolve().parent
 
 
 class PreEpochRowError(RuntimeError):
@@ -45,13 +57,23 @@ class PreEpochRowError(RuntimeError):
 
 
 class EpochGuard:
-    def __init__(self, manifest: dict | None, floor_ts: float | None = None, require_floor: bool = False) -> None:
-        self.manifest = manifest
+    def __init__(self, manifest: dict | None, floor_ts: float | None = None, require_floor: bool = False,
+                 manifest_missing: bool = False, fail_closed_reason: str | None = None) -> None:
         self.floor_ts = float(floor_ts) if floor_ts else None  # fresh_start_epoch.json epoch_ts (see data_epoch.classify)
+        # HM 19 Oct: a fresh-start floor with a missing/corrupt data_epoch.json is a post-reset deploy whose manifest
+        # vanished, and a REQUIRED epoch that is declared nowhere is the same failure. Both FAIL CLOSED (admit
+        # nothing, RED), never fall back to "no epoch declared" (admit all).
+        reason = fail_closed_reason or (MANIFEST_MISSING if manifest_missing else None)
+        self.fail_closed_reason = reason if manifest is None else None
+        self.manifest_missing = self.fail_closed_reason is not None
+        self.required_by: str | None = None  # set by resolve_epoch_guard when an undeclared epoch is required
+        if self.manifest_missing:
+            manifest = de.new_manifest(MANIFEST_MISSING_EPOCH_ID, started_at_ts=self.floor_ts or 1.0)
+        self.manifest = manifest
         self.require_floor = bool(require_floor)
         # Fail closed: a declared epoch whose fresh-start floor could not be loaded admits NOTHING (a missing or
         # unreadable fresh_start_epoch.json must never silently turn the floor off).
-        self.floor_missing = bool(manifest) and self.require_floor and self.floor_ts is None
+        self.floor_missing = (bool(manifest) and self.require_floor and self.floor_ts is None) or self.manifest_missing
 
         self.admitted: dict[str, int] = {}
         self.rejected: dict[str, dict[str, int]] = {}
@@ -62,8 +84,7 @@ class EpochGuard:
 
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike) -> "EpochGuard":
-        return cls(de.load_manifest(Path(data_dir) / de.MANIFEST_NAME), floor_ts=fresh_floor_ts(data_dir),
-                   require_floor=True)
+        return resolve_epoch_guard([data_dir])[0]
 
     @property
     def declared(self) -> bool:
@@ -100,8 +121,9 @@ class EpochGuard:
         return False
 
     def _reject_no_floor(self, relpath: str) -> bool:
+        reason = self.fail_closed_reason or NO_FRESH_FLOOR
         bucket = self.rejected.setdefault(relpath, {})
-        bucket[NO_FRESH_FLOOR] = bucket.get(NO_FRESH_FLOOR, 0) + 1
+        bucket[reason] = bucket.get(reason, 0) + 1
         return False
 
     def admit_line(self, relpath: str, line: str | bytes) -> bool:
@@ -141,7 +163,9 @@ class EpochGuard:
         fields = tuple(ts_fields)
         for row in rows:
             if self.floor_missing:
-                raise PreEpochRowError(f"{relpath}: {NO_FRESH_FLOOR}: declared epoch without fresh_start_epoch.json")
+                reason = (f"{self.fail_closed_reason}: no valid data_epoch.json (floor file present or epoch required)"
+                          if self.manifest_missing else f"{NO_FRESH_FLOOR}: declared epoch without fresh_start_epoch.json")
+                raise PreEpochRowError(f"{relpath}: {reason}")
             cls = de.classify_row(relpath, row, self.manifest, fields, floor_ts=self.floor_ts)
             if cls not in ADMITTED_CLASSES:
                 raise PreEpochRowError(f"{relpath}: {cls} row in a {self.manifest['epoch_id']} result")
@@ -152,12 +176,25 @@ class EpochGuard:
         return {"declared": self.declared, "epoch_id": manifest.get("epoch_id"),
                 "floor_ts": self.floor_ts, "floor_loaded": self.floor_loaded,
                 "floor_required": self.require_floor, "floor_missing_fail_closed": self.floor_missing,
+                "manifest_missing_fail_closed": self.manifest_missing,
+                "fail_closed_reason": self.fail_closed_reason, "epoch_required_by": self.required_by,
                 "started_at_utc": manifest.get("started_at_utc"),
                 "rows_admitted": sum(self.admitted.values()), "pre_epoch_rows_rejected": rejected,
                 "pre_epoch_rows_admitted": int(pre_epoch_rows_admitted),
                 "rejected_by_stream": {k: dict(v) for k, v in sorted(self.rejected.items())},
                 "admitted_by_stream": dict(sorted(self.admitted.items())),
+                **self.hard_rejected_counts(),
                 "fresh_rule": self.fresh_rule_status()}
+
+    def hard_rejected_counts(self) -> dict:
+        """HM 19 Oct: straddle (window crosses the floor) and unstamped rows the readers hard-REJECTED, reported as their
+        own numbers, never inside the ``*_unguarded`` read-monitor counts (those mean a reader skipped the guard)."""
+        out: dict = {}
+        for cls, key in ((NESTED_STRADDLE, "straddle"), (NESTED_UNSTAMPED, "unstamped")):
+            by = {k: int(v.get(cls, 0)) for k, v in sorted(self.rejected.items()) if v.get(cls)}
+            out[f"{key}_rows_rejected"] = sum(by.values())
+            out[f"{key}_rows_rejected_by_stream"] = by
+        return out
 
     def fresh_rule_status(self) -> dict:
         """RED when a declared epoch has no loadable floor (the fresh rule then admits NOTHING, which must be loud, not
@@ -165,6 +202,8 @@ class EpochGuard:
         v3 = [k for k in set(self.admitted) | set(self.rejected) if k.startswith("v3/ledgers/")]
         per = {k: {"admitted": int(self.admitted.get(k, 0)), "rejected_by_reason": dict(self.rejected.get(k, {}))}
                for k in sorted(v3)}
+        if self.fail_closed_reason:
+            return {"status": "RED", "reason": self.fail_closed_reason, "v3_readers": per}
         if self.declared and (self.floor_missing or self.floor_ts is None):
             return {"status": "RED", "reason": NO_FRESH_FLOOR, "v3_readers": per}
         return {"status": "GREEN", "reason": None, "v3_readers": per}
@@ -355,12 +394,224 @@ def guarded_open(path: str | os.PathLike, *args: Any, relpath: str | None = None
         return open(path, *args, **kwargs)
 
 
+V3_LEDGER_DIRS = ("ledgers", "recovery_ledgers")
+
+
+def v3_ledger_relpath(path: str | os.PathLike) -> str | None:
+    """``v3/ledgers/<name>.jsonl`` (or ``v3/recovery_ledgers/...``) for a V3 ledger file, rotation suffix dropped;
+    None for any other file (non-ledger readers keep their own guard)."""
+    parts = Path(path).parts
+    if len(parts) >= 3 and parts[-3] == "v3" and parts[-2] in V3_LEDGER_DIRS:
+        name = re.sub(r"\.\d+$", "", parts[-1])
+        if name.endswith(".jsonl"):
+            return f"v3/{parts[-2]}/{name}"
+    return None
+
+
+def open_v3_ledger(path: str | os.PathLike, *args: Any, inventory: bool = False, **kwargs: Any):
+    """``open`` for one V3 ledger file, recorded by the read monitor as guarded.
+
+    Default (``inventory=False``): the caller MUST pass every parsed row through :func:`admit_v3_row` (hard
+    rejection of PRE_EPOCH / STRADDLE / UNSTAMPED rows) before it reaches any result. ``inventory=True`` is only for
+    byte-level work whose output is never a cohort row (whole-file digests, store dedup/truncation checks).
+    Only the ``open`` itself runs inside the guarded block, so a suspended generator never marks the caller's
+    other opens as guarded."""
+    rel = v3_ledger_relpath(path) or stream_name(path)
+    with guarded_read(rel, "inventory" if inventory else "epoch_filtered"):
+        return Path(path).open(*args, **kwargs)  # Path.open, as the readers used, so open() instrumentation still sees it
+
+
+def admit_v3_row(path_or_rel: str | os.PathLike, row: Any) -> bool:
+    """Hard fresh-epoch gate for one parsed V3 ledger row (EpochGuard.admit_v3_ledger_row under the analyzer's
+    process guard). Non-dict rows are rejected. Outside an analyzer run (no declared epoch) everything is admitted."""
+    if not isinstance(row, dict):
+        return False
+    text = os.fspath(path_or_rel)
+    rel = text if text.startswith("v3/") else v3_ledger_relpath(text)
+    if rel is None:
+        return True
+    return process_guard().admit_v3_ledger_row(rel, row)
+
+
+def admit_stream_row(path: str | os.PathLike, row: Any, *, relpath: str | None = None) -> bool:
+    """Hard fresh-epoch gate for one row of any epoch-scoped stream file (V3 ledgers via :func:`admit_v3_row`, other
+    streams via :meth:`EpochGuard.admit`); epoch-independent tape streams are admitted. ``relpath`` skips the per-row
+    path parse when the caller already has it (``stream_name`` of the file)."""
+    if not isinstance(row, dict):
+        return False
+    guard = process_guard()
+    if not guard.manifest:
+        return True
+    v3 = v3_ledger_relpath(path) if relpath is None or not relpath.startswith("v3/") else relpath
+    if v3 is not None:
+        return guard.admit_v3_ledger_row(v3, row)
+    rel = relpath or stream_name(path)
+    if de.epoch_independent(rel):
+        return True
+    return guard.admit(rel, row)
+
+
+def floor_file_present(root: str | os.PathLike) -> bool:
+    """A fresh_start_epoch.json exists where :func:`fresh_floor_ts` looks (beside the root or one level up), readable
+    or not: the deploy is post-reset, so an epoch must be declared."""
+    base = Path(root)
+    return any((d / FRESH_FLOOR_FILE).is_file() for d in (base, base.parent))
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on", "required")
+
+
+def epoch_required(roots: Iterable[str | os.PathLike | None]) -> str | None:
+    """Why a fresh epoch is REQUIRED here, or None. Sources, any of:
+    ``BTC_REQUIRE_FRESH_EPOCH=1`` (laptop analyzer / scheduled jobs), a ``fresh_epoch_required.json`` marker in any
+    root (laptop canonical-research-data / mirror tree), or a post-reset deploy (a fresh_start_epoch.json exists,
+    even unreadable)."""
+    if _truthy(os.environ.get(REQUIRE_EPOCH_ENV)):
+        return f"env:{REQUIRE_EPOCH_ENV}"
+    for root in roots:
+        if root and (Path(root) / REQUIRE_EPOCH_MARKER).is_file():
+            return f"marker:{Path(root) / REQUIRE_EPOCH_MARKER}"
+    for root in roots:
+        if root and floor_file_present(root):
+            return f"post_reset:{FRESH_FLOOR_FILE}"
+    return None
+
+
+def epoch_roots(data_dirs: Iterable[str | os.PathLike | None] = ()) -> list[Path]:
+    """THE epoch roots, shared by the analyzer (``_epoch_manifest_roots``) and every standalone entry point, so both
+    resolve the same manifest and the same floor: ``BTC_DATA_EPOCH_DIR`` alone when set; otherwise
+    ``BTC_AGENT_DATA_DIR``, this service's canonical-research-data (the laptop floor), each given data dir and the
+    laptop mirror tree, each with its ``v3/``."""
+    override = os.environ.get("BTC_DATA_EPOCH_DIR")
+    if override:
+        return [Path(override)]
+    out: list[Path] = []
+    seen: set[str] = set()
+    # Fixed priority, whoever calls: the agent data dir and canonical-research-data (the laptop's floor) come before
+    # any caller data dir (the genome grid's mirror tree), so the analyzer and every job resolve the same floor.
+    for base in (os.environ.get("BTC_AGENT_DATA_DIR"), AGENT_DIR / "canonical-research-data", *data_dirs,
+                 LAPTOP_MIRROR_TREE):
+        if not base:
+            continue
+        for root in (Path(base), Path(base) / "v3"):
+            key = os.path.normcase(os.path.abspath(str(root)))
+            if key not in seen:
+                seen.add(key)
+                out.append(root)
+    return out
+
+
+def resolve_epoch_guard(roots: Iterable[str | os.PathLike | None]) -> "tuple[EpochGuard, Path | None]":
+    """The one manifest+floor resolution (analyzer and standalone alike):
+
+    1. the first root holding BOTH a valid data_epoch.json and a fresh-start floor;
+    2. else the manifest from the first root declaring one and the floor from the first root holding one (a
+       declared epoch with no floor anywhere fails closed: FRESH_FLOOR_MISSING);
+    3. else, with a fresh_start_epoch.json present anywhere (readable or corrupt): fail closed MANIFEST_MISSING;
+    4. else, when an epoch is required (:func:`epoch_required`): fail closed FRESH_EPOCH_REQUIRED_NOT_DECLARED;
+    5. else nothing is declared (admit all; :func:`ensure_process_guard` logs it loudly)."""
+    roots = [Path(r) for r in roots if r]
+    manifests = {str(r): de.load_manifest(r / de.MANIFEST_NAME) for r in roots}
+    floors = {str(r): fresh_floor_ts(r) for r in roots}
+    for r in roots:
+        if manifests[str(r)] and floors[str(r)] is not None:
+            return EpochGuard(manifests[str(r)], floor_ts=floors[str(r)], require_floor=True), r
+    floor = next((floors[str(r)] for r in roots if floors[str(r)] is not None), None)
+    for r in roots:
+        if manifests[str(r)]:
+            return EpochGuard(manifests[str(r)], floor_ts=floor, require_floor=True), r
+    floor_root = next((r for r in roots if floor_file_present(r)), None)
+    if floor_root is not None:
+        return EpochGuard(None, floor_ts=floor, require_floor=True, fail_closed_reason=MANIFEST_MISSING), floor_root
+    required = epoch_required(roots)
+    if required:
+        guard = EpochGuard(None, require_floor=True, fail_closed_reason=EPOCH_REQUIRED_UNDECLARED)
+        guard.required_by = required
+        return guard, None
+    return EpochGuard(None), None
+
+
+def guard_from_roots(roots: Iterable[str | os.PathLike | None]) -> "EpochGuard":
+    """Declared-epoch guard for a process outside the analyzer (genome grid etc.); see :func:`resolve_epoch_guard`."""
+    return resolve_epoch_guard(roots)[0]
+
+
+def standalone_guard_roots(data_dir: str | os.PathLike | None) -> list[Path]:
+    """Epoch roots for a standalone entry point: :func:`epoch_roots` with its data dir first."""
+    return epoch_roots([data_dir])
+
+
+def _log_guard_state(guard: "EpochGuard", roots: Iterable[str | os.PathLike | None], where: str) -> None:
+    """Loud stderr line for every state that is not a normal declared epoch (HM #7)."""
+    import logging
+    roots = [str(r) for r in roots if r]
+    if guard.fail_closed_reason or guard.floor_missing:
+        msg = (f"EPOCH GUARD FAIL-CLOSED ({where}): {guard.fail_closed_reason or NO_FRESH_FLOOR}; every "
+               f"epoch-scoped row is rejected. roots={roots}")
+    elif not guard.declared:
+        msg = (f"EPOCH GUARD NOT DECLARED ({where}): neither data_epoch.json nor fresh_start_epoch.json found under "
+               f"roots={roots}; rows are NOT fresh-epoch filtered. Set {REQUIRE_EPOCH_ENV}=1 or place "
+               f"{REQUIRE_EPOCH_MARKER} in the data dir to make this fail closed.")
+    else:
+        return
+    print(msg, file=sys.stderr, flush=True)
+    logging.getLogger("analyzer_epoch_guard").warning(msg)
+
+
+def ensure_process_guard(roots: Iterable[str | os.PathLike | None]) -> "EpochGuard":
+    """Standalone entry points (genome grid, walk-forward scorer, latency measurement run outside the analyzer)
+    install the same hard guard the analyzer does. An already-installed guard (the analyzer's) is kept. A guard
+    that declares nothing (no manifest, no floor, not required) is returned but not installed, and logged loudly."""
+    if _PROCESS_GUARD is not None:
+        return _PROCESS_GUARD
+    roots = list(roots)
+    guard = guard_from_roots(roots)
+    _log_guard_state(guard, roots, "ensure_process_guard")
+    if guard.declared:
+        set_process_guard(guard)
+    return guard
+
+
+def admit_v3_line(path_or_rel: str | os.PathLike, raw: str | bytes) -> bool:
+    """:func:`admit_v3_row` for one raw JSONL line (parsed here; unparseable lines are rejected)."""
+    guard = process_guard()
+    if not guard.manifest:
+        return True
+    import json
+    try:
+        row = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return admit_v3_row(path_or_rel, row)
+
+
 _PROCESS_GUARD: "EpochGuard | None" = None
 
 
 def set_process_guard(guard: "EpochGuard | None") -> None:
     global _PROCESS_GUARD
     _PROCESS_GUARD = guard
+
+
+@contextlib.contextmanager
+def scoped_process_guard(roots: Iterable[str | os.PathLike | None]) -> Iterator["EpochGuard"]:
+    """Library-level entry (fill_model latency): use the installed guard, else install one for this call only."""
+    if _PROCESS_GUARD is not None:
+        yield _PROCESS_GUARD
+        return
+    roots = list(roots)
+    guard = guard_from_roots(roots)
+    _log_guard_state(guard, roots, "scoped_process_guard")
+    if not guard.declared:
+        yield guard
+        return
+    set_process_guard(guard)
+    try:
+        yield guard
+    finally:
+        if _PROCESS_GUARD is guard:  # clear only our own guard; one installed meanwhile stays
+            set_process_guard(None)
 
 
 def process_guard() -> "EpochGuard":

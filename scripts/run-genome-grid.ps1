@@ -30,6 +30,8 @@ try {
 }
 try {
   Remove-Item -LiteralPath Env:BTC_AGENT_DATA_DIR -ErrorAction SilentlyContinue
+  # Post-reset: no declared fresh epoch must fail closed (exit 3 FAIL_CLOSED), never score every row.
+  $env:BTC_REQUIRE_FRESH_EPOCH = '1'
   $started = [datetime]::UtcNow
   Push-Location $service
   try {

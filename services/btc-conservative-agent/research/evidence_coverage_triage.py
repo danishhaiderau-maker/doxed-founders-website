@@ -294,8 +294,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _count_jsonl_records(path: Path) -> int:
     """Validate and count a ledger without retaining its rows in memory."""
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
     count = 0
-    with path.open("rt", encoding="utf-8-sig") as handle:
+    with open_v3_ledger(path, "rt", encoding="utf-8-sig") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
@@ -309,6 +311,8 @@ def _count_jsonl_records(path: Path) -> int:
                 raise ValueError(
                     f"AUTHORITATIVE_LEDGER_ROW_NOT_OBJECT:{path.name}:{line_number}"
                 )
+            if not admit_v3_row(path, dict(row)):  # fresh-epoch count, same gate as the binding index
+                continue
             count += 1
     return count
 
@@ -338,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--v3-root", type=Path, help="Canonical v3 root for authoritative ledger counts")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    from analyzer_epoch_guard import ensure_process_guard, standalone_guard_roots  # noqa: PLC0415
+    ensure_process_guard(standalone_guard_roots(args.v3_root.parent if args.v3_root else None))
     if args.binding_index.suffix == ".gz":
         binding_report = {"bindings": _read_jsonl(args.binding_index)}
     else:
