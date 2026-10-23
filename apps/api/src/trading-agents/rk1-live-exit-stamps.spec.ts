@@ -103,7 +103,8 @@ test('RK1: subscriber-exchange-live book rows use the same leg check (missing st
     participants: [
       row('none', undefined),
       row('nosend', [placed, { eventType: 'EXIT', payload: { ...railwayExitLegStamps({ exitTriggerAtMs: 49_900, platformReceivedAtMs: 50_080 }), close_exchange_ack_at: iso(50.4) } }]),
-      row('full', [placed, exitFull]),
+      // HM R5 nit 6: countable only with the entry from the entry order's own trades
+      row('full', [placed, { eventType: 'FILLED', payload: { fill_price: 100_000, fill_price_source: 'exchange_trades' } }, exitFull]),
     ],
   });
   const by = Object.fromEntries(book.trades.map((t) => [t.tradeId, t]));

@@ -58,10 +58,10 @@ test('forceFlatDisarmAccount: lots -> reduce-only residual flatten -> cancel all
   assert.equal(r.cancelled, 2);
   const ex = calls.filter((c) => !c.startsWith('fence:'));
   assert.deepEqual(ex.slice(0, 6), ['lots', 'pos', 'flatten:LONG:0.0003', 'orders', 'cancel:5', 'cancel:6']);
-  // HM1 + HM R4 N2: the fence acquisition starts first (under the mutex lock) but the flatten never waits for it; it is
-  // acquired before the DB verification and released last. No TTL (B2a): nothing is refreshed.
+  // HM1 + HM R5 N2: the fence is acquired (under the mutex lock) BEFORE the first flatten step and released last. The
+  // heartbeat (nit 1) only runs every LIVE_FENCE_HEARTBEAT_MS, so this short flatten never refreshes.
   assert.equal(calls[0], 'fence:lock');
-  assert.ok(calls.includes('fence:acquire'));
+  assert.ok(calls.indexOf('fence:acquire') >= 0 && calls.indexOf('fence:acquire') < calls.indexOf('lots'));
   assert.equal(calls[calls.length - 1], 'fence:release');
   assert.ok(!calls.includes('fence:refresh'));
   assert.equal(r.fenced, true);
@@ -213,25 +213,59 @@ test('HM4: the trigger reason reaches emergencyFlattenOpenCopyLots (NOT as opera
   assert.match(ev, /non_countable_reason: `FORCE_FLAT:\$\{trigger\.reason\}`/);
 });
 
-test('HM R4 N2: a fence stuck behind the account lock never delays the flatten (lots / residual / cancel start at once)', async () => {
+test('HM R5 N2: a fence queued behind the account lock is AWAITED before the flatten starts (held start to release)', async () => {
   const { s, calls } = svc({ pos: [{ amount: -0.0002 }, null], orders: [[{ id: 3 }], []] });
   let unlock!: () => void;
   const held = new Promise<void>((r) => { unlock = r; });
   const prisma = (s as unknown as { prisma: Record<string, unknown> }).prisma;
   prisma.$transaction = async (fn: (tx: unknown) => Promise<unknown>) => {
-    await held;   // queued behind every claim on the account live-mutex
+    await held;   // queued behind claims on the account live-mutex (shorter than the bound)
     return fn({ $executeRawUnsafe: async () => { calls.push('fence:lock'); }, liveEntryFence: { create: async () => { calls.push('fence:acquire'); } } });
   };
+  (s as any).fenceBeforeFlattenMaxWaitMs = 2_000;
+  const run = s.forceFlatDisarmAccount('u', 'slug');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(calls.length, 0);   // no exchange write while the fence is not held
+  unlock();
+  const r = await run;
+  assert.deepEqual(calls.slice(0, 3), ['fence:lock', 'fence:acquire', 'lots']);
+  assert.deepEqual(calls.filter((c) => !c.startsWith('fence:')).slice(0, 4), ['lots', 'pos', 'flatten:SHORT:0.0002', 'orders']);
+  assert.equal(r.verdict, 'FLAT_NO_STOPS');
+  assert.equal(r.fenced, true);
+  assert.equal(calls[calls.length - 1], 'fence:release');
+});
+
+test('HM R5 N2: a fence still not held at the bound -> the flatten runs anyway (safety) but fenced=false; a late acquisition is released', async () => {
+  const { s, calls } = svc({ pos: [{ amount: -0.0002 }, null], orders: [[{ id: 3 }], []] });
+  let unlock!: () => void;
+  const held = new Promise<void>((r) => { unlock = r; });
+  const prisma = (s as unknown as { prisma: Record<string, unknown> }).prisma;
+  prisma.$transaction = async (fn: (tx: unknown) => Promise<unknown>) => {
+    await held;
+    return fn({ $executeRawUnsafe: async () => { calls.push('fence:lock'); }, liveEntryFence: { create: async () => { calls.push('fence:acquire'); } } });
+  };
+  (s as any).fenceBeforeFlattenMaxWaitMs = 50;
   const t0 = Date.now();
   const run = s.forceFlatDisarmAccount('u', 'slug');
   while (!calls.includes('cancel:3') && Date.now() - t0 < 2_000) await new Promise((r) => setTimeout(r, 5));
-  assert.ok(calls.includes('cancel:3'), `flatten waited for the fence: ${calls}`);
-  assert.ok(Date.now() - t0 <= 2_000);
-  assert.deepEqual(calls.filter((c) => !c.startsWith('fence:')).slice(0, 4), ['lots', 'pos', 'flatten:SHORT:0.0002', 'orders']);
+  assert.ok(calls.includes('cancel:3'), `flatten never ran: ${calls}`);
+  assert.ok(Date.now() - t0 >= 45);   // it did wait (bounded) for the fence first
   assert.ok(!calls.includes('fence:acquire'));
   unlock();
   const r = await run;
   assert.equal(r.verdict, 'FLAT_NO_STOPS');
-  assert.equal(r.fenced, true);
-  assert.equal(calls[calls.length - 1], 'fence:release');
+  assert.equal(r.fenced, false);   // not held from the start -> route ok=false (Fly RED)
+  assert.ok(r.errors.some((e) => e === 'fence:not held at flatten start (waited 50 ms)'));
+  assert.equal(calls[calls.length - 1], 'fence:release');   // the late acquisition never leaks
+});
+
+test('HM R5 N2 / nit 1: source: bounded wait before the inner flatten, owner-scoped lease fence, heartbeat, release last', () => {
+  const src = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const ff = src.slice(src.indexOf('  async forceFlatDisarmAccount('), src.indexOf('  private async runLiveBootReconcile('));
+  assert.ok(ff.indexOf('await Promise.race([fenceSettled') < ff.indexOf('this.forceFlatDisarmAccountInner('));
+  assert.ok(ff.includes('const fenced = acquired;'));
+  assert.ok(ff.includes('const fenceId = flattenFenceId();'));
+  assert.ok(ff.includes('new Date(Date.now() + LIVE_FENCE_LEASE_MS)'));
+  assert.ok(ff.includes('refreshLiveEntryFence(this.prisma, fenceId)'));
+  assert.ok(ff.indexOf('clearInterval(heartbeat)') < ff.indexOf('releaseLiveEntryFence(this.prisma, fenceId)'));
 });

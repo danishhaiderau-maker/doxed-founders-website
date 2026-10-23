@@ -9,8 +9,38 @@ import {
   signExecutorCapability,
   signLiveExecutionReport,
 } from './live-copy-approval';
-import { liveExitFillEvidence } from './live-row-countability';
+import { EXIT_FILL_RECONCILED_EVENT, liveExitFillEvidence } from './live-row-countability';
 import { BITFINEX_BTC_PERP_SYMBOL, BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
+
+/**
+ * HM R4 B1 / RK 08:03 / HM R5 C1: close.price is ONLY a real Bitfinex fill (close-order trades or the resident stop's own
+ * trades), via the one shared liveExitFillEvidence also used by countability. A ticker/mark or entry-price fallback is
+ * never sent as the price: price null + price_source => Fly's D3 cap reads the trade as UNREADABLE (AMBER entry block),
+ * never as a $0 loss. reported_exit_price keeps the relay's value for audit.
+ */
+function closeReport(pl: Record<string, unknown>, entryRef: number | null, reconciled: boolean): Record<string, unknown> {
+  const exitFill = liveExitFillEvidence(pl, entryRef);
+  const fillAt = typeof pl.exit_fill_at === 'string' ? Date.parse(pl.exit_fill_at) : NaN;
+  return {
+    close: {
+      price: exitFill.price,
+      price_source: exitFill.source,
+      reported_exit_price: exitFill.reportedPrice,
+      reason: pl.reason ?? pl.exit_reason ?? null,
+      paper_exit_price: num(pl.showcase_exit_price),
+      exchange_order_id: pl.close_exchange_order_id != null
+        ? String(pl.close_exchange_order_id)
+        : pl.exit_order_id != null ? String(pl.exit_order_id) : null,
+      exit_order_class: pl.exit_order_class === 'EXCHANGE_RESIDENT' || pl.exit_order_class === 'BOT_SENT'
+        ? pl.exit_order_class : null,
+      exit_fill_status: typeof pl.exit_fill_status === 'string' ? pl.exit_fill_status : null,
+      exit_fill_vwap: num(pl.exit_fill_vwap),
+      fill_at_ts: Number.isFinite(fillAt) ? fillAt / 1000 : null,
+      reconciled,
+    },
+  };
+}
+
 
 /**
  * The copier's protective stop as submitStopOrder sends it (type STOP, flags
@@ -281,19 +311,17 @@ export function buildLiveCopyReports(input: {
           // stop's own trades), via the one shared liveExitFillEvidence also used by countability. A ticker/mark or
           // entry-price fallback is never sent as the price: price null + price_source => Fly's D3 cap reads the trade
           // as UNREADABLE (AMBER entry block), never as a $0 loss. reported_exit_price keeps the relay's value for audit.
-          const exitFill = liveExitFillEvidence(pl, entryFillPrice ?? entryPrice);
-          push(e, 'POSITION_CLOSED', {
-            close: {
-              price: exitFill.price,
-              price_source: exitFill.source,
-              reported_exit_price: exitFill.reportedPrice,
-              reason: pl.reason ?? pl.exit_reason ?? null,
-              paper_exit_price: num(pl.showcase_exit_price),
-              exchange_order_id: pl.close_exchange_order_id != null ? String(pl.close_exchange_order_id) : null,
-              exit_order_class: pl.exit_order_class === 'EXCHANGE_RESIDENT' || pl.exit_order_class === 'BOT_SENT'
-                ? pl.exit_order_class : null,
-            },
-          });
+          push(e, 'POSITION_CLOSED', closeReport(pl, entryFillPrice ?? entryPrice, false));
+          break;
+        }
+        case EXIT_FILL_RECONCILED_EVENT: {
+          // HM R5 C1 / RK 09:10 (3): the clearing read re-stamped an EXIT_FILL_UNREADABLE exit from the stop / close
+          // order's own trades. A NEW event id => a new report_id; Fly's chain build takes the latest close report, so
+          // D3 recomputes from the real fill. Only the fill-record leg is filled in; the exit send/ack legs keep the
+          // original EXIT's values (never overwritten by the later reconcile time).
+          const ms = isoMs(pl.exit_fill_record_at) ?? isoMs(pl.exchange_exit_fill_first_at);
+          if (ms != null) tl.exit_fill_record_at_ts = tl.exit_fill_record_at_ts ?? sec(ms);
+          push(e, 'POSITION_CLOSED', closeReport(pl, entryFillPrice ?? entryPrice, true));
           break;
         }
         case 'EXPIRED':

@@ -103,6 +103,8 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
         if r.get("type") in ("ORDER_FILLED",):
             ch["fill_reported_to_fly_at_ts"] = ch.get("fill_reported_to_fly_at_ts") or _f(r.get("fly_received_at_ts"))
             fill = r.get("fill") if isinstance(r.get("fill"), Mapping) else {}
+            if _f(fill.get("price")) is not None:   # HM R5 nit 6: the source rides with the price it labels (latest wins)
+                ch["fill_price_source"] = str(fill.get("source") or "none")
             ch["fill_price"] = _f(fill.get("price")) or ch.get("fill_price")
             ch["fill_qty"] = _f(fill.get("qty")) or ch.get("fill_qty")
         if r.get("type") in ("ORDER_PLACED", "ORDER_SENT"):

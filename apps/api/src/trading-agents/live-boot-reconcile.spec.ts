@@ -14,6 +14,12 @@ import {
   liveBootGateSetPhase,
   liveBootReconcileStampFor,
   liveBootReconcileVerdict,
+  LIVE_BOOT_RECONCILE_MAX_ATTEMPTS,
+  LIVE_ENTRY_FENCE_NO_EXPIRY,
+  LIVE_FENCE_LEASE_MS,
+  staleFlattenFenceWhere,
+  flattenFenceId,
+  exitFillUnreadableFenceId,
   SignalSubscriberExecutionService,
 } from './signal-subscriber-execution.service';
 
@@ -49,7 +55,7 @@ test('verdict table: only FLAT_NO_STOPS or a full DB match with resident stops a
 });
 
 type Read = { pos: { amount: number } | null; orders: Array<{ id: number }> } | Error;
-function svc(o: { read: Read; rows?: Array<{ id: string; status: string; direction: 'LONG' | 'SHORT'; qty: number; stops: number[] }>; creds?: boolean }) {
+function svc(o: { read: Read; rows?: Array<{ id: string; status: string; direction: 'LONG' | 'SHORT'; qty: number; stops: number[]; entryOrderId?: number }>; creds?: boolean; users?: string[] }) {
   const s = Object.create(SignalSubscriberExecutionService.prototype) as SignalSubscriberExecutionService;
   const calls: string[] = [];
   const logs: string[] = [];
@@ -63,10 +69,10 @@ function svc(o: { read: Read; rows?: Array<{ id: string; status: string; directi
       getOpenPositionDetail: async () => { calls.push(`pos@${Date.now()}`); if (o.read instanceof Error) throw o.read; return o.read.pos; },
       listActiveOrders: async () => { calls.push('orders'); if (o.read instanceof Error) throw o.read; return o.read.orders; },
     },
-    loadExecutionMeta: async (id: string) => { const r = rows.find((x) => x.id === id)!; return { direction: r.direction, qty: r.qty }; },
+    loadExecutionMeta: async (id: string) => { const r = rows.find((x) => x.id === id)!; return { direction: r.direction, qty: r.qty, bitfinexOrderId: r.entryOrderId }; },
     participantRecordedStopOrderIds: async (id: string) => rows.find((x) => x.id === id)!.stops,
     prisma: {
-      tradingAgentInstance: { findMany: async () => [{ userId: 'u1' }] },
+      tradingAgentInstance: { findMany: async () => (o.users ?? ['u1']).map((userId) => ({ userId })) },
       signalCycleParticipant: { findMany: async () => rows.map((r) => ({ id: r.id, status: r.status })) },
       liveEntryFence: { deleteMany: async (a: unknown) => { calls.push(`fence-clear:${JSON.stringify(a)}`); } },
       $executeRaw: async (..._a: unknown[]) => { calls.push('stamp'); return 1; },
@@ -162,4 +168,121 @@ test('wiring: onModuleInit sets the gate PENDING before any tick; mirrors carry 
   assert.ok(acct.includes('this.bitfinex.listActiveOrders(creds)'));
   const py = readFileSync(resolve(__dirname, '../../../../services/btc-conservative-agent/live_guardian.py'), 'utf8');
   assert.ok(py.includes('RELAY_BOOT_RECONCILE'));
+});
+
+test('HM R5 nit 5: a PENDING_ENTRY row whose resting entry order is active reconciles (PENDING_ENTRY_MATCH, no RED)', async () => {
+  const v = (o: Partial<Parameters<typeof liveBootReconcileVerdict>[0]>) => liveBootReconcileVerdict({
+    processStartMs: START, readSentAtMs: AFTER, positionAmount: 0, activeOrders: [], dbRows: [], ...o,
+  });
+  const pend = (id: string, eid: number | null) => ({ id, status: 'PENDING_ENTRY', direction: 'LONG' as const, qty: 0.001, stopOrderIds: [], entryOrderId: eid });
+  const flat = v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', 77)] });
+  assert.deepEqual([flat.verdict, flat.allowed], ['PENDING_ENTRY_MATCH', true]);
+  const withOpen = v({ positionAmount: 0.001, activeOrders: [{ id: 9 }, { id: 77 }], dbRows: [open('p', 'LONG', 0.001, [9]), pend('q', 77)] });
+  assert.deepEqual([withOpen.verdict, withOpen.allowed], ['PENDING_ENTRY_MATCH', true]);
+  // unreadable / unreconcilable stays blocked
+  assert.equal(v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', null)] }).verdict, 'MISMATCH');          // no entry order id
+  assert.equal(v({ activeOrders: [], dbRows: [pend('q', 77)] }).verdict, 'MISMATCH');                     // entry order gone
+  assert.equal(v({ positionAmount: 0.001, activeOrders: [{ id: 77 }], dbRows: [pend('q', 77)] }).verdict, 'MISMATCH');   // filled while down
+  assert.equal(v({ activeOrders: [{ id: 77 }, { id: 5 }], dbRows: [pend('q', 77)] }).verdict, 'MISMATCH');  // + an unrecorded order
+  assert.equal(v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', 77)], readSentAtMs: null }).verdict, 'UNREADABLE');
+
+  const b = svc({ read: { pos: null, orders: [{ id: 77 }] }, rows: [{ id: 'q', status: 'PENDING_ENTRY', direction: 'LONG', qty: 0.001, stops: [], entryOrderId: 77 }] });
+  await b.run();
+  const st = liveBootReconcileStampFor('u1') as Record<string, unknown>;
+  assert.deepEqual([st.verdict, st.allowed, st.red], ['PENDING_ENTRY_MATCH', true, false]);   // no RED -> Fly never force-flats it
+  assert.equal(liveBootEntryBlocked('u1'), false);
+  const n = svc({ read: { pos: null, orders: [{ id: 77 }] }, rows: [{ id: 'q', status: 'PENDING_ENTRY', direction: 'LONG', qty: 0.001, stops: [] }] });
+  await n.run();
+  assert.equal((liveBootReconcileStampFor('u1') as Record<string, unknown>).red, true);
+  assert.equal(liveBootEntryBlocked('u1'), true);
+  liveBootGateSetPhase('NOT_RUN');
+});
+
+test('HM R5 nit 4: after LIVE_BOOT_RECONCILE_MAX_ATTEMPTS failed reads -> ALERT, retries stop, entries stay BLOCKED (stamped)', async () => {
+  assert.equal(LIVE_BOOT_RECONCILE_MAX_ATTEMPTS, 20);
+  const u = svc({ read: new Error('ETIMEDOUT') });
+  (u.s as any).executorDestroyed = false;
+  liveBootGateSetPhase('PENDING');
+  const timers: unknown[] = [];
+  const orig = global.setTimeout;
+  (global as any).setTimeout = (...a: unknown[]) => { timers.push(a); return { unref: () => undefined }; };
+  try {
+    await (u.s as any).runLiveBootReconcile(LIVE_BOOT_RECONCILE_MAX_ATTEMPTS - 1);
+    assert.equal(timers.length, 1);   // below the cap: one retry scheduled
+    await (u.s as any).runLiveBootReconcile(LIVE_BOOT_RECONCILE_MAX_ATTEMPTS);
+    assert.equal(timers.length, 1);   // at the cap: no further retry
+  } finally {
+    (global as any).setTimeout = orig;
+  }
+  const st = liveBootReconcileStampFor('u1') as Record<string, unknown>;
+  assert.deepEqual([st.verdict, st.allowed, st.red, st.retries_exhausted], ['UNREADABLE', false, true, true]);
+  assert.equal(liveBootEntryBlocked('u1'), true);
+  assert.ok(u.logs.some((l) => l.startsWith('E [LIVE-BOOT-RECONCILE] ALERT:') && l.includes('20 attempts') && l.includes('u1')));
+  // instance list unreadable at the cap: ALERT, gate stays PENDING (every account blocked)
+  const l = svc({ read: { pos: null, orders: [] } });
+  (l.s as any).prisma.tradingAgentInstance.findMany = async () => { throw new Error('neon down'); };
+  (l.s as any).executorDestroyed = false;
+  liveBootGateSetPhase('PENDING');
+  await (l.s as any).runLiveBootReconcile(LIVE_BOOT_RECONCILE_MAX_ATTEMPTS);
+  assert.ok(l.logs.some((x) => x.includes('ALERT') && x.includes('every account')), l.logs.join('\n'));
+  assert.equal(liveBootEntryBlocked('anyone'), true);
+  liveBootGateSetPhase('NOT_RUN');
+});
+
+test('HM R5 nit 3: an account created after the boot pass (no stamp) is BLOCKED and gets its own boot read; opens only on a pass', async () => {
+  const b = svc({ read: { pos: null, orders: [] }, users: ['u1'] });
+  await b.run();
+  (b.s as any).executorDestroyed = false;
+  assert.equal(liveBootEntryBlocked('u1'), false);
+  const seen: string[] = [];
+  const { liveBootGateOnUnstamped } = await import('./signal-subscriber-execution.service');
+  liveBootGateOnUnstamped((uid) => { seen.push(uid); (b.s as any).reconcileUnstampedBootUser(uid); });
+  assert.equal(liveBootEntryBlocked('late'), true);                      // DONE phase, no stamp -> blocked (was: allowed)
+  assert.equal(await countLiveMutexOthers(tx, 'late', null), 1);
+  assert.deepEqual(liveBootReconcileStampFor('late'), { verdict: 'PENDING', allowed: false, red: false });
+  assert.deepEqual(seen, ['late', 'late']);
+  await (b.s as any).bootUnstampedLast;                                   // one read in flight (deduped), then stamped
+  assert.equal((b.calls.filter((c) => c.startsWith('pos@'))).length, 2);  // u1 at boot + late once
+  assert.equal((liveBootReconcileStampFor('late') as Record<string, unknown>).verdict, 'FLAT_NO_STOPS');
+  assert.equal(liveBootEntryBlocked('late'), false);
+  // a late account that does not pass stays blocked (RED) and is not re-read while its retry is pending
+  const m = svc({ read: { pos: { amount: 0.001 }, orders: [] } });
+  (m.s as any).executorDestroyed = false;   // its retry timer is unref'd (30 s); the gate keeps it blocked meanwhile
+  liveBootGateOnUnstamped((uid) => (m.s as any).reconcileUnstampedBootUser(uid));
+  assert.equal(liveBootEntryBlocked('late2'), true);
+  await (m.s as any).bootUnstampedLast;
+  assert.equal((liveBootReconcileStampFor('late2') as Record<string, unknown>).red, true);
+  assert.equal(liveBootEntryBlocked('late2'), true);
+  liveBootGateOnUnstamped(null);
+  liveBootGateSetPhase('NOT_RUN');
+  assert.equal(liveBootEntryBlocked('late3'), false);                     // the API process (NOT_RUN) never gates
+});
+
+test('HM R5 nit 1: boot cleanup is owner-scoped: never an exit-fill fence, never a heartbeating holder, never its own', () => {
+  const now = 10_000_000;
+  const procStart = now - 5_000;
+  const w = staleFlattenFenceWhere('u1', now, procStart, 'me');
+  // evaluate the Prisma where on in-memory rows
+  const hit = (r: { id: string; userId: string; acquiredAt: Date; expiresAt: Date }) =>
+    r.userId === w.userId && r.id.startsWith(w.id.startsWith) && !r.id.startsWith(w.NOT.id.startsWith)
+    && w.OR.some((c: any) => (c.expiresAt instanceof Date
+      ? r.expiresAt.getTime() === c.expiresAt.getTime() && r.acquiredAt < c.acquiredAt.lt
+      : r.expiresAt < c.expiresAt.lt));
+  const at = (ms: number) => new Date(ms);
+  const rows = {
+    deadHolder: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(now - 600_000), expiresAt: at(now - LIVE_FENCE_LEASE_MS - 1) },
+    liveOldWorker: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(now - 600_000), expiresAt: at(now + 30_000) },
+    justStopped: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(now - 600_000), expiresAt: at(now - 1_000) },
+    mine: { id: flattenFenceId('me'), userId: 'u1', acquiredAt: at(now - 600_000), expiresAt: at(now - 600_000) },
+    legacyBeforeBoot: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(procStart - 1), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
+    legacyAfterBoot: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(procStart + 1), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
+    exitFill: { id: exitFillUnreadableFenceId('p1'), userId: 'u1', acquiredAt: at(now - 9e9), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
+    otherUser: { id: flattenFenceId('old'), userId: 'u2', acquiredAt: at(now - 600_000), expiresAt: at(now - LIVE_FENCE_LEASE_MS - 1) },
+  };
+  const deleted = Object.entries(rows).filter(([, r]) => hit(r)).map(([k]) => k);
+  assert.deepEqual(deleted, ['deadHolder', 'legacyBeforeBoot']);
+  const src = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const run = src.slice(src.indexOf('  private async reconcileBootUser('), src.indexOf('  private async persistBootStamp('));
+  assert.ok(run.includes('deleteMany({ where: staleFlattenFenceWhere(userId, Date.now(), LIVE_PROCESS_START_MS) })'));
+  assert.equal(/acquiredAt: \{ lt: new Date\(LIVE_PROCESS_START_MS\)/.test(src), false);   // the unscoped delete is gone
 });

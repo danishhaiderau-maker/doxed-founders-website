@@ -199,6 +199,8 @@ export type SignalCycleEventType =
   // MIRROR_DIFF -> STALE_NO_EXPOSURE sequence reportable without inference.
   | 'EXECUTION_TIMING'
   | 'NEGATIVE_EVIDENCE'
+  // HM R5 C1 / RK 09:10 (3): the clearing re-stamp of an EXIT stored EXIT_FILL_UNREADABLE (real fill by order id).
+  | 'EXIT_FILL_RECONCILED'
   // F2 (2026-07-07 incident) � Showcase-unreachable orphan kill. Emitted when
   // the relay market-closes an OPEN copy lot because the showcase has been
   // unreachable past SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS. Distinct from

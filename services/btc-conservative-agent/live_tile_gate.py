@@ -381,7 +381,8 @@ def trade_realised_pnl_usd(c: Mapping[str, Any]) -> float | None:
     pnl_usd can itself be computed from a mark or entry fallback (a $0 "loss"), so it is never read here.
     None = UNREADABLE: the caller fails closed (unreadable_pnl_rows -> LEDGER_PNL_UNREADABLE, AMBER entry block) and the
     trade is non-countable (live_exit_fill.exit_fill_non_countable_reason, R17)."""
-    entry, exit_, qty = _f(c.get("fill_price")), _lef.exit_fill_price(c), _f(c.get("fill_qty"))
+    # HM R5 nit 6: the entry is the real entry fill only (live_exit_fill.entry_fill_price); no limit-price fallback
+    entry, exit_, qty = _lef.entry_fill_price(c), _lef.exit_fill_price(c), _f(c.get("fill_qty"))
     side = str(c.get("side") or c.get("direction") or "").strip().upper()
     if entry and exit_ and qty and qty > 0 and side in ("LONG", "BUY", "SHORT", "SELL"):
         sgn = 1.0 if side in ("LONG", "BUY") else -1.0
@@ -874,7 +875,8 @@ def stop_fill_overshoots(chains: Iterable[Mapping[str, Any]]) -> list:
             continue
         if force_flat_non_countable(c):
             continue   # a guardian/liq flatten (STOP_FAILURE_FLATTEN, LIQ_CHECK_FLATTEN, LIQ_CLAMP_FLATTEN) is no stop fill
-        stop, entry, px = _f(c.get("stop_price")), _f(c.get("fill_price")), _f(c.get("exit_price"))
+        # HM R5 nit 7: the fill is the REAL exit fill (live_exit_fill.exit_fill_price), never the display exit_price
+        stop, entry, px = _f(c.get("stop_price")), _f(c.get("fill_price")), _lef.exit_fill_price(c)
         side = None if stop is None or entry is None else ("LONG" if stop < entry else "SHORT")
         out.append({"trade_id": c.get("correlation_id"), "tile": chain_tile_key(c), "side": side, "stop_level": stop,
                     "fill_px": px, "overshoot_bp": overshoot_bp(side or "", stop, px)})

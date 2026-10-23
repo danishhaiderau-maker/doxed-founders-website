@@ -13,6 +13,10 @@ from typing import Any, Mapping
 
 REAL_EXIT_FILL_SOURCES = frozenset({"exchange_fill", "stop_fill"})
 EXIT_FILL_UNREADABLE = "EXIT_FILL_UNREADABLE"
+# HM R5 nit 6: the entry side of every live P&L is the entry order's OWN trades only (reporter fill.source
+# 'exchange_trades'); a limit / mark / position-base reference fallback is no entry fill price.
+REAL_ENTRY_FILL_SOURCES = frozenset({"exchange_trades"})
+ENTRY_FILL_UNREADABLE = "ENTRY_FILL_UNREADABLE"
 
 
 def _pos(v: Any) -> float | None:
@@ -31,9 +35,23 @@ def exit_fill_price(chain: Mapping[str, Any] | None) -> float | None:
     return _pos(c.get("exit_fill_price"))
 
 
-def exit_fill_non_countable_reason(chain: Mapping[str, Any] | None) -> str | None:
-    """R17: a CLOSED live chain without a real exit fill is non-countable: 'EXIT_FILL_UNREADABLE:<source>'."""
+def entry_fill_price(chain: Mapping[str, Any] | None) -> float | None:
+    """HM R5 nit 6: the real Bitfinex entry fill price of a chain (fill_price_source exchange_trades), else None.
+    Never the limit price, never a mark or position-base fallback."""
     c = chain if isinstance(chain, Mapping) else {}
-    if not c.get("closed") or exit_fill_price(c) is not None:
+    if str(c.get("fill_price_source") or "") not in REAL_ENTRY_FILL_SOURCES:
         return None
-    return f"{EXIT_FILL_UNREADABLE}:{str(c.get('exit_price_source') or 'none')}"
+    return _pos(c.get("fill_price"))
+
+
+def exit_fill_non_countable_reason(chain: Mapping[str, Any] | None) -> str | None:
+    """R17: a CLOSED live chain without a real exit fill is non-countable: 'EXIT_FILL_UNREADABLE:<source>';
+    HM R5 nit 6: one without a real entry fill is non-countable: 'ENTRY_FILL_UNREADABLE:<source>'."""
+    c = chain if isinstance(chain, Mapping) else {}
+    if not c.get("closed"):
+        return None
+    if exit_fill_price(c) is None:
+        return f"{EXIT_FILL_UNREADABLE}:{str(c.get('exit_price_source') or 'none')}"
+    if entry_fill_price(c) is None:
+        return f"{ENTRY_FILL_UNREADABLE}:{str(c.get('fill_price_source') or 'none')}"
+    return None

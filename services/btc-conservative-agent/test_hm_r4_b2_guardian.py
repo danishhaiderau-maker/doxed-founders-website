@@ -24,7 +24,7 @@ def _codes(v):
 
 def _real(pnl, **k):
     return {"correlation_id": "GS01-1", "lane": "FAMILY_GS01_XV", "closed": True, "fill_price": 100_000.0, "fill_qty": 0.01,
-            "side": "LONG", "exit_fill_price": 100_000.0 + pnl / 0.01, "exit_price_source": "exchange_fill", **k}
+            "side": "LONG", "exit_fill_price": 100_000.0 + pnl / 0.01, "exit_price_source": "exchange_fill", "fill_price_source": "exchange_trades", **k}
 
 
 def _nofill(**k):

@@ -39,7 +39,7 @@ CASES = [
 def _chain(close: dict, *, pnl_usd=0.0, exit_price_top=None) -> dict:
     reports = [
         {"correlation_id": "gs1-a", "account": "A", "type": "ORDER_PLACED", "order": {"side": "LONG", "qty": 0.001, "price": ENTRY}},
-        {"correlation_id": "gs1-a", "account": "A", "type": "ORDER_FILLED", "fill": {"price": ENTRY, "qty": 0.001}},
+        {"correlation_id": "gs1-a", "account": "A", "type": "ORDER_FILLED", "fill": {"price": ENTRY, "qty": 0.001, "source": "exchange_trades"}},
         {"correlation_id": "gs1-a", "account": "A", "type": "POSITION_CLOSED", "close": close, "pnl_usd": pnl_usd,
          "exit_price": exit_price_top, "closed_at_ts": NOW - 60},
     ]

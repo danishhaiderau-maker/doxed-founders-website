@@ -17,7 +17,7 @@ def real_fill(pnl):
     """HM R4 B1: a closed live trade whose P&L is backed by a REAL Bitfinex exit fill (the reporter's close.price with
     price_source exchange_fill). pnl_usd alone is no longer read by D3 (no fallback)."""
     return {"fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 100_000.0 + pnl / 0.01,
-            "exit_price_source": "exchange_fill"}
+            "exit_price_source": "exchange_fill", "fill_price_source": "exchange_trades"}
 
 
 def codes(v):

@@ -81,6 +81,7 @@ const target = {
   closeQty: 0.01, targetAmount: 0, confirmedExchangeAmount: 0, remainingManagedOrderIds: [],
   accountWideActiveOrderIds: [], accountWideManagedOrderIds: [], orphanOrderIds: [], foreignOrderIds: [],
   closeSubmitStartedAtMs: RX + 50, closeExchangeAckAtMs: RX + 120, closeConfirmedAtMs: RX + 200,
+  closeExchangeOrderId: 555,
 };
 
 function harness(recordImpl?: (type: string, body: Record<string, unknown>, n: number) => void) {
@@ -97,7 +98,17 @@ function harness(recordImpl?: (type: string, body: Record<string, unknown>, n: n
     showcaseFlatOpenSince: new Map([['p1', 1]]),
     logger: { log() {}, warn() {}, error() {}, debug() {} },
     swallowedError: () => () => undefined,
-    prisma: { signalCycleParticipant: { findUnique: async () => ({ status: 'OPEN', terminalCloseClaimToken: null }) } },
+    prisma: {
+      signalCycleParticipant: { findUnique: async () => ({ status: 'OPEN', terminalCloseClaimToken: null }) },
+      // HM R5 C1 / RK 09:10: the entry is the real fill; the exit is the close order's own trades (by order id)
+      signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 100_000, fill_price_source: 'exchange_trades' } }) },
+      liveEntryFence: { upsert: async () => ({}) },
+    },
+    bitfinex: {
+      fetchOrderTrades: async (_c: unknown, orderId: number) => (orderId === 555
+        ? [{ id: 9001, execAmount: -0.01, execPrice: 101_050, mtsCreate: RX + 150, fee: -0.2, feeCurrency: 'USD' }]
+        : []),
+    },
     hasParticipantExited: async () => false,
     acquireTerminalCloseClaim: async () => claim,
     readOpenPositionDetailWithRetry: async () => ({ amount: 0.01, basePrice: 100_000 }),
@@ -163,7 +174,8 @@ test('RK: a forced throw after the Bitfinex close reconciles the DB to flat (EXI
   assert.equal(b.exit_post_close_reconciled, true);
   assert.match(String(b.exit_post_close_error), /RangeError: Invalid time value/);
   assert.equal(b.exit_price, 101_050); // the exchange's own fill
-  assert.equal(b.pnl_source, 'exchange_fill');
+  assert.equal(b.pnl_source, 'bitfinex_order_trades'); // HM R5 C1: the close order's own trades
+  assert.equal(b.exit_price_source, 'exchange_fill');
   assert.equal(b.pnl_usd, 10.5);
   assert.equal(b.terminal_close_phase, 'CONFIRMED');
   assert.equal(b.terminal_close_claim_token, 'tok-1');

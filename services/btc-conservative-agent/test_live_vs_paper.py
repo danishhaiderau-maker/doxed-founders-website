@@ -5,7 +5,8 @@ ROOT = Path(__file__).resolve().parent
 # every live leg measured (HM 01:43 item 3): entry from the chain, exit Fly send / Railway receive from the outbox
 _LEGS = {"fly_signal_at_ts": 9.0, "fly_intent_emitted_at_ts": 9.1, "railway_received_at_ts": 9.2,
          "exchange_ack_at_ts": 9.6, "exit_ack_at_ts": 50.4,
-         "exit_fill_price": 100.9, "exit_price_source": "exchange_fill"}   # HM R4 B1: a real exit fill
+         "exit_fill_price": 100.9, "exit_price_source": "exchange_fill",   # HM R4 B1: a real exit fill
+         "fill_price_source": "exchange_trades"}                             # HM R5 nit 6: a real entry fill
 _EXIT_SEND = {"exit_signal_at_ts": 49.9, "fly_intent_at_ts": 50.0, "fly_send_started_at_ts": 50.01,
               "fly_send_rtt_s": 0.12, "railway_received_at_ts": 50.08}
 

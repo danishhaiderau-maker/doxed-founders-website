@@ -231,6 +231,7 @@ test_genome_search_space_disclosure.py
 test_genome_source_preflight.py
 test_gs_regime_engine.py
 test_hm_r4_b1_exit_fill.py
+test_hm_r5_fill_provenance.py
 test_hm_audit_20261010.py
 test_hm_missing_checks.py
 test_horizon_source_truth.py

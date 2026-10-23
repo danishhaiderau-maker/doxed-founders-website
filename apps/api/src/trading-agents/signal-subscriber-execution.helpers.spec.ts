@@ -1719,17 +1719,14 @@ test('live close does not await public mark enrichment before reduce-only close 
   const source = String(
     (SignalSubscriberExecutionService.prototype as any).executeShowcaseMirrorCloseOwned,
   );
-  const markPromiseAt = source.indexOf('preparedExitPricePromise');
-  const closeAt = source.indexOf('closeParticipantPositionToLedgerTarget', markPromiseAt);
-  const auditAwaitAt = source.indexOf('await preparedExitPricePromise', closeAt);
-  assert.ok(markPromiseAt >= 0);
-  assert.ok(closeAt > markPromiseAt);
-  assert.ok(auditAwaitAt > closeAt);
-  const criticalPromiseAll = source.slice(
-    source.indexOf('Promise.all', markPromiseAt),
-    source.indexOf(']);', source.indexOf('Promise.all', markPromiseAt)) + 3,
-  );
-  assert.doesNotMatch(criticalPromiseAll, /getMarkPrice/);
+  // HM R5 C1 + RK 09:10: the mark is never read for an exit price at all (so nothing can hold the close behind it);
+  // the exit price is the close order's own trades, read only after the close via the shared helper.
+  assert.doesNotMatch(source, /getMarkPrice/);
+  assert.doesNotMatch(source, /preparedExitPricePromise/);
+  const closeAt = source.indexOf('closeParticipantPositionToLedgerTarget');
+  const fillReadAt = source.indexOf('readLiveExitOrderFill', closeAt);
+  assert.ok(closeAt >= 0);
+  assert.ok(fillReadAt > closeAt);
 });
 
 test('live close keeps reduce-only stop protection through exchange close confirmation', () => {
@@ -1816,7 +1813,7 @@ test('concurrent signed close traverses durable claim and submits exactly one ex
   service.showcasePositionAbsentMisses = new Map();
   service.showcasePositionAbsentSince = new Map();
   service.showcaseFlatOpenSince = new Map();
-  service.logger = { log: () => undefined, warn: () => undefined };
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
   const cycle = {
     id: 'cycle-integrated-close', agentId: 'agent', tradeId: 'cont-integrated-close',
     intentEnvelope: { context: { showcase_event_seq: 21 } }, showcasePnlUsd: null,
@@ -1854,6 +1851,14 @@ test('concurrent signed close traverses durable claim and submits exactly one ex
   service.prisma = {
     signalCycleParticipant: participantStore,
     $transaction: async (run: (client: any) => Promise<unknown>) => run(tx),
+    // HM R5 C1 / RK 09:10: the exit price is the close order's own trades (by order id); the entry is the real fill
+    signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 64_500, fill_price_source: 'exchange_trades' } }) },
+    liveEntryFence: { upsert: async () => { throw new Error('no fence expected: the close fill is readable'); } },
+  };
+  service.bitfinex = {
+    fetchOrderTrades: async (_c: unknown, orderId: number) => (orderId === 88001
+      ? [{ id: 1, execAmount: 0.01, execPrice: 64_400, mtsCreate: Date.now(), fee: 0, feeCurrency: 'USD' }]
+      : []),
   };
   service.cycles = {
     recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => {
@@ -2331,6 +2336,10 @@ test('terminal protected partial already flat records FILLED and EXIT without su
   assert.deepEqual(types, ['FILLED', 'EXIT']);
   assert.equal(payloads[0]?.exchange_fill_ids, undefined);
   assert.equal(payloads[0]?.exchange_fill_costs, undefined);
+  // HM R5 C1 + RK 09:10: the stop's fill read failed => exit_price null, EXIT_FILL_UNREADABLE (never a mark / limit)
+  assert.equal(payloads[1]?.exit_price, null);
+  assert.equal(payloads[1]?.exit_fill_status, 'EXIT_FILL_UNREADABLE');
+  assert.equal(payloads[1]?.pnl_usd, null);
   assert.equal(stopSubmits, 0);
 });
 
@@ -8980,7 +8989,16 @@ test('Scenario C policy close persists authenticated PnL, complete costs, profil
   service.showcaseFlatOpenSince = new Map();
   service.stopManagerCircuitOpen = new Map();
   service.positionRuntime = new Map();
-  service.logger = { log: () => undefined, warn: () => undefined };
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  // HM R5 C1 / RK 09:10: the exit price is the close order's (202) own trades; the entry is the real fill
+  service.bitfinex = {
+    fetchOrderTrades: async (_c: unknown, id: number) => (id === 202
+      ? [{ id: 5, execAmount: 0.01, execPrice: 63_900, fee: 0, feeCurrency: 'USD', mtsCreate: 20_150 }] : []),
+  };
+  service.prisma = {
+    signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 64_000, fill_price_source: 'exchange_trades' } }) },
+    liveEntryFence: { upsert: async () => { throw new Error('no fence expected: the close fill is readable'); } },
+  };
   service.hasParticipantExited = async () => false;
   service.acquireTerminalCloseClaim = async (input: any) => ({
     ownerToken: 'owner', requestId: 'request', phase: 'CLAIMED',
@@ -9032,6 +9050,9 @@ test('Scenario C policy close persists authenticated PnL, complete costs, profil
   assert.equal(exitPayload!.slippage_usd, 0.03);
   assert.deepEqual(exitPayload!.fill_ids, ['entry-fill', 'exit-fill']);
   assert.equal(exitPayload!.final_reconciliation.complete, true);
+  assert.equal(exitPayload!.exit_price, 63_900);   // the close order's own fill
+  assert.equal(exitPayload!.exit_fill_status, 'REAL_FILL');
+  assert.equal(exitPayload!.pnl_usd, 1);           // (64_000 - 63_900) * 0.01 SHORT
   assert.match(exitPayload!.fee_model, /execution_cost_profile_v1/);
   assert.match(exitPayload!.execution_profile, /relay_execution_profile_v1/);
 });
@@ -9060,7 +9081,11 @@ test('exchange-observed terminal stop uses exact stop fills instead of a later m
       if (type === 'EXIT') exitPayload = payload;
     },
   };
-  service.prisma = { tradingAgentInstance: { updateMany: async () => ({ count: 1 }) } };
+  service.prisma = {
+    tradingAgentInstance: { updateMany: async () => ({ count: 1 }) },
+    // HM R5 nit 6: the P&L entry is the entry order's own trades (FILLED exchange_trades)
+    signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 62_836, fill_price_source: 'exchange_trades' } }) },
+  };
   const closed = await service.reconcileManualClose(
     'agent', 'user',
     { id: 'cycle', status: SignalCycleStatus.OPEN, showcasePnlUsd: null },

@@ -91,7 +91,8 @@ def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
 def test_d3_trade_pnl_only_no_funding_no_fees():
     # RK D3 (24 Oct 06:26) supersedes AMEND4 E1's funding term: trade P&L only, no funding term, no fee term.
     c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.03, "funding_usd": -0.025, "fee_usd": -9,
-         "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 99_997.0, "exit_price_source": "stop_fill"}
+         "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 99_997.0, "exit_price_source": "stop_fill",
+         "fill_price_source": "exchange_trades"}   # HM R5 nit 6: the entry price is the real entry fill
     per, total, n = ltg.daily_realised_loss([c], NOW)
     assert abs(per["gs1"] - 0.03) < 1e-9 and n == 1
 
@@ -100,7 +101,8 @@ def test_skipped_daily_cap_count_and_non_countable_summary():
     day_ts = NOW - 10
     rows = [("gs1-a", {"decided_at_ts": day_ts, "reasons": [ltg.SKIP_DAILY_CAP]}), ("gs6-b", {"decided_at_ts": day_ts, "reasons": ["X"]})]
     assert ltg.skipped_daily_cap_count(rows, NOW) == {"utc_day": ltg.utc_day(NOW), "count": 1, "by_tile": {"gs1": 1}}
-    ch = [{"correlation_id": "gs1-a", "closed": True, "exit_reason": "STOP", "stop_price": 99.0, "fill_price": 100.0, "exit_price": 98.9},
+    ch = [{"correlation_id": "gs1-a", "closed": True, "exit_reason": "STOP", "stop_price": 99.0, "fill_price": 100.0, "exit_price": 98.9,
+           "exit_fill_price": 98.9, "exit_price_source": "stop_fill", "fill_price_source": "exchange_trades"},   # HM R5 nit 7: real exit fill
           {"correlation_id": "gs1-b", "closed": True, "exit_reason": ltg.STOP_FAILURE_FLATTEN}]
     s = ltg.non_countable_summary(ch, [{"code": ltg.STOP_FAILURE_FLATTEN}])
     assert s["non_countable_trades"] == 1 and s["stop_failure_flatten_red"] and s["stop_overshoot_bp"] == [10.101]

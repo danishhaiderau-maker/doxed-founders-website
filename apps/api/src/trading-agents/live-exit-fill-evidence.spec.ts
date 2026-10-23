@@ -88,10 +88,12 @@ test('B1 / RK 08:03: stop-fired-no-fill and budget-refused exits are non-countab
   const now = new Date('2026-10-24T00:00:00Z');
   const placed = { eventType: 'ORDER_PLACED', payload: { entry_exchange_ack_at: iso(9.6) }, createdAt: now };
   const legs = { exit_trigger_ts: 49.9, fly_send_started_at: iso(50.01), platform_received_at: iso(50.08), close_exchange_ack_at: iso(50.4) };
-  const row = (pl: Record<string, unknown>) => mapParticipantToExportRow({
+  // HM R5 nit 6: a countable row also needs the entry from the entry order's own trades (FILLED exchange_trades)
+  const realFilled = { eventType: 'FILLED', payload: { fill_price: ENTRY, fill_price_source: 'exchange_trades' }, createdAt: now };
+  const row = (pl: Record<string, unknown>, withFilled = false) => mapParticipantToExportRow({
     participant: { id: 'p', status: SignalCycleStatus.CLOSED, venue: 'bitfinex', fillPrice: ENTRY, exitPrice: Number(pl.exit_price ?? ENTRY),
       pnlUsd: 0, pnlMarginPct: 0, feeUsd: null, createdAt: now, updatedAt: now,
-      events: [placed, { eventType: 'EXIT', payload: { ...legs, ...pl }, createdAt: now }] },
+      events: [placed, ...(withFilled ? [realFilled, { eventType: 'STOP_LOSS_ARMED', payload: {}, createdAt: now }] : []), { eventType: 'EXIT', payload: { ...legs, ...pl }, createdAt: now }] },
     cycle: { id: 'c', tradeId: 't', intentEnvelope: env, showcaseExitReason: 'TP', createdAt: now, closedAt: now },
   });
   for (const name of ['stop_fired_no_fill_read', 'fill_read_failed_or_budget_refused', 'already_flat', 'reconcile_entry_fallback', 'partial_close', 'non_usd_fee']) {
@@ -99,7 +101,9 @@ test('B1 / RK 08:03: stop-fired-no-fill and budget-refused exits are non-countab
     assert.equal(r.nonCountable, true, name);
     assert.match(String(r.nonCountableReason), /^EXIT_FILL_UNREADABLE:(mark|entry_fallback)$/, name);   // no FILLED event here => no entry ref
   }
-  assert.deepEqual([row(CASES.exchange_fill.pl).nonCountable, row(CASES.exchange_fill.pl).nonCountableReason], [false, null]);
+  assert.deepEqual([row(CASES.exchange_fill.pl, true).nonCountable, row(CASES.exchange_fill.pl, true).nonCountableReason], [false, null]);
+  // HM R5 nit 6: the same real exit with no real entry fill stays non-countable
+  assert.equal(row(CASES.exchange_fill.pl).nonCountableReason, 'ENTRY_FILL_UNREADABLE:none');
   // FromEvents picks the LATEST EXIT and the FILLED entry price for entry-fallback detection
   assert.equal(liveExitFillEvidenceFromEvents([{ eventType: 'FILLED', payload: { fill_price: 61_000 } },
     { eventType: 'EXIT', payload: { exit_price: 61_000 } }]).source, 'entry_fallback');

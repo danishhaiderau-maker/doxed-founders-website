@@ -113,7 +113,13 @@ export function liveRowStopEvidenceFromEvents(events: readonly EvidenceEvent[]):
  */
 export type LiveExitPriceSource = 'exchange_fill' | 'stop_fill' | 'mark' | 'entry_fallback' | 'none';
 export const LIVE_REAL_EXIT_FILL_SOURCES: ReadonlySet<LiveExitPriceSource> = new Set(['exchange_fill', 'stop_fill']);
-export type LiveExitFillEvidence = { price: number | null; source: LiveExitPriceSource; reportedPrice: number | null };
+export type LiveExitFillEvidence = {
+  price: number | null;
+  source: LiveExitPriceSource;
+  reportedPrice: number | null;
+  /** nit 6: set by liveExitFillEvidenceFromEvents (the real entry fill); absent = not checked */
+  entry?: LiveEntryFillEvidence;
+};
 
 const finitePos = (v: unknown): number | null => {
   const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : Number.NaN;
@@ -126,28 +132,203 @@ export function liveExitFillEvidence(exitPayload: unknown, entryFillPrice?: unkn
   const fill = finitePos(pl.exit_exchange_fill_price);
   if (fill != null) return { price: fill, source: 'exchange_fill', reportedPrice: reported ?? fill };
   const stopIds = Array.isArray(pl.exchange_exit_fill_ids) ? pl.exchange_exit_fill_ids : [];
-  if (reported != null && String(pl.pnl_source ?? '') === 'bitfinex_order_trades'
-      && String(pl.exit_reason ?? '').toUpperCase() === 'EXCHANGE_STOP' && stopIds.length > 0
-      && finitePos(pl.exchange_exit_filled_qty) != null) {
+  const stopQtyOk = stopIds.length > 0 && finitePos(pl.exchange_exit_filled_qty) != null
+    && String(pl.pnl_source ?? '') === 'bitfinex_order_trades';
+  if (reported != null && stopQtyOk && (String(pl.exit_reason ?? '').toUpperCase() === 'EXCHANGE_STOP'
+      // HM R5 C1 / RK 09:10: the shared order-fill helper (liveOrderExitFill) stamps the resident stop's own trades
+      || (pl.exit_fill_status === EXIT_FILL_REAL && pl.exit_fill_kind === 'stop'))) {
     return { price: reported, source: 'stop_fill', reportedPrice: reported };
   }
-  if (reported == null) return { price: null, source: 'none', reportedPrice: null };
+  if (reported == null) {
+    // RK 09:10: an unreadable exit is stored with exit_price null; keep the source it was stamped with (audit only)
+    const stamped = String(pl.exit_price_source ?? '');
+    const source: LiveExitPriceSource = stamped === 'mark' || stamped === 'entry_fallback' ? stamped : 'none';
+    return { price: null, source, reportedPrice: null };
+  }
   const entry = finitePos(entryFillPrice ?? pl.entry_exchange_fill_price ?? pl.fill_price);
   return { price: null, source: entry != null && Math.abs(entry - reported) < 1e-9 ? 'entry_fallback' : 'mark', reportedPrice: reported };
 }
 
-/** The latest EXIT event of a participant, with the FILLED price as the entry reference. */
-export function liveExitFillEvidenceFromEvents(events: readonly { eventType: string; payload: unknown }[]): LiveExitFillEvidence {
-  const exit = [...events].reverse().find((e) => e.eventType === 'EXIT');
-  const filled = events.find((e) => e.eventType === 'FILLED');
-  const fp = filled && filled.payload && typeof filled.payload === 'object' ? (filled.payload as Record<string, unknown>) : {};
-  return liveExitFillEvidence(exit?.payload, fp.exchange_fill_price ?? fp.fill_price);
+/**
+ * HM R5 nit 6: the ENTRY price of a live row is real only when the FILLED event carries the entry order's own Bitfinex
+ * trades (fill_price_source 'exchange_trades'). A limit / stop-reference / position-delta / merged-base fallback is never
+ * used by D3 or countability (price null => ENTRY_FILL_UNREADABLE, non-countable; Fly D3 treats it as unreadable).
+ */
+export type LiveEntryFillEvidence = { price: number | null; source: string };
+export function liveEntryFillEvidence(filledPayload: unknown): LiveEntryFillEvidence {
+  const pl = filledPayload && typeof filledPayload === 'object' ? (filledPayload as Record<string, unknown>) : {};
+  const source = String(pl.fill_price_source ?? pl.fill_source ?? 'none') || 'none';
+  const price = finitePos(pl.fill_price);
+  return { price: source === 'exchange_trades' ? price : null, source };
 }
 
-/** R17: a closed row whose exit price is not a real Bitfinex fill is non-countable. */
+/** EXIT plus its later clearing re-stamp (RK 09:10 (3)): the latest of the two is THE exit record of a participant. */
+export const EXIT_FILL_RECONCILED_EVENT = 'EXIT_FILL_RECONCILED';
+export function latestLiveExitEvent<T extends { eventType: string }>(events: readonly T[]): T | undefined {
+  return [...events].reverse().find((e) => e.eventType === 'EXIT' || e.eventType === EXIT_FILL_RECONCILED_EVENT);
+}
+
+/** The latest EXIT (or its EXIT_FILL_RECONCILED re-stamp) of a participant, with the real FILLED entry (nit 6). */
+export function liveExitFillEvidenceFromEvents(events: readonly { eventType: string; payload: unknown }[]): LiveExitFillEvidence {
+  const exit = latestLiveExitEvent(events);
+  const filled = [...events].reverse().find((e) => e.eventType === 'FILLED');
+  const entry = liveEntryFillEvidence(filled?.payload);
+  const fp = filled && filled.payload && typeof filled.payload === 'object' ? (filled.payload as Record<string, unknown>) : {};
+  return { ...liveExitFillEvidence(exit?.payload, fp.exchange_fill_price ?? fp.fill_price), entry };
+}
+
+/** R17: a closed row whose exit price is not a real Bitfinex fill is non-countable; nit 6: nor one without a real entry fill. */
 export function liveRowExitFillCountability(ev: LiveExitFillEvidence | null | undefined): LiveRowCountability {
-  if (ev && LIVE_REAL_EXIT_FILL_SOURCES.has(ev.source) && ev.price != null) return COUNTABLE;
-  return { nonCountable: true, nonCountableReason: `EXIT_FILL_UNREADABLE:${ev?.source ?? 'none'}` };
+  if (!(ev && LIVE_REAL_EXIT_FILL_SOURCES.has(ev.source) && ev.price != null)) {
+    return { nonCountable: true, nonCountableReason: `EXIT_FILL_UNREADABLE:${ev?.source ?? 'none'}` };
+  }
+  if (ev.entry && ev.entry.price == null) return { nonCountable: true, nonCountableReason: `ENTRY_FILL_UNREADABLE:${ev.entry.source}` };
+  return COUNTABLE;
+}
+
+/**
+ * HM R5 C1 + RK 09:10 (binding): THE one exit-fill helper of every live exit path. Reads are the exit order(s)' OWN
+ * Bitfinex trades (resolveExchangeTradesFillEvidence per order id, under the shared read budget), for the EXACT lot qty:
+ *   - one order whose trades equal the qty (sats) => that order's VWAP;
+ *   - else every readable order together equal to the qty (partial / multiple fills) => the combined VWAP;
+ *   - else UNREADABLE: exit_price null, pnl null, exit_fill_status EXIT_FILL_UNREADABLE (+ the pending order ids and qty
+ *     the clearing read retries). Never a mark, ticker or entry price, not even fail-safe.
+ * P&L = (exit VWAP - REAL entry fill) x qty x side; no fee or funding term (fees are kept as audit fields only). Without a
+ * real entry fill (nit 6) pnl is null.
+ */
+export const EXIT_FILL_REAL = 'REAL_FILL';
+export const EXIT_FILL_UNREADABLE = 'EXIT_FILL_UNREADABLE';
+export type LiveOrderFillRead = {
+  price: number;
+  qty: number;
+  fillIds: Array<number | string>;
+  fees?: unknown[];
+  firstExecutedAtMs: number | null;
+  lastExecutedAtMs: number | null;
+};
+export type LiveOrderExitFillInput = {
+  kind: 'stop' | 'close';
+  expectedQty: number | null | undefined;
+  /** one entry per exit order id; read null = the read failed / was budget-refused / returned no trades */
+  reads: Array<{ orderId: number; read: LiveOrderFillRead | null }>;
+  direction?: 'LONG' | 'SHORT' | null;
+  entryFillPrice?: number | null;
+  leverage?: number | null;
+};
+export type LiveOrderExitFill = {
+  ok: boolean;
+  price: number | null;
+  qty: number | null;
+  firstMs: number | null;
+  lastMs: number | null;
+  pnlUsd: number | null;
+  fields: Record<string, unknown>;
+};
+const SATS = 1e8;
+const toSats = (btc: number) => Math.round(Math.abs(btc) * SATS);
+const isoOrNull = (ms: number | null | undefined) => (ms == null || !Number.isFinite(ms) ? null : new Date(ms).toISOString());
+
+export function liveOrderExitFill(i: LiveOrderExitFillInput): LiveOrderExitFill {
+  const expected = i.expectedQty != null && Number.isFinite(i.expectedQty) ? toSats(i.expectedQty) : 0;
+  const ids = [...new Set(i.reads.map((r) => Number(r.orderId)).filter((id) => Number.isFinite(id) && id > 0))];
+  const readable = i.reads.filter((r): r is { orderId: number; read: LiveOrderFillRead } =>
+    r.read != null && finitePos(r.read.price) != null && toSats(r.read.qty) > 0);
+  const unreadable = (reason: string): LiveOrderExitFill => ({
+    ok: false, price: null, qty: null, firstMs: null, lastMs: null, pnlUsd: null,
+    fields: {
+      exit_price: null,
+      pnl_usd: null,
+      pnl_margin_pct: null,
+      gross_pnl_usd: null,
+      exit_fill_status: EXIT_FILL_UNREADABLE,
+      exit_fill_kind: i.kind,
+      exit_fill_pending_order_ids: ids,
+      exit_fill_expected_qty: i.expectedQty ?? null,
+      exit_fill_unreadable_reason: reason,
+      exit_fill_direction: i.direction ?? null,
+      ...(i.kind === 'close' ? { exit_exchange_fill_price: null } : {}),
+    },
+  });
+  if (ids.length === 0) return unreadable('NO_ORDER_ID');
+  if (!(expected > 0)) return unreadable('NO_EXPECTED_QTY');
+  if (readable.length === 0) return unreadable('NO_FILL_READ');   // every read failed, was budget-refused or returned no trades
+  let used = readable.filter((r) => toSats(r.read.qty) === expected).slice(0, 1);
+  if (used.length === 0) {
+    const total = readable.reduce((s, r) => s + toSats(r.read.qty), 0);
+    if (total !== expected) {
+      return unreadable(`QTY_MISMATCH:${(total / SATS).toFixed(8)}!=${(expected / SATS).toFixed(8)}`);
+    }
+    used = readable;
+  }
+  const qtySats = used.reduce((s, r) => s + toSats(r.read.qty), 0);
+  const qty = qtySats / SATS;
+  const vwap = used.reduce((s, r) => s + toSats(r.read.qty) * r.read.price, 0) / qtySats;
+  const firsts = used.map((r) => r.read.firstExecutedAtMs).filter((v): v is number => v != null && Number.isFinite(v));
+  const lasts = used.map((r) => r.read.lastExecutedAtMs).filter((v): v is number => v != null && Number.isFinite(v));
+  const firstMs = firsts.length ? Math.min(...firsts) : null;
+  const lastMs = lasts.length ? Math.max(...lasts) : null;
+  const entry = finitePos(i.entryFillPrice);
+  const sign = i.direction === 'LONG' ? 1 : i.direction === 'SHORT' ? -1 : 0;
+  const gross = entry != null && sign !== 0 ? (vwap - entry) * qty * sign : null;
+  const lev = finitePos(i.leverage);
+  const pnlUsd = gross == null ? null : Math.round(gross * 100) / 100;
+  const pnlMarginPct = gross == null || entry == null || lev == null
+    ? null : Math.round((gross / (entry * qty)) * 100 * lev * 100) / 100;
+  const usedIds = used.map((r) => Number(r.orderId));
+  return {
+    ok: true, price: vwap, qty, firstMs, lastMs, pnlUsd,
+    fields: {
+      exit_price: vwap,
+      exit_fill_vwap: vwap,
+      exit_fill_status: EXIT_FILL_REAL,
+      exit_fill_kind: i.kind,
+      exit_fill_order_ids: usedIds,
+      exit_order_id: usedIds[0],
+      exit_fill_at: isoOrNull(lastMs),
+      exchange_exit_fill_first_at: isoOrNull(firstMs),
+      exchange_exit_fill_last_at: isoOrNull(lastMs),
+      exchange_exit_fill_ids: [...new Set(used.flatMap((r) => r.read.fillIds.map(String)))],
+      exchange_exit_fill_count: used.reduce((s, r) => s + r.read.fillIds.length, 0),
+      exchange_exit_filled_qty: qty,
+      exchange_exit_costs: used.flatMap((r) => r.read.fees ?? []),   // audit only: never in P&L or gates
+      ...(i.kind === 'close' ? { exit_exchange_fill_price: vwap } : {}),
+      pnl_source: 'bitfinex_order_trades',
+      pnl_usd: pnlUsd,
+      pnl_margin_pct: pnlMarginPct,
+      gross_pnl_usd: pnlUsd,
+      entry_fill_price_used: entry,
+    },
+  };
+}
+
+/**
+ * RK 09:10 (1): the last line before ANY live EXIT payload is persisted. A payload whose exit price is not a real
+ * Bitfinex fill (shared liveExitFillEvidence) is stored with exit_price null and every P&L field null,
+ * exit_fill_status EXIT_FILL_UNREADABLE; a real one is stored at the fill (exit_fill_status REAL_FILL).
+ */
+export function liveExitPayloadRealFillOnly(body: Record<string, unknown>): Record<string, unknown> {
+  const ev = liveExitFillEvidence(body);
+  if (ev.price != null && LIVE_REAL_EXIT_FILL_SOURCES.has(ev.source)) {
+    return {
+      ...body,
+      exit_price: ev.price,
+      exit_price_source: ev.source,
+      exit_fill_status: EXIT_FILL_REAL,
+      exit_fill_at: body.exit_fill_at ?? body.exchange_exit_fill_last_at ?? body.exchange_close_fill_last_at ?? null,
+    };
+  }
+  return {
+    ...body,
+    exit_price: null,
+    exit_price_source: ev.source,
+    exit_fill_status: EXIT_FILL_UNREADABLE,
+    exit_fill_unreadable_reason: body.exit_fill_unreadable_reason ?? `NO_REAL_FILL:${ev.source}`,
+    pnl_usd: null,
+    pnl_margin_pct: null,
+    gross_pnl_usd: null,
+    net_pnl_usd: null,
+    actual_bitfinex_realized_pnl_usd: null,
+  };
 }
 
 /** HM 02:55 blocker 4 (R17): a live row with no leg stamps to check (e.g. a Bitfinex cash-ledger-only close) is
