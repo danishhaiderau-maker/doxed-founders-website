@@ -108,6 +108,7 @@ def test_c11_qualification_retired_r17_total_accumulates_across_worker_cycles(tm
 def test_c11_health_exposes_lifecycle_qualification_retired_r17():
     src = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
     assert '"lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(),' in src
+    assert '"lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(fast=True),' in src
     import bot
     real = bot._lifecycle_pipeline_runtime_status
     try:

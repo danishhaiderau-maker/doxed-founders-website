@@ -49962,6 +49962,14 @@ def health():
         payload["clock_sync"] = clock_sync_verdict()
     except Exception as exc:
         payload["clock_sync"] = {"status": "UNKNOWN", "error": type(exc).__name__}
+    try:  # HM C11 / C1: retired-source counters, so HM can see R17 stops on the liveness probe
+        payload["research_retired_r17"] = {
+            "lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(fast=True),
+            "v22_retired_r17": v22_retired_r17_count(),
+            "label": "source retired (R17)",
+        }
+    except Exception as exc:  # noqa: BLE001
+        payload["research_retired_r17"] = {"status": "UNKNOWN", "error": type(exc).__name__}
     try:
         payload["research_collection"] = research_collection_health(now)
     except Exception as exc:
@@ -52355,12 +52363,18 @@ def _collection_epoch_parity(lifecycle_public) -> dict:
     return {**identities, "status": verdict, "match": verdict == "MATCH"}
 
 
-def _lifecycle_qualification_retired_r17_total() -> int:
+def _lifecycle_qualification_retired_r17_total(fast: bool = False) -> int:
     """HM C11: lifecycles that stopped at QUALIFICATION_HORIZON_RETIRED_R17. The worker runs as a subprocess, so the
-    runtime owner accumulates its per-cycle counts; an in-process run (tests, catch-up) adds the module counter."""
+    runtime owner accumulates its per-cycle counts; an in-process run (tests, catch-up) adds the module counter.
+    ``fast`` (the /health liveness probe) waits at most 20 ms for the runtime status lock."""
     total = 0
     try:
-        raw = _lifecycle_pipeline_runtime_status().get("qualification_retired_r17_total")
+        runtime_module = _LIFECYCLE_PIPELINE_RUNTIME
+        if fast and runtime_module is not None:
+            internal = runtime_module.status(timeout=0.02)
+        else:
+            internal = _lifecycle_pipeline_runtime_status()
+        raw = internal.get("qualification_retired_r17_total")
         if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
             total += raw
     except Exception:  # noqa: BLE001 - never break /health
