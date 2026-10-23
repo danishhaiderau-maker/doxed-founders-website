@@ -57,7 +57,7 @@ MIRROR_MAX_AGE_SEC = 20.0
 # the sha and line, and when the prereg file is present it re-hashes it and re-reads line 22, so a silent edit fails CI.
 # Breach response (AMEND4 E1, sha256 AMEND4_SHA256 below, L12): the caps are an ENTRY BLOCK ONLY, never a close and never a
 # disarm. admit_entry refuses a new live entry (LIVE_SKIPPED_DAILY_CAP, AMBER; the signal stays a normal paper row) while the
-# tile's (or the account's) UTC-day realised loss (incl. funding, no fees, R7) plus the open mark-to-book loss (full-size
+# tile's (or the account's) UTC-day realised trade loss (REAL Bitfinex fill prices; no funding, no fees: RK D3 06:26) plus the open mark-to-book loss (full-size
 # exit-side walk through the shared paper_fill book helper) is >= the cap. HM N1: a closed live trade of the day whose pnl is
 # unreadable, or a book older than 2 s, is NOT skipped: it blocks entries (AMBER). The caps never SIZE an entry. The one
 # switchable response is cap_breach_response() (== CAP_RESPONSE_ENTRY_BLOCK under AMEND4).
@@ -353,7 +353,7 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         info.update(entries_today=n, max_entries_per_day=int(caps.get("max_entries_per_day", MAX_ENTRIES_PER_DAY)), utc_day=day)
         if n >= info["max_entries_per_day"]:
             reasons.append(DENY_DAILY_LIMIT)
-        # 6. HM G6 loss caps under AMEND4 E1 (L12): ENTRY BLOCK only (cap_breach_response()). Realised incl. funding + open
+        # 6. HM G6 loss caps under AMEND4 E1 (L12): ENTRY BLOCK only (cap_breach_response()). Realised trade P&L (no funding/fees) + open
         #    mark-to-book (full-size exit-side book walk); unreadable pnl / mark or a book > 2 s also blocks (AMBER). The
         #    signal stays a normal paper row stamped LIVE_SKIPPED_DAILY_CAP. The E7 stale-book block comes from the same shared
         #    open_position_protection(). (No pre-arm/pre-entry liq-distance block: AMEND5 F3/F3' are VOID; G3/G4 act in-trade.)
@@ -369,20 +369,34 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         return False, [f"{DENY_GATE_ERROR}:{type(exc).__name__}"], {}
 
 
+def trade_realised_pnl_usd(c: Mapping[str, Any]) -> float | None:
+    """THE realised P&L of one closed live trade for the D3 loss caps (RK final ruling (1), 24 Oct 06:26; R4: the ONE helper
+    used by admit_entry/daily_cap_entry_block, daily_loss_violations and live_guardian.evaluate). From the REAL Bitfinex
+    fill prices: (exit fill - entry fill) x filled qty x side when the chain carries all four; otherwise the executor's
+    ``pnl_usd`` for the trade, which the relay computes from the same Bitfinex fills. NO funding term and NO fee term.
+    None = unreadable (the caller fails closed: AMBER entry block, never silently skipped)."""
+    entry, exit_, qty = _f(c.get("fill_price")), _f(c.get("exit_price")), _f(c.get("fill_qty"))
+    side = str(c.get("side") or c.get("direction") or "").strip().upper()
+    if entry and exit_ and qty and qty > 0 and side in ("LONG", "BUY", "SHORT", "SELL"):
+        sgn = 1.0 if side in ("LONG", "BUY") else -1.0
+        return (exit_ - entry) * qty * sgn
+    return _f(c.get("pnl_usd"))
+
+
 def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
                         registry: Mapping[str, Mapping] | None = None) -> tuple[dict, float, int]:
     """({tile_key|None: loss_usd}, total_loss_usd, n_rows) for live chains CLOSED in the current UTC day.
 
-    Realised pnl (``pnl_usd`` as reported by the executor) plus reported ``funding_usd`` (AMEND4 E1); no fees (R7). Loss = -sum(pnl), so wins
-    on the same tile/day offset losses. A closed row with pnl but no close time counts as closed now (conservative, same
-    as the guardian). Rows whose tile cannot be attributed count only towards the total."""
+    Realised trade P&L from trade_realised_pnl_usd (REAL Bitfinex fills; no funding, no fees: RK D3 06:26). Loss = -sum(pnl),
+    so wins on the same tile/day offset losses. A closed row with pnl but no close time counts as closed now (conservative,
+    same as the guardian). Rows whose tile cannot be attributed count only towards the total."""
     day = utc_day(now)
     per: dict = {}
     n = 0
     for c in chains or []:
         if not c.get("closed"):
             continue
-        pnl = _f(c.get("pnl_usd"))
+        pnl = trade_realised_pnl_usd(c)
         if pnl is None:
             continue   # never silently: unreadable_pnl_rows() turns it into an entry block (HM N1)
         t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
@@ -390,42 +404,12 @@ def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
         if t > now + 60 or utc_day(t) != day:
             continue
         k = chain_tile_key(c, registry)
-        fund = funding_usd_countable(c)   # AMEND4 E1: incl. funding (signed cash flow, negative = paid); no fees (R7)
-        fund = 0.0 if fund is None else fund   # never silently: unverified_funding_rows() blocks entries (HM B3)
-        per[k] = per.get(k, 0.0) - pnl - fund
+        per[k] = per.get(k, 0.0) - pnl
         n += 1
     return per, sum(per.values()), n
 
 
 VIOL_PNL_UNREADABLE = "LEDGER_PNL_UNREADABLE"
-# HM BEFORE-ARM B3 (#852 R3): a closed live trade of the day with NO verified funding fails CLOSED (AMBER entry block, never a
-# disarm), same codes as #849: funding_usd readable => counted; funding_status NO_CROSSING (no funding settlement crossed
-# while open) => countable 0; anything else => LIVE_FUNDING_UNVERIFIED.
-VIOL_FUNDING_UNVERIFIED = "LIVE_FUNDING_UNVERIFIED"
-FUNDING_NO_CROSSING = "NO_CROSSING"
-
-
-def funding_usd_countable(c: Mapping[str, Any]) -> float | None:
-    """Verified funding of a closed chain (signed USD), 0.0 for NO_CROSSING, None when unverified (B3)."""
-    v = _f(c.get("funding_usd") if c.get("funding_usd") is not None else c.get("fundingUsd"))
-    if v is not None:
-        return v
-    st = str(c.get("funding_status") or c.get("fundingStatus") or "").strip().upper()
-    return 0.0 if st == FUNDING_NO_CROSSING else None
-
-
-def unverified_funding_rows(chains: Iterable[Mapping[str, Any]], now: float) -> list:
-    """B3: live chains CLOSED in the current UTC day (or with no readable close time) with readable pnl but no verified
-    funding. Unreadable-pnl rows are already blocked by unreadable_pnl_rows."""
-    day = utc_day(now)
-    bad = []
-    for c in chains or []:
-        if not c.get("closed") or _f(c.get("pnl_usd")) is None or funding_usd_countable(c) is not None:
-            continue
-        t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
-        if t is None or t <= 0 or (t <= now + 60 and utc_day(t) == day):
-            bad.append(c)
-    return bad
 
 
 def unreadable_pnl_rows(chains: Iterable[Mapping[str, Any]], now: float) -> list:
@@ -435,7 +419,7 @@ def unreadable_pnl_rows(chains: Iterable[Mapping[str, Any]], now: float) -> list
     day = utc_day(now)
     bad = []
     for c in chains or []:
-        if not c.get("closed") or _f(c.get("pnl_usd")) is not None:
+        if not c.get("closed") or trade_realised_pnl_usd(c) is not None:
             continue
         t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
         if t is None or t <= 0 or (t <= now + 60 and utc_day(t) == day):
@@ -454,10 +438,6 @@ def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
         for c in unreadable_pnl_rows(chains, now)[:4]:
             out.append({"code": VIOL_PNL_UNREADABLE, "tile": chain_tile_key(c, registry),
                         "detail": f"closed live trade {c.get('correlation_id') or c.get('trade_id')} pnl_usd={c.get('pnl_usd')!r} unreadable"})
-        for c in unverified_funding_rows(chains, now)[:4]:
-            out.append({"code": VIOL_FUNDING_UNVERIFIED, "tile": chain_tile_key(c, registry),
-                        "detail": f"closed live trade {c.get('correlation_id') or c.get('trade_id')} funding unverified "
-                                  f"(funding_usd={c.get('funding_usd')!r} status={c.get('funding_status')!r})"})
         for k, loss in sorted(per.items(), key=lambda kv: str(kv[0])):
             if k is not None and loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9:
                 out.append({"code": VIOL_TILE_LOSS_CAP, "tile": k,
@@ -816,13 +796,13 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
 
 def daily_cap_entry_block(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, book: Mapping[str, Any] | None,
                           now: float, tile_key: str | None, registry: Mapping[str, Mapping] | None = None) -> tuple[list, dict]:
-    """AMEND4 E1 (L12): (blocks, info) for a NEW live entry of ``tile_key``. Realised (incl. funding, no fees) UTC-day loss
+    """AMEND4 E1 (L12): (blocks, info) for a NEW live entry of ``tile_key``. Realised trade (trade_realised_pnl_usd: real fills, no funding, no fees) UTC-day loss
     plus the open mark-to-book loss of any live position (full-size exit-side book walk) vs $0.05/tile and $0.10 total.
     Unreadable realised pnl, an unreadable open mark or a book > 2 s => block (AMBER). Never a close, never a disarm."""
     chains = list(chains or [])
     per, total, n = daily_realised_loss(chains, now, registry)
     blocks = [{"code": v["code"], "tile": v.get("tile"), "detail": v.get("detail")} for v in daily_loss_violations(chains, now, registry)
-              if v.get("tile") in (None, tile_key) or v["code"] in (VIOL_PNL_UNREADABLE, VIOL_FUNDING_UNVERIFIED)]
+              if v.get("tile") in (None, tile_key) or v["code"] == VIOL_PNL_UNREADABLE]
     open_loss = 0.0
     m = mirror if isinstance(mirror, Mapping) else {}
     for p in (m.get("positions") or []) if m.get("ok") is True else []:

@@ -88,10 +88,11 @@ def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
     assert ltg.VIOL_PNL_UNREADABLE in {x["code"] for x in amber} and ltg.VIOL_PNL_UNREADABLE not in {x["code"] for x in red}
 
 
-def test_e1_funding_counts_no_fees():
+def test_d3_trade_pnl_only_no_funding_no_fees():
+    # RK D3 (24 Oct 06:26) supersedes AMEND4 E1's funding term: trade P&L only, no funding term, no fee term.
     c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.03, "funding_usd": -0.025, "fee_usd": -9}
     per, total, n = ltg.daily_realised_loss([c], NOW)
-    assert abs(per["gs1"] - 0.055) < 1e-9 and n == 1
+    assert abs(per["gs1"] - 0.03) < 1e-9 and n == 1
 
 
 def test_skipped_daily_cap_count_and_non_countable_summary():

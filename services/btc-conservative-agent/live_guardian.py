@@ -21,7 +21,7 @@ import live_tile_gate as _ltg_caps  # noqa: E402
 
 # HM C1 (24 Oct): aligned with the G6 account-wide cap pinned in live_tile_gate (prereg AMEND3 line 22 (D3), sha256 632dcf34...
 # = live_tile_gate.CAP_PREREG_SHA256, $0.10). Was $1.00. FROZEN: changes only via a new frozen amendment (see live_tile_gate). This
-# rolling-24 h check runs on the ledger AND on the Derivatives balance (so funding is included); the UTC-day G6 checks
+# rolling-24 h check runs on the ledger (live_tile_gate.trade_realised_pnl_usd) AND on the Derivatives balance; the UTC-day G6 checks
 # (per tile $0.05, total $0.10) run on the ledger in live_tile_gate.daily_loss_violations.
 DAILY_LOSS_CAP_USD = _ltg_caps.DAILY_LOSS_CAP_TOTAL_USD
 LEDGER_GRACE_SEC = 10.0         # fill/close propagation grace before a position-count mismatch counts
@@ -88,8 +88,7 @@ POSITION_FLATTEN_CODES = frozenset({_ltg_caps.LIQ_CLAMP_FLATTEN})
 # ENTRY BLOCK ONLY (AMBER): reported, enforced in live_tile_gate.admit_entry, never a disarm and never a close. The response
 # is the one switchable live_tile_gate.cap_breach_response().
 ENTRY_BLOCK_CODES = frozenset({"DAILY_LOSS_CAP", _ltg_caps.VIOL_TILE_LOSS_CAP, _ltg_caps.VIOL_TOTAL_LOSS_CAP,
-                               _ltg_caps.VIOL_TOTAL_LOSS_CAP + "_ERROR", _ltg_caps.VIOL_PNL_UNREADABLE,
-                               _ltg_caps.VIOL_FUNDING_UNVERIFIED, "OPEN_MARK_UNREADABLE",
+                               _ltg_caps.VIOL_TOTAL_LOSS_CAP + "_ERROR", _ltg_caps.VIOL_PNL_UNREADABLE, "OPEN_MARK_UNREADABLE",
                                _ltg_caps.AMBER_BOOK_STALE})
 
 
@@ -189,9 +188,10 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         if not c.get("stop_confirmed") and age > STOP_MISSING_SEC:
             out.append({"code": "STOP_MISSING_GT_5S", "tile": tile_of(c), "detail": f"{c.get('correlation_id')} unprotected {age:.1f}s"})
     # 4a. realised loss cap from the fresh-epoch ledger: needs no exchange read, so it is evaluated BEFORE the blind-mirror return
-    ledger_today = [c for c in live if c.get("closed") and _f(c.get("pnl_usd")) is not None
+    # RK D3 (06:26, R4): the same trade_realised_pnl_usd as the G6 caps and admit_entry (real fills; no funding, no fees)
+    ledger_today = [c for c in live if c.get("closed") and _ltg.trade_realised_pnl_usd(c) is not None
                     and now - ROLLING_WINDOW_SEC <= close_ts(c, now) <= now + 60]
-    ledger_loss = -sum(float(c["pnl_usd"]) for c in ledger_today)
+    ledger_loss = -sum(float(_ltg.trade_realised_pnl_usd(c)) for c in ledger_today)
     state["ledger_loss_usd"] = round(ledger_loss, 4)
     if ledger_loss >= DAILY_LOSS_CAP_USD:
         out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} in the last 24 h ({len(ledger_today)} fresh-epoch rows)"})

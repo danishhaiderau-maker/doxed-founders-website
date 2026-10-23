@@ -104,8 +104,7 @@ def test_second_signal_refused_while_another_live_lot_exists(chain):
 
 
 def test_closed_or_stale_pending_chain_does_not_block():
-    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100,
-               "funding_usd": 0.0},
+    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100},
               {"correlation_id": "gs6-b", "lane": GS6, "order_sent_at_ts": NOW - ltg.PENDING_EXPOSURE_SEC - 1}]
     assert admit(chains=chains)[0]
 
@@ -308,8 +307,7 @@ def test_c6_only_reduce_only_orders_are_skipped(order):
 
 
 def test_c1_admission_refuses_while_a_daily_loss_cap_is_breached():
-    lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.06,
-            "funding_status": "NO_CROSSING"}
+    lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.06}
     assert admit(chains=[lost])[0]
     ok, r, info = admit(chains=[lost, dict(lost, correlation_id="gs1-old", lane=GS1, pnl_usd=-0.05)])
     assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and info["daily_loss_violations"]
@@ -352,3 +350,34 @@ def test_loss_caps_pinned_to_frozen_amend3():
             assert hashlib.sha256(raw).hexdigest() == ltg.CAP_PREREG_SHA256
             assert raw.decode("utf-8").splitlines()[ltg.CAP_PREREG_LINE - 1] == ltg.CAP_PREREG_LINE_TEXT
             break
+
+
+# RK final ruling (1) (24 Oct 06:26): D3 loss cap = realised trade P&L from the REAL Bitfinex fill prices + the open
+# position marked to the book (full-size walk, book <= 2 s else BLOCK). No funding term, no fee term. ONE shared helper (R4).
+def test_d3_realised_pnl_is_from_real_fills_with_no_funding_or_fee_term():
+    row = {"correlation_id": "gs6-a", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60,
+           "fill_price": 100_000.0, "exit_price": 99_800.0, "fill_qty": 0.0003, "side": "LONG",
+           "pnl_usd": 123.0, "funding_usd": -50.0, "fee_usd": -9.0}
+    assert ltg.trade_realised_pnl_usd(row) == pytest.approx(-0.06)              # fills win over the reported pnl
+    assert ltg.trade_realised_pnl_usd(dict(row, side="SHORT")) == pytest.approx(0.06)
+    per, total, n = ltg.daily_realised_loss([row], NOW)
+    assert total == pytest.approx(0.06) and n == 1                               # funding/fee fields are ignored
+    # without the four fill fields: the executor's pnl for the trade (relay computes it from the same fills), still no funding
+    bare = {"correlation_id": "gs6-b", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.02,
+            "funding_usd": -5.0}
+    assert ltg.daily_realised_loss([bare], NOW)[1] == pytest.approx(0.02)
+    # a missing/unknown funding value never blocks, never gates countability
+    assert not ltg.daily_loss_violations([dict(bare, funding_usd=None, funding_status="PENDING")], NOW)
+    # unreadable trade pnl still fails closed (AMBER), via the same helper
+    assert {v["code"] for v in ltg.daily_loss_violations([dict(bare, pnl_usd=None)], NOW)} == {ltg.VIOL_PNL_UNREADABLE}
+
+
+def test_d3_one_helper_no_funding_term_in_gate_or_guardian_source():
+    here = Path(__file__).resolve().parent
+    gate = (here / "live_tile_gate.py").read_text()
+    guardian = (here / "live_guardian.py").read_text()
+    for name in ("FUNDING_UNVERIFIED", "funding_usd_countable", "unverified_funding_rows", 'c.get("funding_usd")'):
+        assert name not in gate and name not in guardian
+    assert gate.count("pnl = trade_realised_pnl_usd(c)") == 1                   # G6 / admit_entry
+    assert "_ltg.trade_realised_pnl_usd(c)" in guardian                          # guardian rolling ledger cap
+    assert '_f(c.get("pnl_usd")) is not None' not in gate
