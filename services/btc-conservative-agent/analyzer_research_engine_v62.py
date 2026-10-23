@@ -1794,6 +1794,14 @@ def load_data():
         print(f"   Hygiene: {_hyg.SUMMARY} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as _exc:
         print(f"   Hygiene filter failed ({type(_exc).__name__}: {_exc}) {PIPELINE_ENFORCEMENT_TAG}")
+        # R17: a hygiene failure must never let a non-countable row into a verdict (fail closed).
+        try:
+            import analysis_hygiene as _hyg
+            trades = _hyg.r17_filter(trades)
+        except Exception as _r17_exc:
+            print(f"   R17 filter failed ({type(_r17_exc).__name__}: {_r17_exc}); no trades counted "
+                  f"{PIPELINE_ENFORCEMENT_TAG}")
+            trades = trades.iloc[0:0]
 
     print(
         f"Loaded: Trades={len(trades)} | Blocked={len(blocked)} | Decisions={len(decisions)} | "

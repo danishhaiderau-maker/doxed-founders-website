@@ -491,6 +491,11 @@ def row_fresh_eligible(row) -> bool:
         return True
     if row_before_epoch(row):
         return False
+    # R17 (RK 23 Oct 2026): pinned discard ids, non-book exit triggers and rows stamped non_countable on write are
+    # never fresh (dynamic rule, not a static list alone; fails closed if a pinned list is missing or altered).
+    import r17_exclusion as _r17
+    if _r17.non_countable_reason(row):
+        return False
     row = tag_legacy(row)
     if is_excluded(row.get("fresh_data_excluded")) or row.get("exit_status") == "FORCED_NO_BOOK" \
             or row.get("fill_model_tag") == LEGACY_TAG or as_bool(row.get("fresh_eligible")) is False:

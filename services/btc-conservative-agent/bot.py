@@ -32026,6 +32026,14 @@ def close_position(pos: dict, exit_reason: str):
                 observed_ts=pos.get("entry_ts"),
             ),
         }
+        # R17 (RK 23 Oct 2026): every new closed row is stamped non_countable / non_countable_reason on write (pinned
+        # discard ids, non-book exit trigger); a stamping error fails closed as non-countable.
+        try:
+            import r17_exclusion as _r17
+            _r17.stamp_on_write(trade_row)
+        except Exception as _r17_exc:
+            trade_row.update({"non_countable": True, "fresh_eligible": False,
+                              "non_countable_reason": f"R17_STAMP_ERROR:{type(_r17_exc).__name__}"})
     def target_mutator(target):
         matches = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") == str(trade_id)]
         if len(matches) != 1:

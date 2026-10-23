@@ -25,6 +25,25 @@ def _flag(v: Any) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes")
 
 
+def r17_reasons(df):
+    """Per-row R17 non-countable reason (None = countable): pinned ids, non-book exit triggers, stamped rows."""
+    import pandas as pd
+    import r17_exclusion as _r17
+    recs = df.to_dict("records")
+    return pd.Series([_r17.non_countable_reason({k: (None if (isinstance(v, float) and v != v) else v)
+                                                 for k, v in r.items()}) for r in recs],
+                     index=df.index, dtype=object)
+
+
+def r17_filter(trades):
+    """R17 alone (no opt-in, ever): the analyzer's fallback when apply() fails, so a hygiene error never lets a
+    non-countable row into a verdict."""
+    if trades is None or getattr(trades, "empty", True):
+        return trades
+    reasons = r17_reasons(trades)
+    return trades[reasons.isna()]
+
+
 def apply(trades, *, include_forced: bool | None = None, include_late: bool | None = None):
     import numpy as np
     import pandas as pd
@@ -63,7 +82,11 @@ def apply(trades, *, include_forced: bool | None = None, include_late: bool | No
     df["net_bp"] = bp
     df["late_window"] = late
     df["forced_close_excluded"] = forced
+    # R17 (RK 23 Oct 2026): never countable, no env opt-in (ids list + non-book exit trigger + stamped rows).
+    r17 = r17_reasons(df)
+    df["r17_non_countable_reason"] = r17
     keep = pd.Series(True, index=df.index)
+    keep &= r17.isna()
     if not include_forced:
         keep &= ~forced
     if not include_late:
@@ -73,6 +96,7 @@ def apply(trades, *, include_forced: bool | None = None, include_late: bool | No
     SUMMARY.update({"schema": "analyzer_hygiene_v1", "rows_in": n0, "rows_out": int(len(out)),
                     "forced_excluded": 0 if include_forced else int(forced.sum()),
                     "late_window_excluded": 0 if include_late else int((late & ~forced).sum()),
+                    "r17_non_countable_excluded": int(r17.notna().sum()),
                     "net_bp_known": int(out["net_bp"].notna().sum()),
                     "mean_net_bp": round(float(out["net_bp"].mean()), 4) if out["net_bp"].notna().any() else None,
                     "late_window_aedt": _LATE.get("window_aedt"), "basis": "net_bp (price bp, unrounded)"})
