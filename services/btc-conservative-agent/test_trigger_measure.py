@@ -230,6 +230,8 @@ PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
     "UNVERIFIED_DELAY", "delay_stamp", "quantile_method_of", "quantile_nearest_rank",
     # tile-fill site registry (DISLOC row left as is)
     "TILE_FILL_SITES",
+    # #845 base (feat/r17-dynamic-exclusion): r17_exclusion fail-closed gate in the fresh-eligibility check
+    "row_fresh_eligible",
 })
 
 
