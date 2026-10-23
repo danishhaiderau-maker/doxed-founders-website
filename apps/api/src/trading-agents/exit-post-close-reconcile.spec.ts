@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { boundedExitLegMs, EXIT_TRIGGER_OUT_OF_WINDOW, safeIsoMs } from './exit-leg-time';
+import { liveRowLegCheck } from './live-row-countability';
+import { liveLegStamps } from './live-trade-export.mapper';
 import {
   railwayExitLegStamps,
   readSignedShowcaseClose,
@@ -224,4 +226,16 @@ test('R3: executor wake bounds exit stamps to the close window (us/ns/negative/f
     assert.equal(w?.signedClose?.flySendStartedAtMs, null, String(v));
   }
   assert.equal(wake(now - 500)?.signedClose?.exitTriggerAtMs, now - 500);
+});
+
+test('R3 nit: exit_signal_at is no longer a fallback for the exit trigger (only exit_trigger_ts counts)', () => {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const envelope = { context: { fly_live_approval: { signal_at_ts: 9, created_at_ts: 9.1 }, platform_received_at: iso(9_200) } };
+  const placed = { eventType: 'ORDER_PLACED', payload: { entry_exchange_ack_at: iso(9_600) } };
+  const base = { exit_order_class: 'BOT_SENT', fly_send_started_at: iso(50_010), platform_received_at: iso(50_080), close_exchange_ack_at: iso(50_400) };
+  const legacy = liveLegStamps(envelope, [placed, { eventType: 'EXIT', payload: { ...base, exit_signal_at: iso(49_900) } }], true);
+  assert.equal(legacy[1]?.exit_signal_at_ts, null);
+  assert.deepEqual(liveRowLegCheck(legacy[0], legacy[1], legacy[2]).legReasons, ['LIVE_LEG_MISSING:exit.signal']);
+  const measured = liveLegStamps(envelope, [placed, { eventType: 'EXIT', payload: { ...base, exit_trigger_ts: iso(49_900) } }], true);
+  assert.deepEqual(liveRowLegCheck(measured[0], measured[1], measured[2]).legReasons, []);
 });
