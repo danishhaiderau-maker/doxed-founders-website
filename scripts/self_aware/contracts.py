@@ -1350,9 +1350,17 @@ def _forward_chain_ok(path: Path) -> bool | None:
     return True
 
 
+R3_QUARANTINED_STATUS = "R3_QUARANTINED"  # mirrors research/r3_quarantine.STATUS
+
+
 def _rec_research_api_content(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
     """Research API cache: fresh (same generation as the genome report), every family/regime present, sort order
     descending, totals equal the genome rows artifact, forward-tracker freezes append-only (re-hashed from disk)."""
+    if isinstance(obj, dict) and obj.get("status") == R3_QUARANTINED_STATUS:
+        # HM #847: the R3 quarantine is a deliberate retirement of a 1s-priced source, not an outage -> AMBER,
+        # never the permanent RED RESEARCH_API_UNAVAILABLE.
+        return [_v("SOURCE_RETIRED_R17", AMBER, f"research API cache {R3_QUARANTINED_STATUS} "
+                   f"({obj.get('quarantine') or 'R3'}): source retired (R17) until rebuilt on paper_fill + quote_trigger")], {}
     if not isinstance(obj, dict) or obj.get("status") != "OK":
         return [_v("RESEARCH_API_UNAVAILABLE", RED, f"research API cache {None if not isinstance(obj, dict) else obj.get('status')}")], {}
     ci = obj.get("contract_inputs") or {}
