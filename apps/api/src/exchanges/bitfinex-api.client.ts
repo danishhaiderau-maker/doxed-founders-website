@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { btcToSats } from '@dcf/utils';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { exchangeErrorMessage, exchangeFetch } from './exchange-http.util';
+import { untaggedOrderRefusal } from '../trading-agents/live-tile-gate';
 
 export const BITFINEX_BTC_PERP_SYMBOL = 'tBTCF0:USTF0';
 /** Bitfinex defaults to 10x when lev is omitted — showcase bot uses 100x. */
@@ -852,6 +853,7 @@ export class BitfinexTradingClient {
       timeInForce?: 'GTC' | 'IOC';
     },
   ): Promise<number> {
+    assertTileTaggedEntry('limit entry', input.clientOrderId);
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
     const lev = bitfinexOrderLev(input.leverage);
     const amount =
@@ -1038,6 +1040,7 @@ export class BitfinexTradingClient {
       clientOrderId?: number;
     },
   ): Promise<number> {
+    assertTileTaggedEntry('market entry', input.clientOrderId);
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
     const lev = bitfinexOrderLev(input.leverage);
     const amount =
@@ -1346,4 +1349,14 @@ export class BitfinexTradingClient {
     }
     return cancelled;
   }
+}
+
+/**
+ * RK 02:25 24 Oct, last line of defence at the exchange client: an order that is NOT reduce-only (every live entry) must
+ * carry a tile-keyed cid; only reduce-only closing orders (stops, market close, flatten) may be untagged. Throws before
+ * any request is signed or sent.
+ */
+export function assertTileTaggedEntry(kind: string, clientOrderId: number | null | undefined): void {
+  const refusal = untaggedOrderRefusal({ clientOrderId, reduceOnly: false });
+  if (refusal) throw new Error(`${refusal}: ${kind} refused: cid ${clientOrderId ?? 'none'} carries no live tile key`);
 }

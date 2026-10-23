@@ -6,7 +6,13 @@ import {
   liveCopyAccountArmed,
   readEnvelopeFlyApproval,
 } from './live-copy-approval';
-import { decodeTileClientOrderId, encodeTileClientOrderId, liveEntryAdmission, tileKeyForTradeId } from './live-tile-gate';
+import {
+  decodeTileClientOrderId,
+  encodeTileClientOrderId,
+  liveEntryAdmission,
+  tileKeyForTradeId,
+  untaggedOrderRefusal,
+} from './live-tile-gate';
 import { ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
@@ -10814,6 +10820,24 @@ await this.notifications
       ? computeClientOrderId(cycleId, claimParticipantId, tradeId)
       : undefined;
     entryClientOrderId = clientOrderId;
+    // RK 02:25: a (non-reduce-only) entry must carry a tile-keyed cid; untagged => refuse before the exchange write. Not
+    // venue-gated: relay sim (bitfinex_sim) also writes to the real Bitfinex account the guardian watches.
+    {
+      const untagged = untaggedOrderRefusal({ clientOrderId, reduceOnly: false });
+      if (untagged) {
+        if (claimParticipantId) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: claimParticipantId } })
+            .catch(this.swallowedError('op@live-tile-gate-untagged'));
+          claimParticipantId = null;
+        }
+        this.logger.error(
+          `[LIVE TILE GATE] Hire entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}: ${untagged}`
+          + ` (cid=${clientOrderId ?? 'none'} decodes to no live tile)`,
+        );
+        return false;
+      }
+    }
 
     // Durable request fence must exist before the exchange write. A crash or
     // transport timeout can then recover the deterministic CID instead of
@@ -14751,6 +14775,14 @@ await this.notifications
     const clientOrderId = Number.isSafeInteger(persistedCid) && persistedCid > 0
       ? persistedCid
       : computeClientOrderId(cycleId, participantId, opts.tradeId);
+    // RK 02:25: the replacement is a non-reduce-only entry; an untagged cid (legacy order) is never re-placed.
+    const chaseUntagged = untaggedOrderRefusal({ clientOrderId, reduceOnly: false });
+    if (chaseUntagged) {
+      this.logger.error(
+        `[LIVE TILE GATE] Hire chase ${userId} cycle=${cycleId}: ${chaseUntagged} (cid=${clientOrderId}); replacement blocked`,
+      );
+      return;
+    }
     const signedExactLimitCandidate = opts.tradeId
       ? readFreshSignedShowcaseExactLimit(opts.tradeId, intent, opts.now)
       : null;
@@ -18671,6 +18703,15 @@ await this.notifications
 
     const qty = exactQty.qty;
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
+    // RK 02:25: catch-up is a live market entry (non-reduce-only): it must carry a tile-keyed cid.
+    const catchupUntagged = untaggedOrderRefusal({ clientOrderId, reduceOnly: false });
+    if (catchupUntagged) {
+      await releaseClaim();
+      this.logger.error(
+        `[LIVE TILE GATE] catch-up entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}: ${catchupUntagged}`,
+      );
+      return false;
+    }
 
     let prePosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
     let otherLiveParticipants = 0;

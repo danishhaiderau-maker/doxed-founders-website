@@ -10,7 +10,12 @@ import {
   liveEntryAdmission,
   tileKeyCode,
   tileKeyForTradeId,
+  UNTAGGED_ORDER_REFUSED,
+  untaggedOrderRefusal,
 } from './live-tile-gate';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { assertTileTaggedEntry } from '../exchanges/bitfinex-api.client';
 import { LIVE_COPY_TILE_PREFIXES, approvalTileMatchesTrade } from './live-copy-approval';
 
 test('every live-copy tile prefix has a stable tile code; codes are unique and never reuse reserved ones', () => {
@@ -76,4 +81,47 @@ test('approval tile key is MANDATORY for a live entry (RK) and must match the tr
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs6', tile_key_code: 5 } as never, 'gs1-x1'), false);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs1', tile_key_code: 5 } as never, 'gs1-x1'), false);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key_code: 2 } as never, 'gs1-x1'), false);
+});
+
+test('RK 02:25: only reduce-only closing orders may be untagged; every other order needs a tile-keyed cid', () => {
+  const tagged = encodeTileClientOrderId('gs1', 12345);
+  // reduce-only closes (stops, market close, flatten) may carry any cid or none
+  assert.equal(untaggedOrderRefusal({ clientOrderId: undefined, reduceOnly: true }), null);
+  assert.equal(untaggedOrderRefusal({ clientOrderId: 987654, reduceOnly: true }), null);
+  // non-reduce-only: tagged passes, legacy/foreign/missing/stop-style cids are refused
+  assert.equal(untaggedOrderRefusal({ clientOrderId: tagged, reduceOnly: false }), null);
+  for (const cid of [undefined, null, 0, -5, 987654, 0x7fffffff, 'abc', encodeTileClientOrderId('gs1', 1) & ~(0b111 << 28)]) {
+    assert.equal(untaggedOrderRefusal({ clientOrderId: cid as never, reduceOnly: false }), UNTAGGED_ORDER_REFUSED, String(cid));
+  }
+  // a reserved/retired tile code (dsl=6) is not a live tile
+  const dsl = (0b101 << 28) | (6 << 21) | 7;
+  assert.equal(untaggedOrderRefusal({ clientOrderId: dsl, reduceOnly: false }), UNTAGGED_ORDER_REFUSED);
+  // exchange-client last line of defence throws before any request for an untagged entry
+  assert.throws(() => assertTileTaggedEntry('limit entry', 987654), /UNTAGGED_ORDER_REFUSED/);
+  assert.throws(() => assertTileTaggedEntry('market entry', undefined), /UNTAGGED_ORDER_REFUSED/);
+  assert.doesNotThrow(() => assertTileTaggedEntry('limit entry', tagged));
+});
+
+test('RK 02:25: untagged guard runs before every non-reduce-only submit (hire, chase, catch-up, exchange client)', () => {
+  const svc = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const before = (guard: string, submit: string, from: number) => {
+    const g = svc.indexOf(guard, from);
+    const s = svc.indexOf(submit, from);
+    assert.ok(g > 0 && s > 0 && g < s, `${guard} must precede ${submit}`);
+    return s;
+  };
+  const hire = svc.indexOf('entryClientOrderId = clientOrderId;');
+  before("untaggedOrderRefusal({ clientOrderId, reduceOnly: false })", 'this.activeTrading.submitLimitOrder(creds, {', hire);
+  const chase = svc.indexOf('const chaseUntagged = untaggedOrderRefusal');
+  assert.ok(chase > 0);
+  before('const chaseUntagged', 'this.activeTrading.submitLimitOrder(creds, {', chase - 2000);
+  const catchup = svc.indexOf('const catchupUntagged = untaggedOrderRefusal');
+  assert.ok(catchup > 0);
+  before('const catchupUntagged', 'this.activeTrading.submitMarketEntry(creds, {', catchup - 2000);
+  const client = readFileSync(join(__dirname, '../exchanges/bitfinex-api.client.ts'), 'utf8');
+  for (const m of ['async submitLimitOrder(', 'async submitMarketEntry(']) {
+    const at = client.indexOf(m);
+    const body = client.slice(at, client.indexOf("bitfinexAuthPost(creds, 'v2/auth/w/order/submit'", at));
+    assert.ok(body.includes('assertTileTaggedEntry('), `${m} must assert a tile-tagged cid before submit`);
+  }
 });

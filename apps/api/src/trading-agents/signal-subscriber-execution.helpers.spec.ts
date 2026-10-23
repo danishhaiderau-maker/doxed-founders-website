@@ -926,7 +926,7 @@ test('market catch-up money path also submits the exact showcase position quanti
     },
     { apiKey: 'redacted', apiSecret: 'redacted' },
     0.25,
-    'cont-catchup-exact',
+    'gs1-cont-catchup-exact',
     63_614.55,
     25 / 63_614.55,
     63_620,
@@ -986,7 +986,7 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
       risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-timeout', 63_614.55,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'gs1-cont-catchup-timeout', 63_614.55,
     25 / 63_614.55, 63_620, 5.45,
   );
 
@@ -1049,7 +1049,7 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
       risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-stop-fail', 63_614.55,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'gs1-cont-catchup-stop-fail', 63_614.55,
     25 / 63_614.55, 63_620, 5.45,
   );
 
@@ -4521,7 +4521,7 @@ test('Bitfinex reprice amends the exact resting order in place without a cancel 
       now: 1_700_000_000_000,
       chaseLabel: 'signed-limit=64075.00',
       event: 'BOT_ANCHOR_CHASE',
-      tradeId: 'cont-native-update',
+      tradeId: 'gs1-cont-native-update',
     },
   );
 
@@ -4530,6 +4530,62 @@ test('Bitfinex reprice amends the exact resting order in place without a cancel 
   assert.equal(persisted?.limitPrice, 64_075);
   assert.equal(persisted?.replacementMode, 'BITFINEX_IN_PLACE_UPDATE');
   assert.equal(persisted?.limitChaseCount, 2);
+});
+
+test('RK 02:25: a chase never re-places an untagged (legacy cid) entry order', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const activeTrading: any = Object.create(BitfinexTradingClient.prototype);
+  const calls: string[] = [];
+  activeTrading.findOrder = async () => ({ id: 9_002, amountOrig: -0.031, amount: -0.031 });
+  activeTrading.updateLimitOrder = async (_creds: unknown, input: { orderId: number; price: number }) => {
+    calls.push(`update:${input.orderId}:${input.price}`);
+    return input.orderId;
+  };
+  activeTrading.cancelOrder = async () => {
+    calls.push('cancel');
+  };
+  activeTrading.submitLimitOrder = async () => {
+    calls.push('submit');
+    return 9_003;
+  };
+  service.activeTrading = activeTrading;
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  service.positionRuntime = new Map();
+  service.hydrateRuntime = () => ({});
+  let persisted: any = null;
+  service.cycles = {
+    recordHireExecutionEvent: async (_userId: string, _agentId: string, _cycleId: string, _action: string, payload: Record<string, unknown>) => {
+      persisted = payload;
+    },
+  };
+
+  await service.replaceRestingLimitOwned(
+    'agent-native-update',
+    'user-native-update',
+    'cycle-native-update',
+    'participant-native-update',
+    {
+      bitfinexOrderId: 9_002,
+      direction: 'SHORT',
+      limitPrice: 64_100,
+      qty: 0.031,
+      limitChaseCount: 1,
+      clientOrderId: 987_654,
+    },
+    { apiKey: 'redacted', apiSecret: 'redacted' },
+    { action: 'ENTER', direction: 'SHORT', entry: {}, risk: { max_margin_usd: 20 } },
+    {
+      newLimit: 64_075,
+      mark: 64_080,
+      now: 1_700_000_000_000,
+      chaseLabel: 'signed-limit=64075.00',
+      event: 'BOT_ANCHOR_CHASE',
+      tradeId: 'gs1-cont-native-update-legacy',
+    },
+  );
+
+  assert.deepEqual(calls, []);   // no update, no cancel, no submit
+  assert.equal(persisted, null);
 });
 
 test('rapid signed reprices execute only against the newest durable order generation', async () => {

@@ -28,6 +28,7 @@ export const TILE_CID_HASH_MASK = (1 << TILE_CID_CODE_SHIFT) - 1;
 
 export const LIVE_SKIPPED_MUTEX = 'LIVE_SKIPPED_MUTEX';
 export const ACCOUNT_NOT_FLAT = 'ACCOUNT_NOT_FLAT';
+export const UNTAGGED_ORDER_REFUSED = 'UNTAGGED_ORDER_REFUSED';
 
 /** Tile key of a trade id (adopt:/relink: wrappers ignored); null when the prefix has no code. */
 export function tileKeyForTradeId(tradeId: string | null | undefined): string | null {
@@ -72,4 +73,18 @@ export function liveEntryAdmission(input: {
   const q = Number(input.positionQty ?? 0);
   if (!Number.isFinite(q) || Math.abs(q) > 0) return { ok: false, reason: ACCOUNT_NOT_FLAT };
   return { ok: true };
+}
+
+/**
+ * RK 02:25 24 Oct: ONLY reduce-only closing orders may go out without a tile key. Any order that is not reduce-only
+ * (every entry: limit, chase replacement, catch-up market) must carry a cid that decodes to a live tile; otherwise it is
+ * refused before the exchange write. Returns null when allowed, else UNTAGGED_ORDER_REFUSED. Pure; the same rule is
+ * enforced by the Fly guardian on the exchange mirror (UNTAGGED_ORDER / UNTAGGED_POSITION => RED, disarm ALL, force-flat).
+ */
+export function untaggedOrderRefusal(input: {
+  clientOrderId: number | string | null | undefined;
+  reduceOnly: boolean;
+}): string | null {
+  if (input.reduceOnly === true) return null;
+  return decodeTileClientOrderId(input.clientOrderId) ? null : UNTAGGED_ORDER_REFUSED;
 }
