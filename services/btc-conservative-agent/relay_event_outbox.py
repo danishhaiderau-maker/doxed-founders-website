@@ -488,7 +488,8 @@ class RelayEventOutbox:
                 raise
 
     def acknowledge(
-        self, event_id: str, receipt: dict, state_payload: dict | None = None
+        self, event_id: str, receipt: dict, state_payload: dict | None = None,
+        send_timing: dict | None = None,
     ) -> bool:
         with self._lock:
             row = self._pending.get(event_id)
@@ -505,10 +506,19 @@ class RelayEventOutbox:
                 return False
             before_acks = _deep_copy(self._acks)
             del self._pending[event_id]
+            timing = send_timing if isinstance(send_timing, dict) else {}
             self._acks.append({
                 **_deep_copy(ack),
                 "acknowledged_at_unix": time.time(),
                 "intent_created": receipt.get("intentCreated") is True,
+                # HM 01:43 blocker 1: the Fly-side send stamps of this event (intent = durable enqueue, the POST that
+                # got the durable ack, its round trip) so a live exit can be timed Fly intent -> exchange ack.
+                "fly_intent_at_unix": row.get("created_at_unix"),
+                "fly_attempts": int(row.get("attempts") or 0),
+                "fly_send_started_at_unix": timing.get("fly_send_started_at_unix"),
+                "fly_send_rtt_s": timing.get("fly_send_rtt_s"),
+                # HM 01:43 item 3: the exit signal leg start (the bot's exit trigger), only when the payload carries it
+                "exit_signal_at_unix": (row.get("payload") or {}).get("exit_trigger_ts"),
             })
             self._acks = self._acks[-self.ack_limit:]
             try:

@@ -5655,7 +5655,8 @@ def _r17_contract_fields(pos: dict) -> dict:
             # same measured exit_price_age_s in ms; None when neither is a finite number >= 0 (never fabricated)
             "exit_book_age_ms": _r17_exit_book_age_ms(pos),
             "levels_crossed_unfired": _levels_crossed_unfired(pos),
-            "stop_coverage": _stop_coverage_value(pos)}
+            "stop_coverage": _stop_coverage_value(pos),
+            **_book_receive_row_fields("exit", xs if paper else None)}
 
 
 def _stop_late_prints(pos: dict, now: float) -> list:
@@ -7939,8 +7940,9 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     import tile_fill as _tf
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
+    # HM 01:43 item 4: now - t0 is pricing lag, not a measured exit send -> own signal->send unmeasured (fail closed)
     delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
-                                          own_signal_to_send_s=max(0.0, float(now) - t0))
+                                          own_signal_to_send_s=None)
     _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
     res = _paper_stamp_pool(_tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -8042,8 +8044,9 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
         price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
     else:
+        # HM 01:43 item 4: now - t0 is pricing lag (the thread waits for the book row), not a measured exit send
         delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
-                                              own_signal_to_send_s=max(0.0, now - t0))
+                                              own_signal_to_send_s=None)
         _paper_note_exit_trigger(pos, t0)
         price_fn = lambda: _paper_stamp_pool(  # noqa: E731
             _tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -8200,7 +8203,18 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
                               (round(float(efs["price_age_s"]) * 1000) if efs.get("price_age_s") is not None else None))
                              if paper else None,
         "entry_price_stale": (bool(efs.get("price_stale")) if efs.get("price_stale") is not None else None) if paper else None,
+        # RK/HM #851: the entry book row's MEASURED receive time (r17 BOOK_RECEIVE_TS_MISSING when absent)
+        **_book_receive_row_fields("entry", efs if paper else None),
     }
+
+
+def _book_receive_row_fields(side: str, sim) -> dict:
+    """ONE helper (R4) for both legs: copy paper_fill.book_receive_proof's stamp from a fill result onto the row under
+    the r17 contract names <side>_book_receive_ts / _mono / _ts_source. None when unpriced or not a paper book lane."""
+    sim = sim if isinstance(sim, dict) else {}
+    return {f"{side}_book_receive_ts": sim.get("book_receive_ts"),
+            f"{side}_book_receive_mono": sim.get("book_receive_mono"),
+            f"{side}_book_receive_ts_source": sim.get("book_receive_ts_source")}
 
 
 def _delay_leg_unverified(sim) -> bool:
@@ -11340,12 +11354,15 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     if legacy_secret:
         headers["X-Bot-Control-Secret"] = legacy_secret
     started = time.perf_counter()
+    send_wall = time.time()  # HM 01:43 blocker 1: Fly send stamp (wall, Fly chrony clock) of THIS POST
     try:
         response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
         response.raise_for_status()
         receipt = response.json() if response.content else {}
         if not _relay_response_has_durable_receipt(receipt, payload):
             raise RuntimeError("relay durable receipt identity mismatch")
+        send_timing = {"fly_send_started_at_unix": round(send_wall, 6),
+                       "fly_send_rtt_s": round(time.perf_counter() - started, 6)}
         ack_state = None
         if payload.get("marketable_fallback"):
             commit_before_ack = lambda: _commit_marketable_relay_payload(payload)
@@ -11357,10 +11374,10 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
                     reason=f"relay_ack:{payload.get('event')}"
                 )
                 acknowledged = _relay_event_outbox.acknowledge(
-                    event_id, receipt, state_payload=ack_state
+                    event_id, receipt, state_payload=ack_state, send_timing=send_timing
                 )
         else:
-            acknowledged = _relay_event_outbox.acknowledge(event_id, receipt)
+            acknowledged = _relay_event_outbox.acknowledge(event_id, receipt, send_timing=send_timing)
         if not acknowledged:
             raise RuntimeError("relay outbox acknowledgement mismatch")
         _relay_push_state.update({
@@ -33987,9 +34004,10 @@ def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_se
     fail closed below n=10 per key."""
     sampler = _paper_delay_sampler()
     if pool_key is None and leg == "exit" and own_signal_to_send_s is None:
-        # the one bare exit caller is _tp1_gate (R4 byte-pinned): it decides and sends at the same instant, so the
-        # row's own signal->send is 0 and the exit is a bot-sent reduce-only market order
-        pool_key, own_signal_to_send_s = _live_ack_pool.KEY_EXIT_RO_MKT, 0.0
+        # the one bare exit caller is _tp1_gate (R4 byte-pinned): a bot-sent reduce-only market exit. HM 01:43 item 4:
+        # its own signal -> Fly intent is NOT measured for a paper row (there is no paper send; 0.0 was assumed), so it
+        # stays None -> the pooled label carries "default_own_s2s_missing" -> UNVERIFIED -> non-countable.
+        pool_key = _live_ack_pool.KEY_EXIT_RO_MKT
     if pool_key is None or sampler._xs(lane, leg):
         return sampler.delay(lane, leg)
     pool = _cross_lane_pool()
@@ -34000,6 +34018,38 @@ def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_se
         logger.warning(f"[RK-A POOL] admit failed: {type(exc).__name__}")
     d, src, _meta = pool.total(pool_key, own_signal_to_send_s)
     return d, src
+
+
+def _iso_or_unix(v):
+    """Epoch seconds from an epoch number or an ISO-8601 string (Railway platform_received_at); None otherwise."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v) if v > 0 else None
+    if isinstance(v, str) and v.strip():
+        try:
+            return datetime.fromisoformat(v.strip().replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _fly_exit_send_record(trade_id: str):
+    """HM 01:43 blocker 1: this bot's own Fly exit-send stamps for a trade (the acknowledged POSITION_CLOSED relay
+    event): Fly intent (durable enqueue), the POST that got the durable ack + its RTT, Railway's durable receive and
+    the attempt count. None when the event was not acknowledged here (-> FLY_SEND_TS_MISSING, fail closed)."""
+    try:
+        rows = _relay_event_outbox.acknowledged_events(str(trade_id or ""))
+    except Exception:  # noqa: BLE001
+        return None
+    for row in reversed(rows or []):
+        if str(row.get("event_type") or "") != "POSITION_CLOSED":
+            continue
+        return {"fly_intent_at_ts": row.get("fly_intent_at_unix"),
+                "fly_send_started_at_ts": row.get("fly_send_started_at_unix"),
+                "fly_send_rtt_s": row.get("fly_send_rtt_s"),
+                "railway_received_at_ts": _iso_or_unix(row.get("platform_received_at")),
+                "attempts": row.get("fly_attempts"),
+                "exit_signal_at_ts": row.get("exit_signal_at_unix")}  # None until POSITION_CLOSED carries it
+    return None
 
 
 def _paper_own_s2s_entry(order: dict):
@@ -34034,6 +34084,14 @@ def _paper_stamp_pool(res, lane: str, leg: str):
     meta = _paper_delay_meta(lane, leg)
     if meta and str(res.get("delay_source") or "") == str(meta.get("delay_source") or ""):
         res.update({k: meta.get(k) for k in _DELAY_STAMP_KEYS})
+        if leg in ("entry", "exit"):
+            # HM 01:43 item 5: the B1 lane pool is already END-TO-END (Fly signal / paper trigger -> live ack); the
+            # row's own signal->send is inside it and is never added again.
+            d = res.get("delay_s")
+            res.update({"delay_span": ("POOLED_FLY_SIGNAL_TO_ACK_END_TO_END" if leg == "entry"
+                                       else "POOLED_PAPER_TRIGGER_TO_EXIT_ACK_END_TO_END"),
+                        "sig_to_send_ms": None,
+                        "pool_send_to_ack_ms": round(float(d) * 1000) if isinstance(d, (int, float)) else None})
     return res
 
 
@@ -34096,7 +34154,8 @@ def _paper_delay_observe_report(report: dict) -> dict:
                 out[leg] = v
     queued = []
     try:  # RK A: the same verified report feeds the cross-lane send->ack pool (queued; admitted after the boot check)
-        queued = _cross_lane_pool().observe(report, book_at=_pf.book10l_at, missing_seconds=_pf.book10l_missing_seconds)
+        queued = _cross_lane_pool().observe(report, book_at=_pf.book10l_at, missing_seconds=_pf.book10l_missing_seconds,
+                                            fly_exit_send=_fly_exit_send_record)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[RK-A POOL] observe failed: {type(exc).__name__}")
     if out or queued:
@@ -62724,6 +62783,7 @@ def _live_copy_monitor_context() -> dict:
         "journal_write_failures": journal.write_failures,
         "ingest_rejects": list(_live_copy_ingest_rejects),
         "paper_twins": _live_copy_paper_twins(),
+        "fly_exit_send": _fly_exit_send_record,  # HM 01:43 item 3: live exit legs (callable; not serialised)
         "relay": {
             "pending": _relay_event_outbox.pending_count() if _relay_event_outbox else None,
             "live_copy_outbox": _get_live_copy_outbox().status(),

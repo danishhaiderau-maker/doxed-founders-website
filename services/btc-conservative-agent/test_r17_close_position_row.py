@@ -44,7 +44,9 @@ def _clean_book(monkeypatch, entry_ts):
     def book(t):
         s = float(math.floor(float(t)) - 1)
         off = -110.0 if s < entry_ts + 5 else 0.0
-        return {"s": s, "b": [[BID + off, 5.0], [BID + off - 1, 5.0]], "a": [[ASK + off, 5.0], [ASK + off + 1, 5.0]]}
+        return {"s": s, "b": [[BID + off, 5.0], [BID + off - 1, 5.0]], "a": [[ASK + off, 5.0], [ASK + off + 1, 5.0]],
+                # RK/HM #851: collector-measured WS receive time (<= s+1 <= t)
+                "receive_ts": s + 0.9, "receive_mono": s, "receive_ts_source": "WS_FRAME"}
     monkeypatch.setattr(paper_fill, "book10l_at", book)
 
 

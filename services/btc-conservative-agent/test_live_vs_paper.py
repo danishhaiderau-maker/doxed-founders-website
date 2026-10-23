@@ -2,6 +2,11 @@ import live_vs_paper as lv
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+# every live leg measured (HM 01:43 item 3): entry from the chain, exit Fly send / Railway receive from the outbox
+_LEGS = {"fly_signal_at_ts": 9.0, "fly_intent_emitted_at_ts": 9.1, "railway_received_at_ts": 9.2,
+         "exchange_ack_at_ts": 9.6, "exit_ack_at_ts": 50.4}
+_EXIT_SEND = {"exit_signal_at_ts": 49.9, "fly_intent_at_ts": 50.0, "fly_send_started_at_ts": 50.01,
+              "fly_send_rtt_s": 0.12, "railway_received_at_ts": 50.08}
 
 
 def test_long_pair_computes_slippage_latencies_outcome_and_missing_fields():
@@ -100,14 +105,15 @@ def test_k3_live_only_forced_close_marks_the_paper_twin_non_countable():
 def test_k3_pair_rows_always_carry_non_countable():
     twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 101.0, "exit_reason": "TAKE_PROFIT"}
     chain = {"correlation_id": "c2", "fill_price": 100.1, "fill_at_ts": 10.0, "exit_price": 100.9,
-             "exit_reason": "EXCHANGE_STOP_35BP", "closed": True}
-    r = lv.pair_row("c2", chain, twin)
+             "exit_reason": "EXCHANGE_STOP_35BP", "closed": True, **_LEGS}
+    r = lv.pair_row("c2", chain, twin, fly_exit_send=_EXIT_SEND)
     assert r["non_countable"] is False and r["non_countable_reasons"] is None
     assert r["paper_twin_non_countable"] is False and r["live_non_countable"] is False
     # a paper twin that is itself forced / non-countable makes the pair non-countable
-    r = lv.pair_row("c2", chain, dict(twin, exit_reason="DEPLOY_FORCE_FLAT"))
+    r = lv.pair_row("c2", chain, dict(twin, exit_reason="DEPLOY_FORCE_FLAT"), fly_exit_send=_EXIT_SEND)
     assert r["non_countable"] is True and r["paper_twin_non_countable"] is True
-    r = lv.pair_row("c2", chain, dict(twin, non_countable=True, non_countable_reason="R17_UNPROVEN:LIQ_UNVERIFIED"))
+    r = lv.pair_row("c2", chain, dict(twin, non_countable=True, non_countable_reason="R17_UNPROVEN:LIQ_UNVERIFIED"),
+                    fly_exit_send=_EXIT_SEND)
     assert r["non_countable"] is True and r["non_countable_reasons"] == ["PAPER_NON_COUNTABLE:R17_UNPROVEN:LIQ_UNVERIFIED"]
     # paper-only row (no live chain): only the paper leg decides
     r = lv.pair_row("c3", None, twin)
@@ -120,3 +126,60 @@ def test_k3_forced_set_mirrors_ts_and_paper_canon():
     ts = (ROOT.parents[1] / "apps/api/src/trading-agents/live-row-countability.ts").read_text()
     for r in lv.LIVE_FORCED_EXIT_REASONS:
         assert f"'{r}'" in ts, r
+
+
+def test_hm3_live_row_per_leg_check_fails_closed_on_a_missing_or_reversed_leg():
+    """HM 01:43 item 3: signal -> Fly send -> relay receive -> ack/fill, entry and exit, each leg start/end stamped
+    once (no double count); a missing stamp or a reversed leg makes the LIVE row non-countable (R17)."""
+    import live_ack_pool as lap
+    twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 101.0, "exit_reason": "TAKE_PROFIT"}
+    base = {"correlation_id": "c9", "fill_price": 100.1, "fill_at_ts": 9.7, "exit_price": 100.9, "closed": True, **_LEGS}
+    ok = lv.pair_row("c9", base, twin, fly_exit_send=_EXIT_SEND)
+    assert ok["live_non_countable"] is False and ok["non_countable"] is False
+    legs = ok["live_legs"]
+    assert list(legs["entry"]) == ["signal->fly_send", "fly_send->relay_receive", "relay_receive->ack_fill"]
+    assert legs["entry"]["signal->fly_send"]["ms"] == 100.0 and legs["entry"]["relay_receive->ack_fill"]["ms"] == 400.0
+    assert legs["exit"]["signal->fly_send"] == {"start_ts": 49.9, "end_ts": 50.01, "ms": 110.0}
+    # each stamp ends one leg and starts the next: the leg sum is the end-to-end span (no double count)
+    for side, (a, b) in (("entry", (9.0, 9.6)), ("exit", (49.9, 50.4))):
+        assert round(sum(x["ms"] for x in legs[side].values()), 3) == round((b - a) * 1000.0, 3)
+    for drop, reason in (("fly_intent_emitted_at_ts", "LIVE_LEG_MISSING:entry.fly_send"),
+                         ("railway_received_at_ts", "LIVE_LEG_MISSING:entry.relay_receive"),
+                         ("fly_signal_at_ts", "LIVE_LEG_MISSING:entry.signal")):
+        r = lv.pair_row("c9", {k: v for k, v in base.items() if k != drop}, twin, fly_exit_send=_EXIT_SEND)
+        assert r["live_non_countable"] is True and reason in r["non_countable_reasons"], (drop, r["non_countable_reasons"])
+        assert r["paper_twin_non_countable"] is False  # the paper twin is not tainted by a live stamp gap
+    r = lv.pair_row("c9", {k: v for k, v in base.items() if k not in ("exchange_ack_at_ts", "fill_at_ts")}, twin,
+                    fly_exit_send=_EXIT_SEND)
+    assert "LIVE_LEG_MISSING:entry.ack_fill" in r["non_countable_reasons"]
+    r = lv.pair_row("c9", base, twin)  # no Fly exit-send record -> exit legs unmeasured
+    assert r["live_non_countable"] is True
+    assert {"LIVE_LEG_MISSING:exit.signal", "LIVE_LEG_MISSING:exit.fly_send",
+            "LIVE_LEG_MISSING:exit.relay_receive"} <= set(r["non_countable_reasons"])
+    r = lv.pair_row("c9", dict(base, railway_received_at_ts=9.8), twin, fly_exit_send=_EXIT_SEND)  # receive after ack
+    assert "LIVE_LEG_ORDER:entry.relay_receive->ack_fill" in r["non_countable_reasons"]
+    # an exchange-resident stop exit has no Fly send leg; an open row has no exit legs
+    r = lv.pair_row("c9", dict(base, exit_order_class="EXCHANGE_RESIDENT"), twin)
+    assert r["live_non_countable"] is False and "exit" not in r["live_legs"]
+    opened = {k: v for k, v in base.items() if k not in ("closed", "exit_ack_at_ts")}
+    assert lap.live_legs(opened, None, closed=False)["non_countable"] is False
+
+
+def test_hm3_build_uses_the_exit_send_lookup_and_a_failed_lookup_fails_closed():
+    twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 101.0, "exit_reason": "TAKE_PROFIT"}
+    chain = {"correlation_id": "c8", "trade_id": "T8", "fill_price": 100.1, "fill_at_ts": 9.7, "closed": True, **_LEGS}
+    seen = []
+    out = lv.build([chain], {"c8": twin}, exit_send_for=lambda tid: (seen.append(tid), _EXIT_SEND)[1])
+    assert seen == ["T8"] and out["rows"][0]["live_non_countable"] is False
+    out = lv.build([chain], {"c8": twin}, exit_send_for=lambda tid: 1 / 0)
+    assert out["rows"][0]["live_non_countable"] is True
+
+
+def test_hm3_leg_spec_mirrors_ts():
+    import live_ack_pool as lap
+    ts = (ROOT.parents[1] / "apps/api/src/trading-agents/live-row-countability.ts").read_text()
+    for side, legs in lap.LIVE_LEGS.items():
+        for name, keys in legs:
+            assert f"'{name}'" in ts, name
+            for k in keys:
+                assert f"'{k}'" in ts, k

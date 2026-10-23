@@ -395,3 +395,28 @@ def test_trade_head_backoff_blocks_reorder_without_starving_other_trade(tmp_path
     box.enqueue(peer)
     box.fail(first["event_id"], "timeout", now=10)
     assert [row["trade_id"] for row in box.due(now=10)] == ["peer"]
+
+
+def test_ack_row_carries_fly_send_stamps_for_the_exit_pool(tmp_path):
+    """HM 01:43 blocker 1: the acknowledged POSITION_CLOSED keeps this bot's Fly send stamps (intent = durable
+    enqueue, the POST that got the durable ack + its RTT, attempts) so a live exit is timed Fly intent -> ack."""
+    box = RelayEventOutbox(tmp_path / "paper_lifecycle_v1.json")
+    row = box.enqueue_next(
+        {"event": "POSITION_CLOSED", "trade_id": "trade", "ts": "closed"},
+        state_payload={**lifecycle(), "pending_orders": []},
+    )
+    timing = {"fly_send_started_at_unix": row["created_at_unix"] + 0.01, "fly_send_rtt_s": 0.04}
+    assert box.acknowledge(row["event_id"], ack(row), send_timing=timing)
+    got = box.acknowledged_events("trade")[-1]
+    assert got["fly_intent_at_unix"] == row["created_at_unix"]
+    assert got["fly_send_started_at_unix"] == timing["fly_send_started_at_unix"] and got["fly_send_rtt_s"] == 0.04
+    assert got["fly_attempts"] == int(row.get("attempts") or 0)
+    assert got["exit_signal_at_unix"] is None  # the payload carries no exit trigger yet -> exit signal leg missing
+    restarted = RelayEventOutbox(tmp_path / "paper_lifecycle_v1.json")
+    assert restarted.acknowledged_events("trade")[-1]["fly_send_rtt_s"] == 0.04
+    row2 = box.enqueue_next(
+        {"event": "POSITION_CLOSED", "trade_id": "trade2", "ts": "closed", "exit_trigger_ts": 1234.5},
+        state_payload={**lifecycle(), "pending_orders": []},
+    )
+    assert box.acknowledge(row2["event_id"], ack(row2), send_timing=timing)
+    assert box.acknowledged_events("trade2")[-1]["exit_signal_at_unix"] == 1234.5

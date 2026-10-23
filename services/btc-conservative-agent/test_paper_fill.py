@@ -460,3 +460,33 @@ def fill(self, o):
                                  leg="entry", delay_source="sampled", cap_px=o["ioc_cap_px"])
 """
     assert pf.fill_site_violations(ok, "fill") == []
+
+
+def test_book_receive_ts_proves_no_look_ahead_and_missing_is_unverified(tmp_path):
+    """RK/HM #851: BookTail serves only rows with a MEASURED receive_ts <= t; a row with no receive_ts (pre-#851)
+    prices but is UNVERIFIED (BOOK_RECEIVE_TS_MISSING), never COMPLETE; INFERRED_BUCKET_LAG never counts."""
+    import json
+    import paper_fill as pf
+    p = tmp_path / "bfx_book_10l_1s.jsonl"
+    rows = [{"s": 100, "b": [[99.0, 5]], "a": [[101.0, 5]], "receive_ts": 100.6, "receive_mono": 5.6,
+             "receive_ts_source": "WS_FRAME"},
+            {"s": 101, "b": [[99.5, 5]], "a": [[101.5, 5]], "receive_ts": 102.4, "receive_mono": 7.4,  # bad: > s+1
+             "receive_ts_source": "WS_FRAME"}]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    tail = pf.BookTail(str(p))
+    assert tail.at(102.1)["s"] == 100  # row 101 is complete at 102 but was received at 102.4 > t
+    assert tail.at(102.5)["s"] == 101
+    ok = pf.paper_fill("LONG", 1.0, 100.0, 1.7, tail.at)  # t = 101.7 -> row 100, received 100.6 <= t
+    assert ok["evidence_status"] == pf.EVIDENCE_COMPLETE and ok["book_receive_ts"] == 100.6
+    assert ok["book_receive_mono"] == 5.6 and ok["book_receive_ts_source"] == "WS_FRAME"
+    old = pf.paper_fill("LONG", 1.0, 100.0, 1.7, lambda t: {"s": 100, "b": [[99.0, 5]], "a": [[101.0, 5]]})
+    assert old["price"] == 101.0 and old["evidence_status"] == "UNVERIFIED"
+    assert old["unverified_reason"] == pf.BOOK_RECEIVE_TS_MISSING and old["book_receive_ts_source"] == "MISSING"
+    inf = pf.paper_fill("LONG", 1.0, 100.0, 1.7, lambda t: {"s": 100, "b": [[99.0, 5]], "a": [[101.0, 5]],
+                                                          "receive_ts": 100.9, "receive_mono": 1.0,
+                                                          "receive_ts_source": pf.RECEIVE_TS_INFERRED})
+    assert inf["evidence_status"] == "UNVERIFIED" and inf["unverified_reason"] == pf.BOOK_RECEIVE_TS_MISSING
+    late = pf.paper_fill("LONG", 1.0, 100.0, 1.7, lambda t: {"s": 100, "b": [[99.0, 5]], "a": [[101.0, 5]],
+                                                           "receive_ts": 101.9, "receive_mono": 1.0,
+                                                           "receive_ts_source": "WS_FRAME"})
+    assert late["evidence_status"] == "UNVERIFIED" and late["unverified_reason"] == pf.BOOK_RECEIVE_AFTER_FILL

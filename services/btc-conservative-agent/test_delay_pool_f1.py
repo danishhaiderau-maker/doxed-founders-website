@@ -2,6 +2,7 @@
 stamped) and the closed-row consequences (pool stamps carried, default-delay rows non_countable)."""
 import ast
 import json
+from datetime import datetime
 import math
 import pathlib
 import threading
@@ -53,7 +54,8 @@ def _defines(n, name):
 def _ns(tmp, names, **extra):
     tree = _tree()
     ns = {"json": json, "threading": threading, "math": math, "_live_copy": _LC(tmp), "logger": _Log(), "DATA_EPOCH_ID": EPOCH,
-          "paper_fill": pf, "_live_ack_pool": live_ack_pool, "time": time, **extra}
+          "paper_fill": pf, "_live_ack_pool": live_ack_pool, "time": time,
+          "datetime": datetime, "_relay_event_outbox": None, **extra}
     for name in names:
         node = next(n for n in tree.body if _defines(n, name))
         exec(compile(ast.Module([node], []), "bot.py", "exec"), ns)
@@ -64,7 +66,7 @@ POOL_NAMES = ["_DISLOC_DELAYS", "PAPER_DELAY_POOL_FILE", "_PAPER_DELAY_POOL_LOCK
               "_paper_delay_sampler", "_paper_delay_pool_persist", "_paper_delay_pool_reset", "_disloc_delay",
               "_paper_delay_meta", "_DELAY_STAMP_KEYS", "_paper_stamp_pool", "_PAPER_EXIT_TRIGGERS",
               "PAPER_EXIT_TRIGGERS_KEY", "PAPER_EXIT_TRIGGERS_CAP", "_paper_exit_triggers_restore", "_paper_note_exit_trigger", "_paper_delay_observe_report",
-              "_CROSS_LANE_POOL", "_cross_lane_pool"]
+              "_CROSS_LANE_POOL", "_cross_lane_pool", "_iso_or_unix", "_fly_exit_send_record"]
 
 
 def _fresh(tmp, monkeypatch):
@@ -146,7 +148,8 @@ def test_stamp_only_when_source_matches(tmp_path, monkeypatch):
 
 def _row_ns():
     import tile_fill as tf
-    return _ns("/tmp", ["_entry_fill_sim", "_entry_priced_by_paper_fill", "_entry_pricing_fields", "_is_paper_book_lane",
+    return _ns("/tmp", ["_entry_fill_sim", "_entry_priced_by_paper_fill", "_entry_pricing_fields", "_book_receive_row_fields",
+                        "_is_paper_book_lane",
                         "_delay_leg_unverified", "_non_countable_reasons"],
                tile_fill=tf, STATS_EXCLUDED_EXIT_REASONS={"FORCE_FLATTENED"})
 
@@ -154,8 +157,9 @@ def _row_ns():
 def _pos(entry_src, exit_src):
     import tile_fill as tf
     lane = sorted(tf.MIGRATED_LANES)[0]
-    efs = {"delay_source": entry_src, "fill_px": 100.0, **pf.delay_stamp(entry_src, 123.0)}
-    xfs = {"delay_source": exit_src, **pf.delay_stamp(exit_src, 456.0)} if exit_src else None
+    rx = {"book_receive_ts": 1000.2, "book_receive_mono": 50.2, "book_receive_ts_source": "WS_FRAME"}  # RK/HM #851
+    efs = {"delay_source": entry_src, "fill_px": 100.0, **pf.delay_stamp(entry_src, 123.0), **rx}
+    xfs = {"delay_source": exit_src, **pf.delay_stamp(exit_src, 456.0), **rx} if exit_src else None
     return {"research_lane": lane, "fill_sim": efs, "entry_fill_sim": efs, "exit_fill_sim": xfs,
             "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None}  # RK/HM K1: liq proven clear
 

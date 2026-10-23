@@ -18,13 +18,15 @@ BASE = "51d926f93"
 # #841 RK fixes (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core, paper_fill.py:paper_fill (trades-only stops, first-row-at-or-after resident fill, BFX truncation, liquidation stamp).
 # #842 book exits (23 Oct 2026): intentional pin move for bot.py:get_mark_price, bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay, paper_fill.py:_paper_fill_core (every lane exits on book rows via the shared pricer; no ticker).
 # #842 RK ruling A (24 Oct 2026): intentional pin move for bot.py:_paper_lane_exit, bot.py:_disloc_delay (POOLED_LIVE_ACK_CROSS_LANE: a paper-only lane times fills with its own signal->send + the shared cross-lane send->ack pool; fail closed below n=10).
+# #842 HM 01:43 blocker 2 / #851 (24 Oct 2026): intentional pin move for paper_fill.py:_paper_fill_core (every book walk stamps the row's MEASURED WS receive time via the shared book_receive_proof; missing/inferred -> UNVERIFIED; bot-sent fills require receive_ts <= fill time).
+# #842 HM 01:43 blocker 1 / items 4-5 (24 Oct 2026): intentional pin move for bot.py:_paper_lane_exit, bot.py:_disloc_delay (paper exit own signal->send is not measured: None -> default_own_s2s_missing -> UNVERIFIED, no assumed 0.0 / pricing-lag own leg; pool = Fly intent -> ack).
 PINNED = {
     "bot.py": {
         "get_mark_price": "b03f13d6030996983221371bede76b67fd2f610c03922e9aa3f142ece840b9c6",
         "_paper_lane_entry_result": "a227911677f4b9c9f80b0bec463171fe9e06e4190d2ddac5e1d51005193ef05d",
         "_tp1_gate": "49ad3cb852da75e99879f00713e6a43d6b2b1f315f4d8e6066b6ced711b17062",
-        "_paper_lane_exit": "0a1641587c50eb800fc78bec981721fb4dcac5aee280b5ee5d01dc7aa2dafb6e",
-        "_disloc_delay": "78f532e68c3d1b9b324b15c8c1f19ae1d8f5cf5b05f30b646afed5770418acf0"
+        "_paper_lane_exit": "6a04d926ee4ccabdca6964bda1de8f502856783c5fb00377d95a2d6e89f55f42",
+        "_disloc_delay": "6597a0aae49bb3e9292c24f2c7c728cae589d90acfa8f1d09a4846de4a403951"
     },
     "paper_fill.py": {
         "_f": "c70d10da2af1181b4d56905d296e71c2b6da8603ab5d7e9a22c0ad0b0b6e303f",
@@ -32,7 +34,7 @@ PINNED = {
         "_safe": "577c4d1a9927bea25660a9a46802c84fabf3b5d44889bfed82a86e0f042cd002",
         "_snap": "e19ffc0d73e86ae849dff85c6bec6c1e6219883f5c3e1897a2d9666e1bef9f29",
         "taker_side_levels": "2e794b626132b0f1320049fa51683053c6ba948e3b8292aa2bc4a84209efa05b",
-        "_paper_fill_core": "02200d0214fd576ad405e90b314a19bef86f4183896f9ebfd88c4c38c940f389",
+        "_paper_fill_core": "c677f477311e3d3de7399e6861e1ac49aeb85b91b23f6799ed870ef9c58ce800",
         "paper_fill": "3205191a41fde2cafbbdd1ebd4f500ccefe44668e5fbb792c6fc03943d008057",
         "book10l_at": "9bfbe8e684e475716e132b2105d7ad27eb43a3fc681db481601698f8b20f62d9",
         "book10l_missing_seconds": "3683b425ea5cf93da7aec4fcebbd26e26e9e5baaf75c52f672ae01d1b2f5b38d",

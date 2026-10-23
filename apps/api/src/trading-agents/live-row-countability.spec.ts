@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { SignalCycleStatus } from '@prisma/client';
-import { LIVE_FORCED_EXIT_REASONS, liveRowCountability } from './live-row-countability';
+import { LIVE_FORCED_EXIT_REASONS, liveRowCountability, liveRowCountabilityWithLegs, liveRowLegCheck } from './live-row-countability';
 import { mapParticipantToExportRow } from './live-trade-export.mapper';
 import { mapSubscriberExchangeLiveBook } from './subscriber-exchange-live.mapper';
 
@@ -79,4 +79,50 @@ test('B4: live trade export row and CSV carry non_countable', () => {
   });
   assert.equal(row.nonCountable, true);
   assert.equal(row.nonCountableReason, 'FORCED_CLOSE:ADMIN_FORCE_FLAT');
+});
+
+const LEGS_ENTRY = { fly_signal_at_ts: 9, fly_intent_emitted_at_ts: 9.1, railway_received_at_ts: 9.2, exchange_ack_at_ts: 9.6 };
+const LEGS_EXIT = { exit_signal_at_ts: 49.9, fly_send_started_at_ts: 50.01, railway_received_at_ts: 50.08, exit_ack_at_ts: 50.4 };
+
+test('HM 01:43 item 3: a live row needs every leg (signal, Fly send, relay receive, ack/fill) measured and ordered', () => {
+  assert.deepEqual(liveRowLegCheck(LEGS_ENTRY, LEGS_EXIT), { nonCountable: false, nonCountableReason: null, legReasons: [] });
+  assert.equal(liveRowLegCheck(LEGS_ENTRY, null).nonCountable, false); // open / exchange-resident stop exit
+  for (const [k, side] of [['fly_intent_emitted_at_ts', 'entry.fly_send'], ['railway_received_at_ts', 'entry.relay_receive'],
+    ['fly_signal_at_ts', 'entry.signal'], ['exchange_ack_at_ts', 'entry.ack_fill']] as const) {
+    const r = liveRowLegCheck({ ...LEGS_ENTRY, [k]: null }, LEGS_EXIT);
+    assert.equal(r.nonCountable, true, k);
+    assert.ok(r.legReasons.includes(`LIVE_LEG_MISSING:${side}`), k);
+  }
+  assert.ok(liveRowLegCheck({ ...LEGS_ENTRY, exchange_ack_at_ts: null, fill_at_ts: 9.7 }, null).legReasons.length === 0);
+  const rev = liveRowLegCheck({ ...LEGS_ENTRY, railway_received_at_ts: 9.8 }, LEGS_EXIT);
+  assert.deepEqual(rev.legReasons, ['LIVE_LEG_ORDER:entry.relay_receive->ack_fill']);
+  assert.ok(liveRowLegCheck(LEGS_ENTRY, {}).legReasons.includes('LIVE_LEG_MISSING:exit.fly_send'));
+  // forced close still wins and keeps its B4 reason
+  assert.equal(liveRowCountabilityWithLegs(['DEPLOY_FORCE_FLAT'], {}, {}).nonCountableReason, 'FORCED_CLOSE:DEPLOY_FORCE_FLAT');
+});
+
+test('HM 01:43 item 3: the export row fails closed when the exit Fly-send legs are not on the EXIT payload', () => {
+  const iso = (s: number) => new Date(s * 1000).toISOString();
+  const envelope = { context: { fly_live_approval: { signal_at_ts: 9, created_at_ts: 9.1 }, platform_received_at: iso(9.2) } };
+  const base = {
+    id: 'p2', status: SignalCycleStatus.CLOSED, venue: 'bitfinex', fillPrice: 100_000, exitPrice: 100_100,
+    pnlUsd: 3, pnlMarginPct: 10, feeUsd: null, createdAt: now, updatedAt: now,
+  };
+  const placed = { eventType: 'ORDER_PLACED', payload: { entry_exchange_ack_at: iso(9.6) }, createdAt: now };
+  const cycle = { id: 'c2', tradeId: 't2', intentEnvelope: envelope, showcaseExitReason: 'TP', createdAt: now, closedAt: now };
+  const today = mapParticipantToExportRow({
+    participant: { ...base, events: [placed, { eventType: 'EXIT', payload: { exit_reason: 'TP', close_exchange_ack_at: iso(50.4) }, createdAt: now }] },
+    cycle,
+  });
+  assert.equal(today.nonCountable, true);
+  assert.equal(today.nonCountableReason, 'LIVE_LEG_MISSING:exit.signal');
+  const full = mapParticipantToExportRow({
+    participant: {
+      ...base,
+      events: [placed, { eventType: 'EXIT', payload: { exit_reason: 'TP', exit_trigger_ts: 49.9, fly_send_started_at: iso(50.01),
+        platform_received_at: iso(50.08), close_exchange_ack_at: iso(50.4) }, createdAt: now }],
+    },
+    cycle,
+  });
+  assert.deepEqual([full.nonCountable, full.nonCountableReason], [false, null]);
 });

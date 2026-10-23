@@ -598,7 +598,7 @@ def _entry_pos(monkeypatch, lane="FAMILY_GSB2_REGIME_SWITCHER", exit_status="PAP
 
 
 def _row_ns():
-    return _bot_ns(["_entry_fill_sim", "_entry_priced_by_paper_fill", "_entry_pricing_fields",
+    return _bot_ns(["_entry_fill_sim", "_entry_priced_by_paper_fill", "_entry_pricing_fields", "_book_receive_row_fields",
                     "_row_priced_by_paper_fill"], _is_paper_book_lane=lambda pos: pos.get("research_lane") in tf.MIGRATED_LANES)
 
 
