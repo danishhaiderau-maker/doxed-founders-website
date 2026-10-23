@@ -57,6 +57,8 @@ def _proof_failures(row):
         out.append("EXIT_DELAY")
     if not isinstance(row.get("exit_price_age_s"), (int, float)) and not isinstance(row.get("exit_eval_price_age_s"), (int, float)):
         out.append("EXIT_AGE")
+    if "entry_book_age_ms" in row and not isinstance(row.get("entry_book_age_ms"), (int, float)):
+        out.append("ENTRY_AGE")
     if row.get("exit_price_stale") is True:
         out.append("EXIT_STALE")
     v = row.get("levels_crossed_unfired")
@@ -131,7 +133,8 @@ def _good_closed_row():
     pos = _clean_pos(entry_fill_sim=efs)
     ns = _ns(HELPERS + ("_entry_pricing_fields",), _entry_fill_sim=lambda p: p.get("entry_fill_sim") or {})
     row = {"trade_id": "rv2-r17-good-1", "exit_pricing_basis": "MODEL_TIME",
-           "entry_walk_bp": 0.8, "exit_walk_bp": 1.1, "exit_legs_unmeasured": 0, "exit_evidence_status": "COMPLETE"}
+           "entry_walk_bp": 0.8, "exit_walk_bp": 1.1, "exit_legs_unmeasured": 0, "exit_evidence_status": "COMPLETE",
+           "exit_unverified_reason": None}
     row.update(ns["_entry_pricing_fields"](pos, {}))
     row.update(ns["_r17_contract_fields"](pos))
     return row
@@ -140,6 +143,7 @@ def _good_closed_row():
 def test_good_closed_row_has_entry_age_from_the_pricer():
     row = _good_closed_row()
     assert row["entry_price_age_s"] == 0.6 and row["entry_price_stale"] is False
+    assert row["entry_book_age_ms"] == 600
     assert row["delay_source"] == "lane_q90_n14" and row["trigger_price_source"] == "book"
     assert _proof_failures(row) == []
 
@@ -151,4 +155,13 @@ def test_good_closed_row_passes_r17_exclusion():
     row = _good_closed_row()
     assert r17.proof_failures(row) == []
     bad = dict(row, stop_coverage=qt.STOP_COVERAGE_GAP, levels_crossed_unfired=None)
-    assert "STOP_COVERAGE_GAP" in r17.proof_failures(bad) and "LEVEL_CROSS_UNKNOWN" in r17.proof_failures(bad)
+    fails = r17.proof_failures(bad)
+    assert "LEVEL_CROSS_UNKNOWN" in fails and any(f.startswith("STOP_COVERAGE") for f in fails)
+    assert r17.non_countable_reason(row, ids=set(), load_errors=[]) is None
+
+
+def test_good_closed_row_carries_every_r17_fields_contract_key():
+    """Cross-PR (#845 r17_fields.REQUIRED_FIELDS): every contract field is a key of the closed row."""
+    import pytest
+    fields = pytest.importorskip("r17_fields")
+    assert set(fields.REQUIRED_FIELDS) <= set(_good_closed_row()), set(fields.REQUIRED_FIELDS) - set(_good_closed_row())

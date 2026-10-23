@@ -8115,6 +8115,10 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
         "entry_price_age_s": (efs.get("price_age_s") if efs.get("price_age_s") is not None else
                               (round(float(efs["book_age_ms"]) / 1000.0, 3) if efs.get("book_age_ms") is not None else None))
                              if paper else None,
+        # R17 contract (r17_fields, #845): entry_book_age_ms = the pricer's book_age_ms (first-row legs: price age).
+        "entry_book_age_ms": (efs.get("book_age_ms") if efs.get("book_age_ms") is not None else
+                              (round(float(efs["price_age_s"]) * 1000) if efs.get("price_age_s") is not None else None))
+                             if paper else None,
         "entry_price_stale": (bool(efs.get("price_stale")) if efs.get("price_stale") is not None else None) if paper else None,
     }
 
@@ -24177,7 +24181,8 @@ _RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "priced_delay_s", "as
                           "exit_delay_drift_usd", "exit_delay_drift_bp", "exit_touch_drift_usd",
                           "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
                           "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts",
-                          "entry_price_age_s", "exit_price_age_s", "exit_eval_price_age_s")  # R17 contract ages
+                          "entry_price_age_s", "exit_price_age_s", "exit_eval_price_age_s",
+                          "entry_book_age_ms")  # R17 contract ages
 _RELOAD_INT_FIELDS = ("fill_model_version", "exit_legs", "exit_legs_unmeasured")
 _RELOAD_LITERAL_FIELDS = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
                           "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",
