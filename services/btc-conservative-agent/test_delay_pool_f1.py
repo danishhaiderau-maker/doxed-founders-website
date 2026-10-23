@@ -2,6 +2,7 @@
 stamped) and the closed-row consequences (pool stamps carried, default-delay rows non_countable)."""
 import ast
 import json
+import math
 import pathlib
 import threading
 
@@ -49,7 +50,7 @@ def _defines(n, name):
 
 def _ns(tmp, names, **extra):
     tree = _tree()
-    ns = {"json": json, "threading": threading, "_live_copy": _LC(tmp), "logger": _Log(), "DATA_EPOCH_ID": EPOCH,
+    ns = {"json": json, "threading": threading, "math": math, "_live_copy": _LC(tmp), "logger": _Log(), "DATA_EPOCH_ID": EPOCH,
           "paper_fill": pf, **extra}
     for name in names:
         node = next(n for n in tree.body if _defines(n, name))
@@ -60,7 +61,7 @@ def _ns(tmp, names, **extra):
 POOL_NAMES = ["_DISLOC_DELAYS", "PAPER_DELAY_POOL_FILE", "_PAPER_DELAY_POOL_LOCK", "_paper_delay_pool_path",
               "_paper_delay_sampler", "_paper_delay_pool_persist", "_paper_delay_pool_reset", "_disloc_delay",
               "_paper_delay_meta", "_DELAY_STAMP_KEYS", "_paper_stamp_pool", "_PAPER_EXIT_TRIGGERS",
-              "_paper_note_exit_trigger", "_paper_delay_observe_report"]
+              "PAPER_EXIT_TRIGGERS_KEY", "PAPER_EXIT_TRIGGERS_CAP", "_paper_exit_triggers_restore", "_paper_note_exit_trigger", "_paper_delay_observe_report"]
 
 
 def _fresh(tmp, monkeypatch):
@@ -185,3 +186,22 @@ def test_row_wiring():
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     assert '"non_countable": bool(_non_countable_reasons(pos, exit_reason))' in src
     assert "_paper_delay_observe_report(report)" in src and "_paper_delay_pool_reset()" in src
+
+
+def test_exit_triggers_survive_restart_per_epoch_and_reset(tmp_path, monkeypatch):
+    """HM R2 N-d: the exit-leg anchors are persisted with the B1 pool, so an exit ack after a restart still samples."""
+    ns = _fresh(tmp_path, monkeypatch)
+    ns["_paper_note_exit_trigger"]({"trade_id": "t7"}, 1100.0)
+    ns["_paper_note_exit_trigger"]({"trade_id": "t7"}, 1199.0)  # first trigger wins
+    path = tmp_path / "paper_delay_pool.json"
+    assert json.loads(path.read_text())["exit_triggers"] == {"t7": 1100.0}
+    ns2 = _fresh(tmp_path, monkeypatch)  # restart
+    out = ns2["_paper_delay_observe_report"](_report(7, exit_ack=1100.6))
+    assert abs(out["exit"] - 0.6) < 1e-9
+    monkeypatch.setattr(pf, "DELAYS", None, raising=False)
+    ns3 = _ns(tmp_path, POOL_NAMES)
+    ns3["DATA_EPOCH_ID"] = "other-epoch"
+    ns3["_paper_delay_sampler"]()
+    assert ns3["_PAPER_EXIT_TRIGGERS"] == {}  # another epoch's anchors are ignored
+    ns2["_paper_delay_pool_reset"]()
+    assert json.loads(path.read_text())["exit_triggers"] == {}

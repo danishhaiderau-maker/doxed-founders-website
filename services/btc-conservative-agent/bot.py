@@ -33892,7 +33892,9 @@ def _paper_delay_sampler():
         try:
             path = _paper_delay_pool_path()
             if path.is_file():
-                sampler.load(json.loads(path.read_text(encoding="utf-8") or "{}"), globals().get("DATA_EPOCH_ID"))
+                payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+                if sampler.load(payload, globals().get("DATA_EPOCH_ID")):
+                    _paper_exit_triggers_restore(payload)  # HM R2 N-d: same epoch only (load rejects others)
         except Exception as exc:  # noqa: BLE001 - an unreadable pool is an empty pool (default delay, UNVERIFIED)
             logger.warning(f"[F1 DELAY POOL] load failed: {type(exc).__name__}")
         _DISLOC_DELAYS = sampler
@@ -33903,8 +33905,9 @@ def _paper_delay_sampler():
 def _paper_delay_pool_persist() -> bool:
     with _PAPER_DELAY_POOL_LOCK:
         try:
-            return bool(_live_copy._atomic_write_json(
-                _paper_delay_pool_path(), _paper_delay_sampler().to_json(globals().get("DATA_EPOCH_ID"))))
+            payload = _paper_delay_sampler().to_json(globals().get("DATA_EPOCH_ID"))
+            payload[PAPER_EXIT_TRIGGERS_KEY] = dict(list(_PAPER_EXIT_TRIGGERS.items())[-PAPER_EXIT_TRIGGERS_CAP:])
+            return bool(_live_copy._atomic_write_json(_paper_delay_pool_path(), payload))
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[F1 DELAY POOL] persist failed: {type(exc).__name__}")
             return False
@@ -33944,14 +33947,36 @@ def _paper_stamp_pool(res, lane: str, leg: str):
 
 
 _PAPER_EXIT_TRIGGERS: dict = {}  # trade_id -> paper exit trigger ts (the anchor of that trade's live exit ack)
+PAPER_EXIT_TRIGGERS_KEY = "exit_triggers"  # HM R2 N-d: persisted in the same per-epoch pool file as the B1 pool
+PAPER_EXIT_TRIGGERS_CAP = 2000
+
+
+def _paper_exit_triggers_restore(payload) -> int:
+    """HM R2 N-d: restore the exit-leg anchors persisted with the B1 pool (caller has already checked schema + epoch),
+    so a live exit ack that lands after a restart still pairs with its paper exit trigger. In-memory entries win."""
+    raw = payload.get(PAPER_EXIT_TRIGGERS_KEY) if isinstance(payload, dict) else None
+    n = 0
+    for tid, t0 in list((raw if isinstance(raw, dict) else {}).items())[-PAPER_EXIT_TRIGGERS_CAP:]:
+        try:
+            v = float(t0)
+        except (TypeError, ValueError):
+            continue
+        if tid and math.isfinite(v) and v > 0:
+            _PAPER_EXIT_TRIGGERS.setdefault(str(tid), v)
+            n += 1
+    return n
 
 
 def _paper_note_exit_trigger(pos: dict, t0) -> None:
     tid = str((pos or {}).get("trade_id") or "")
     if tid and t0:
-        if len(_PAPER_EXIT_TRIGGERS) > 2000:
+        _paper_delay_sampler()  # restore the persisted anchors first (per epoch)
+        if tid in _PAPER_EXIT_TRIGGERS:
+            return
+        while len(_PAPER_EXIT_TRIGGERS) >= PAPER_EXIT_TRIGGERS_CAP:
             _PAPER_EXIT_TRIGGERS.pop(next(iter(_PAPER_EXIT_TRIGGERS)))
-        _PAPER_EXIT_TRIGGERS.setdefault(tid, float(t0))
+        _PAPER_EXIT_TRIGGERS[tid] = float(t0)
+        _paper_delay_pool_persist()  # HM R2 N-d: once per trade, survives restarts like the B1 pool
 
 
 def _paper_delay_observe_report(report: dict) -> dict:
