@@ -3,6 +3,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
+import { decodeTileClientOrderId } from './live-tile-gate';
 import {
   executorWakeAuthorized,
   parseExecutorWakeRequest,
@@ -690,7 +691,7 @@ const LIVE_VENUE_MARGIN_EVIDENCE = {
   observedAt: '2026-09-29T23:21:00.000Z', source: 'BITFINEX_PUBLIC_FUTURES_CONFIG',
 };
 
-async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = {}) {
+async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean; otherLive?: number } = {}) {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.venueMarginEvidence = { value: LIVE_VENUE_MARGIN_EVIDENCE, atMs: Date.now() };
   const now = Date.now();
@@ -735,7 +736,9 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = 
   };
   const submitted: Array<Record<string, unknown>> = [];
   const events: Array<Record<string, unknown>> = [];
-  service.logger = { log() {}, warn() {}, error() {} };
+  const deleted: string[] = [];
+  const warns: string[] = [];
+  service.logger = { log() {}, warn(m: string) { warns.push(String(m)); }, error() {} };
   service.cycleAudit = { stage() {} };
   service.config = { get: (k: string) => (k === 'SHOWCASE_WEBHOOK_SECRET' ? 'test-secret' : undefined) };
   service.activeTrading = {
@@ -757,8 +760,9 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = 
       },
     }),
     signalCycleParticipant: {
+      count: async () => opts.otherLive ?? 0, // two-tile live gate: other live participants
       create: async () => ({ id: 'participant-exact-qty' }),
-      delete: async () => ({}),
+      delete: async () => { deleted.push('participant-exact-qty'); return {}; },
       findUnique: async () => null,
       findMany: async () => [],
     },
@@ -787,8 +791,22 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = 
     'bitfinex',
     { availableUsd: 100, markPrice: 63_620, exchangeBookProvenEmpty: true },
   );
-  return { placed, submitted, events };
+  return { placed, submitted, events, deleted, warns };
 }
+
+test('two-tile live gate: a second live entry while another lot is pending/open is refused, logged, claim released', async () => {
+  const { placed, submitted, deleted, warns } = await runExactQtyEntry({ otherLive: 1 });
+  assert.equal(placed, false);
+  assert.equal(submitted.length, 0);
+  assert.deepEqual(deleted, ['participant-exact-qty']);
+  assert.ok(warns.some((w) => w.includes('[LIVE TILE GATE]') && w.includes('LIVE_SKIPPED_MUTEX') && w.includes('tile=gs1')));
+});
+
+test('two-tile live gate: the entry order cid carries the tile key', async () => {
+  const { placed, submitted } = await runExactQtyEntry();
+  assert.equal(placed, true);
+  assert.equal(decodeTileClientOrderId(submitted[0].clientOrderId as number), 'gs1');
+});
 
 test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
   const { placed, submitted, events } = await runExactQtyEntry();
@@ -854,6 +872,7 @@ test('market catch-up money path also submits the exact showcase position quanti
       create: async () => ({}),
     },
     signalCycleParticipant: {
+      count: async () => 0, // two-tile live gate: no other live participant
       findUnique: async () => null,
       create: async () => ({ id: 'participant-catchup-exact-qty' }),
       delete: async () => ({}),
@@ -929,6 +948,7 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
   service.prisma = {
     signalCycleEvent: { create: async ({ data }: any) => { fences.push(data.payload); return {}; } },
     signalCycleParticipant: {
+      count: async () => 0, // two-tile live gate: no other live participant
       findUnique: async () => null,
       create: async () => ({ id: 'participant-catchup-timeout' }),
       delete: async () => { deleted += 1; },
@@ -982,6 +1002,7 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
   service.prisma = {
     signalCycleEvent: { create: async () => ({}) },
     signalCycleParticipant: {
+      count: async () => 0, // two-tile live gate: no other live participant
       findUnique: async () => null,
       create: async () => ({ id: 'participant-catchup-stop-fail' }),
       delete: async () => ({}),

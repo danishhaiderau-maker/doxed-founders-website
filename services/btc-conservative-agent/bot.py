@@ -49747,7 +49747,7 @@ def _nonaccum_plans_worker(root: str, epoch_ts: float) -> None:
 
 
 
-# ---- Live guardian (HM 19 Oct): automatic stop-or-disarm for the GS-01 live test --------------------------------
+# ---- Live guardian (HM 19 Oct; every live tile since the two-tile gate): automatic stop-or-disarm ---------------
 _LIVE_GUARDIAN_STATE: dict = {"enabled": True, "last_check_ts": None, "heartbeat_ts": None, "last_violations": [], "disarms": [], "calc": {}}
 _LIVE_GUARDIAN_ERROR_LIMIT = 3   # consecutive failed evaluations (output ON) before AUTO_DISARM:GUARDIAN_ERROR
 _LIVE_GUARDIAN_INTERVAL_SEC = 1.0
@@ -49784,7 +49784,8 @@ def _live_guardian_tick(now=None) -> list:
     if not _epoch and now - float(_LIVE_GUARDIAN_STATE.get("epoch_warn_ts") or 0) >= 60.0:
         _LIVE_GUARDIAN_STATE["epoch_warn_ts"] = now
         logger.error("[LIVE GUARDIAN] fresh epoch floor unreadable: evaluating WITHOUT the epoch filter [PIPELINE ENFORCEMENT]")
-    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, epoch_ts=_epoch or None)
+    # every live tile (two-tile gate): lane_needle="" evaluates all live-copy chains, violations carry their tile key
+    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, lane_needle="", epoch_ts=_epoch or None)
     _LIVE_GUARDIAN_STATE["last_violations"] = viol
     if viol:
         reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
@@ -49859,8 +49860,16 @@ def monitor_live_guardian_route():
     if not monitor_integrity_authorized():
         return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
     import live_guardian as _lg
+    import live_tile_gate as _ltg
+    _caps = _ltg.load_caps()
     body = {"schema": "live_guardian_v1", "limits": {"stop_missing_sec": _lg.STOP_MISSING_SEC, "daily_loss_cap_usd": _lg.DAILY_LOSS_CAP_USD,
-            "ledger_grace_sec": _lg.LEDGER_GRACE_SEC, "balance_drift_usd": _lg.BALANCE_DRIFT_USD},
+            "ledger_grace_sec": _lg.LEDGER_GRACE_SEC, "balance_drift_usd": _lg.BALANCE_DRIFT_USD,
+            "fill_to_stop_max_sec": _lg.FILL_TO_STOP_MAX_SEC, "lanes": "ALL_LIVE_TILES"},
+            "tile_gate": {"tile_key_codes": dict(_ltg.TILE_KEY_CODES), "day_basis": _ltg.DAY_BASIS,
+                          "max_entries_per_day": _caps["max_entries_per_day"],
+                          "tile_margin_caps_usd": {k: _ltg.tile_cap_usd(k, _caps) for k in _ltg.TILE_KEY_CODES},
+                          "total_margin_cap_usd_override": _caps["total_usd"], "cap_unit": "USD_MARGIN",
+                          "recent": list(_LIVE_TILE_GATE_LOG)[-20:]},
             "active": bool(_get_live_copy_output().snapshot().get("enabled")),
             "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
             "heartbeat_stale": _live_guardian_heartbeat_stale(), "heartbeat_stale_after_sec": _lg.HEARTBEAT_STALE_SEC,
@@ -61613,6 +61622,39 @@ def _iso_or_ts_to_unix(value):
 _live_copy_bootstrap_lock = threading.Lock()
 
 
+_LIVE_TILE_GATE_LOG: "collections.deque" = collections.deque(maxlen=200)
+
+
+def _live_tile_admission(lane, trade_id, now):
+    """Two-tile live gate (live_tile_gate.admit_entry) for the FIRST entry event of a live trade. Refusals are logged and
+    kept in _LIVE_TILE_GATE_LOG; the paper tile is never touched (the trade simply is not copied)."""
+    import live_tile_gate as _ltg
+    from combo_pathway_config import ACTIVE_TILE_ORDER
+    sw = _get_bfx_live_switch()
+    armed = [l for l in ACTIVE_TILE_ORDER if (sw.snapshot(l) or {}).get("bitfinex_live_orders")]
+    # strict chain build (no swallow): if the live-copy monitor context is unavailable the gate raises -> refused
+    import live_copy_monitor as _lcm
+    import live_copy_monitor_api as _lcma
+    ctx = _lcma._CTX["provider"]()
+    chains = list(_lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])["accounts"].values())
+    # net=0 from the mirror Fly already holds (relay read age <= 20 s, Fly's cached fetch <= 45 s; no network I/O on the
+    # signal path, R8). The AUTHORITATIVE net=0 is the relay's fresh exchange read at placement (placeEntryInner).
+    mirror = dict(_live_guardian_mirror())
+    _fetched = _live_copy_website_cached_view().get("fetched_at_ts")
+    if not _fetched or now - float(_fetched) > 45.0:
+        mirror = {"ok": False, "error": "website view stale"}
+    ok, reasons, info = _ltg.admit_entry(
+        lane=lane, trade_id=trade_id, now=now, chains=chains, mirror=mirror,
+        decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD)
+    row = {"ts": now, "trade_id": trade_id, "lane": lane, "tile_key": info.get("tile_key"), "admitted": bool(ok),
+           "reasons": list(reasons)[:8], "entries_today": info.get("entries_today"), "utc_day": info.get("utc_day"),
+           "exposures": info.get("exposures")}
+    _LIVE_TILE_GATE_LOG.append(row)
+    if not ok:
+        logger.warning(f"[LIVE TILE GATE] {trade_id} lane={lane} NOT copied (paper unaffected): {','.join(reasons)}")
+    return ok, reasons, info
+
+
 def _live_copy_stamp_payload(payload, signal_at=None):
     """Attach a signed live-copy approval to an eligible lane's relay payload.
 
@@ -61677,6 +61719,7 @@ def _live_copy_stamp_payload(payload, signal_at=None):
                     force_paper_mode=_live_copy_paper_lock_active(), decisions=_get_live_copy_decisions(),
                     secret=(os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip(),
                     bot_instance_id=BOT_INSTANCE_ID, operator_eligible=op_elig,
+                    admission_gate=(lambda: _live_tile_admission(lane, trade_id, now)),
                 )
                 if (approval and approval.get("entry_allowed") and needs_bootstrap
                         and not _get_live_copy_bootstrap().claim(lane, trade_id)):

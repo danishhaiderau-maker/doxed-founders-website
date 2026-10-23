@@ -813,6 +813,11 @@ class TradeDecisions:
                 row["reasons"] = ["DECISION_PERSIST_FAILED"]
             return dict(row)
 
+    def items(self) -> list[tuple[str, dict]]:
+        """Snapshot of (trade_id, decision row) pairs (live_tile_gate: daily count + in-flight mutex)."""
+        with self._lock:
+            return [(k, dict(v)) for k, v in self._rows.items()]
+
     def approved_trade_ids(self) -> set[str]:
         with self._lock:
             return {k for k, r in self._rows.items() if r.get("approved")}
@@ -1176,7 +1181,22 @@ def build_approval(
         "max_signal_age_sec": s.get("live_copy_max_signal_age_sec"),
         "reasons": list(reasons or [])[:12],
         "bot_instance_id": bot_instance_id,
+        # two-tile live gate: the tile key the relay folds into the order cid (it re-derives it from the trade id and
+        # refuses a mismatch); live_tile_gate.TILE_KEY_CODES is the single table.
+        "tile_key": _tile_key_for_trade(trade_id),
+        "tile_key_code": _tile_key_code_for_trade(trade_id),
     }
+
+
+def _tile_key_for_trade(trade_id) -> str | None:
+    import live_tile_gate as _ltg
+    return _ltg.tile_key_for_trade_id(trade_id)
+
+
+def _tile_key_code_for_trade(trade_id) -> int | None:
+    import live_tile_gate as _ltg
+    k = _ltg.tile_key_for_trade_id(trade_id)
+    return _ltg.TILE_KEY_CODES.get(k) if k else None
 
 
 def stamp_or_block(
@@ -1195,8 +1215,14 @@ def stamp_or_block(
     secret: str,
     bot_instance_id: str | None = None,
     operator_eligible: bool = False,
+    admission_gate=None,
 ) -> tuple[dict | None, list[str]]:
     """Return (signed approval, []) when the event may be emitted, else (None, reasons).
+
+    ``admission_gate``: optional zero-arg callable -> (ok, reasons, info), run ONLY for the first entry event of a trade
+    after ``entry_gate`` passed (live_tile_gate.admit_entry: mutex, net=0, caps, daily limit, tile key). A refusal is
+    persisted as the trade's decision, so the trade stays paper-only; later reprices of an admitted trade are not
+    re-admitted (its own resting order would otherwise block it). Any error refuses (fail closed).
 
     The first entry event of a trade decides (and persists) whether the trade
     is copied. Undecided/denied trades never emit; approved trades emit every
@@ -1218,6 +1244,14 @@ def stamp_or_block(
                 tile_row=tile_row, tile_eval=tile_eval, force_paper_mode=force_paper_mode,
                 operator_eligible=operator_eligible,
             )
+            gate_info: dict = {}
+            if ok and admission_gate is not None:
+                try:
+                    g_ok, g_reasons, gate_info = admission_gate()
+                except Exception as exc:  # noqa: BLE001
+                    g_ok, g_reasons = False, [f"LIVE_TILE_GATE_ERROR:{type(exc).__name__}"]
+                if not g_ok:
+                    ok, reasons = False, list(reasons) + list(g_reasons or ["LIVE_TILE_GATE_DENIED"])
             decision = decisions.decide(trade_id, ok, lane=lane, reasons=reasons,
                                         approval_ts=now if ok else None)
             if not decision.get("approved"):

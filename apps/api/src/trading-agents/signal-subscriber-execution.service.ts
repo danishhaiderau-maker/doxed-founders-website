@@ -6,6 +6,7 @@ import {
   liveCopyAccountArmed,
   readEnvelopeFlyApproval,
 } from './live-copy-approval';
+import { decodeTileClientOrderId, encodeTileClientOrderId, liveEntryAdmission, tileKeyForTradeId } from './live-tile-gate';
 import { ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
@@ -3622,7 +3623,11 @@ function computeClientOrderId(
   const digest = createHash('sha256')
     .update(`${cycleId}|${participantId}|${tradeId ?? ''}`)
     .digest('hex');
-  return parseInt(digest.slice(0, 8), 16) & 0x7fffffff;
+  const hash = parseInt(digest.slice(0, 8), 16) & 0x7fffffff;
+  // Two-tile live gate: a live tile's ENTRY cid carries its stable tile key (live-tile-gate.ts), so every live order and
+  // fill maps to its tile. Reconcile always matches the PERSISTED cid, so the formula change is deploy-safe.
+  const tileKey = tileKeyForTradeId(tradeId);
+  return tileKey ? encodeTileClientOrderId(tileKey, hash) : hash;
 }
 
 function computeAccountEmergencyClientOrderId(requestId: string): number {
@@ -3941,6 +3946,7 @@ export function buildExchangeMirror(input: {
     reduce_only: typeof o.flags === 'number' ? (o.flags & REDUCE_ONLY) === REDUCE_ONLY : null,
     oco: typeof o.flags === 'number' ? (o.flags & 16384) === 16384 : null,
     cid: o.cid ?? null,
+    tile_key: decodeTileClientOrderId(o.cid),
   }));
   const stops = open_orders.filter((o) => /STOP/i.test(String(o.type)));
   const positions = input.position && Math.abs(input.position.amount) > 0
@@ -10302,6 +10308,22 @@ await this.notifications
       .catch(this.swallowedError('op@spec-claim-release'));
   }
 
+  /** Two-tile live gate: this account's OTHER pending/open lots on this agent (any tile), excluding the current claim. */
+  private async countOtherLiveParticipants(
+    userId: string,
+    agentId: string,
+    excludeParticipantId: string | null | undefined,
+  ): Promise<number> {
+    return this.prisma.signalCycleParticipant.count({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+        cycle: { agentId },
+        ...(excludeParticipantId ? { id: { not: excludeParticipantId } } : {}),
+      },
+    });
+  }
+
   private async placeEntryInner(
     agentId: string,
     instance: TradingAgentInstance,
@@ -10647,6 +10669,7 @@ await this.notifications
     let prePosition: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
     let latestGate: { status: TradingAgentInstanceStatus; dashboardState: unknown } | null = null;
     let latestCycle: { createdAt: Date } | null = null;
+    let otherLiveParticipants = 0;
     try {
       // A flat book proven by the authenticated fast preflight moments ago
       // is reused instead of a second ~0.3-0.6 s Bitfinex REST read (the
@@ -10655,7 +10678,7 @@ await this.notifications
       const reuseProvenFlat = fastPreflight?.exchangeBookProvenEmpty === true
         && typeof fastPreflight.provenEmptyAtMs === 'number'
         && Date.now() - fastPreflight.provenEmptyAtMs <= PROVEN_FLAT_REUSE_MAX_AGE_MS;
-      [prePosition, [latestGate, latestCycle]] = await Promise.all([
+      [prePosition, [latestGate, latestCycle], otherLiveParticipants] = await Promise.all([
         reuseProvenFlat ? Promise.resolve(null) : this.readOpenPositionDetailWithRetry(creds),
         venue === 'bitfinex'
           ? Promise.all([
@@ -10669,6 +10692,10 @@ await this.notifications
               }),
             ])
           : Promise.resolve([null, null] as const),
+        // Two-tile live gate (N1): one live position account-wide -> any OTHER pending/open lot (any tile) refuses.
+        venue === 'bitfinex'
+          ? this.countOtherLiveParticipants(instance.userId, agentId, claimParticipantId)
+          : Promise.resolve(0),
       ]);
     } catch (err) {
       if (claimParticipantId) {
@@ -10683,6 +10710,28 @@ await this.notifications
         }`,
       );
       return false;
+    }
+    // Two-tile live gate (N1 mutex + N5 per-entry net=0): refuse unless no other live lot exists and the fresh exchange
+    // read (or the proven-flat preflight moments ago) shows no position. Never waits for flat (R8): refuse and log.
+    if (venue === 'bitfinex') {
+      const admission = liveEntryAdmission({
+        otherLiveParticipants,
+        positionQty: prePosition ? prePosition.amount : 0,
+      });
+      if (!admission.ok) {
+        if (claimParticipantId) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: claimParticipantId } })
+            .catch(this.swallowedError('op@live-tile-gate'));
+          claimParticipantId = null;
+        }
+        this.logger.warn(
+          `[LIVE TILE GATE] Hire entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}`
+          + ` tile=${tileKeyForTradeId(tradeId) ?? 'unknown'}: ${admission.reason}`
+          + ` (other live lots=${otherLiveParticipants} pos=${prePosition ? prePosition.amount : 0})`,
+        );
+        return false;
+      }
     }
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
     const entryBbo = await entryBboPromise;
@@ -14651,7 +14700,12 @@ await this.notifications
       );
       return;
     }
-    const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
+    // Keep the order's persisted cid (an in-place update preserves it on the exchange; a deploy that changed the cid
+    // formula must not record a different cid for an order placed before it). Fallback: the deterministic formula.
+    const persistedCid = Number(meta.clientOrderId);
+    const clientOrderId = Number.isSafeInteger(persistedCid) && persistedCid > 0
+      ? persistedCid
+      : computeClientOrderId(cycleId, participantId, opts.tradeId);
     const signedExactLimitCandidate = opts.tradeId
       ? readFreshSignedShowcaseExactLimit(opts.tradeId, intent, opts.now)
       : null;
@@ -18562,10 +18616,27 @@ await this.notifications
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
 
     let prePosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    let otherLiveParticipants = 0;
     try {
-      prePosition = await this.readOpenPositionDetailWithRetry(creds);
+      [prePosition, otherLiveParticipants] = await Promise.all([
+        this.readOpenPositionDetailWithRetry(creds),
+        this.countOtherLiveParticipants(instance.userId, agentId, claimParticipantId),
+      ]);
     } catch {
       await releaseClaim();
+      return false;
+    }
+    // Two-tile live gate (N1 mutex + N5 per-entry net=0), same shared rule as placeEntryInner.
+    const catchupAdmission = liveEntryAdmission({
+      otherLiveParticipants,
+      positionQty: prePosition ? prePosition.amount : 0,
+    });
+    if (!catchupAdmission.ok) {
+      await releaseClaim();
+      this.logger.warn(
+        `[LIVE TILE GATE] catch-up entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}`
+        + ` tile=${tileKeyForTradeId(tradeId) ?? 'unknown'}: ${catchupAdmission.reason}`,
+      );
       return false;
     }
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
@@ -20874,7 +20945,7 @@ await this.notifications
       if (cancel.ok) {
         autoCancelled += 1;
         this.logger.warn(
-          `[RECONCILE] auto-cancelled own orphan order ${order.id} (cid=${order.cid}) for ${userId} — matched participant ${matched.participantId}`,
+          `[RECONCILE] auto-cancelled own orphan order ${order.id} (cid=${order.cid}, tile=${decodeTileClientOrderId(order.cid) ?? 'n/a'}) for ${userId} — matched participant ${matched.participantId}`,
         );
         await this.cycles
           .recordHireExecutionEvent(userId, agentId, matched.cycleId, 'RECONCILE_AUTO_CANCELLED_OWN_ORPHAN', {
@@ -20882,6 +20953,7 @@ await this.notifications
             source: 'hire',
             bitfinex_order_id: order.id,
             client_order_id: order.cid,
+            tile_key: decodeTileClientOrderId(order.cid),
             matched_participant_id: matched.participantId,
             cancel_attempts: cancel.attempts,
             cancel_reason: cancel.reason ?? 'cancelled',

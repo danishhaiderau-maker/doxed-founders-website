@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { LIVE_TILE_KEY_CODES } from './live-tile-gate';
 
 /**
  * Fly "live copy" approval verification (Option 1, 2026-10-09).
@@ -175,7 +176,13 @@ export function approvalTileMatchesTrade(a: FlyLiveCopyApproval, tradeId: string
   const tid = String(tradeId ?? '').trim().toLowerCase();
   if (!prefix || !tid || isRetiredLiveCopyTileTradeId(tid)) return false;
   const [head, ...rest] = tid.split('-');
-  return head === prefix && rest.length > 0 && String(a.trade_id).toLowerCase() === tid;
+  if (!(head === prefix && rest.length > 0 && String(a.trade_id).toLowerCase() === tid)) return false;
+  // Two-tile live gate: a signed tile key (Fly live_tile_gate) must name this trade's tile. Absent = pre-gate Fly (allowed).
+  if (a.tile_key != null || a.tile_key_code != null) {
+    const code = LIVE_TILE_KEY_CODES[head];
+    if (code == null || String(a.tile_key ?? '').toLowerCase() !== head || Number(a.tile_key_code) !== code) return false;
+  }
+  return true;
 }
 
 /** The entry approval Fly attached to a persisted intent envelope, if any. */

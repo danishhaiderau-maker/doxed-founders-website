@@ -288,6 +288,7 @@ test_live_guardian.py
 test_live_monitor_extra_routes.py
 test_live_policy_provenance.py
 test_live_test_gaps_20261011.py
+test_live_tile_gate.py
 test_local_dynamic_input.py
 test_local_dynamic_mapping.py
 test_local_fresh_collection.py
