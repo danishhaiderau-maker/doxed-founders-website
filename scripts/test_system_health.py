@@ -1858,15 +1858,74 @@ def test_analyzer_operator_hold_reports_info_analyzer_down():
     before = by_id(sh.evaluate(copy.deepcopy(inputs), {}))
     assert before["analyzer.generation"]["status"] == sh.RED
     assert before["streams.analysed_freshness"]["status"] == sh.AMBER
-    inputs["analyzer_hold"] = {"since": "2026-10-23T05:45:00Z", "reason": "F7 restart pending", "by": "operator"}
+    inputs["analyzer_hold"] = {"since": "2026-10-02T01:45:00Z", "reason": "F7 restart pending", "by": "operator"}
     after = by_id(sh.evaluate(inputs, {}))
     for cid in ("analyzer.generation", "analyzer.api", "streams.analysed_freshness"):
         assert after[cid]["status"] == sh.SKIP
-        assert after[cid]["observed"].startswith("INFO analyzer down (operator hold since 2026-10-23T05:45:00Z")
+        assert after[cid]["observed"].startswith("INFO analyzer down (operator hold since 2026-10-02T01:45:00Z")
         assert after[cid]["observed_fields"]["held_status"] in (sh.RED, sh.AMBER)
     assert "content lag frozen" in after["streams.analysed_freshness"]["observed"]
     # unrelated checks keep their verdicts
     assert after["trading.orders"]["status"] == before["trading.orders"]["status"]
+
+
+def _c12_hold_inputs(now):
+    inputs = healthy(now)
+    inputs["analyzer_status"]["lastCompletedGenerationAt"] = sh.iso(now - 5 * 3600)
+    inputs["analyzer_api"] = None
+    return inputs
+
+
+def test_c12_hold_never_covers_exports_or_archive_and_emits_one_info_line():
+    now = ts("2026-10-02T03:00:00Z")
+    assert set(sh.ANALYZER_HOLD_CHECKS) == {"analyzer.generation", "analyzer.api", "analyzer.reports",
+                                            "streams.analysed_freshness"}
+    checks = [sh.check(cid, "x", sh.RED, "stale", "t") for cid in
+              ("analyzer.generation", "analyzer.api", "analyzer.reports", "streams.analysed_freshness",
+               "exports.freshness", "archive.freshness")]
+    sh.apply_analyzer_hold(checks, {"since": sh.iso(now - 3600), "reason": "r", "source": "f"}, now)
+    got = by_id(checks)
+    assert got["exports.freshness"]["status"] == sh.RED and got["archive.freshness"]["status"] == sh.RED
+    assert [got[c]["status"] for c in sh.ANALYZER_HOLD_CHECKS] == [sh.SKIP] * 4
+    lines = [c for c in checks if c["id"] == "analyzer.operator_hold"]
+    assert len(lines) == 1 and lines[0]["status"] == sh.GREEN
+    assert lines[0]["observed"].startswith("INFO 4 checks held")
+    assert lines[0]["observed_fields"]["held"] == 4 and lines[0]["observed_fields"]["expired"] is False
+
+
+@pytest.mark.parametrize("source", ["file", "launcher"])
+def test_c12_hold_expires_after_24h_with_amber_and_holds_nothing(source):
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = _c12_hold_inputs(now)
+    stale = sh.iso(now - sh.ANALYZER_HOLD_TTL_SEC - 60)
+    if source == "file":
+        inputs["analyzer_hold"] = {"since": stale, "reason": "forgotten", "by": "operator"}
+    else:
+        inputs["analyzer_status"].update(state="STOPPED_BY_OPERATOR", stoppedAt=stale)
+    after = by_id(sh.evaluate(inputs, {}))
+    assert after["analyzer.generation"]["status"] == sh.RED       # real verdict, no longer masked
+    hold = after["analyzer.operator_hold"]
+    assert hold["status"] == sh.AMBER and hold["observed"].startswith("hold expired")
+    assert hold["observed_fields"]["held"] == 0 and hold["observed_fields"]["expired"] is True
+
+
+def test_c12_undated_hold_is_treated_as_expired():
+    now = ts("2026-10-02T03:00:00Z")
+    checks = [sh.check("analyzer.generation", "x", sh.RED, "stale", "t")]
+    sh.apply_analyzer_hold(checks, {"since": None, "reason": "r", "source": "analyzer-run.status.json"}, now)
+    assert checks[0]["status"] == sh.RED
+    assert checks[-1]["id"] == "analyzer.operator_hold" and checks[-1]["status"] == sh.AMBER
+    assert "unparseable" in checks[-1]["observed"]
+
+
+def test_c12_hold_within_ttl_from_launcher_state_still_holds():
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = _c12_hold_inputs(now)
+    inputs["analyzer_status"].update(state="OPERATOR_HOLD", stoppedAt=sh.iso(now - 23 * 3600))
+    after = by_id(sh.evaluate(inputs, {}))
+    assert after["analyzer.generation"]["status"] == sh.SKIP
+    assert after["analyzer.operator_hold"]["observed"].startswith("INFO ")
+    assert after["exports.freshness"]["status"] != sh.SKIP or "operator hold" not in after["exports.freshness"]["observed"]
 
 
 def test_analyzer_hold_from_launcher_state_and_inactive_flag():

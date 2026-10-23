@@ -66,8 +66,13 @@ GREEN, AMBER, RED, SKIP = "GREEN", "AMBER", "RED", "SKIP"
 # down" observation instead of a frozen lag / stale generation (the pre-hold verdict stays in fields).
 ANALYZER_HOLD_FILE = "analyzer-operator-hold.json"
 ANALYZER_HOLD_STATES = {"STOPPED_BY_OPERATOR", "OPERATOR_HOLD"}
-ANALYZER_HOLD_CHECKS = ("analyzer.generation", "analyzer.api", "analyzer.reports", "streams.analysed_freshness",
-                        "exports.freshness", "archive.freshness")
+# HM C12 (PR #843 review): the hold covers analyzer output only. exports.freshness / archive.freshness are custody and
+# export checks and are never held (a hold must not mask an export or archive stall). A hold (file flag or launcher
+# state alike) expires after ANALYZER_HOLD_TTL_SEC: the held checks report their real verdicts again and one AMBER
+# "hold expired" line asks the operator to clear it. A hold with no parseable "since" cannot be aged, so it is treated
+# as expired (fail closed).
+ANALYZER_HOLD_CHECKS = ("analyzer.generation", "analyzer.api", "analyzer.reports", "streams.analysed_freshness")
+ANALYZER_HOLD_TTL_SEC = 24 * 3600
 RANK = {SKIP: -1, GREEN: 0, AMBER: 1, RED: 2}
 RUNBOOK = "docs/SYSTEM_HEALTH_RUNBOOK.md"
 
@@ -2339,7 +2344,7 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   fields={"generated_age_sec": gen_age, "diagnose_age_sec": diag_age, "late_jobs": amber,
                           "verdict": sa.get("verdict")}))
 
-    apply_analyzer_hold(checks, analyzer_hold(inputs))
+    apply_analyzer_hold(checks, analyzer_hold(inputs), now)
     if "fly_platform" in inputs:
         add(fly_platform_check(inputs.get("fly_platform"), checks, now))
     add(_fail_open_guard(checks, errors, source_down, now, t))
@@ -2359,14 +2364,35 @@ def analyzer_hold(inputs: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def apply_analyzer_hold(checks: list[dict[str, Any]], hold: Mapping[str, Any] | None) -> None:
-    """Under an operator hold, analyzer-derived checks become SKIP/INFO 'analyzer down' (never hides RED elsewhere)."""
+def apply_analyzer_hold(checks: list[dict[str, Any]], hold: Mapping[str, Any] | None,
+                        now: float | None = None) -> None:
+    """Under an operator hold, analyzer-output checks become SKIP/INFO 'analyzer down' (never hides RED elsewhere).
+
+    One top-level ``analyzer.operator_hold`` line is added: INFO "N checks held" while the hold is live, or AMBER
+    "hold expired" after ANALYZER_HOLD_TTL_SEC (or when its start is unknown), in which case nothing is held."""
     if not hold:
         return
+    now = time.time() if now is None else float(now)
     since = hold.get("since") or "unknown"
+    since_ts = parse_ts(hold.get("since"))
+    age = (now - since_ts) if since_ts is not None else None
+    fields = {"operator_hold": dict(hold), "ttl_sec": ANALYZER_HOLD_TTL_SEC, "hold_age_sec": age,
+              "scope": list(ANALYZER_HOLD_CHECKS)}
+    threshold = (f"hold covers {', '.join(ANALYZER_HOLD_CHECKS)} only; expires after {fmt_age(ANALYZER_HOLD_TTL_SEC)} "
+                 f"(AMBER 'hold expired')")
+    if age is None or age > ANALYZER_HOLD_TTL_SEC:
+        why = f"since {since}, {fmt_age(age)} ago" if age is not None else f"since {since!r} unparseable"
+        checks.append(check("analyzer.operator_hold", "analyzer", AMBER,
+                            f"hold expired ({why}; source {hold.get('source')}: {hold.get('reason')}); "
+                            f"{len(ANALYZER_HOLD_CHECKS)} analyzer checks report their real verdicts again",
+                            threshold, f"remove {ANALYZER_HOLD_FILE} / restart the analyzer, or re-date the hold",
+                            fields={**fields, "held": 0, "expired": True}))
+        return
+    held = 0
     for item in checks:
         if item.get("id") not in ANALYZER_HOLD_CHECKS:
             continue
+        held += 1
         held_status, held_observed = item.get("status"), item.get("observed")
         what = ("content lag frozen at the last export, not a live lag" if item["id"] == "streams.analysed_freshness"
                 else "value frozen at the last generation")
@@ -2375,6 +2401,11 @@ def apply_analyzer_hold(checks: list[dict[str, Any]], hold: Mapping[str, Any] | 
         item["hint"] = f"remove {ANALYZER_HOLD_FILE} / restart the analyzer to resume this check"
         item["observed_fields"] = {**dict(item.get("observed_fields") or {}), "operator_hold": dict(hold),
                                    "held_status": held_status, "held_observed": held_observed}
+    checks.append(check("analyzer.operator_hold", "analyzer", GREEN,
+                        f"INFO {held} checks held (operator hold since {since}, {fmt_age(age)} ago; source "
+                        f"{hold.get('source')}: {hold.get('reason')}); expires in {fmt_age(ANALYZER_HOLD_TTL_SEC - age)}",
+                        threshold, f"remove {ANALYZER_HOLD_FILE} / restart the analyzer to resume the held checks",
+                        fields={**fields, "held": held, "expired": False}))
 
 
 def fly_platform_check(snapshot: Any, checks: list[dict[str, Any]], now: float) -> dict[str, Any]:

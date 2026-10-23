@@ -316,6 +316,16 @@ Age of the last completed analyzer generation (`analyzer-run.status.json`). AMBE
 Fix: read `logs\analyzer-once-*.err.log` and `segment-analyzer-cycle.status.json`
 (phase). A failed cycle is retried on the next supervisor tick.
 
+<a id="analyzer-operator-hold"></a>
+### analyzer.operator_hold
+Present only while an operator hold is set (`analyzer-operator-hold.json` in the state dir, or the launcher
+state `STOPPED_BY_OPERATOR` / `OPERATOR_HOLD`). The hold covers analyzer output only: `analyzer.generation`,
+`analyzer.api`, `analyzer.reports` and `streams.analysed_freshness` report SKIP "INFO analyzer down", and this
+line reads "INFO N checks held". Exports and archive freshness are never held. After 24 hours (or when the
+hold has no parseable start time) the hold expires: the four checks report their real verdicts again and
+this line is AMBER "hold expired".
+Fix: restart the analyzer, or remove `analyzer-operator-hold.json`.
+
 <a id="analyzer-api"></a>
 ### analyzer.api
 The :9001 `/api/health` and `/api/status` must both answer `ok` (health ok with status
