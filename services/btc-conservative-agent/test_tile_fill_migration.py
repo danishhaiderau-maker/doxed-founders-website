@@ -202,11 +202,12 @@ def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
     return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_paper_exit_missing_book_seconds",
                     "_paper_unpriced_marks", "_paper_exit_model_times", "_tp1_pending_action",
-                    "_paper_lane_entry_result", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
+                    "_paper_lane_entry_result", "_paper_lane_entry_core", "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close",
                     "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", *extra_names],
                    trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
+                   _paper_stamp_pool=lambda res, lane, leg: res, _paper_note_exit_trigger=lambda pos, t0: None,
                    ACTIVE_TILE_REGISTRY=cpc.ACTIVE_TILE_REGISTRY, _is_paper_book_lane=lambda p: True,
                    _exchange_stop_trigger=(xstop or (lambda pos, a, b: None)),
                    _normalize_order_side_to_dir=lambda v: "LONG" if str(v).upper() in ("BUY", "LONG") else "SHORT",
@@ -978,7 +979,9 @@ def test_realism_v2_maker_rest_queue_reset_on_reprice_and_drop(monkeypatch):
              "signal_created_ts": 999.0, "limit_price": 100.0}
     assert ns["_paper_lane_entry_result"](order, 1001.0) is None
     assert order["_entry_rest"]["queue_ahead"] == 2.0  # joined behind 2.0 at the bid
-    prints["rows"].append({"ts": 1005.0, "px": 100.0, "amt": -2.5})  # depletes the queue, fills 0.5
+    # HM C1: trade_through is the default rest basis -> an at-limit print never fills us; a print THROUGH does
+    prints["rows"].append({"ts": 1004.0, "px": 100.0, "amt": -2.5})  # at the limit: no fill (trade_through)
+    prints["rows"].append({"ts": 1005.0, "px": 99.99, "amt": -0.5})  # through the limit: fills 0.5 at 100.0
     assert ns["_paper_lane_entry_result"](order, 1010.0) is None
     assert abs(order["_entry_rest"]["remaining"] - 0.5) < 1e-12
     order["limit_price"] = 100.0 + 1e-6 * 0 + 0.0  # same price: no reset

@@ -56,3 +56,23 @@ def test_paper_signal_during_an_open_live_position_is_derived_as_live_busy_skipp
     out = lv.build(chains, {"a": {"side": "LONG"}}, intents, paper_signal_ids=["a", "b", "c"])
     by = {r["trade_id"]: r for r in out["rows"]}
     assert by["b"]["live_not_traded_reason"] == "LIVE_BUSY_SKIPPED" and by["c"]["live_not_traded_reason"] == "NO_LIVE_CHAIN"
+
+
+def test_g5_one_pair_row_per_live_signal_and_anchor_drift_measured():
+    """HM G5/B2: duplicate chains collapse to one pair row per live signal; a live chain with no paper twin is
+    NO_PAPER_TWIN; the stop-anchor drift is measured from the pair (paper anchor vs live fill), not NO_LIVE_TWIN."""
+    chains = [{"correlation_id": "a", "lane": "GS-01", "fill_price": 100.1, "fill_at_ts": 10.0},
+              {"correlation_id": "a", "lane": "GS-01", "fill_price": 100.1, "fill_at_ts": 10.0},
+              {"correlation_id": "b", "lane": "GS-01", "fill_price": 99.0, "fill_at_ts": 20.0}]
+    twins = {"a": {"side": "LONG", "entry_price": 100.0, "exchange_stop_anchor_px": 100.0},
+             "c": {"side": "SHORT", "entry_price": 101.0}}
+    out = lv.build(chains, twins, paper_signal_ids=["a", "c"], skip_reasons={"c": "ACCOUNT_NOT_ARMED"})
+    by = {r["trade_id"]: r for r in out["rows"]}
+    assert [r["trade_id"] for r in out["rows"]] == ["a", "b", "c"]
+    assert out["n_live_signals"] == 2 and out["n_live_pair_rows"] == 2 and out["one_pair_row_per_live_signal"]
+    assert out["n_no_paper_twin"] == 1
+    assert by["a"]["twin_status"] == "PAIRED" and by["b"]["twin_status"] == "NO_PAPER_TWIN"
+    assert by["c"]["twin_status"] == "PAPER_ONLY"
+    assert by["a"]["stop_anchor_drift_status"] == "MEASURED" and abs(by["a"]["stop_anchor_drift_bp"] - 10.0) < 1e-6
+    assert by["c"]["stop_anchor_drift_status"] == "LIVE_NOT_TRADED"
+    assert by["b"]["stop_anchor_drift_status"] == "UNVERIFIED"  # live fill but no paper anchor

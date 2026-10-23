@@ -79,7 +79,9 @@ def test_tile_options_trades_only_and_stop_basis_verified_default_false():
     assert o["resident_stop_trigger_basis"] == "trades" and o["entry_rest_fill_basis"] == "trade_through"
     assert o["stop_basis_verified"] is False and o["stop_basis_unverified"] is True
     assert o["time_exit_basis"] == "CLOCK" and o["funding_unverified"] is True
-    assert om.tile_options(None)["entry_rest_fill_basis"] == "queue_clear"
+    assert om.tile_options(None)["entry_rest_fill_basis"] == "trade_through"  # HM C1: conservative default
+    assert om.tile_options({"realism_options": {"entry_rest_fill_basis": "queue_clear"}})["entry_rest_fill_basis"] \
+        == "queue_clear"
 
 
 def test_liquidation_first_of_mark_or_trade():
@@ -104,4 +106,6 @@ def test_liquidation_first_of_mark_or_trade():
 def test_r8_force_flattened_rows_are_non_countable():
     import pathlib
     src = pathlib.Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
-    assert '"non_countable": str(exit_reason or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS' in src
+    # HM C2: the row's non_countable is any of the reasons (FORCE_FLATTENED from STATS_EXCLUDED_EXIT_REASONS kept)
+    assert '"non_countable": bool(_non_countable_reasons(pos, exit_reason))' in src
+    assert 'if str(exit_reason or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS:\n        out.append("FORCE_FLATTENED")' in src

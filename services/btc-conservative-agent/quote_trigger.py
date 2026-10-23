@@ -2,12 +2,13 @@
 
 Every paper exit trigger, every entry quote-staleness check and every dual stamp goes through here.
 
-Trigger rule (tracker "REALISM FIXES F1-F7" F2 + Rules Keeper):
-- A price level (stop / target) is reached at the FIRST of
-    * a trade printing at or through the level (``trigger_basis = LAST_TRADE``), or
-    * the executable book side reaching it (``trigger_basis = BOOK_TOP``): bid for a LONG exit, ask for a SHORT exit.
-  Stops trigger on book top PLUS last trade; every other exit triggers on the executable book side only
-  (``exit_events(..., include_trades=False)``).
+Trigger rule (tracker "REALISM FIXES F1-F7" F2 + Rules Keeper, RK 17:24 BINDING):
+- The exchange-resident stop triggers on the FIRST trade print at or through its level only
+  (``trigger_basis = LAST_TRADE``, LAST_TRADE_DOC_INFERRED). A book-top touch never triggers it; the first touch is
+  recorded as a comparison column (stop_book_touch_ts / _px / _s).
+- Every bot-side exit (TP / TP1 / BE locks / bot hard stop) triggers on the executable book side of a completed row
+  only (``trigger_basis = BOOK_TOP``: bid for a LONG exit, ask for a SHORT exit; ``exit_events(...,
+  include_trades=False)``) - the same book_level_trigger the live close path calls.
 - Stale threshold = paper_fill.MAX_BOOK_AGE_S (2 s). An entry whose book quote is stale is skipped with
   ``QUOTE_STALE``. With a stale book (> 2 s) the exit is marked ``STALE_BOOK`` with its price age; a price-level exit
   fires on the FIRST fresh book row (or, for the exchange-resident stop, on the real trades stream); only time exits
@@ -216,6 +217,26 @@ class TradesTail:
         out.sort(key=lambda p: p["ts"])
         return out
 
+    def received_after(self, t0: float, t1: float, recv_after: float) -> list:
+        """HM C3: prints with t0 < ts <= t1 written in a collector second > recv_after (i.e. not yet seen by a scan
+        that read the tail up to recv_after) - late prints are returned, never skipped. Oldest first."""
+        with self._lock:
+            if self._max_s is None or self._max_s + 1 < t1 - 0.5:
+                self._refresh()
+            out = [p for s, ps in self._by_s.items() if s > recv_after for p in ps if t0 < p["ts"] <= t1]
+        out.sort(key=lambda p: p["ts"])
+        return out
+
+    def coverage(self) -> Optional[dict]:
+        """HM C3: the collector seconds the in-memory tail holds (tail = last 1 MB, keep 600 s): {"lo_s", "hi_s",
+        "n_s"} or None when the tail is empty / the file is missing."""
+        with self._lock:
+            if self._max_s is None:
+                self._refresh()  # otherwise between()/received_after() keep the tail current (no extra 1 MB read)
+            if not self._by_s:
+                return None
+            return {"lo_s": min(self._by_s), "hi_s": max(self._by_s), "n_s": len(self._by_s)}
+
 
 _TRADES_TAIL: Optional[TradesTail] = None
 
@@ -229,6 +250,44 @@ def trades_between(t0: float, t1: float) -> list:
         return _TRADES_TAIL.between(t0, t1)
     except Exception:  # noqa: BLE001 - a missing tape means no LAST_TRADE events, never a crash
         return []
+
+
+def _trades_tail() -> TradesTail:
+    global _TRADES_TAIL
+    if _TRADES_TAIL is None:
+        _TRADES_TAIL = TradesTail(os.path.join(os.getcwd(), TRADES_FILE))
+    return _TRADES_TAIL
+
+
+def trades_received_after(t0: float, t1: float, recv_after: float) -> list:
+    try:
+        return _trades_tail().received_after(t0, t1, recv_after)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def trades_coverage() -> Optional[dict]:
+    try:
+        return _trades_tail().coverage()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+STOP_COVERAGE_GAP = "STOP_COVERAGE_GAP"
+LATE_PRINT_S = STALE_S  # a print known (end of its collector second) more than 2 s after its own time is LATE
+
+
+def stop_scan_coverage(t0: float, t1: float, cov: Optional[dict]) -> dict:
+    """HM C3: is the resident-stop scan window (t0, t1] covered by the trades tail? Gap seconds = the part of the
+    window older than the oldest second the tail holds (or the whole window when the tail is empty). A gap means a
+    stop crossing may have been missed -> STOP_COVERAGE_GAP / UNVERIFIED."""
+    t0, t1 = float(t0), float(t1)
+    if t1 <= t0:
+        return {"gap_s": 0.0, "lo_s": (cov or {}).get("lo_s"), "hi_s": (cov or {}).get("hi_s")}
+    if not cov:
+        return {"gap_s": round(t1 - t0, 3), "lo_s": None, "hi_s": None}
+    gap = max(0.0, min(float(cov["lo_s"]), t1) - t0)
+    return {"gap_s": round(gap, 3), "lo_s": cov["lo_s"], "hi_s": cov["hi_s"]}
 
 
 DERIV_FILE = "bfx_deriv_status_1s.jsonl"  # the collector's Bitfinex deriv status rows {"s", "mark", ...}

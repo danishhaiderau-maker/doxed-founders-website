@@ -122,6 +122,9 @@ def first_row_at_or_after(book_at, t: float, horizon_s: float = FIRST_ROW_HORIZO
     return None
 
 
+DEPTH_SHORT_PARTIAL = "DEPTH_SHORT_PARTIAL"  # HM C7: a first-row walk the visible 10 levels could not fill
+
+
 def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
                delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
@@ -158,6 +161,12 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
             out["unverified_reason"] = "STALE_BOOK"
         if px is None:
             return {**out, "status": "NO_FILL_NO_DEPTH", "price": None, "filled_qty": 0.0}
+        if filled + 1e-12 < q:
+            # HM C7: the 10-level row is too shallow for the open qty. The exchange would walk deeper; the paper price
+            # covers only the visible depth -> UNVERIFIED (depth short), never COMPLETE.
+            out["depth_short_qty"] = round(q - filled, 8)
+            out["unverified_reason"] = out.get("unverified_reason") or DEPTH_SHORT_PARTIAL
+            out["depth_short"] = True
         return {**out, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px,
                 "filled_qty": round(filled, 8), "price_source": "BFX_BOOK_10L"}
     base["book_row_rule"] = ROW_RULE_LATEST
@@ -320,36 +329,102 @@ def quantile_method_of(delay_source: Any) -> str:
     return QM_DEFAULT
 
 
+DELAY_LEGS = ("entry", "exit", "stop")  # F1 legs: entry signal->ack, bot-sent exit trigger->ack, stop fill->confirmed
+PRICED_DELAY_LEGS = ("entry", "exit")     # the stop-placement leg is stamped only (it never times a fill)
+POOL_SCHEMA = "paper_delay_pool_v1"
+
+
 class DelaySampler:
-    """Rolling measured live delay per lane and leg (entry: signal->exchange_ack; exit: trigger->exit ack)."""
+    """F1 pool of MEASURED LIVE ACK delays per lane and leg (entry: Fly signal -> exchange ack; exit: paper exit
+    trigger -> exit ack; stop: entry fill -> STOP_CONFIRMED, stamped only). Live acks are the only samples (never a
+    paper signal->fill). Capped at ``maxlen`` per (lane, leg), one sample per trade and leg, persisted per DATA epoch
+    (to_json / load) and cleared at reset (clear)."""
 
     def __init__(self, maxlen: int = 200) -> None:
         self._lock = threading.Lock()
         self._d: dict = {}
+        self._seen: dict = {}
         self.maxlen = maxlen
 
-    def add(self, lane: str, leg: str, delay_s: float) -> None:
+    def add(self, lane: str, leg: str, delay_s: float, *, measured_ts: Any = None, trade_id: Any = None) -> Optional[float]:
         v = _f(delay_s)
         if v is None or v < 0 or v > 30:
-            return
+            return None
+        key = (str(lane or "").upper(), str(leg))
         with self._lock:
-            self._d.setdefault((lane, leg), deque(maxlen=self.maxlen)).append(v)
+            if trade_id:
+                seen = self._seen.setdefault(key, deque(maxlen=self.maxlen * 2))
+                if str(trade_id) in seen:
+                    return None
+                seen.append(str(trade_id))
+            self._d.setdefault(key, deque(maxlen=self.maxlen)).append((v, _f(measured_ts)))
+        return v
+
+    def has_trade(self, lane: str, leg: str, trade_id: Any) -> bool:
+        with self._lock:
+            return str(trade_id) in (self._seen.get((str(lane or "").upper(), str(leg))) or ())
+
+    def _xs(self, lane: str, leg: str) -> list:
+        with self._lock:
+            return list(self._d.get((str(lane or "").upper(), str(leg))) or ())
 
     def delay(self, lane: str, leg: str = "entry") -> tuple:
         """RK 17:24 / AMEND2 B1: n < 10 -> default (UNVERIFIED_DELAY); 10 <= n < 20 -> MAX of the pool; n >= 20 ->
         q0.90 (nearest-rank). The source string carries the method + n (quantile_method_of() parses it)."""
-        with self._lock:
-            xs = sorted(self._d.get((lane, leg)) or ())
+        xs = sorted(v for v, _ in self._xs(lane, leg))
         if len(xs) < MIN_SAMPLES:
             return DEFAULT_DELAY_S, "default_until_n10"
         if len(xs) < QUANTILE_SWITCH_N:
             return max(MIN_DELAY_S, xs[-1]), f"lane_max_n{len(xs)}"
         return max(MIN_DELAY_S, quantile_nearest_rank(xs, 0.90)), f"lane_q90_n{len(xs)}"
 
+    def pool_ts(self, lane: str, leg: str) -> Optional[float]:
+        """The measured ts of the newest live ack in the pool (None for an empty pool)."""
+        ts = [t for _, t in self._xs(lane, leg) if t]
+        return max(ts) if ts else None
+
+    def describe(self, lane: str, leg: str = "entry") -> dict:
+        """delay_s, delay_source plus the per-row delay stamp (pool_n, pool_ts, quantile_method, delay_unverified,
+        delay_flag) for this lane/leg."""
+        d, src = self.delay(lane, leg)
+        return {"delay_s": d, "delay_source": src, **delay_stamp(src, self.pool_ts(lane, leg))}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._d.clear()
+            self._seen.clear()
+
+    def to_json(self, epoch_id: Any) -> dict:
+        with self._lock:
+            return {"schema": POOL_SCHEMA, "epoch_id": epoch_id, "maxlen": self.maxlen,
+                    "pools": {f"{k[0]}|{k[1]}": [[v, t] for v, t in dq] for k, dq in self._d.items()},
+                    "seen": {f"{k[0]}|{k[1]}": list(dq) for k, dq in self._seen.items()}}
+
+    def load(self, payload: Any, epoch_id: Any) -> bool:
+        """Restore a persisted pool. A pool from another DATA epoch (or another schema) is ignored: per-epoch."""
+        if not isinstance(payload, Mapping) or payload.get("schema") != POOL_SCHEMA \
+                or payload.get("epoch_id") != epoch_id:
+            return False
+        with self._lock:
+            self._d.clear()
+            self._seen.clear()
+            for k, rows in (payload.get("pools") or {}).items():
+                lane, _, leg = str(k).partition("|")
+                dq = self._d.setdefault((lane, leg), deque(maxlen=self.maxlen))
+                for r in rows or ():
+                    v = _f(r[0]) if isinstance(r, (list, tuple)) and r else None
+                    if v is not None and 0 <= v <= 30:
+                        dq.append((v, _f(r[1]) if len(r) > 1 else None))
+            for k, ids in (payload.get("seen") or {}).items():
+                lane, _, leg = str(k).partition("|")
+                self._seen[(lane, leg)] = deque((str(i) for i in ids or ()), maxlen=self.maxlen * 2)
+        return True
+
     def snapshot(self) -> dict:
         with self._lock:
-            return {f"{k[0]}|{k[1]}": {"n": len(v), "p50": statistics.median(v) if v else None}
-                    for k, v in self._d.items()}
+            items = {k: [v for v, _ in dq] for k, dq in self._d.items()}
+        return {f"{k[0]}|{k[1]}": {"n": len(v), "p50": statistics.median(v) if v else None,
+                                    "pool_ts": self.pool_ts(*k)} for k, v in items.items()}
 
 
 # ---------------------------------------------------------------- measured slippage (HM 17 Oct)
