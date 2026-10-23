@@ -114,8 +114,10 @@ def test_limit_fill_1s_writers_write_nothing(tmp_path, capsys):
 
 def test_limit_fill_1s_row_producers_return_no_evidence_and_print_once(capsys):
     from research import entry_baseline_replay, latency_schedule_replay
-    assert analyzer._joined_compressed_chase_tape_evidence({}, {}, [], "long", {}) == {}
-    assert analyzer._joined_compressed_chase_tape_evidence({}, {}, [], "long", {}) == {}
+    for _ in range(2):
+        ev = analyzer._joined_compressed_chase_tape_evidence({}, {}, [], "long", {})
+        assert ev["outcome_code"] == "SOURCE_RETIRED_R17" and ev["coverage_status"] == r3_quarantine.RETIRED_LABEL
+        assert ev["conservative_execution_supported"] is False and ev["countable"] is False
     assert entry_baseline_replay.replay_episode({}) is None
     out = latency_schedule_replay._replay_delayed_entry(
         schedule={}, delay_sec=1, ordering_treatment=None, tape=[], direction="long", requested_qty=None,

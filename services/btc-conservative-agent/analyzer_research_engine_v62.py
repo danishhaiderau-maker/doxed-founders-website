@@ -13995,7 +13995,17 @@ def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
     }
 
 
-@_r3q_retired("LIMIT_FILL_1S", returns=lambda *a, **k: {}, print_once=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
+def _retired_chase_tape_evidence(*_args, **_kwargs):
+    """HM #850 R2 C2: labelled "no evidence" for a retired LIMIT_FILL_1S join, so missed-opportunity proof rows
+    reject as SOURCE_RETIRED_R17 (coverage tape_status "source retired (R17)") instead of an unlabelled
+    TAPE_OR_EXECUTION_EVIDENCE_INCOMPLETE.  Still fail-closed: never COMPLETE, never a fill."""
+    from research import r3_quarantine as _r3q
+    return {"outcome_code": "SOURCE_RETIRED_R17", "coverage_status": _r3q.RETIRED_LABEL,
+            "fill_status": "UNKNOWN", "conservative_execution_supported": False,
+            "quarantine": "LIMIT_FILL_1S", "label": _r3q.RETIRED_LABEL, "countable": False}
+
+
+@_r3q_retired("LIMIT_FILL_1S", returns=_retired_chase_tape_evidence, print_once=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tape_by_bucket):
     """Replay the signed virtual limit over the complete one-second path.
 
