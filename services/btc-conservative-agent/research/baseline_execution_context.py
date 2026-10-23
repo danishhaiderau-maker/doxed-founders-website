@@ -58,7 +58,20 @@ class VerifiedLedgerRowIndex:
     """
     def __init__(self):
         self._temporary = tempfile.TemporaryDirectory(prefix="btc-baseline-row-proof-")
-        self._connection = sqlite3.connect(str(Path(self._temporary.name) / "rows.sqlite"))
+        try:
+            self._connection = sqlite3.connect(str(Path(self._temporary.name) / "rows.sqlite"))
+            self._create_schema()
+        except BaseException:
+            try:
+                if getattr(self, "_connection", None) is not None:
+                    self._connection.close()
+            finally:
+                self._temporary.cleanup()
+            raise
+        self.sources: dict[str, str] = {}
+        self._source_snapshots: dict[str, tuple[Path, tuple]] = {}
+
+    def _create_schema(self) -> None:
         self._connection.execute("PRAGMA cache_size=-2048")
         self._connection.execute("PRAGMA temp_store=FILE")
         self._connection.execute("""CREATE TABLE evidence_rows (
@@ -67,15 +80,22 @@ class VerifiedLedgerRowIndex:
         self._connection.execute("CREATE INDEX by_row ON evidence_rows(source_id,row_sha)")
         self._connection.execute("CREATE INDEX by_identity ON evidence_rows(epoch,opportunity,episode,shared,event)")
         self._connection.execute("CREATE INDEX by_episode_event ON evidence_rows(epoch,episode,event)")
-        self.sources: dict[str, str] = {}
-        self._source_snapshots: dict[str, tuple[Path, tuple]] = {}
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *_args):
-        self._connection.close()
-        self._temporary.cleanup()
+    def __exit__(self, exc_type, exc, tb):
+        # Always remove the temporary index, and never let a close failure mask
+        # the exception that is already propagating out of the ``with`` body.
+        try:
+            try:
+                self._connection.close()
+            except Exception:  # noqa: BLE001
+                if exc_type is None:
+                    raise
+        finally:
+            self._temporary.cleanup()
+        return False
 
     @staticmethod
     def _file_identity(path: Path) -> tuple:

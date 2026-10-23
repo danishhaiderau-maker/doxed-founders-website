@@ -51,6 +51,7 @@ test_baseline_execution_context.py
 test_baseline_execution_context_integration.py
 test_baseline_nested_bbo_capture.py
 test_baseline_pre_entry_join_integration.py
+test_baseline_row_index_exit.py
 test_bbo_refresh_nonblocking.py
 test_best_policy_research_dashboard.py
 test_bilateral_future_path_chain.py
