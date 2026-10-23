@@ -375,8 +375,8 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
         if hit["partial"]:
             close = min(float(hit["close_fraction"]), remaining)
             return ExitAction(reason, close, book, None, remaining - close, peak, partial_key="ladder_tp1",
-                              book_price=book, maker=True)
-        return ExitAction(reason, remaining, book, None, 0.0, peak, book_price=book, maker=bool(hit.get("maker")))
+                              book_price=book, maker=False)  # REALISM_V2: BOT_SENT market leg
+        return ExitAction(reason, remaining, book, None, 0.0, peak, book_price=book, maker=False)  # REALISM_V2
 
     def exit_config(self, analyzer_sync_id):
         config = super().exit_config(analyzer_sync_id)

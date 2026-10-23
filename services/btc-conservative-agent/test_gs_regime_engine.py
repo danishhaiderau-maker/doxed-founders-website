@@ -120,7 +120,7 @@ def test_main_exit_beats_tp1_on_the_same_tick_and_tp1_needs_tp1_below_tp():
     prof = _profile("FAMILY_GSB1_CVD_DIV_REGIME", "MOM_QUIET")
     st = stack.new_state()
     hit = stack.evaluate_tick(prof, st, cur_bp=10.5, age_sec=30, atr_bp=4.0)
-    assert hit["rule"] == "ATR_TAKE_PROFIT" and hit["maker"] and hit["book_bp"] == 10.0
+    assert hit["rule"] == "ATR_TAKE_PROFIT" and not hit["maker"] and hit["book_bp"] == 10.0  # REALISM_V2: no maker TP
     lv = stack.levels({**prof, "tp1_atr": 5.0}, 4.0)
     assert lv["tp1"] is None
 

@@ -170,7 +170,7 @@ def evaluate_tick(profile: Mapping[str, Any], state: MutableMapping[str, Any], *
     for rule in order:
         if rule in hit:
             return {"rule": rule, "partial": False, "close_fraction": None, "book_bp": hit[rule],
-                    "maker": rule == "ATR_TAKE_PROFIT"}
+                    "maker": False}  # REALISM_V2: no maker TP; BOT_SENT market
     if state.get("tp1_done") and cur <= float(profile.get("lock_bp", 2.0)):
         ladder_lock = float(profile.get("lock_bp", 2.0))
         return {"rule": "LADDER_LOCK", "partial": False, "close_fraction": None,
@@ -178,7 +178,7 @@ def evaluate_tick(profile: Mapping[str, Any], state: MutableMapping[str, Any], *
     if lv["tp1"] is not None and not state.get("tp1_done") and not first_tick and favourable > lv["tp1"]:
         state["tp1_done"] = True
         return {"rule": "LADDER_TP1", "partial": True, "close_fraction": float(profile.get("tp1_frac", 0.5)),
-                "book_bp": lv["tp1"], "maker": True}
+                "book_bp": lv["tp1"], "maker": False}  # REALISM_V2: BOT_SENT market
     if age >= float(profile["time_sec"]):
         return {"rule": "TIME_BACKSTOP", "partial": False, "close_fraction": None, "book_bp": cur, "maker": False}
     return None

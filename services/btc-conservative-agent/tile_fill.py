@@ -35,6 +35,12 @@ def price_exit(p, ex):
                                  leg="exit", delay_source=ex["delay_source"])
 
 
+def price_exit_resident(p, ex):
+    """REALISM_V2: the exchange-resident stop fills as a full book walk at its trigger instant (delay 0)."""
+    return paper_fill.paper_fill(p["side"], p["open_qty"], ex["trigger_ts"], ex["delay_s"], paper_fill.book10l_at,
+                                 leg="exit_resident", delay_source=ex["delay_source"])
+
+
 def signal_cap_px(direction: str, signal_ts: float):
     """IOC cap from the 10-level book at the signal second; None when there is no book."""
     book = paper_fill.book10l_at(float(signal_ts))
@@ -61,6 +67,12 @@ def entry_fill(direction: str, qty: float, signal_ts: float, delay_s, delay_sour
 def exit_fill(direction: str, qty: float, trigger_ts: float, delay_s, delay_source: str) -> dict:
     return price_exit({"side": str(direction).upper(), "open_qty": qty},
                       {"trigger_ts": float(trigger_ts), "delay_s": delay_s, "delay_source": delay_source})
+
+
+def exit_resident_fill(direction: str, qty: float, trigger_ts: float) -> dict:
+    return price_exit_resident({"side": str(direction).upper(), "open_qty": qty},
+                               {"trigger_ts": float(trigger_ts), "delay_s": 0.0,
+                                "delay_source": "EXCHANGE_RESIDENT_NO_DELAY"})
 
 
 def provenance(res) -> dict:
