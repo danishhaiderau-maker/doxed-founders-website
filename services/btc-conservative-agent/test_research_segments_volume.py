@@ -956,7 +956,7 @@ def test_server_never_deletes_and_prune_deletes_only_in_execute():
     tree = ast.parse((ROOT / "research_segment_prune.py").read_text(encoding="utf-8"))
     owners = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
               and ".unlink(" in ast.unparse(node)}
-    assert owners == {"execute"}
+    assert owners == {"execute", "execute_r5_segment_prune"}  # R5 2026-10-23: age/cap segment pass
 
 
 def test_bot_mounts_segment_server_ahead_of_flask_with_reserved_workers():
@@ -969,11 +969,13 @@ def test_bot_mounts_segment_server_ahead_of_flask_with_reserved_workers():
     assert dispatch({"PATH_INFO": "/health"}, lambda *a: None) == [b"flask"]
 
 
-def test_fly_config_enables_volume_sink_with_dry_run_pruning_default():
+def test_fly_config_enables_volume_sink_with_custody_prune_retired_r5():
     toml = (ROOT / "fly.toml").read_text(encoding="utf-8")
     assert 'RESEARCH_SEGMENTS_ENABLED = "1"' in toml and 'RESEARCH_SEGMENTS_SINK = "volume"' in toml
     assert 'RESEARCH_SEGMENTS_PRUNE_ENABLED = "1"' in toml
-    assert 'RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "dry_run"' in toml
+    assert 'RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "off"' in toml
+    assert "R5: cap/age, no custody gate (r5_segment_pass + rotation_cap)" in toml
+    assert "custody-gated" not in toml.split("RESEARCH_SEGMENTS_PRUNE_ENABLED")[0].split("Sealed research segments")[1]
     assert "enforce" not in toml.lower()
 
 

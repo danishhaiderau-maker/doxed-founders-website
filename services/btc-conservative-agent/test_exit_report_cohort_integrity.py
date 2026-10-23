@@ -259,6 +259,9 @@ def test_ladder_distinguishes_missing_file_from_ineligible_current_epoch_replays
             "ticks": [{"t": 0, "price": 100.0}],
         }
     }
+    from research import r3_quarantine
+
+    monkeypatch.setattr(r3_quarantine, "ACTIVE", set(r3_quarantine.ACTIVE) - {"EXIT_LADDER_SIM"})
     monkeypatch.setattr(analyzer, "_load_jsonl_replays", lambda: raw)
     monkeypatch.setattr(analyzer, "_filter_policy_analysis_replays", lambda rows, label: {})
     monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
@@ -273,6 +276,16 @@ def test_ladder_distinguishes_missing_file_from_ineligible_current_epoch_replays
     assert report["eligible_replays_available"] == 0
     assert "none belongs to a current-epoch eligible executed trade" in report["empty_reason"]
     assert "No signal_replay.jsonl" not in report["empty_reason"]
+
+
+def test_ladder_r3_quarantined_runs_nothing_and_writes_nothing(tmp_path, monkeypatch):
+    def _no_ticks():
+        raise AssertionError("quarantined simulator must not load ticker/BBO replays")
+    monkeypatch.setattr(analyzer, "_load_jsonl_replays", _no_ticks)
+    monkeypatch.chdir(tmp_path)
+    report = analyzer.exit_ladder_simulator_report(trades=pd.DataFrame(), session={"mode": "FRESH-COLLECTION"})
+    assert report["status"] == "R3_QUARANTINED" and report["countable"] is False
+    assert not (tmp_path / analyzer.EXIT_LADDER_SIMULATOR_REPORT_FILE).exists()
 
 
 def test_empty_exit_views_explain_insufficient_terminal_evidence_not_analyzer_failure():

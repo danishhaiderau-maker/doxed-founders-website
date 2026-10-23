@@ -23,7 +23,7 @@ def test_invert_variants_have_distinct_policy_signatures_and_policy_epochs():
     assert CONTROL_CELL["invert_on"] is False
 
 
-def test_event_and_replay_preserve_policy_identity_and_raw_direction():
+def test_event_preserves_policy_identity_and_replay_is_ineligible_r17():
     signal_ts = 1_700_000_000.0
     event = build_research_event(
         trade_id="identity-1",
@@ -38,14 +38,15 @@ def test_event_and_replay_preserve_policy_identity_and_raw_direction():
     )
     report = replay_event_report(event)
 
+    # Event-side identity is live.
     assert event["envelope"]["raw_direction"] == "LONG"
     assert event["event_episode"]["direction"] == "LONG"
     assert event["envelope"]["executed_direction"] == "SHORT"
     assert event["policy_signature"] == event["envelope"]["policy_signature"]
     assert event["policy_epoch_id"] == event["envelope"]["policy_epoch_id"]
-    assert report["policy_signature"] == event["policy_signature"]
-    assert report["policy_epoch_id"] == event["policy_epoch_id"]
-    assert report["control_cell"]["invert_on"] is True
+    # R17: the 1m path is retired, so the replay report is ineligible.
+    assert report["replay_status"] == "REPLAY_INELIGIBLE"
+    assert report["eligibility"]["reasons"] == ["MISSING_1M_TAPE"]
 
 
 def test_invert_treatment_does_not_change_causal_episode_identity():

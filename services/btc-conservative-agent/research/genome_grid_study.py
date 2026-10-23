@@ -51,6 +51,7 @@ if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
 from research import fill_model as fm  # noqa: E402
+from research import r3_quarantine  # noqa: E402
 from paper_pnl_canon import is_forced_close, round_usd  # noqa: E402
 
 SCHEMA = "genome_grid_report_v1"
@@ -1395,10 +1396,19 @@ def _iso(ts: float | None) -> str | None:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
 
 
+def _now_iso_r3() -> str:
+    from datetime import timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_episodes: int | None = None) -> dict[str, Any]:
     for p in (mirror, tier_a, out_dir):
         if "onedrive" in str(p).lower():
             raise SystemExit(f"REFUSED_ONEDRIVE: {p}")
+    if r3_quarantine.is_active("GENOME_GRID"):
+        # R3: the fast replay prices on 1s tape bid/ask. Write nothing (no
+        # report, rows, research cache) until rebuilt on paper_fill/quote_trigger.
+        return r3_quarantine.disabled_payload("GENOME_GRID", generated_at=_now_iso_r3())
     started = time.time()
     tape = load_tape(mirror, tier_a)
     episodes, episode_stats = load_episodes(mirror, tape)
@@ -1652,6 +1662,9 @@ def main(argv: list[str] | None = None) -> int:
     except EpisodeIntegrityError as exc:
         print(json.dumps({"status": "EPISODE_INTEGRITY_FAILED", "violations": str(exc)}))
         return 2
+    if rep.get("status") == r3_quarantine.STATUS:
+        print(json.dumps({"status": rep["status"], "quarantine": rep["quarantine"], "reason": rep["reason"]}))
+        return 0
     print(json.dumps({"status": "OK", "generated_at": rep["generated_at"], "coverage": rep["coverage"]["episode_status"],
                       "policies": rep["grid"]["policies_evaluated"], "parity": rep["canonical_parity"]["status"],
                       "runtime_sec": rep["runtime_sec"]}))

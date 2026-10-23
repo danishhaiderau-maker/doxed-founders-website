@@ -18,6 +18,9 @@
 !ai_call_cost.py
 !shadow_chase_buckets.py
 !monitor_api.py
+!rotation_cap.py
+!disk_alert.py
+!r5_retention.py
 
 # Test and local QA modules are not runtime dependencies. Keep them in Git and
 # CI, but do not ship 100+ harness files in the production trading image.

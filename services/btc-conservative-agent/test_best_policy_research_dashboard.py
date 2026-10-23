@@ -118,8 +118,12 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(tmp_p
     assert payloads[1]["generation_freshness"]["current"] is False
     assert payloads[2]["generation_freshness"]["current"] is False
     assert payloads[3]["evidence_scope"].startswith("LEGACY")
-    assert payloads[3]["raw_replays_available"] == 92
-    assert payloads[3]["eligible_replays_available"] == 0
+    # R3: the exit-ladder simulator replays ticker/BBO ticks; a published copy
+    # is never read while quarantined.
+    assert payloads[3]["data_status"] == "R3_QUARANTINED"
+    assert payloads[3]["source_available"] is False
+    assert payloads[3]["raw_replays_available"] is None
+    assert dashboard._read_report("exit_ladder_simulator_report.json") == {}
 
 
 def test_execution_panels_keep_undeclared_artifacts_unavailable(tmp_path, monkeypatch):

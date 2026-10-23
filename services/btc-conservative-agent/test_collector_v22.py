@@ -9,6 +9,9 @@ from chase_offset_touch_grid import orig_limit_price, simulate_touch_fill
 from collector_storage import storage_blocks_new_events, project_capacity
 from collector_v22 import (
     BYTES_PER_EVENT_TYPICAL,
+    RESEARCH_EVENTS_FILE,
+    RETIRED_R17,
+    V22_RETIRED_R17,
     build_research_event,
     event_already_written,
     terminal_observation,
@@ -43,17 +46,22 @@ class CollectorV22Tests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_write_once_idempotent(self):
-        candles = [_1m(i, 100010, 99990, 100000) for i in range(200)]
+        # R17: positive events are retired; write-once is exercised with a
+        # terminal negative-evidence (INSUFFICIENT_PATH) event.
+        signal_ts = 1_700_000_000.0
+        candles = [_1m(i, 100010, 99990, 100000) for i in range(-60, 10)]
         event = build_research_event(
             trade_id="cont-idem-1",
             epoch_id="epoch-v22-test",
-            signal_ts=1_700_000_000.0,
+            signal_ts=signal_ts,
             signal_price=100000.0,
             candles_1m=candles,
             submitted=False,
             rejected=True,
             ticket_closed=True,
+            evaluation_ts=signal_ts + 300 * 60,
         )
+        self.assertEqual(event["observation_status"], OBS_INSUFFICIENT_PATH)
         ok1, _ = write_research_event_once(event, data_dir=self.tmp)
         ok2, reason2 = write_research_event_once(event, data_dir=self.tmp)
         self.assertTrue(ok1)
@@ -170,33 +178,6 @@ class CollectorV22Tests(unittest.TestCase):
         self.assertEqual(event["observation_status"], OBS_WAITING_ENTRY_WINDOW)
         self.assertFalse(terminal_observation(event["observation_status"]))
 
-    def test_latest_hypothetical_fill_requires_full_hold(self):
-        signal_ts = 1_700_000_000.0
-        fill_px = orig_limit_price(100000.0, "SHORT", 0.10)
-        candles = [
-            _1m(i, fill_px + 0.01 if i == 29 else 100000.0, 99990, 100000.0)
-            for i in range(148)
-        ]
-        incomplete = build_research_event(
-            trade_id="cont-minute-59-short",
-            epoch_id="epoch-v22-test",
-            signal_ts=signal_ts,
-            signal_price=100000.0,
-            candles_1m=candles,
-            ticket_closed=True,
-        )
-        self.assertEqual(incomplete["observation_status"], OBS_WAITING_120M)
-        complete = build_research_event(
-            trade_id="cont-minute-59-full",
-            epoch_id="epoch-v22-test",
-            signal_ts=signal_ts,
-            signal_price=100000.0,
-            candles_1m=candles + [_1m(148, 100000, 99990, 100000.0)],
-            ticket_closed=True,
-        )
-        self.assertEqual(complete["observation_status"], OBS_FUNNEL_COMPLETE)
-        self.assertTrue(complete["immutable"])
-
     def test_gap_blocks_finalization_and_legacy_terminal_is_ineligible(self):
         signal_ts = 1_700_000_000.0
         candles = [_1m(i, 100000, 99990, 100000) for i in range(180) if i != 30]
@@ -233,55 +214,39 @@ class CollectorV22Tests(unittest.TestCase):
         self.assertEqual(event["primary_outcome"], PRIMARY_REJECTED)
         self.assertEqual(event["envelope"]["policy_id"], "CONTROL_V1")
 
-    def test_post_ttl_touch_not_fill(self):
-        signal_price = 100000.0
-        signal_ts = 1_700_000_000.0
-        fill_px = orig_limit_price(signal_price, "SHORT", 0.10)
-        candles = [
-            _1m(i, fill_px if i == 37 else signal_price, signal_price - 10, signal_price)
-            for i in range(50)
-        ]
-        event = build_research_event(
-            trade_id="cont-post-ttl",
-            epoch_id="epoch-v22-test",
-            signal_ts=signal_ts,
-            signal_price=signal_price,
-            candles_1m=candles,
-            ticket_closed=True,
-            ttl_sec=1800.0,
-        )
-        control_children = [
-            c for c in event["entry_children"]
-            if abs(float(c.get("offset_pct", 0)) - 0.10) < 1e-9 and c.get("chase_id") == "no_chase"
-        ]
-        self.assertTrue(control_children)
-        self.assertIsNone(control_children[0].get("fill_ts"))
-        self.assertTrue(control_children[0].get("post_ttl_observation") or control_children[0].get("post_ttl_touch_ts"))
-
-    def test_analyzer_three_primaries(self):
-        for tid, outcome in (
-            ("cont-a", PRIMARY_ACCEPTED_FILLED),
-            ("cont-b", PRIMARY_ACCEPTED_UNFILLED),
-            ("cont-c", PRIMARY_REJECTED),
-        ):
-            ev = build_research_event(
-                trade_id=tid,
-                epoch_id="epoch-v22-test",
-                signal_ts=1_700_000_000.0,
-                signal_price=100000.0,
-                candles_1m=[_1m(i, 100010, 99990, 100000) for i in range(180)],
-                submitted=(outcome != PRIMARY_REJECTED),
-                rejected=(outcome == PRIMARY_REJECTED),
-                ticket_closed=True,
-            )
-            ev["primary_outcome"] = outcome
-            write_research_event_once(ev, data_dir=self.tmp)
+    def test_analyzer_labels_r17_retired_rows_and_computes_no_primaries(self):
+        # R17: v22 rows carry no 1m path. The writer refuses them, so emulate
+        # rows already on disk and check the analyzer labels them retired.
+        path = os.path.join(self.tmp, RESEARCH_EVENTS_FILE)
+        with open(path, "w", encoding="utf-8") as handle:
+            for tid, outcome in (
+                ("cont-a", PRIMARY_ACCEPTED_FILLED),
+                ("cont-b", PRIMARY_ACCEPTED_UNFILLED),
+                ("cont-c", PRIMARY_REJECTED),
+            ):
+                ev = build_research_event(
+                    trade_id=tid,
+                    epoch_id="epoch-v22-test",
+                    signal_ts=1_700_000_000.0,
+                    signal_price=100000.0,
+                    candles_1m=[_1m(i, 100010, 99990, 100000) for i in range(180)],
+                    submitted=(outcome != PRIMARY_REJECTED),
+                    rejected=(outcome == PRIMARY_REJECTED),
+                    ticket_closed=True,
+                )
+                ev["primary_outcome"] = outcome
+                self.assertEqual(ev["canonical_tape"]["path_1m_status"], RETIRED_R17)
+                self.assertEqual(write_research_event_once(ev, data_dir=self.tmp), (False, V22_RETIRED_R17))
+                handle.write(json.dumps(ev, default=str) + "\n")
         report = analyze_v22_events(data_dir=self.tmp)
-        self.assertEqual(report["primaries"][PRIMARY_ACCEPTED_FILLED]["n"], 1)
-        self.assertEqual(report["primaries"][PRIMARY_ACCEPTED_UNFILLED]["n"], 1)
-        self.assertEqual(report["primaries"][PRIMARY_REJECTED]["n"], 1)
+        self.assertEqual(report["source_retired"]["rows"], 3)
+        self.assertEqual(report["source_retired"]["label"], "source retired (R17)")
+        self.assertEqual(report["source_retired"]["reason"], "MISSING_1M_TAPE")
+        for primary in (PRIMARY_ACCEPTED_FILLED, PRIMARY_ACCEPTED_UNFILLED, PRIMARY_REJECTED):
+            self.assertEqual(report["primaries"][primary]["n"], 0)
+        self.assertEqual(report["replay_integrity"]["eligible_events"], 0)
+        self.assertFalse(report["empty_epoch"])
         self.assertIn("capacity_projection", report)
-        self.assertIn("pct_70", report["capacity_projection"]["thresholds"])
 
     def test_capacity_projection_bytes(self):
         cap = project_capacity(data_dir=self.tmp, bytes_per_event_typical=BYTES_PER_EVENT_TYPICAL, events_per_day=15)
@@ -299,11 +264,10 @@ class CollectorV22Tests(unittest.TestCase):
             rejected=True,
             ticket_closed=True,
         )
-        write_research_event_once(event, data_dir=self.tmp)
         report = replay_event_report(event, data_dir=self.tmp)
         self.assertEqual(report["event_id"], "cont-replay-reject")
         self.assertEqual(report["replay_status"], "REPLAY_INELIGIBLE")
-        self.assertIn("ENTRY_WINDOW_INCOMPLETE", report["eligibility"]["reasons"])
+        self.assertEqual(report["eligibility"]["reasons"], ["MISSING_1M_TAPE"])
 
     def test_terminal_observation_enums(self):
         self.assertTrue(terminal_observation(OBS_FUNNEL_COMPLETE))

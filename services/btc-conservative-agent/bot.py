@@ -215,6 +215,8 @@ from combo_pathway_config import (
     tile_chase_windows,
 )
 import shadow_chase_buckets
+import rotation_cap
+import disk_alert
 from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
@@ -249,7 +251,6 @@ from multiverse_entry_grid import (
     split_entry_grid,
 )
 import execution_markouts
-import shadow_exit_paths
 from research_order_schedule import (
     append_action_timing_receipt,
     append_reprice_interval as append_research_reprice_interval,
@@ -313,6 +314,8 @@ from collector_v22 import (
     terminal_observation,
     write_research_event_once,
     research_event_generation_stat_signature,
+    V22_RETIRED_R17,
+    v22_retired_r17_count,
 )
 from research_v3_contract import COLLECTOR_VERSION as COLLECTOR_V31_VERSION
 from collector_storage import (
@@ -344,7 +347,6 @@ from frozen_policy_trial import FrozenPolicyTrial
 _FROZEN_POLICY_TRIAL = FrozenPolicyTrial.from_env()
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
-    _load_offline_sim_jsonl_revisions as _pure_load_offline_sim_jsonl_revisions,
     _normalize_platform_bitfinex_evidence as _pure_normalize_platform_bitfinex_evidence,
     _offline_sim_jsonl_paths as _pure_offline_sim_jsonl_paths,
     _platform_relay_evidence_index as _pure_platform_relay_evidence_index,
@@ -6396,6 +6398,7 @@ _taker_counterfactual_book = execution_markouts.MarkoutBook()
 _execution_markout_counters = {
     "fill_rows_written": 0, "taker_rows_written": 0, "write_failures": 0,
     "taker_signals_scheduled": 0, "taker_capture_failures": 0,
+    "taker_r17_skipped": 0,
 }
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
 _adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "by_lane": {}, "last": None}
@@ -15327,22 +15330,10 @@ ENTRY_GRID_WRITTEN_DIGESTS_MAX = 8192
 
 
 def _append_order_multiverse_row(record: dict, obs: str) -> None:
-    """Write the call grid once to the sidecar, then the tile row with a ref."""
-    compact = dict(record)
-    compact["event"] = obs
-    compact["lifecycle"] = obs
-    row, grid = split_entry_grid(compact)
-    if grid is not None:
-        digest = grid["grid_sha256"]
-        if digest not in _entry_grid_written_digests:
-            if not _safe_append_jsonl(ORDER_MULTIVERSE_ENTRY_GRID_FILE, grid, label="ORDER_MULTIVERSE_GRID"):
-                # Never publish a reference without its grid.
-                row = compact
-            else:
-                _entry_grid_written_digests[digest] = True
-                while len(_entry_grid_written_digests) > ENTRY_GRID_WRITTEN_DIGESTS_MAX:
-                    _entry_grid_written_digests.popitem(last=False)
-    _safe_append_jsonl(ORDER_MULTIVERSE_FILE, row, label="ORDER_MULTIVERSE")
+    """Retired (R17, 23 Oct): order_multiverse.jsonl and its entry-grid sidecar
+    are no longer written. The research_events_v22 write-once row in
+    _sync_order_multiverse is the only record (HM E1.2)."""
+    return None
 
 
 COLLECTION_HEALTH_WINDOW_SEC = 3600.0
@@ -15365,7 +15356,8 @@ def _collector_record_multiverse_write(record: dict, obs: str) -> None:
     tape = record.get("canonical_tape") if isinstance(record.get("canonical_tape"), dict) else {}
     coverage = tape.get("coverage") if isinstance(tape.get("coverage"), dict) else {}
     never_recorded = coverage.get("reason") == "PATH_SOURCE_NEVER_RECORDED"
-    empty = not tape.get("path_1m")
+    # R17: path_1m is no longer stored; path_1m_bars carries the in-memory count.
+    empty = not (tape.get("path_1m") or tape.get("path_1m_bars"))
     path_source = tape.get("path_source") if isinstance(tape.get("path_source"), dict) else {}
     late = bool(path_source.get("late_backfill"))
     with _collection_stats_lock:
@@ -15904,6 +15896,14 @@ def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str,
     return "VALID", f"FILL_REVALIDATION_SAME_{direction}"
 
 
+def _chase_grid_recovery_candidates() -> tuple:
+    """Newest sealed rotation (highest N) then the active chase grid."""
+    newest = rotation_cap.newest_rotation(CHASE_OFFSET_TOUCH_GRID_FILE)
+    if newest is None:
+        return (CHASE_OFFSET_TOUCH_GRID_FILE,)
+    return (newest, CHASE_OFFSET_TOUCH_GRID_FILE)
+
+
 def _recover_compressed_shadow_chases_once(now: float = None) -> None:
     """Load active and terminal shared-call owners before any new arm."""
     global _compressed_shadow_recovery_attempted
@@ -15915,7 +15915,8 @@ def _recover_compressed_shadow_chases_once(now: float = None) -> None:
         if _compressed_shadow_recovery_attempted:
             return
         durable_rows = []
-        for candidate in (CHASE_OFFSET_TOUCH_GRID_FILE + ".1", CHASE_OFFSET_TOUCH_GRID_FILE):
+        # ".1" is the OLDEST rotation; recovery needs the NEWEST one (DISK-CAP fix).
+        for candidate in _chase_grid_recovery_candidates():
             try:
                 with open(candidate, "r", encoding="utf-8") as handle:
                     for line in handle:
@@ -16208,6 +16209,77 @@ def _run_v3_terminal_reconcile(now: float = None, *, pause=None) -> None:
         _collector_worker_phase(status, "IDLE")
 
 
+R5_RETENTION_INTERVAL_SEC = 600.0
+R5_RETENTION_FIRST_DELAY_SEC = 120.0
+_R5_PROCESS_BOOT_TS = time.time()
+_r5_retention_status: dict = {"alive": False}
+
+
+def _r5_v22_drain_probe(started_ts: float):
+    """Pending marker for the bounded v22 drain (reads the reconcile loop's status only)."""
+    def drain():
+        status = _collector_v3_reconcile_status
+        finished = float(status.get("last_finished_ts") or 0.0)
+        if finished >= started_ts and status.get("last_passed"):
+            return []
+        detail = str(status.get("last_error") or "RECONCILE_NOT_CAUGHT_UP")[:200]
+        return [f"RECONCILE_PENDING:{detail}"]
+    return drain
+
+
+def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
+    """One R5 retention pass; each step is independent and never raises."""
+    import r5_keep
+    import r5_retention
+    now = time.time() if now is None else float(now)
+    runtime_root = _data_sync_runtime_root()
+    out: dict = {"ts": now}
+    # HM C7 (RK: keep only for open lifecycles or prereg tests): one read-only keep set.
+    try:
+        keep_info = r5_keep.open_lifecycles(runtime_root)
+        out["keep"] = r5_keep.summary(keep_info, r5_keep.keep_since_ts(keep_info))
+    except Exception as exc:
+        keep_info = {}
+        out["keep"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    steps = [
+        ("locks", lambda: r5_retention.wipe_stale_locks(runtime_root, boot_ts=_R5_PROCESS_BOOT_TS, now=now)),
+        ("market_segments", lambda: r5_retention.cap_market_segments(
+            runtime_root, referenced=keep_info.get("segment_shas") or (), now=now)),
+        ("lifecycle_bundles", lambda: r5_retention.cap_lifecycle_bundles(
+            runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks",
+            keep=keep_info.get("bundle_ids") or (), now=now)),
+    ]
+    if v22:
+        steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(
+            os.getcwd(), drain=_r5_v22_drain_probe(time.time()),
+            sleep=lambda sec: shutdown_event.wait(sec))))
+    for name, step in steps:
+        try:
+            out[name] = step()
+        except Exception as exc:
+            out[name] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    return out
+
+
+def r5_retention_loop():
+    status = _r5_retention_status
+    status.update({"alive": True, "started_ts": time.time()})
+    try:
+        # HM C6: retention REDs survive a restart and clear 24 h after their last occurrence.
+        disk_alert.configure(_data_sync_runtime_root() / "retention" / "disk_alert_red.json")
+    except Exception as exc:  # noqa: BLE001 - telemetry only, never blocks retention
+        status["disk_alert_state_error"] = type(exc).__name__
+    if shutdown_event.wait(R5_RETENTION_FIRST_DELAY_SEC):
+        return
+    passes = 0
+    while not shutdown_event.is_set():
+        # v22 head is checked once per boot and then every 36 passes (~6 h).
+        result = r5_retention_once(v22=(passes % 36 == 0))
+        status.update({"last": result, "passes": passes + 1})
+        passes += 1
+        shutdown_event.wait(R5_RETENTION_INTERVAL_SEC)
+
+
 def collector_v3_reconcile_loop():
     """Own the V2->V3 terminal reconciliation off the maturation worker."""
     status = _collector_v3_reconcile_status
@@ -16476,6 +16548,27 @@ def _collector_frozen_signal_ref(source: dict, trade_id: str):
     return saved if saved is not None else incoming
 
 
+def _collector_release_refused_provisional(source: dict, why: str) -> None:
+    """HM C1 (re-review): a source refused before maturation (stale epoch or
+    STORAGE_PRESSURE) must not leave its pending/provisional entry behind.
+    Never raises; a failed release only logs."""
+    try:
+        tid = paper_multiverse_trade_id(
+            source.get("trade_id"),
+            source.get("canonical_trade_id"),
+            source.get("source_trade_id"),
+            source.get("source_order_trade_id"),
+        ) or str(source.get("trade_id") or "")
+        if not tid:
+            return
+        _order_multiverse_pending_src.pop(tid, None)
+        _order_multiverse_state.pop(tid, None)
+        if remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root())):
+            _collector_collection_stat(f"refused_provisional_released_{why}")
+    except Exception as exc:  # noqa: BLE001 - release is best effort, never blocks the refusal
+        logger.warning(f"[COLLECTOR_V22] provisional release failed ({why}): {exc} [PIPELINE ENFORCEMENT]")
+
+
 @_collector_epoch_serialized
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
     """v2.2: write-once immutable research event per event_id (~210 KB)."""
@@ -16490,12 +16583,14 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             f"trade_id={source.get('trade_id')} epoch_id={_collector_v22_epoch_id()} "
             "[PIPELINE ENFORCEMENT]"
         )
+        _collector_release_refused_provisional(source, "stale_epoch")
         return None
     if storage_blocks_new_events() and not event_already_written(
         str(source.get("trade_id") or source.get("canonical_trade_id") or ""),
         data_dir=str(_data_sync_runtime_root()),
     ):
         logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping new research event [PIPELINE ENFORCEMENT]")
+        _collector_release_refused_provisional(source, "storage_pressure")
         return None
     try:
         tid = paper_multiverse_trade_id(
@@ -16687,10 +16782,13 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             return record
         _order_multiverse_pending_src.pop(tid, None)
         written, reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
+        # R17 (C1): terminal means done. Always drop the provisional entry so
+        # refused/retired events never accumulate in the journal.
+        remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
+        if reason == V22_RETIRED_R17:
+            _collector_collection_stat("v22_retired_r17")
         if written:
-            remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
-            _append_order_multiverse_row(record, obs)
             _collector_record_multiverse_write(record, obs)
             logger.info(
                 f"[COLLECTOR_V22] write-once event_id={tid} obs={obs} bytes~{reason} "
@@ -17837,6 +17935,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             "[COLLECTOR_V22] stale pre-reset rejected source refused "
             f"trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]"
         )
+        _collector_release_refused_provisional(signal, "stale_epoch")
         return None
     try:
         tid = str(signal.get("trade_id") or "")
@@ -17898,6 +17997,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         )
         if storage_blocks_new_events():
             logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping rejected capture [PIPELINE ENFORCEMENT]")
+            _collector_release_refused_provisional(signal, "storage_pressure")
             return None
         tid = str(signal.get("trade_id") or "")
         if tid in _order_multiverse_written:
@@ -17992,9 +18092,12 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 )
             return record
         written, _reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
+        # R17 (C1): terminal -> always clear pending + provisional.
+        _order_multiverse_pending_src.pop(tid, None)
+        remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
+        if _reason == V22_RETIRED_R17:
+            _collector_collection_stat("v22_retired_r17")
         if written:
-            _order_multiverse_pending_src.pop(tid, None)
-            remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
             _collector_collection_stat("rejected_opportunity_written")
             _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
@@ -23436,7 +23539,8 @@ def _load_shadow_chase_bucket_records_once() -> None:
         _shadow_chase_bucket_state["loaded"] = True
         marker = shadow_chase_buckets.SHADOW_CHASE_BUCKET_SCHEMA
         loaded = []
-        for candidate in (CHASE_OFFSET_TOUCH_GRID_FILE + ".1", CHASE_OFFSET_TOUCH_GRID_FILE):
+        # ".1" is the OLDEST rotation; recovery needs the NEWEST one (DISK-CAP fix).
+        for candidate in _chase_grid_recovery_candidates():
             try:
                 with open(candidate, "r", encoding="utf-8") as handle:
                     for line in handle:
@@ -29628,9 +29732,11 @@ def microstructure_capture_loop():
 
 def _sample_execution_markouts(bid, ask, last, quote_ts) -> None:
     now = time.time()
+    # R17 (23 Oct): the taker-signal counterfactual book is no longer sampled
+    # or written (see TAKER_SIGNAL_COUNTERFACTUAL_ENABLED). Fill markouts are
+    # unchanged.
     for book, path, label, counter in (
         (_fill_markout_book, execution_markouts.FILL_FILE, "FILL_MARKOUT", "fill_rows_written"),
-        (_taker_counterfactual_book, execution_markouts.TAKER_FILE, "TAKER_SIGNAL_COUNTERFACTUAL", "taker_rows_written"),
     ):
         for row in book.sample(now=now, bid=bid, ask=ask, last=last, quote_ts=quote_ts):
             fill_agg = globals().get("_FILL_MARKOUT_AGG") if label == "FILL_MARKOUT" else None
@@ -29679,8 +29785,21 @@ def _register_fill_markout(order: dict, fill_price, signal: dict = None) -> None
     )
 
 
+# R17 (23 Oct): taker_signal_counterfactuals.jsonl is retired. Its touch and
+# marketable limit came from the ticker BBO (state bid/ask), its latencies were
+# fixed modelled values rather than measured order round-trips, and its
+# markouts were sampled from ticker/L1 tape marks. None of that can be checked
+# against the real Bitfinex book, so the PRIME RULE cannot verify a row. The
+# writer stays off until it is rebuilt on a bfx_book_10l walk with measured
+# delay. The file name stays declared so reset/wipe lists still find old copies.
+TAKER_SIGNAL_COUNTERFACTUAL_ENABLED = False
+
+
 def _capture_taker_signal_counterfactual(call_id: str, direction: str, signal_ts: float,
                                          latency: float, context: dict) -> None:
+    if not TAKER_SIGNAL_COUNTERFACTUAL_ENABLED:
+        _execution_markout_counters["taker_r17_skipped"] += 1
+        return
     try:
         now = time.time()
         with state_lock:
@@ -29750,6 +29869,10 @@ def _schedule_taker_signal_counterfactual(ctx: dict, ai: dict, direction: str) -
     """Price an immediate taker entry for every directional signal at each modelled latency."""
     if execution_markouts.direction_sign(direction) == 0:
         return
+    if not TAKER_SIGNAL_COUNTERFACTUAL_ENABLED:
+        # R17: no timers, no rows. Count the skip so the monitor shows the stop.
+        _execution_markout_counters["taker_r17_skipped"] += 1
+        return
     call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
     signal_ts = time.time()
     context = {
@@ -29817,35 +29940,21 @@ def adaptive_entry_status_snapshot() -> dict:
         return copy.deepcopy(_adaptive_entry_stats)
 
 
-SHADOW_EXIT_PATH_FILE = shadow_exit_paths.FILE_NAME
-SHADOW_EXIT_RECORDER_ENABLED = os.getenv("SHADOW_EXIT_RECORDER_ENABLED", "1").strip() == "1"
+# R17 (23 Oct): the shadow-exit recorder is retired. It replayed exits over
+# ticker/L1 marks with no depth, which the PRIME RULE cannot verify. The file
+# name stays declared so reset/wipe lists still remove any old copy.
+SHADOW_EXIT_PATH_FILE = "shadow_exit_paths.jsonl"
+SHADOW_EXIT_RECORDER_ENABLED = False
+R17_RETIRED_STATUS = "disabled: R17"
 
 
-def _shadow_exit_set_for(meta) -> tuple:
-    return tile_shadow_exit_set((meta or {}).get("research_lane"))
-
-
-_SHADOW_EXIT_RECORDER = shadow_exit_paths.ShadowExitRecorder(
-    writer=lambda row: _safe_append_jsonl(SHADOW_EXIT_PATH_FILE, row, label="SHADOW_EXIT_PATH"),
-    shadow_set_for=_shadow_exit_set_for,
-    enabled=SHADOW_EXIT_RECORDER_ENABLED,
-    max_queue=32,
-)
-# LIVE-FIX-0815: started eagerly in main() (not at import, per the cleanup
-# characterization contract) so a dead worker shows liveness RED at boot.
-
-
-def _submit_shadow_exit_path(payload) -> None:
-    """Hand a finished replay to the observation worker; never raises, never blocks."""
-    try:
-        _SHADOW_EXIT_RECORDER.start()
-        _SHADOW_EXIT_RECORDER.submit(payload)
-    except Exception as exc:
-        logger.warning(f"[SHADOW_EXIT] submit failed: {exc} [PIPELINE ENFORCEMENT]")
+def _r17_retired_view(source: str) -> dict:
+    return {"source": source, "enabled": False, "retired": "R17", "status": R17_RETIRED_STATUS,
+            "detail": "source retired (R17)"}
 
 
 def shadow_exit_recorder_status_snapshot() -> dict:
-    return _SHADOW_EXIT_RECORDER.status()
+    return _r17_retired_view("shadow_exit_paths")
 
 
 def execution_markout_status_snapshot() -> dict:
@@ -29856,6 +29965,11 @@ def execution_markout_status_snapshot() -> dict:
         "dropped": _fill_markout_book.dropped + _taker_counterfactual_book.dropped,
         "horizons_sec": list(execution_markouts.MARKOUT_HORIZONS_SEC),
         "taker_latencies_sec": list(execution_markouts.TAKER_LATENCIES_SEC),
+        "taker_signal_counterfactual": (
+            {"source": "taker_signal_counterfactuals", "enabled": True}
+            if TAKER_SIGNAL_COUNTERFACTUAL_ENABLED
+            else _r17_retired_view("taker_signal_counterfactuals")
+        ),
     }
 
 
@@ -35360,6 +35474,8 @@ def research_wipe_file_paths():
         LANE_PNL_LEDGER_FILE, "research_session_index.json", CSV_FALLBACK_JSONL,
         DUPLICATE_INTENT_AUDIT_FILE,
         _AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT,
+        rotation_cap.CAP_RECEIPTS_FILE,  # DISK-CAP: every reset clears cap receipts
+        "v22_discard_receipts.jsonl",
     ]
     paths.extend(glob.glob(os.path.join("research", "genome", "*.jsonl")))
     # V3 belongs to the active research epoch. The reset path first seals the
@@ -35405,6 +35521,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE, AI_INPUT_LOG_FILE, EDGE_CENSUS_FILE,
         LANE_OPPORTUNITY_CAPTURE_FILE, AI_EDGE_DISAGREEMENT_FILE, "shadow_runner_study.jsonl",
         DUPLICATE_INTENT_AUDIT_FILE,
+        rotation_cap.CAP_RECEIPTS_FILE, "v22_discard_receipts.jsonl",
     ]
     found = []
     for base in bases:
@@ -36310,6 +36427,17 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
             str(root), expected_plan_sha256=seal_plan["plan_sha256"])
         operation.update(v22_seal_retirement={key: seal_retirement.get(key) for key in
                                               ("status", "plan_sha256", "moved", "quarantine_dir")})
+        store._atomic_json_receipt(operation_path, operation)
+        # DISK-CAP E4 (HM): market_segments are retired (R17); a reset must
+        # leave zero. A leftover never blocks the reset (R5): it raises RED.
+        try:
+            import r5_retention
+            leftover_segments = r5_retention.count_market_segments(root)
+        except Exception as exc:  # noqa: BLE001
+            leftover_segments = f"COUNT_FAILED:{type(exc).__name__}"
+        operation.update(market_segments_after_reset=leftover_segments)
+        if leftover_segments != 0:
+            disk_alert.raise_red("RESET_LEFT_MARKET_SEGMENTS", {"count": leftover_segments})
         store._atomic_json_receipt(operation_path, operation)
         stage = "GENOME_RESET"
         full_reset_job.note(stage)
@@ -39264,7 +39392,7 @@ __ADMIN_ACCESS_CONTROLS__
         <thead><tr><th style="text-align:left;padding:2px 4px;color:#8b949e;">File</th><th style="text-align:right;padding:2px 4px;color:#8b949e;">MB</th><th style="text-align:right;padding:2px 4px;color:#8b949e;">Lines</th></tr></thead>
         <tbody><tr><td colspan="3" style="padding:4px;color:#6e7681;">Loading...</td></tr></tbody>
       </table>
-      <p style="color:#6e7681;font-size:0.74em;margin:8px 0 0 0;">Key files tracked: trades_3factor.csv, ai_reason_research.jsonl, signal_replay.jsonl</p>
+      <p style="color:#6e7681;font-size:0.74em;margin:8px 0 0 0;">Key files tracked: trades_3factor.csv, ai_reason_research.jsonl</p>
     </div>
   </div>
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
@@ -47125,22 +47253,24 @@ def _memory_oom_check(now: float) -> dict:
 
 
 def _offline_sim_epoch_check() -> dict:
-    """fly.offline_sim_epoch_floor: RED when the fresh floor was unreadable on the last loader call (evidence from rotated
-    shards is being skipped, fail closed); GREEN with the last load stats otherwise."""
-    st = dict(globals().get("_OFFLINE_SIM_LOAD_STATS") or {})
-    _loaded = bool(st)
-    try:  # live re-read every health cycle, independent of the loader cadence
+    """fly.offline_sim_epoch_floor. HM C9 (R17): the offline-sim shard loader is retired ("source retired (R17)"), so
+    there is no "no loader call yet" AMBER any more. The fresh-epoch floor itself is still used (live guardian,
+    non-accum plans): RED when it is unreadable, GREEN otherwise."""
+    st: dict = {"loader": "source retired (R17)"}
+    try:  # live re-read every health cycle
         _fl, _src, _err = _offline_sim_epoch_floor_detail()
         st.update(live_floor_value=_fl, live_floor_source=_src, live_floor_error=_err)
         if _fl is None:
             st["floor_unreadable"] = True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        st.update(floor_unreadable=True, live_floor_error=f"{type(exc).__name__}")
     if st.get("floor_unreadable"):
-        return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; stats={st}",
-                "threshold": "fresh-epoch floor readable (else all rotated shards skipped, fail closed)"}
-    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN" if _loaded else "AMBER",
-            "observed": f"stats={st}" if _loaded else f"no loader call yet; live floor={st.get('live_floor_value')} src={st.get('live_floor_source')}", "threshold": "fresh-epoch floor readable"}
+        return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; {st}",
+                "threshold": "fresh-epoch floor readable (live guardian / non-accum plans fail closed without it)"}
+    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN",
+            "observed": f"offline-sim loader: source retired (R17); live floor={st.get('live_floor_value')} "
+                        f"src={st.get('live_floor_source')}",
+            "threshold": "fresh-epoch floor readable"}
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -47514,6 +47644,7 @@ def _monitor_summary_payload(now: float) -> dict:
             "live_entry_armable": armable,
             "live_entry_arm_block_reason": None if armable else arm_block_reason,
             "relay": _monitor_part(lambda: _monitor_relay_known(now, statuses, watcher.get("failing") or [])),
+            "disk_alert": _monitor_part(lambda: disk_alert.compute_disk_alert(_volume_health_snapshot(now))),
         },
         "pause": {
             "execution_paused": bool(state.get("execution_paused", False)),
@@ -48592,11 +48723,8 @@ def monitor_alerts_full():
 def monitor_shadow_exits():
     """Shadow-exit recorder status + aggregates (was admin-only /api/research/shadow_exits)."""
     def build(now):
-        limit = max(0, min(50, request.args.get("limit", 20, type=int) or 0))
         return {"schema": "shadow_exit_runtime_view_v1", **_monitor_tiles_common(now),
-                "status": _SHADOW_EXIT_RECORDER.status(),
-                "aggregates_since_boot": _SHADOW_EXIT_RECORDER.aggregates(),
-                "recent": _SHADOW_EXIT_RECORDER.recent(limit), "observation_only": True}
+                **_r17_retired_view("shadow_exit_paths"), "observation_only": True}
     return _monitor_tiles_guard(build, 1_000_000)
 
 
@@ -48793,24 +48921,14 @@ def monitor_streams_page(name):
 
 @app.route('/api/research/shadow_exits')
 def research_shadow_exits():
-    """Admin-only (not in _READ_ONLY_GET_PATHS): recorder status, per-tile running aggregates, recent rows."""
-    limit = max(0, min(50, request.args.get("limit", 20, type=int) or 0))
-    return jsonify({
-        "schema": "shadow_exit_runtime_view_v1",
-        "status": _SHADOW_EXIT_RECORDER.status(),
-        "shadow_exit_set_default": [dict(item) for item in tile_shadow_exit_set(None)],
-        "tile_shadow_exit_set_ids": {
-            lane: shadow_exit_paths.shadow_exit_set_id(tile_shadow_exit_set(lane)) for lane in ACTIVE_TILE_ORDER
-        },
-        "aggregates_since_boot": _SHADOW_EXIT_RECORDER.aggregates(),
-        "recent": _SHADOW_EXIT_RECORDER.recent(limit),
-        "observation_only": True,
-    })
+    """Admin-only (not in _READ_ONLY_GET_PATHS). Retired (R17): no recorder runs."""
+    return jsonify({"schema": "shadow_exit_runtime_view_v1", **_r17_retired_view("shadow_exit_paths"),
+                    "observation_only": True})
 
 
 @app.route('/api/shadow_exits/summary')
 def shadow_exits_public_summary():
-    return jsonify(_SHADOW_EXIT_RECORDER.public_summary())
+    return jsonify({"schema": "shadow_exit_public_summary_v1", **_r17_retired_view("shadow_exit_paths")})
 
 
 
@@ -48988,8 +49106,9 @@ def monitor_shipper_snapshot() -> dict:
     out = _CUSTODY_LAG.observe(transfer)
     out["transfer"] = {k: transfer.get(k) for k in ("enabled", "last_error", "unshipped_bytes", "updated_at")
                        if isinstance(transfer, dict)}
-    out["custody_note"] = ("custody_through_seq = min(laptop ACK, parity, analyzer-consumed seq): a lag means the "
-                           "analyzer has not consumed the newest acked segments; pruning never passes custody.")
+    out["custody_note"] = ("R5 (HM C4/C5): the store is pruned by cap/age with no custody gate, so a laptop ACK that "
+                           "has not advanced for 2 h while shipped_seq is ahead is RED LAPTOP_ACK_NOT_ADVANCING "
+                           "(alert only, never a gate).")
     return out
 
 
@@ -49767,8 +49886,8 @@ def status():
             "cycle_universe": CYCLE_3M_UNIVERSE_TAG,
             "path_replay_file": PATH_REPLAY_FILE,
             "cycle_universe_file": CYCLE_3M_UNIVERSE_FILE,
-            "post_exit_file": POST_EXIT_REPLAY_FILE,
-            "order_multiverse_file": ORDER_MULTIVERSE_FILE,
+            "post_exit_file": "disabled: R17",
+            "order_multiverse_file": "disabled: R17",
             "collector_version": COLLECTOR_V31_VERSION,
             "legacy_collector_version": COLLECTOR_V22_VERSION,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -49842,11 +49961,17 @@ def status():
                 "compressed_shadow_books_inflight": len(_compressed_shadow_chase_book),
                 "order_multiverse_pending": len(_order_multiverse_pending_src),
                 "order_multiverse_written": len(_order_multiverse_written),
+                "v22_retired_r17": v22_retired_r17_count(),
+                "v22_retired_r17_label": "positive v22 events retired (R17): no stored 1m path, never written",
+                "lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(),
+                "lifecycle_qualification_retired_r17_label": "lifecycles stopped at QUALIFICATION_HORIZON_RETIRED_R17 "
+                                                             "(POST_EXIT_PATH source retired; transfer bundles only)",
                 "cleanup_enabled": False,
                 "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
                 "family_tiles_arm_discovery_grid": True,
                 "discovery_grid_admission": "TILE_ELIGIBLE_CALL",
-                "order_multiverse_entry_grid_file": ORDER_MULTIVERSE_ENTRY_GRID_FILE,
+                "order_multiverse_entry_grid_file": "disabled: R17",
+                "entry_children_status": "RETIRED_R17",
                 "collection_health": research_collection_health(),
             },
             "hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper")),
@@ -49871,8 +49996,11 @@ _SEGMENT_STATUS_FIELDS = (
     # HM (b): laptop/Fly sync verdict computed by the shipper from the laptop beacon.
     "sync_verdict", "sync_verdict_reasons", "laptop_applied_seq", "fresh_start_epoch_id",
     "laptop_cycle_stop_reason", "laptop_cycle_exit",
-    # CUSTODY_STALLED (HM 19 Oct 16:34): received_at of the newest custody receipt + the last prune plan (deny reasons)
+    # Legacy custody fields (custody prune retired, HM C4); kept so older status files still read.
     "custody_received_at", "prune_last_plan",
+    # HM C5/C6 (23 Oct): laptop ACK advance time (ACK stall RED) and the R5 segment pass result.
+    "laptop_ack_advanced_at", "r5_segment_red", "r5_segment_over_cap", "r5_segment_last_deleted",
+    "r5_segment_last_at",
 )
 _volume_growth_samples = deque(
     maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1
@@ -50023,10 +50151,22 @@ def health():
         "volume": _volume_health_snapshot(now),
     }
     try:
+        payload["disk_alert"] = disk_alert.compute_disk_alert(payload["volume"])
+    except Exception as exc:
+        payload["disk_alert"] = {"level": "UNKNOWN", "error": type(exc).__name__}
+    try:
         from runtime_telemetry import clock_sync_verdict
         payload["clock_sync"] = clock_sync_verdict()
     except Exception as exc:
         payload["clock_sync"] = {"status": "UNKNOWN", "error": type(exc).__name__}
+    try:  # HM C11 / C1: retired-source counters, so HM can see R17 stops on the liveness probe
+        payload["research_retired_r17"] = {
+            "lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(fast=True),
+            "v22_retired_r17": v22_retired_r17_count(),
+            "label": "source retired (R17)",
+        }
+    except Exception as exc:  # noqa: BLE001
+        payload["research_retired_r17"] = {"status": "UNKNOWN", "error": type(exc).__name__}
     try:
         payload["research_collection"] = research_collection_health(now)
     except Exception as exc:
@@ -51783,7 +51923,7 @@ def api_data_size():
         "used_fraction": used_fraction,
         "observation_only": True,
     }
-    key_files = ["trades_3factor.csv", "ai_reason_research.jsonl", "signal_replay.jsonl"]
+    key_files = ["trades_3factor.csv", "ai_reason_research.jsonl"]
     if current:
         size_status = "CURRENT"
     elif has_inventory_generation and raw_inventory_status == "BUILDING":
@@ -52418,6 +52558,30 @@ def _collection_epoch_parity(lifecycle_public) -> dict:
     else:
         verdict = "MISMATCH"
     return {**identities, "status": verdict, "match": verdict == "MATCH"}
+
+
+def _lifecycle_qualification_retired_r17_total(fast: bool = False) -> int:
+    """HM C11: lifecycles that stopped at QUALIFICATION_HORIZON_RETIRED_R17. The worker runs as a subprocess, so the
+    runtime owner accumulates its per-cycle counts; an in-process run (tests, catch-up) adds the module counter.
+    ``fast`` (the /health liveness probe) waits at most 20 ms for the runtime status lock."""
+    total = 0
+    try:
+        runtime_module = _LIFECYCLE_PIPELINE_RUNTIME
+        if fast and runtime_module is not None:
+            internal = runtime_module.status(timeout=0.02)
+        else:
+            internal = _lifecycle_pipeline_runtime_status()
+        raw = internal.get("qualification_retired_r17_total")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            total += raw
+    except Exception:  # noqa: BLE001 - never break /health
+        pass
+    try:
+        import lifecycle_pipeline as _lp
+        total += max(0, int(_lp.lifecycle_qualification_retired_r17_count()))
+    except Exception:  # noqa: BLE001
+        pass
+    return total
 
 
 def _lifecycle_pipeline_runtime_status() -> dict:
@@ -54184,7 +54348,7 @@ def research_export_files():
     return [
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
-        SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
+        SIGNAL_SNAPSHOT_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE,
         EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
         SHADOW_LANE_OUTCOME_FILE,
         LANE_OPPORTUNITY_CAPTURE_FILE,
@@ -54196,7 +54360,6 @@ def research_export_files():
         PATH_REPLAY_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
-        ORDER_MULTIVERSE_FILE,
         OPPORTUNITY_CAPTURE_FILE,
         "execution_funnel.jsonl",
         "execution_funnel_summary.json",
@@ -56422,25 +56585,9 @@ def append_replay_tick(
         )
     if COLLECTOR_V22_PATH_REPLAY_1S:
         _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
-    if persist_trade_id is not None:
-        try:
-            _safe_append_jsonl(POST_EXIT_REPLAY_FILE, {
-                "kind": "tick",
-                "trade_id": persist_trade_id,
-                "ts": now,
-                "price": float(price),
-                "unreal_pct": round(float(unreal_pct), 4) if unreal_pct is not None else None,
-                "phase": "post_exit",
-                "seq": int(buf["seq"]) if is_post_exit else None,
-                "t_rel": t_rel,
-                "best_bid": float(best_bid) if best_bid is not None else None,
-                "best_ask": float(best_ask) if best_ask is not None else None,
-                "mark_source": source,
-                "schema": PATH_REPLAY_SCHEMA,
-                "policy_tag": PATH_REPLAY_POLICY_TAG,
-            }, label="POST_EXIT_REPLAY_TICK")
-        except Exception as e:
-            logger.error(f"[POST_EXIT_REPLAY] tick persist failed tid={persist_trade_id}: {e}")
+    # R17 (23 Oct): post_exit_replay.jsonl is retired. Post-exit ticks are
+    # ticker/L1 marks with no depth, so they stay in the in-memory buffer only.
+    del persist_trade_id
 
 
 def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
@@ -56579,40 +56726,8 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
         })
         buf["last_update"] = now
         buf["last_tick_ts"] = now
-        # Persist the post-exit trade header to the sidecar so a restart can
-        # rebuild this buffer before the deadline elapses.
-        try:
-            _safe_append_jsonl(POST_EXIT_REPLAY_FILE, {
-                "kind": "post_exit_header",
-                "trade_id": trade_id,
-                "ts": now,
-                "post_exit_deadline_ts": buf.get("post_exit_deadline_ts"),
-                "post_exit_started_ts": buf.get("post_exit_started_ts"),
-                "entry_price": buf.get("entry_price"),
-                "virtual_entry": buf.get("virtual_entry"),
-                "direction": buf.get("direction"),
-                "leverage": buf.get("leverage"),
-                "exit_reason": buf.get("exit_reason"),
-                "start_ts": buf.get("start_ts"),
-                "exit_t_rel": buf.get("exit_t_rel"),
-                "virtual_fill_t": buf.get("virtual_fill_t"),
-                "margin_usdt": buf.get("margin_usdt"),
-                "policy_version": buf.get("policy_version"),
-                "exit_config": copy.deepcopy(buf.get("exit_config") or {}),
-                "bitfinex_evidence": copy.deepcopy(buf.get("bitfinex_evidence") or {}),
-                "fee_model": buf.get("fee_model"),
-                "execution_profile": buf.get("execution_profile"),
-                "chase_mode": buf.get("chase_mode"),
-                "max_chases": buf.get("max_chases"),
-                "fill_at_limit": bool(buf.get("fill_at_limit")),
-                "collection_epoch_id": buf.get("collection_epoch_id"),
-                "source_git_rev": buf.get("source_git_rev"),
-                "executor_revision": buf.get("executor_revision"),
-                "fill_gate_rev": buf.get("fill_gate_rev"),
-                "correlated_cluster_boundary_pct": buf.get("correlated_cluster_boundary_pct"),
-            }, label="POST_EXIT_REPLAY_HEADER")
-        except Exception as e:
-            logger.error(f"[POST_EXIT_REPLAY] header persist failed tid={trade_id}: {e}")
+        # R17 (23 Oct): the post-exit header sidecar is retired; a restart
+        # drops in-window post-exit buffers (research-only, never fill state).
     logger.info(
         f"[POST_EXIT_REPLAY] trade_id={trade_id} exit_t={exit_t_rel}s "
         f"collecting {POST_EXIT_REPLAY_SEC}s for horizon recovery [PIPELINE ENFORCEMENT]"
@@ -56662,139 +56777,6 @@ def service_post_exit_replays():
             best_bid=best_bid or None,
             best_ask=best_ask or None,
             mark_source=mark_source,
-        )
-
-
-def _load_post_exit_replays():
-    """Rebuild post-exit replay buffers from the sidecar JSONL on startup.
-
-    Only buffers whose ``post_exit_deadline_ts`` has not yet elapsed are
-    restored, so the file does not grow unbounded across sessions.  Pre-existing
-    in-memory entries are preserved (live in-progress buffers always take
-    precedence over the on-disk snapshot).
-    """
-    active_path = Path(POST_EXIT_REPLAY_FILE)
-    rotated_paths = sorted(
-        (path for path in active_path.parent.glob(f"{active_path.name}.*")
-         if path.name[len(active_path.name) + 1:].isdigit()),
-        key=lambda path: int(path.name[len(active_path.name) + 1:]),
-        reverse=True,
-    )
-    replay_paths = rotated_paths + ([active_path] if active_path.exists() else [])
-    if not replay_paths:
-        return
-    now = time.time()
-    restored = 0
-    headers: Dict[str, dict] = {}
-    ticks_by_tid: Dict[str, list] = {}
-    # The rotated sidecar holds hundreds of MB of expired tick rows; parsing
-    # them all into dicts OOM-killed boot on a 2 GB machine. Stream twice:
-    # headers first, then ticks only for buffers still inside their window.
-    try:
-      for replay_path in replay_paths:
-        with open(replay_path, "r", encoding="utf-8-sig") as f:
-            for line in f:
-                if "post_exit_header" not in line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                tid = row.get("trade_id")
-                if tid and row.get("kind") == "post_exit_header":
-                    headers[tid] = row
-      active_tids = {
-          tid for tid, header in headers.items()
-          if _buf_float(header.get("post_exit_deadline_ts"), 0) > now
-      }
-      headers = {tid: headers[tid] for tid in active_tids}
-      if active_tids:
-        for replay_path in replay_paths:
-            with open(replay_path, "r", encoding="utf-8-sig") as f:
-                for line in f:
-                    if '"tick"' not in line or not any(tid in line for tid in active_tids):
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except (TypeError, ValueError):
-                        continue
-                    tid = row.get("trade_id")
-                    if row.get("kind") == "tick" and tid in active_tids:
-                        ticks_by_tid.setdefault(tid, []).append(row)
-    except Exception as e:
-        logger.error(f"[POST_EXIT_REPLAY] load failed: {e}")
-        return
-    with replay_lock:
-        for tid, header in headers.items():
-            deadline = _buf_float(header.get("post_exit_deadline_ts"), 0)
-            if deadline <= 0 or deadline <= now:
-                continue
-            if tid in replay_buffers and not replay_buffers[tid].get("closed"):
-                # Already rebuilt by the live path this session; skip the stale snapshot.
-                continue
-            start_ts = _buf_float(header.get("start_ts"), now)
-            virtual_entry = _buf_float(header.get("virtual_entry"), 0) or _buf_float(header.get("entry_price"), 0)
-            replay_buffers[tid] = {
-                "start_ts": start_ts,
-                "start_price": virtual_entry,
-                "ticks": [],
-                "last_update": now,
-                "last_tick_ts": 0.0,
-                "closed": False,
-                "seq": 0,
-                "lane": "executed",
-                "direction": header.get("direction") or "LONG",
-                "leverage": _buf_int(header.get("leverage"), _replay_leverage_default()),
-                "margin_usdt": _buf_float(header.get("margin_usdt"), FIXED_MARGIN_USDT),
-                "virtual_entry": virtual_entry,
-                "virtual_fill_t": header.get("virtual_fill_t"),
-                "policy_version": header.get("policy_version"),
-                "exit_config": copy.deepcopy(header.get("exit_config") or {}),
-                "bitfinex_evidence": copy.deepcopy(header.get("bitfinex_evidence") or {}),
-                "fee_model": header.get("fee_model"),
-                "execution_profile": header.get("execution_profile"),
-                "chase_mode": header.get("chase_mode"),
-                "max_chases": header.get("max_chases"),
-                "fill_at_limit": bool(header.get("fill_at_limit")),
-                "collection_epoch_id": header.get("collection_epoch_id"),
-                "source_git_rev": header.get("source_git_rev"),
-                "executor_revision": header.get("executor_revision"),
-                "fill_gate_rev": header.get("fill_gate_rev"),
-                "correlated_cluster_boundary_pct": header.get("correlated_cluster_boundary_pct"),
-                "post_exit": True,
-                "post_exit_started_ts": _buf_float(header.get("post_exit_started_ts"), now),
-                "post_exit_deadline_ts": deadline,
-                "entry_price": _buf_float(header.get("entry_price"), virtual_entry),
-                "exit_reason": header.get("exit_reason"),
-                "exit_t_rel": _buf_float(header.get("exit_t_rel"), 0),
-            }
-            buf = replay_buffers[tid]
-            tick_rows = ticks_by_tid.get(tid, [])
-            tick_rows.sort(key=lambda r: _buf_float(r.get("ts"), 0))
-            for row in tick_rows:
-                ts = _buf_float(row.get("ts"), 0)
-                if ts <= 0:
-                    continue
-                seq = _buf_int(buf.get("seq"), 0) + 1
-                buf["seq"] = seq
-                buf["ticks"].append({
-                    "seq": seq,
-                    "t": round(ts - start_ts, 3),
-                    "price": float(row.get("price") or 0),
-                    "unreal_pct": row.get("unreal_pct"),
-                    "phase": "post_exit",
-                    "best_bid": row.get("best_bid"),
-                    "best_ask": row.get("best_ask"),
-                    "observed_ts": ts,
-                })
-            if buf["ticks"]:
-                buf["last_update"] = _buf_float(tick_rows[-1].get("ts"), now)
-                buf["last_tick_ts"] = _buf_float(tick_rows[-1].get("ts"), 0)
-            restored += 1
-    if restored:
-        logger.info(
-            f"[POST_EXIT_REPLAY] restored {restored} post-exit buffer(s) from sidecar "
-            f"[PIPELINE ENFORCEMENT]"
         )
 
 
@@ -56952,7 +56934,6 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
     """
     global write_counter
     mv_source = None
-    shadow_exit_payload = None
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
@@ -57001,76 +56982,13 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
                 else "INCOMPLETE_BUFFER"
             )
             censored = bool(terminal_reason) and not replay_complete
-            replay = {
-                "schema": "signal_replay_v4",
-                "trade_id": trade_id,
-                "dumped_ts": round(now, 3),
-                "dump_seq": buf["dump_seq"],
-                "dump_reason": terminal_reason or ("BUFFER_CLOSED" if buf.get("closed") else "EXPIRED_OR_EVICTED"),
-                "censored": censored,
-                "start_ts": utc_iso(datetime.fromtimestamp(buf["start_ts"], timezone.utc)),
-                "start_price": buf["start_price"],
-                "direction": buf.get("direction"),
-                "lane": buf.get("lane"),
-                "block_reason": buf.get("block_reason"),
-                "block_ts": buf.get("block_ts"),
-                "block_t_rel": buf.get("block_t_rel"),
-                "post_block_tick_count": len(post_ticks),
-                "post_exit_tick_count": len(post_exit_ticks),
-                "post_exit_sec": round(max(
-                    (_buf_float(t.get("t"), exit_t_rel) - exit_t_rel for t in post_exit_ticks),
-                    default=0,
-                ), 3),
-                "post_exit_complete": post_exit_complete,
-                "replay_complete": replay_complete,
-                "replay_completion_reason": terminal_reason if censored else natural_reason,
-                "natural_completion_reason": natural_reason,
-                "terminal_provenance": (
-                    "SHOWCASE_STRATEGY_EXIT" if is_executed else "COUNTERFACTUAL_ONLY"
-                ),
-                "exit_t_rel": buf.get("exit_t_rel"),
-                "exit_reason": buf.get("exit_reason"),
-                "virtual_entry": buf.get("virtual_entry"),
-                "virtual_fill_t": buf.get("virtual_fill_t"),
-                "origin_t_rel": buf.get("virtual_fill_t"),
-                "horizon_receipts": buf.get("horizon_receipts"),
-                "path_gaps": _path_gap_census(buf.get("ticks")),
-                "entry_price": buf.get("entry_price"),
-                "pullback_pct": buf.get("pullback_pct"),
-                "leverage": buf.get("leverage"),
-                "margin_usdt": buf.get("margin_usdt"),
-                "exit_config": copy.deepcopy(buf.get("exit_config") or {}),
-                "fee_model": buf.get("fee_model"),
-                "execution_profile": buf.get("execution_profile"),
-                "chase": {
-                    "enabled": bool(buf.get("chase_mode")) and str(buf.get("chase_mode")).upper() != "NONE",
-                    "mode": buf.get("chase_mode") or "NONE",
-                    "max_chases": buf.get("max_chases"),
-                    "fill_at_limit": bool(buf.get("fill_at_limit")),
-                },
-                "collection_epoch_id": buf.get("collection_epoch_id"),
-                "source_git_rev": buf.get("source_git_rev"),
-                "executor_revision": buf.get("executor_revision"),
-                "fill_gate_rev": buf.get("fill_gate_rev"),
-                "correlated_cluster_boundary_pct": buf.get("correlated_cluster_boundary_pct"),
-                "ticks": list(buf["ticks"]),
-            }
-            if _safe_append_jsonl(SIGNAL_REPLAY_FILE, replay, label="SIGNAL_REPLAY"):
-                write_counter += 1
-            if buf.get("closed") and not terminal_reason:
-                policy_identity = buf.get("policy_identity") if isinstance(buf.get("policy_identity"), dict) else {}
-                shadow_exit_payload = {"replay": replay, "meta": {
-                    "start_ts": buf.get("start_ts"),
-                    "research_lane": (buf.get("research_lane") or policy_identity.get("research_lane")
-                                      or tile_lane_for_trade_id(trade_id)),
-                    "policy_signature": buf.get("policy_signature"),
-                    "collection_epoch_id": buf.get("collection_epoch_id"),
-                    "limit_price": buf.get("limit_price") or buf.get("original_limit_price"),
-                    "atr14_pct_3m": buf.get("atr14_pct_3m"),
-                    "adx_at_signal": buf.get("adx_at_signal"),
-                    "regime": buf.get("regime") or buf.get("entry_regime"),
-                    "entry_features": buf.get("entry_features"),
-                }}
+            # R17 (23 Oct): signal_replay.jsonl is retired (ticker ticks, no
+            # depth), so no replay row is built or written. The buffer still
+            # feeds the v22 multiverse sync below; write_counter counts dumps,
+            # not file appends (HM E1.1).
+            del post_ticks, censored
+            write_counter += 1
+            # R17 (23 Oct): the shadow_exit_paths recorder is retired.
             if replay_complete:
                 paper_tid = paper_multiverse_trade_id(
                     trade_id,
@@ -57101,8 +57019,6 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
                     }
         except Exception as e:
             logger.error(f"Replay dump failed for {trade_id}: {e}")
-    if shadow_exit_payload is not None:
-        _submit_shadow_exit_path(shadow_exit_payload)
     if mv_source:
         _sync_order_multiverse(mv_source, path_complete=True)
 
@@ -57225,46 +57141,6 @@ def compute_analytics():
         state["analytics"] = analytics
         state["analytics_ts"] = utc_iso()
 
-def run_offline_research_sim():
-    """Backfill counterfactual.jsonl from snapshots + replays (deduped by trade_id)."""
-    global _sim_processed_trade_ids
-    try:
-        platform_revisions = {
-            trade_id: evidence.get("evidence_revision")
-            for trade_id, evidence in _platform_relay_evidence_index().items()
-        }
-        latest_local_revisions = {}
-        if os.path.exists(COUNTERFACTUAL_FILE):
-            with open(COUNTERFACTUAL_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                        tid = row.get("trade_id")
-                        if tid:
-                            latest_local_revisions[str(tid)] = row.get("platform_evidence_revision")
-                        # A changed platform evidence fingerprint produces a new
-                        # append-only derived revision; the older row is retained.
-                        if tid and (
-                            not platform_revisions.get(str(tid))
-                            or row.get("platform_evidence_revision") == platform_revisions.get(str(tid))
-                        ):
-                            _sim_processed_trade_ids.add(tid)
-                    except Exception:
-                        pass
-        for tid, revision in platform_revisions.items():
-            if latest_local_revisions.get(tid) != revision:
-                _sim_processed_trade_ids.discard(tid)
-        # Shadow rows are not a substitute for a compact counterfactual
-        # disposition. Every eligible opportunity gets a CF row or an explicit
-        # exclusion; missing evidence stays UNKNOWN, never $0.
-        offline_simulator()
-    except Exception as e:
-        logger.error(f"[RESEARCH_SIM] {e}")
-
-
 def _timed_step(steps: list, name: str, fn):
     """Run one analytics_loop step and record its wall time and process-RSS delta (stair attribution; diagnostics only,
     never raises from the bookkeeping). RSS delta of a step that grows the heap permanently = the retained structure's owner."""
@@ -57286,28 +57162,12 @@ def _timed_step(steps: list, name: str, fn):
 
 
 def analytics_loop():
-    global _cf_catchup_tick_counter
     try:
         while not shutdown_event.is_set():
             try:
                 _loop_t0 = time.time()
                 _loop_steps: list = []
                 _timed_step(_loop_steps, "compute_analytics", compute_analytics)
-                _timed_step(_loop_steps, "run_offline_research_sim", run_offline_research_sim)
-                # Change 5: periodic catch-up for APPROVE signals whose replay
-                # rotated into a .N shard before the active-file pass saw them.
-                # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks,
-                # EXCEPT the first tick after boot which fires immediately so a
-                # fresh deploy backfills the historical coverage gap without
-                # waiting ~100min for the first window.
-                _cf_catchup_tick_counter += 1
-                if _cf_catchup_tick_counter == 1 or _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
-                    if _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
-                        _cf_catchup_tick_counter = 0
-                    try:
-                        _timed_step(_loop_steps, "counterfactual_catchup", _run_counterfactual_catchup)
-                    except Exception as ce:
-                        logger.error(f"[CF_CATCHUP] analytics loop error: {ce}")
                 try:
                     rep = _timed_step(_loop_steps, "execution_reports", lambda: _refresh_execution_reports_guarded(os.getcwd()))
                     fs = rep.get("funnel_summary") or {}
@@ -57350,6 +57210,7 @@ def analytics_loop():
 
 
 FUTURE_PATH_WORKER_WALL_TIMEOUT_SEC = 30.0
+FUTURE_PATH_WORKER_RETIRED_R17 = True  # main() no longer starts the loop below
 
 
 def all_opportunity_future_path_evidence_loop():
@@ -57941,8 +57802,7 @@ def _offline_sim_jsonl_paths(active_path, max_rotations=_OFFLINE_SIM_MAX_ROTATIO
     return _pure_offline_sim_jsonl_paths(active_path, max_rotations=max_rotations)
 
 
-_OFFLINE_SIM_PERIODIC_ROTATIONS = 8   # periodic analytics path; the every-10th-tick catch-up scans all shards itself
-_OFFLINE_SIM_LOAD_STATS: dict = {}
+_OFFLINE_SIM_LOAD_STATS: dict = {}   # loader retired (R17); kept empty for the health check below
 
 
 def _offline_sim_epoch_floor_detail():
@@ -57974,349 +57834,17 @@ def _offline_sim_epoch_floor():
     return fl
 
 
-def _load_offline_sim_jsonl_revisions(
-    active_path,
-    max_rotations=None,
-    target_trade_ids=None,
-):
-    if max_rotations is None:
-        max_rotations = globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128)
-    floor_fn = globals().get("_offline_sim_epoch_floor")
-    _floor = floor_fn() if callable(floor_fn) else None
-    _stats = globals().get("_OFFLINE_SIM_LOAD_STATS")
-    if isinstance(_stats, dict):
-        _stats["floor_unreadable"] = bool(_floor is None and callable(floor_fn))
-        _stats["floor_checked_ts"] = time.time()
-        _fd = _offline_sim_epoch_floor_detail() if _floor is not None else (None, None, "floor unreadable")
-        _stats["floor_source"], _stats["floor_error"] = _fd[1], _fd[2]
-        _stats["floor_value_utc"] = datetime.fromtimestamp(_floor, timezone.utc).isoformat() if _floor else None
-        _stats["next_check_ts"] = time.time() + 600  # rechecked on every loader call (each analytics cycle)
-    return _pure_load_offline_sim_jsonl_revisions(
-        active_path,
-        max_rotations=max_rotations,
-        target_trade_ids=target_trade_ids,
-        min_ts=_floor,
-        stats=globals().get("_OFFLINE_SIM_LOAD_STATS"),
-        floor_unreadable=_floor is None and callable(floor_fn),   # fail closed: skip ALL rotated shards
-        on_read_error=lambda path, exc: logger.debug(
-            f"[RESEARCH_SIM] immutable shard read failed path={path}: {exc}"
-        ),
-    )
+# HM C9 (R17): _load_offline_sim_jsonl_revisions (the signal_replay/snapshot shard loader) is deleted; it had no
+# callers once the offline simulator was retired. The fresh-epoch floor above stays: the live guardian and the
+# non-accum plans route still use it.
 
 
-def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_file=SIGNAL_REPLAY_FILE, output_file=COUNTERFACTUAL_FILE):
-    global write_counter, _sim_processed_trade_ids
-    platform_index = _platform_relay_evidence_index()
-    platform_trade_ids = set(platform_index)
-    snapshots = _load_offline_sim_jsonl_revisions(
-        signal_snapshot_file,
-        target_trade_ids=platform_trade_ids,
-    )
-    market_loader = globals().get("_load_source_market_evidence_index")
-    source_market_index = market_loader(
-        globals().get("SOURCE_ORDER_MARKET_EVIDENCE_FILE", "source_order_market_evidence.jsonl"),
-        target_trade_ids=set(snapshots),
-        max_rotations=globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128),
-    ) if callable(market_loader) else {}
-    replays = _load_offline_sim_jsonl_revisions(
-        signal_replay_file,
-        target_trade_ids=set(snapshots),
-    )
-    if not snapshots or not replays:
-        return
-    prior_counterfactuals = _load_offline_sim_jsonl_revisions(
-        output_file,
-        target_trade_ids=set(snapshots),
-    )
-    written = 0
-    for trade_id, snapshot in snapshots.items():
-        platform_revision = (platform_index.get(str(trade_id)) or {}).get("evidence_revision")
-        prior_platform_revision = (prior_counterfactuals.get(str(trade_id)) or {}).get(
-            "platform_evidence_revision"
-        )
-        source_market_revision = (source_market_index.get(str(trade_id)) or {}).get("evidence_revision")
-        prior_source_market_revision = (prior_counterfactuals.get(str(trade_id)) or {}).get(
-            "source_market_evidence_revision"
-        )
-        prior_exists = str(trade_id) in prior_counterfactuals
-        if (trade_id in _sim_processed_trade_ids or prior_exists) and (
-            (not platform_revision or prior_platform_revision == platform_revision)
-            and (not source_market_revision or prior_source_market_revision == source_market_revision)
-        ):
-            _sim_processed_trade_ids.add(trade_id)
-            continue
-        if not snapshot.get("ai", {}).get("approved", False):
-            continue
-        replay = replays.get(trade_id)
-        if not replay:
-            continue
-        snapshot = _snapshot_with_platform_relay_evidence(snapshot, trade_id, platform_index)
-        if str(trade_id) in source_market_index:
-            snapshot["source_order_market_evidence"] = copy.deepcopy(source_market_index[str(trade_id)])
-            snapshot["source_market_evidence_revision"] = source_market_revision
-        cfg = snapshot.get("config", {})
-        buf = {
-            "start_price": replay.get("start_price"),
-            "ticks": replay.get("ticks", []),
-            "direction": snapshot.get("direction") or replay.get("direction"),
-            "leverage": cfg.get("leverage", _state_leverage()),
-            "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
-            "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
-            "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
-            "exit_config": copy.deepcopy(replay.get("exit_config") or {
-                **get_exit_config_snapshot(),
-                **{k: v for k, v in cfg.items() if k in (
-                    "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
-                )},
-            }),
-            "virtual_entry": replay.get("virtual_entry"),
-            "virtual_fill_t": replay.get("virtual_fill_t"),
-            "fee_model": replay.get("fee_model"),
-            "execution_profile": replay.get("execution_profile"),
-            "chase": copy.deepcopy(replay.get("chase")),
-            "collection_epoch_id": replay.get("collection_epoch_id"),
-            "source_git_rev": replay.get("source_git_rev"),
-            "executor_revision": replay.get("executor_revision"),
-            "fill_gate_rev": replay.get("fill_gate_rev"),
-            "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
-        }
-        outcome = simulate_replay_outcome(buf)
-        snapshot = _counterfactual_snapshot_with_join_keys(trade_id, snapshot, replay)
-        counterfactual = {
-            "schema": "counterfactual_v2",
-            "trade_id": trade_id,
-            **counterfactual_join_fields(trade_id, snapshot, replay),
-            "scenario": buf["direction"],
-            "executed": bool(snapshot.get("executed")),
-            "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
-            "lane": replay.get("lane"),
-            "ai_win_prob": evidence_win_prob(snapshot.get("ai")),
-            "edge_score": snapshot.get("edge_score"),
-            "fill_price": outcome.get("fill_price"),
-            "fill_delay_sec": outcome.get("fill_delay_sec"),
-            "filled": outcome.get("filled"),
-            "exit_reason": outcome.get("exit_reason"),
-            "net_pnl_usd": outcome.get("net_pnl_usd"),
-            "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
-            "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
-            "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
-            "source_order_market_evidence": _compact_source_market_evidence(
-                snapshot.get("source_order_market_evidence") or {}
-            ),
-            "source_market_evidence_revision": snapshot.get("source_market_evidence_revision"),
-            "market_path_ref": _compact_market_path_ref(replay, snapshot),
-            "horizon_receipts": replay.get("horizon_receipts") or buf.get("horizon_receipts"),
-            "path_gaps": replay.get("path_gaps") or _path_gap_census(replay.get("ticks")),
-            "origin_t_rel": replay.get("virtual_fill_t") or buf.get("virtual_fill_t"),
-            **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
-        }
-        try:
-            if _safe_append_jsonl(output_file, counterfactual, label="COUNTERFACTUAL"):
-                write_counter += 1
-                _sim_processed_trade_ids.add(trade_id)
-                written += 1
-        except Exception as e:
-            logger.error(f"Counterfactual log failed: {e}")
-    if written:
-        logger.info(f"[RESEARCH_SIM] counterfactual rows written={written} [PIPELINE ENFORCEMENT]")
+# R17 (23 Oct): offline_simulator and the counterfactual catch-up are retired.
+# They priced ticker-tick replays (no depth, no book walk) into
+# counterfactual.jsonl, which the PRIME RULE cannot verify. Paper fills are
+# unaffected: paper_fill prices only from the bfx_book_10l book.
+COUNTERFACTUAL_RETIRED_REASON = "source retired (R17)"
 
-# --- counterfactual catch-up (Change 5) -------------------------------------
-# Coverage bug: signal_replay.jsonl rotates into .1/.2/... shards every ~20MB.
-# offline_simulator() only reads the active shard, so any APPROVE signal whose
-# replay buffer rotated before the analytics loop processed it never receives a
-# compact counterfactual.jsonl row. Shadow_outcome is not a substitute.
-# This catch-up scans ALL shards for APPROVE signals that have replay data
-# but no compact CF disposition, then forces a simulate_replay_outcome pass.
-# Analytics-only — never touches the trading path. Called from analytics_loop
-# every CF_CATCHUP_EVERY_N_TICKS ticks.
-CF_CATCHUP_EVERY_N_TICKS = 10
-_cf_catchup_tick_counter = 0
-
-def _scan_replay_shard_trade_ids(path):
-    """Stream a replay shard and yield (trade_id, line_offset) pairs. Keeps
-    only the trade_id — the row body (with its large ticks array) is read on
-    demand by _find_replay_row_for_trade_id to stay memory-safe on 20MB shards."""
-    out = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            offset = 0
-            for line in f:
-                line_stripped = line.strip()
-                if not line_stripped:
-                    offset += len(line)
-                    continue
-                try:
-                    row = json.loads(line_stripped)
-                    tid = row.get("trade_id")
-                    if tid:
-                        out.append((tid, offset))
-                except Exception:
-                    pass
-                offset += len(line)
-    except OSError as e:
-        logger.debug(f"[CF_CATCHUP] shard scan failed {path}: {e}")
-    return out
-
-def _find_replay_row_for_trade_id(path, target_tid, max_bytes_hint=None):
-    """Read a single replay row by byte-offset lookup. Falls back to a full
-    linear scan if the offset index was built from a different shard state."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line_stripped = line.strip()
-                if not line_stripped:
-                    continue
-                try:
-                    row = json.loads(line_stripped)
-                    if row.get("trade_id") == target_tid:
-                        return row
-                except Exception:
-                    pass
-    except OSError as e:
-        logger.debug(f"[CF_CATCHUP] row lookup failed {path} tid={target_tid}: {e}")
-    return None
-
-def _run_counterfactual_catchup():
-    """Force-simulate APPROVE signals that have replay data (in any shard) but
-    no compact counterfactual.jsonl disposition. Shadow_outcome is not a
-    substitute. Idempotent: every successfully simulated trade_id is added to
-    _sim_processed_trade_ids."""
-    global _sim_processed_trade_ids, write_counter
-    try:
-        if not os.path.exists(SIGNAL_SNAPSHOT_FILE):
-            return 0
-        # 1) APPROVE snapshots (active file only — snapshots are not rotated).
-        approve_snaps = {}
-        try:
-            with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                        tid = row.get("trade_id")
-                        if tid and row.get("ai", {}).get("approved", False):
-                            approve_snaps[tid] = row
-                    except Exception:
-                        pass
-        except OSError:
-            return 0
-        if not approve_snaps:
-            return 0
-
-        # 2) Drop anything already processed in-memory.
-        candidate_tids = [t for t in approve_snaps if t not in _sim_processed_trade_ids]
-        if not candidate_tids:
-            return 0
-
-        # 3) Index every replay shard by trade_id. Only offsets are kept so a
-        # 20MB shard with thousands of ticks never fully resides in memory.
-        import glob as _glob
-        shard_paths = sorted(_glob.glob(SIGNAL_REPLAY_FILE + "*"))
-        # shard_trade_ids[tid] = list of (path, offset)
-        shard_trade_ids = {}
-        for sp in shard_paths:
-            for tid, off in _scan_replay_shard_trade_ids(sp):
-                shard_trade_ids.setdefault(tid, []).append((sp, off))
-
-        # 4) Final missing set: APPROVE + has-replay + not-already-processed.
-        missing = [t for t in candidate_tids if t in shard_trade_ids]
-        if not missing:
-            return 0
-
-        written = 0
-        for tid in missing:
-            snapshot = approve_snaps.get(tid)
-            if not snapshot:
-                continue
-            snapshot = _snapshot_with_platform_relay_evidence(snapshot, tid)
-            # Pick the earliest shard entry for this trade_id (deterministic).
-            locations = sorted(shard_trade_ids.get(tid, []))
-            replay = None
-            for sp, _off in locations:
-                replay = _find_replay_row_for_trade_id(sp, tid)
-                if replay:
-                    break
-            if not replay:
-                # Shard rotated between index and lookup — mark processed so we
-                # don't repeatedly re-scan for an unrecoverable row.
-                _sim_processed_trade_ids.add(tid)
-                continue
-            cfg = snapshot.get("config", {})
-            buf = {
-                "start_price": replay.get("start_price"),
-                "ticks": replay.get("ticks", []),
-                "direction": snapshot.get("direction") or replay.get("direction"),
-                "leverage": cfg.get("leverage", _state_leverage()),
-                "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
-                "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
-                "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
-                "exit_config": copy.deepcopy(replay.get("exit_config") or {
-                    **get_exit_config_snapshot(),
-                    **{k: v for k, v in cfg.items() if k in (
-                        "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
-                    )},
-                }),
-                "virtual_entry": replay.get("virtual_entry"),
-                "virtual_fill_t": replay.get("virtual_fill_t"),
-                "fee_model": replay.get("fee_model"),
-                "execution_profile": replay.get("execution_profile"),
-                "chase": copy.deepcopy(replay.get("chase")),
-                "collection_epoch_id": replay.get("collection_epoch_id"),
-                "source_git_rev": replay.get("source_git_rev"),
-                "executor_revision": replay.get("executor_revision"),
-                "fill_gate_rev": replay.get("fill_gate_rev"),
-                "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
-            }
-            outcome = simulate_replay_outcome(buf)
-            snapshot = _counterfactual_snapshot_with_join_keys(tid, snapshot, replay)
-            counterfactual = {
-                "schema": "counterfactual_v2",
-                "trade_id": tid,
-                **counterfactual_join_fields(tid, snapshot, replay),
-                "scenario": buf["direction"],
-                "executed": bool(snapshot.get("executed")),
-                "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
-                "lane": replay.get("lane"),
-                "ai_win_prob": evidence_win_prob(snapshot.get("ai")),
-                "edge_score": snapshot.get("edge_score"),
-                "fill_price": outcome.get("fill_price"),
-                "fill_delay_sec": outcome.get("fill_delay_sec"),
-                "filled": outcome.get("filled"),
-                "exit_reason": outcome.get("exit_reason"),
-                "net_pnl_usd": outcome.get("net_pnl_usd"),
-                "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
-                "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
-                "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
-                "source_order_market_evidence": _compact_source_market_evidence(
-                    snapshot.get("source_order_market_evidence") or {}
-                ),
-                "market_path_ref": _compact_market_path_ref(replay, snapshot),
-                "horizon_receipts": replay.get("horizon_receipts"),
-                "path_gaps": replay.get("path_gaps") or _path_gap_census(replay.get("ticks")),
-                "origin_t_rel": replay.get("virtual_fill_t") or buf.get("virtual_fill_t"),
-                **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
-                "catchup": True,
-            }
-            try:
-                if _safe_append_jsonl(
-                    COUNTERFACTUAL_FILE, counterfactual, label="COUNTERFACTUAL_CATCHUP",
-                ):
-                    write_counter += 1
-                    _sim_processed_trade_ids.add(tid)
-                    written += 1
-            except Exception as e:
-                logger.error(f"[CF_CATCHUP] counterfactual log failed tid={tid}: {e}")
-        if written:
-            logger.info(
-                f"[CF_CATCHUP] backfilled {written} missing counterfactual rows "
-                f"(of {len(missing)} candidates) [PIPELINE ENFORCEMENT]"
-            )
-        return written
-    except Exception as e:
-        logger.error(f"[CF_CATCHUP] failed: {e}")
-        return 0
 
 def preload_candles():
     global latest_candles, last_candle_ts
@@ -58605,7 +58133,16 @@ def save_persistent_config():
     ):
         logger.debug(f"Saved persistent config -> {config_path}")
 
-def rotate_log(file):
+def rotate_log(file, max_rotations=None, max_bytes=None):
+    """Rotate at 20 MB, then enforce the per-family rotation cap.
+
+    DISK-CAP (23 Oct): ``rotation_cap.CAP_ALLOW`` is the per-family table
+    (default 10 rotations / <=500 MB; the count binds). Only ``^base\\.(\\d+)$``
+    siblings are candidates, oldest first (``.1`` is the OLDEST); never the
+    active file, never PROTECTED or exempt bases, at most 3 unlinks per call.
+    R5: never gated on custody or ack. PRIME RULE: neutral (retention only).
+    """
+    rotated = False
     try:
         if os.path.exists(file) and os.path.getsize(file) > 20 * 1024 * 1024:
             # Retention may remove older siblings and leave gaps. Counting the
@@ -58618,8 +58155,18 @@ def rotate_log(file):
                     suffixes.append(int(suffix))
             next_index = max(suffixes, default=0) + 1
             os.rename(file, f"{file}.{next_index}")
+            rotated = True
     except OSError as e:
         logger.error(f"[LOG ROTATION] failed for {file}: {e} [PIPELINE ENFORCEMENT]")
+    if rotated or max_rotations is not None or max_bytes is not None:
+        try:
+            cap = rotation_cap.enforce_cap(
+                file, max_rotations=max_rotations, max_bytes=max_bytes,
+            )
+            if cap.get("class") == "UNCLASSIFIED":
+                logger.warning(f"[ROTATION CAP] unclassified family {file} (not capped)")
+        except Exception as e:  # noqa: BLE001 - the cap never blocks an append
+            logger.error(f"[ROTATION CAP] failed for {file}: {e}")
 
 
 _jsonl_append_locks_guard = threading.Lock()
@@ -58636,8 +58183,6 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "DECISION_FEATURE_SNAPSHOT_FILE",
     "CSV_FALLBACK_JSONL",
     "CHASE_OFFSET_TOUCH_GRID_FILE",
-    "ORDER_MULTIVERSE_FILE",
-    "ORDER_MULTIVERSE_ENTRY_GRID_FILE",
     "OPPORTUNITY_CAPTURE_FILE",
     "CYCLE_3M_UNIVERSE_FILE",
     "LANE_OPPORTUNITY_CAPTURE_FILE",
@@ -58659,16 +58204,12 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "GOLDEN_STACK_REJECTIONS_FILE",
     "SHADOW_OUTCOME_FILE",
     "PATH_REPLAY_FILE",
-    "POST_EXIT_REPLAY_FILE",
     "TRADE_OUTCOME_FILE",
-    "SIGNAL_REPLAY_FILE",
-    "COUNTERFACTUAL_FILE",
     "SOURCE_ORDER_MARKET_EVIDENCE_FILE",
     "MICROSTRUCTURE_TAPE_FILE",
     "ADAPTIVE_ENTRY_DECISIONS_FILE",
     "RETIRED_TILE_BOUNDARY_FILE",
     "XVL_SHADOW_FILE",
-    "SHADOW_EXIT_PATH_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
     "execution_funnel.jsonl",
@@ -59452,7 +58993,6 @@ def _validate_research_ledgers_on_startup():
     """Quarantine known active research corruption before mirror discovery."""
     ledgers = (
         (SHADOW_LANE_OUTCOME_FILE, "SHADOW_LANE_STARTUP"),
-        (SIGNAL_REPLAY_FILE, "SIGNAL_REPLAY_STARTUP"),
     )
     for path, label in ledgers:
         with _jsonl_path_lock(path):
@@ -60268,10 +59808,6 @@ def main():
     # A port conflict is therefore fatal to the entire bot, never just a web thread.
     dashboard_httpd = _create_dashboard_server()
     threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
-    try:
-        _SHADOW_EXIT_RECORDER.start()
-    except Exception as exc:  # noqa: BLE001 - liveness reports a dead worker
-        logger.error(f"[SHADOW_EXIT] eager start failed: {exc}")
     # Publish liveness before synchronous restore, preload, and reconciliation.
     threading.Thread(
         target=safe_thread(heartbeat_loop), name="process-heartbeat", daemon=True
@@ -60378,10 +59914,9 @@ def main():
         _segregate_lane_pnl_ledger_for_epoch()
     except Exception as exc:
         logger.error(f"[LANE_PNL] epoch segregation failed: {exc} [PIPELINE ENFORCEMENT]")
-    try:
-        _load_post_exit_replays()
-    except Exception as exc:
-        logger.warning(f"[STARTUP] post-exit replay restore failed: {exc}")
+    # R17 (23 Oct): the post-exit replay boot restore is retired with its
+    # sidecar file. Pending v22 maturation still resumes from the provisional
+    # journal (collector_v22_provisional), which is unchanged.
     _start_api_state_cache_refresher()
     time.sleep(1)
     logger.info(f"[RAILWAY] Early health server on :{DASHBOARD_PORT}/health [PIPELINE ENFORCEMENT]")
@@ -60665,10 +60200,18 @@ def main():
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
     threading.Thread(target=safe_thread(ws_watchdog), daemon=True).start()
     threading.Thread(target=safe_thread(analytics_loop), daemon=True).start()
-    threading.Thread(
-        target=safe_thread(all_opportunity_future_path_evidence_loop),
-        daemon=True,
-    ).start()
+    # DISK-CAP: background rotation-cap sweeper (R5: never custody-gated).
+    rotation_cap.start_sweeper(os.getcwd, shutdown_event, interval_sec=300.0, logger=logger)
+    # DISK-CAP E4b/E4c + v3/.locks (R5): never custody/ack-gated.
+    threading.Thread(target=safe_thread(r5_retention_loop), daemon=True,
+                     name="r5_retention").start()
+    # R17 (23 Oct): the future-path worker subprocess is stopped (HM R17 (B)1).
+    # It wrote LIVE_1S future-path market_segments from L1 microstructure,
+    # which no fill, exit or tile decision reads.
+    with state_lock:
+        state["all_opportunity_future_path_evidence"] = {
+            "status": "disabled: R17", "retired": "R17", "worker_started": False,
+        }
     threading.Thread(target=safe_thread(position_manager), daemon=True).start()
     threading.Thread(target=retired_tile_boundary_worker, daemon=True).start()
     threading.Thread(target=safe_thread(ttl_monitor), daemon=True).start()

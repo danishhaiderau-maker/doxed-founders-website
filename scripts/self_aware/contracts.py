@@ -1450,7 +1450,14 @@ RECONCILERS: dict[str, Callable[[Any, dict[str, Any]], tuple[list, dict]]] = {
 
 # ------------------------------------------------------------------ run
 
+# R3 quarantine (mirrors services/btc-conservative-agent/research/r3_quarantine.py):
+# genome grid outputs price on the 1s tape and are never read.
+GENOME_GRID_R3_QUARANTINED = True
+
+
 def _genome_grid(paths: Paths) -> dict[str, Any] | None:
+    if GENOME_GRID_R3_QUARANTINED:
+        return None
     root = Path(paths.exports).parent / "genome-grid"
     rep = read_json(root / "genome_grid_report.json") if root.exists() else None
     if not isinstance(rep, dict):
@@ -1474,7 +1481,8 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
     rt = facts.get("runtime") or {}
     ctx: dict[str, Any] = {"now": now, "store": store, "facts": facts, "docs": docs,
                            "roster": rt.get("active_tile_lanes") or [], "retired": retired_lanes(paths.analyzer_repo),
-                           "genome_grid": _genome_grid(paths), "genome_grid_dir": Path(paths.exports).parent / "genome-grid"}
+                           "genome_grid": _genome_grid(paths),
+                           "genome_grid_dir": None if GENOME_GRID_R3_QUARANTINED else Path(paths.exports).parent / "genome-grid"}
     fetch = fetcher or Fetcher(paths, docs)
     ctx["fetch"] = fetch
     started = _epoch_started_ts(paths)

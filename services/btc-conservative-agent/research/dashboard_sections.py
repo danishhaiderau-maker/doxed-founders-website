@@ -143,6 +143,11 @@ def genome_grid_checks(grid: Mapping[str, Any] | None, combos: Mapping[str, Any]
     checks: list[dict[str, Any]] = []
     combos = combos or {}
     dims = tuple(combos.get("dimensions") or ())
+    if grid and grid.get("status") == "R3_QUARANTINED":
+        checks.append({"id": "genome_grid_present", "severity": AMBER,
+                       "observed": "genome grid R3_QUARANTINED (prices on 1s tape); not read until rebuilt on paper_fill",
+                       "expected": "genome grid rebuilt on paper_fill + quote_trigger (R3/R4)"})
+        return checks
     if not grid or grid.get("status") == "UNAVAILABLE":
         sev = RED if dims == LEGACY_COMBO_DIMENSIONS or not dims else AMBER
         checks.append({"id": "genome_grid_present", "severity": sev,
