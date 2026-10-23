@@ -12,8 +12,7 @@ from research_v3_candidates import (
     _validation_receipt_identity,
     _comparison_cohort_receipt,
     _conservative_child_receipt,
-    _conservative_ohlc_prices,
-    evaluate_protection_screen,
+    evaluate_protection_screen as _evaluate_protection_screen,
     load_candidate_inputs,
     protection_screen,
 )
@@ -21,6 +20,14 @@ from research_v3_store import V3EvidenceStore
 from research_v3_ranking import rank_safe_policies
 from research_v3_sealed_holdout import consume_seal, create_seal
 from research.quantity_execution import build_signed_quantity_constraints
+from book_walk_test_fixture import flat_tape
+
+
+def evaluate_protection_screen(inputs, *args, **kwargs):
+    # Exits are repriced on bfx_book_10l rows only (HM defect 2 / RK binding 1); every fixture
+    # event is inside this synthetic book coverage unless a test passes its own ``book_walk``.
+    kwargs.setdefault("book_walk", flat_tape())
+    return _evaluate_protection_screen(inputs, *args, **kwargs)
 
 
 def source(event_id="event-1", episode_id="episode-1"):
@@ -625,10 +632,18 @@ class V3CandidateTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["regime"], "BULL")
 
-    def test_one_minute_fallback_is_adverse_first(self):
-        candle = [{"t": 60, "o": 100, "h": 102, "l": 98, "c": 101}]
-        self.assertEqual([row["price"] for row in _conservative_ohlc_prices(candle, direction="LONG")], [100, 98, 102, 101])
-        self.assertEqual([row["price"] for row in _conservative_ohlc_prices(candle, direction="SHORT")], [100, 102, 98, 101])
+    def test_no_candle_fallback_event_outside_book_coverage_is_r17_unproven(self):
+        self.assertFalse(hasattr(research_v3_candidates, "_conservative_ohlc_prices"))
+        row = source()
+        row["canonical_1m_ohlc"] = [{"t": 960, "o": 100, "h": 102, "l": 98, "c": 101}]
+        report = _evaluate_protection_screen([row])
+        self.assertEqual(report["candidates"], [])
+        marks = report["mark_source"]
+        self.assertEqual(marks["r17_unproven_events"], 1)
+        self.assertEqual(marks["countable_events"], 0)
+        self.assertEqual(marks["r17_unproven_reasons"], {"BOOK_WALK_NOT_LOADED": 1})
+        self.assertEqual(marks["alert_level"], "RED")
+
     def test_screen_contains_requested_loss_and_profit_protection_families(self):
         names = {row["protection_id"] for row in protection_screen()}
         self.assertIn("ATR_TP_2.5_ATR_SL_1", names)
@@ -716,21 +731,21 @@ class V3CandidateTests(unittest.TestCase):
             for candidate in report["candidates"]
         ))
 
-    def test_missing_ordered_path_is_unsupported_not_zero_pnl(self):
-        row = source()
-        row["ordered_1s_prices"] = []
-        report = evaluate_protection_screen([row])
+    def test_event_outside_book_coverage_is_excluded_not_zero_pnl(self):
+        from book_walk_test_fixture import build_tape
+
+        covered = source("event-1", "episode-1")
+        uncovered = source("event-2", "episode-2")
+        uncovered["signal_ts"] = 20000
+        uncovered["entry_children"][0]["fill_ts"] = 20000
+        report = evaluate_protection_screen([covered, uncovered], book_walk=build_tape(900, 8800))
+        marks = report["mark_source"]
+        self.assertEqual(marks["countable_events"], 1)
+        self.assertEqual(marks["r17_unproven_events"], 1)
+        self.assertEqual(marks["r17_unproven_reasons"], {"BOOK_ROWS_DO_NOT_COVER_WINDOW": 1})
         first = report["candidates"][0]["validation"]
-        self.assertEqual(first["episodes_scored"], 0)
-        self.assertIn("episode-1", first["missing_or_unsupported_episode_ids"])
-        risk = first["risk"]
-        self.assertIsNone(risk["net_pnl_usd"])
-        self.assertIsNone(risk["max_drawdown_usd"])
-        candidate = report["candidates"][0]
-        self.assertEqual(candidate["ranking_status"], "INCOMPLETE_UNRANKED")
-        self.assertIsNone(candidate["ranking_score"])
-        self.assertNotIn("global_rank", candidate)
-        self.assertNotIn("family_rank", candidate)
+        self.assertNotIn("episode-2", first["missing_or_unsupported_episode_ids"])
+        self.assertTrue(all(candidate["episodes_total"] == 1 for candidate in report["candidates"]))
 
     def test_actual_and_counterfactual_share_canonical_chase_identity(self):
         counterfactual = source("counterfactual-lane")

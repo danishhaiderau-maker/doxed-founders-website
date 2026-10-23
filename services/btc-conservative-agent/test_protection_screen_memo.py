@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 import research_v3_candidates as rc
+from book_walk_test_fixture import flat_tape
 from research_v3_contract import canonical_hash
 
 
@@ -39,21 +40,20 @@ def test_each_distinct_replay_input_is_replayed_once_and_every_input_is_covered(
     calls = []
     original_cell = rc.replay_cell
 
-    class RecordingArrays(rc.PreparedReplayArrays):
-        def __init__(self, ordered, *, direction, entry_price, leverage, fill_ts):
-            super().__init__(ordered, direction=direction, entry_price=entry_price,
-                             leverage=leverage, fill_ts=fill_ts)
-            self.inputs = (entry_price, fill_ts)
+    class RecordingArrays(rc.PreparedBookWalkArrays):
+        def __init__(self, window, **kwargs):
+            super().__init__(window, **kwargs)
+            self.inputs = (kwargs["entry_price"], kwargs["fill_ts"])
 
     def recording(path, plan, **kwargs):
         calls.append((*path.inputs, kwargs["margin_usd"], plan.floor_key, plan.hard_stop,
                       plan.atr_sl, plan.atr_tp, plan.time_stop_sec))
         return original_cell(path, plan, **kwargs)
 
-    monkeypatch.setattr(rc, "PreparedReplayArrays", RecordingArrays)
+    monkeypatch.setattr(rc, "PreparedBookWalkArrays", RecordingArrays)
     monkeypatch.setattr(rc, "replay_cell", recording)
     source = _source()
-    screen = rc.evaluate_protection_screen([source])
+    screen = rc.evaluate_protection_screen([source], book_walk=flat_tape())
     assert screen["input_events"] == 1
     # Both worlds replay the same fill once each; nothing else is replayed.
     expected = Counter()
