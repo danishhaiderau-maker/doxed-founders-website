@@ -194,20 +194,59 @@ def _docstring_ids(tree) -> set[int]:
     return out
 
 
+def _module_level_nodes(tree):
+    """Every node outside function bodies: module- and class-level code (incl. nested if/try/with/for blocks)."""
+    stack = list(tree.body)
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue  # decorators / defaults are module-level, but the body is a function scope
+        stack.extend(ast.iter_child_nodes(n))
+
+
+def _rhs_pricer(value, names, aliases):
+    """The retired pricer a binding's RHS *contains* anywhere (tuple, call arg, dict value, lambda body, ...)."""
+    hits = set()
+    for x in ast.walk(value):
+        if isinstance(x, ast.Name) and x.id in names:
+            hits.add(x.id)
+        elif isinstance(x, ast.Name) and x.id in aliases:
+            hits.add(aliases[x.id])
+        elif isinstance(x, ast.Attribute) and x.attr in names:
+            hits.add(x.attr)
+    return min(hits) if hits else None
+
+
+def _binding_targets(n):
+    if isinstance(n, ast.Assign):
+        return n.targets
+    if isinstance(n, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+        return [n.target]
+    return []
+
+
 def _module_aliases(tree, names) -> dict[str, str]:
-    """HM #850 R2 C1: every local name a module binds to a retired pricer, resolved to the pricer's real name.
+    """HM #850 R2 C1/C1b: every local name a module binds to a retired pricer, resolved to the pricer's real name.
 
     ``from X import evaluate_limit_fill as _x`` binds ``_x``; ``import fill_model as fm2`` binds ``fm2`` as a module
     alias (its ``fm2.<pricer>`` attributes are pinned by attribute name); ``_y = fm2.realistic_exit_margin`` and
-    ``_z = _x`` bind ``_y`` / ``_z``. Bindings anywhere in the module (top level, class or function body) count and
-    are resolved to a fixpoint so alias chains cannot hide a call."""
+    ``_z = _x`` bind ``_y`` / ``_z`` wherever they occur (top level, class or function body).
+
+    C1b: at module / class level any binding whose RHS merely *contains* a retired name or alias marks ALL of its
+    targets: ``_a, _b = _x, 1``, ``_p = functools.partial(_x)``, ``_HM = {'a': _x}`` (and ``_HM['a'] = _x``),
+    ``_l = lambda *a: _x(*a)``. Function-local bindings keep the bare-alias rule (a local ``r = _x(...)`` result is
+    a value, and marking it module-wide would flag unrelated functions that reuse the name). Resolved to a fixpoint
+    so alias chains cannot hide a call."""
     aliases: dict[str, str] = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.ImportFrom):
             for a in n.names:
                 if a.name in names:
                     aliases[a.asname or a.name] = a.name
-    assigns = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr))]
+    kinds = (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)
+    top_ids = {id(n) for n in _module_level_nodes(tree) if isinstance(n, kinds)}
+    assigns = [n for n in ast.walk(tree) if isinstance(n, kinds)]
     changed = True
     while changed:
         changed = False
@@ -215,13 +254,15 @@ def _module_aliases(tree, names) -> dict[str, str]:
             v = n.value
             if v is None:
                 continue
-            real = (v.id if isinstance(v, ast.Name) and v.id in names else
-                    aliases.get(v.id) if isinstance(v, ast.Name) else
-                    v.attr if isinstance(v, ast.Attribute) and v.attr in names else None)
+            if id(n) in top_ids:
+                real = _rhs_pricer(v, names, aliases)
+            else:
+                real = (v.id if isinstance(v, ast.Name) and v.id in names else
+                        aliases.get(v.id) if isinstance(v, ast.Name) else
+                        v.attr if isinstance(v, ast.Attribute) and v.attr in names else None)
             if real is None:
                 continue
-            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
-            for t in targets:
+            for t in _binding_targets(n):
                 for tn in ast.walk(t):
                     if isinstance(tn, ast.Name) and tn.id not in aliases and tn.id not in names:
                         aliases[tn.id] = real
@@ -346,6 +387,70 @@ def test_planted_import_alias_caller_fails_the_pin(tmp_path):
     tree = ast.parse(PLANTED_ALIAS_SRC)
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "sneaky_alias_call")
     assert _refs(fn, names, set()) == set() and _refs(fn, names, set(), _module_aliases(tree, names))
+
+
+PLANTED_C1B = {
+    # HM #850 R2 C1b planted cases D-G: a module-level binding whose RHS *contains* a retired alias
+    "D_tuple": "from conservative_limit_fill import evaluate_limit_fill as _x\n_a, _b = _x, 1\n"
+               "def sneaky():\n    return _a()\n",
+    "E_partial": "import functools\nfrom conservative_limit_fill import evaluate_limit_fill as _x\n"
+                 "_p = functools.partial(_x)\ndef sneaky():\n    return _p()\n",
+    "F_dict": "from conservative_limit_fill import evaluate_limit_fill as _x\n_HM = {'a': _x}\n"
+              "def sneaky():\n    return _HM['a']()\n",
+    "G_lambda": "from conservative_limit_fill import evaluate_limit_fill as _x\n_l = lambda *a: _x(*a)\n"
+                "def sneaky():\n    return _l(1)\n",
+}
+
+
+def _planted_c1b(tmp_path, key):
+    names = set(r3_quarantine.RETIRED_TAPE_PRICERS)
+    rel = f"services/btc-conservative-agent/planted_c1b_{key}.py"
+    p = tmp_path / f"planted_c1b_{key}.py"
+    p.write_text(PLANTED_C1B[key], encoding="utf-8")
+    hits = _scan_file(p, rel, names)
+    return rel + "::sneaky", hits, _pin_violations({**_repo_pricer_references(), **hits})
+
+
+def test_c1b_planted_tuple_assignment_fails_the_pin(tmp_path):
+    scope, hits, bad = _planted_c1b(tmp_path, "D_tuple")
+    assert hits[scope] == {"evaluate_limit_fill"}
+    assert f"UNPINNED {scope} -> ['evaluate_limit_fill']" in bad
+
+
+def test_c1b_planted_functools_partial_fails_the_pin(tmp_path):
+    scope, hits, bad = _planted_c1b(tmp_path, "E_partial")
+    assert hits[scope] == {"evaluate_limit_fill"}
+    assert f"UNPINNED {scope} -> ['evaluate_limit_fill']" in bad
+
+
+def test_c1b_planted_dict_holding_alias_fails_the_pin(tmp_path):
+    scope, hits, bad = _planted_c1b(tmp_path, "F_dict")
+    assert hits[scope] == {"evaluate_limit_fill"}
+    assert f"UNPINNED {scope} -> ['evaluate_limit_fill']" in bad
+
+
+def test_c1b_planted_lambda_wrapper_fails_the_pin(tmp_path):
+    scope, hits, bad = _planted_c1b(tmp_path, "G_lambda")
+    assert hits[scope] == {"evaluate_limit_fill"}
+    assert f"UNPINNED {scope} -> ['evaluate_limit_fill']" in bad
+
+
+def test_c1b_rhs_containment_marks_every_target_at_module_and_class_level():
+    names = set(r3_quarantine.RETIRED_TAPE_PRICERS)
+    tree = ast.parse(
+        "import functools, fill_model as fm\n"
+        "_a, (_b, _c) = fm.maker_fill_rows, (1, 2)\n"
+        "_d = _e = functools.partial(_a, 3)\n"
+        "_T = {}\n_T['k'] = [fm.taker_fill_rows]\n"
+        "class K:\n    tbl = {'x': lambda: _d()}\n"
+        "if True:\n    _g = (_c, 1)\n"
+        "def f():\n    res = fm.realistic_exit_margin(1)\n    return res\n"
+    )
+    al = _module_aliases(tree, names)
+    assert {k: al[k] for k in ("_a", "_b", "_c", "_d", "_e", "_g")} == dict.fromkeys(
+        ("_a", "_b", "_c", "_d", "_e", "_g"), "maker_fill_rows")
+    assert al["_T"] == "taker_fill_rows" and al["tbl"] == "maker_fill_rows"
+    assert "res" not in al  # function-local value bindings keep the bare-alias rule
 
 
 def test_module_aliases_resolve_chains_and_local_imports():
