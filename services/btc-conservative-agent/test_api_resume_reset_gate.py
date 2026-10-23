@@ -43,7 +43,7 @@ def resume_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "set_execution_paused", clear_pause)
     monkeypatch.setattr(bot, "_patch_api_state_cache_fields", patch_cache)
     monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
-    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "")
+    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "test-admin-token-rk4")   # RK (4) #852 R3: loopback is not admin; throwaway test token
     with bot.state_lock:
         bot.state["execution_paused"] = True
         bot.state["execution_reason"] = "ADMIN_MANUAL"
@@ -76,7 +76,7 @@ def test_resume_lock_contention_blocks_before_readiness_or_mutation(resume_runti
     assert bot._fresh_collection_lock.acquire(blocking=False)
     try:
         with bot.app.test_client() as client:
-            response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+            response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"})
     finally:
         bot._fresh_collection_lock.release()
     assert response.status_code == 409
@@ -88,7 +88,7 @@ def test_nonterminal_active_reset_receipt_blocks_without_mutation(resume_runtime
     root, calls = resume_runtime
     _write_reset_receipts(root)
     with bot.app.test_client() as client:
-        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"})
     assert response.status_code == 409
     assert response.get_json()["reason"] == "FRESH_COLLECTION_RESET_IN_PROGRESS"
     _assert_no_resume_mutation(calls)
@@ -103,7 +103,7 @@ def test_unreadable_or_unsafe_active_reset_receipt_fails_closed(
     receipts.mkdir(parents=True)
     (receipts / "ACTIVE_RESET.json").write_text(pointer_text, encoding="utf-8")
     with bot.app.test_client() as client:
-        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"})
     assert response.status_code == 409
     assert response.get_json()["reason"] == "RESET_RECEIPT_UNREADABLE"
     _assert_no_resume_mutation(calls)
@@ -115,7 +115,7 @@ def test_normal_resume_contract_is_unchanged(resume_runtime, completed_pointer):
     if completed_pointer:
         _write_reset_receipts(root, stage="COMPLETE")
     with bot.app.test_client() as client:
-        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"})
     assert response.status_code == 200
     assert response.get_json() == {"status": "resumed", "execution_paused": False,
                                    "pause_owner": None, "active_pause_reason": None}
@@ -147,6 +147,6 @@ def test_large_terminal_operation_allows_resume_and_fresh_reset_noop(
 
     assert bot._fresh_research_reset_resume() is None
     with bot.app.test_client() as client:
-        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"})
     assert response.status_code == 200
     assert calls == {"readiness": 1, "save": 1, "resume": 1, "cache": 1}

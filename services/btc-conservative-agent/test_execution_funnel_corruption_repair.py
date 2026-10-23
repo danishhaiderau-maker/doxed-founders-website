@@ -17,6 +17,12 @@ import bot
 import execution_funnel
 
 
+@pytest.fixture(autouse=True)
+def _rk4_test_admin_token(monkeypatch):
+    """RK (4) #852 R3: loopback is no longer an admin credential; requests carry a throwaway test token."""
+    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "test-admin-token-rk4")
+
+
 def _fixture_bytes():
     return (
         b'{"stage":"APPROVE","trade_id":"one"}\n'
@@ -158,7 +164,7 @@ def test_endpoint_is_admin_paper_only_and_uses_exact_funnel_path(tmp_path, monke
                     "expected_sha256": _sha(raw), "expected_invalid_line": 2,
                     "expected_invalid_line_sha256": _bad_line_sha(raw),
                 },
-                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
             )
         assert response.status_code == 200
         assert response.get_json()["status"] == "repaired"
@@ -186,7 +192,7 @@ def test_endpoint_refuses_when_live_is_armed(tmp_path, monkeypatch):
                     "expected_sha256": _sha(raw), "expected_invalid_line": 2,
                     "expected_invalid_line_sha256": _bad_line_sha(raw),
                 },
-                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
             )
         assert response.status_code == 409
         assert target.read_bytes() == raw
@@ -212,7 +218,7 @@ def test_endpoint_requires_exact_invalid_line_sha256(tmp_path, monkeypatch):
             missing = client.post(
                 "/api/research/repair-execution-funnel",
                 json={"expected_sha256": _sha(raw), "expected_invalid_line": 2},
-                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
             )
             malformed = client.post(
                 "/api/research/repair-execution-funnel",
@@ -220,7 +226,7 @@ def test_endpoint_requires_exact_invalid_line_sha256(tmp_path, monkeypatch):
                     "expected_sha256": _sha(raw), "expected_invalid_line": 2,
                     "expected_invalid_line_sha256": "ABC",
                 },
-                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
             )
         assert missing.status_code == 400
         assert malformed.status_code == 400
