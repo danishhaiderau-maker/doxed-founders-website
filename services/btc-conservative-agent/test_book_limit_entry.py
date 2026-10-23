@@ -128,6 +128,7 @@ def test_c_no_fee_term_in_the_entry_price_or_receipt():
                          quantity_constraints=CONSTRAINTS, symbol=SYMBOL)
     assert r["fill_price"] == 99.90  # exactly the book level: no fee/penalty added to the price
     assert not [k for k in _keys(r) if "fee" in k.lower()]
-    import pathlib
-    src = pathlib.Path(__file__).with_name("book_limit_entry.py").read_text().lower()
-    assert "fee" not in src.replace("feed", "")
+    import io, pathlib, tokenize
+    src = pathlib.Path(__file__).with_name("book_limit_entry.py").read_text()
+    names = {t.string.lower() for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type == tokenize.NAME}
+    assert not [n for n in names if "fee" in n]  # no fee identifier anywhere in the entry pricer's code
