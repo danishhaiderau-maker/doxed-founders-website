@@ -6,7 +6,7 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
-import { liveRowCountability, liveRowCountabilityWithLegs } from './live-row-countability';
+import { liveRowCountabilityWithLegs, liveRowUncheckedCountability } from './live-row-countability';
 import { liveLegStamps } from './live-trade-export.mapper';
 
 type IntentEnvelope = {
@@ -434,7 +434,8 @@ export function mapSubscriberExchangeLiveBook(input: {
   trades.push(...mergedParticipantRows, ...unmatchedLedger);
 
   for (const t of trades) {
-    if (t.nonCountable === undefined) Object.assign(t, liveRowCountability(t.exitReason));
+    // HM 02:55 blocker 4: rows not built through the leg check (ledger-only closes) default to non-countable.
+    if (t.nonCountable === undefined) Object.assign(t, liveRowUncheckedCountability(t.exitReason));
   }
   trades.sort((a, b) => {
     const ta = parseMelbourneTimestampMs(a.exchangeExitTime ?? a.time) ?? 0;

@@ -131,3 +131,13 @@ test('RK1: executor wake carries optional exit stamps; malformed stamps are drop
   assert.equal(bad?.signedClose?.flySendStartedAtMs, null);
   assert.equal(wake({})?.signedClose?.exitTriggerAtMs, null);
 });
+
+test('HM 02:55 blocker 4: a ledger-only live close (no leg stamps) defaults to LIVE_LEGS_UNCHECKED', () => {
+  const closedAt = new Date('2026-07-23T10:55:53.717Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [], position: null, participants: [],
+    ledgerCloses: [{ ledgerId: '2001', closedAt, pnlUsd: 2.25, description: 'Position closed' }],
+  } as never);
+  assert.ok(book.trades.length >= 1);
+  for (const t of book.trades) assert.deepEqual([t.nonCountable, t.nonCountableReason], [true, 'LIVE_LEGS_UNCHECKED']);
+});

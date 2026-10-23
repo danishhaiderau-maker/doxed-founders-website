@@ -34038,7 +34038,7 @@ def _fly_exit_send_record(trade_id: str):
                 "fly_send_rtt_s": row.get("fly_send_rtt_s"),
                 "railway_received_at_ts": _iso_or_unix(row.get("platform_received_at")),
                 "attempts": row.get("fly_attempts"),
-                "exit_signal_at_ts": row.get("exit_signal_at_unix")}  # None until POSITION_CLOSED carries it
+                "exit_signal_at_ts": row.get("exit_signal_at_unix")}  # RK (1): POSITION_CLOSED exit_trigger_ts
     return None
 
 

@@ -44,6 +44,14 @@ export function liveRowCountability(...reasons: Array<string | null | undefined>
   return { nonCountable: false, nonCountableReason: null };
 }
 
+/** HM 02:55 blocker 4 (R17): a live row with no leg stamps to check (e.g. a Bitfinex cash-ledger-only close) is
+ * never countable: FORCED_CLOSE when forced, else LIVE_LEGS_UNCHECKED. */
+export const LIVE_LEGS_UNCHECKED = 'LIVE_LEGS_UNCHECKED';
+export function liveRowUncheckedCountability(...reasons: Array<string | null | undefined>): LiveRowCountability {
+  const forced = liveRowCountability(...reasons);
+  return forced.nonCountable ? forced : { nonCountable: true, nonCountableReason: LIVE_LEGS_UNCHECKED };
+}
+
 /**
  * HM 01:43 item 3 (R17): per-leg check of a LIVE row. Each side (entry; exit when closed by a Fly-sent order)
  * needs the four stamps signal -> Fly send -> relay (Railway) receive -> exchange ack/fill; each stamp ends one

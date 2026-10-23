@@ -60,14 +60,15 @@ test('B4: website live book rows carry non_countable for force-flattened closes'
   assert.equal(by.tp?.nonCountableReason, 'LIVE_LEG_MISSING:entry.signal');
 });
 
-test('B4: unlinked ledger rows are stamped (countable unless forced)', () => {
+test('B4: unlinked ledger rows are stamped (HM 02:55 blocker 4: no leg stamps -> LIVE_LEGS_UNCHECKED)', () => {
   const book = mapSubscriberExchangeLiveBook({
     orders: [],
     position: null,
     participants: [],
     ledgerCloses: [{ ledgerId: 7, closedAt: now, pnlUsd: 1 } as never],
   });
-  assert.equal(book.trades[0]?.nonCountable, false);
+  assert.equal(book.trades[0]?.nonCountable, true);
+  assert.equal(book.trades[0]?.nonCountableReason, 'LIVE_LEGS_UNCHECKED');
 });
 
 test('B4: live trade export row and CSV carry non_countable', () => {
