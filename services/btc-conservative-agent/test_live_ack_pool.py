@@ -153,7 +153,9 @@ def test_two_accounts_without_config_fail_closed(gd):
 def test_r17_accepts_only_measured_pooled_labels():
     rx = re.compile(F.MEASURED_DELAY_PATTERN)
     assert rx.fullmatch("POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_q90_n25")
-    assert rx.fullmatch("lane_max_n12")
+    # HM #842 R3 nit: old per-lane labels no longer count
+    assert not rx.fullmatch("lane_max_n12")
+    assert not rx.fullmatch("lane_q90_n25")
     assert not rx.fullmatch("POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_default_until_n10_n4")
     assert not rx.fullmatch("POOLED_LIVE_ACK_CROSS_LANE:STOP_max_n12")
     assert all(rx.fullmatch(f"{lap.DELAY_SOURCE}:{k}_q90_n20") for k in lap.KEYS)
