@@ -98,9 +98,9 @@ def _decision(**kw):
 
 
 def test_quote_source_ws_rest_unknown():
-    assert tm.quote_source(5.0, 5.0, 3.0) == "WS"
-    assert tm.quote_source(3.0, 5.0, 3.0) == "REST"
-    assert tm.quote_source(4.0, 5.0, 3.0) == "UNKNOWN" and tm.quote_source(None, 5.0, 3.0) == "UNKNOWN"
+    assert tm.quote_source(5.0, 5.0, 3.0) == "ws_ticker"
+    assert tm.quote_source(3.0, 5.0, 3.0) == "rest_refresh"
+    assert tm.quote_source(4.0, 5.0, 3.0) == "unknown" and tm.quote_source(None, 5.0, 3.0) == "unknown"
 
 
 def test_entry_quote_stamp_is_cheap_quote_only():
@@ -108,7 +108,7 @@ def test_entry_quote_stamp_is_cheap_quote_only():
                               recorded_ts=T0 + 0.01)
     assert set(q) == set(tm.ENTRY_QUOTE_KEYS)
     assert (q["entry_quote_bid"], q["entry_quote_ask"], q["entry_quote_age_s"]) == (83160.0, 83170.0, 0.4)
-    assert q["entry_quote_source"] == "WS" and q["entry_decision_signal_ts"] == T0
+    assert q["entry_quote_source"] == "ws_ticker" and q["entry_decision_signal_ts"] == T0
     assert q["entry_decision_recorded_ts"] == T0 + 0.01 and q["entry_quote_age_flag"] is None
     neg = tm.entry_quote_fields(_decision(bbo_age_sec=-0.3))
     assert neg["entry_quote_age_s"] is None and neg["entry_quote_age_flag"] == tm.NEGATIVE_AGE
@@ -152,10 +152,10 @@ def test_live_limit_price_sent_only_for_limit_orders():
 
 def test_pair_row_carries_entry_measure_and_live_limit_sent():
     twin = {"side": "LONG", "paper_entry_quote_ask": 83170.0, "paper_entry_book_best_ask": 83150.0,
-            "paper_entry_trigger_vs_book_bp": 2.405, "paper_entry_quote_source": "WS"}
+            "paper_entry_trigger_vs_book_bp": 2.405, "paper_entry_quote_source": "ws_ticker"}
     chain = {"side": "LONG", "order_type": "LIMIT", "order_price": 83171.0}
     row = lvp.pair_row("gs1-x", chain, twin)
-    assert row["paper_entry_trigger_vs_book_bp"] == 2.405 and row["paper_entry_quote_source"] == "WS"
+    assert row["paper_entry_trigger_vs_book_bp"] == 2.405 and row["paper_entry_quote_source"] == "ws_ticker"
     assert row["paper_entry_book_best_ask"] == 83150.0 and row["live_limit_price_sent"] == 83171.0
     bare = lvp.pair_row("gs1-y", {}, {"side": "LONG"})
     assert bare["paper_entry_trigger_vs_book_bp"] is None and bare["live_limit_price_sent"] is None
@@ -285,7 +285,7 @@ def test_tile_row_fill_price_limit_and_pnl_byte_identical():
     r0, r1 = mt.tile_trade_row(base, **kw), mt.tile_trade_row(stamped, **kw)
     for block in ("fill", "pnl", "order", "pricing"):
         assert json.dumps(r0.get(block), sort_keys=True) == json.dumps(r1.get(block), sort_keys=True), block
-    assert r1["trigger"]["entry_quote_source"] == "WS" and r1["trigger"]["entry_trigger_vs_book_bp"] == round(
+    assert r1["trigger"]["entry_quote_source"] == "ws_ticker" and r1["trigger"]["entry_trigger_vs_book_bp"] == round(
         (83170 - 83150) / 83170 * 1e4, 3)
     assert r1["exit"]["trigger_book_age_s"] == 1.0 and r1["exit"]["trigger_vs_book_bp"] is not None
     # the measurement never rewrites the trade's own prices
