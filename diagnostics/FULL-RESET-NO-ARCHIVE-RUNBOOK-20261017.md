@@ -16,7 +16,7 @@ none is applied or shown anywhere.
 * DELETE is an explicit set of data classes: paper rows (`trades_3factor.csv`, `expired_orders_3factor.csv`, lane
   ledgers; the PAPER_FILL_FORCED deploy-flatten rows are rows of these files), `paper_ioc_no_fill_shadow.jsonl`,
   DISLOC ledgers, shadow / counterfactual streams, tape (`market_microstructure_1s`), `bfx_book_10l_1s`,
-  `bfx_trades`, `bfx_deriv_status_1s`, `venue_bbo_1m`, cross venue, context, liquidations, and every other top-level
+  `bfx_trades`, `bfx_deriv_status_1s`, `bfx_ws_events`, `venue_bbo_1m`, cross venue, context, liquidations, and every other top-level
   `.jsonl` / `.csv` row stream with all rotated `.N` / `.N.gz` copies.
 * Unclassified files are RETAINED and listed in the plan and receipt (never deleted silently).
 * The V3 ledgers, collector v22 seals and research payloads are reset by the existing in-process guarded reset
