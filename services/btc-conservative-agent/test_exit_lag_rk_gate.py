@@ -219,17 +219,22 @@ def test_only_bot_code_sets_exchange_resident():
     here = pathlib.Path(__file__).resolve().parent
     repo = here.parent.parent
     pat = re.compile(r"""exit_order_class["']?\]?\s*(?::|(?<![=!<>])=(?!=))\s*[^\n=]*EXCHANGE_RESIDENT|EXCHANGE_RESIDENT\s*=\s*["']""")
+    import os
     hits = set()
-    for p in repo.rglob("*"):
-        if (p.suffix not in (".py", ".ts", ".tsx", ".js", ".mjs") or "node_modules" in p.parts or ".git" in p.parts
-                or p.name.startswith("test_") or ".test." in p.name or "fixtures" in p.parts):
-            continue
-        try:
-            txt = p.read_text(errors="ignore")
-        except OSError:
-            continue
-        if pat.search(txt):
-            hits.add(str(p.relative_to(repo)))
+    skip_dirs = {"node_modules", ".git", "fixtures", "dist", "build", ".next", "__pycache__", ".venv", "venv"}
+    for root, dirs, files in os.walk(repo, followlinks=False):   # pruned walk (never descends node_modules)
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+        for name in files:
+            if (not name.endswith((".py", ".ts", ".tsx", ".js", ".mjs")) or name.startswith("test_")
+                    or ".test." in name or ".spec." in name):
+                continue
+            p = pathlib.Path(root) / name
+            try:
+                txt = p.read_text(errors="ignore")
+            except OSError:
+                continue
+            if pat.search(txt):
+                hits.add(str(p.relative_to(repo)))
     svc = "services/btc-conservative-agent/"
     web = "apps/api/src/trading-agents/signal-subscriber-execution.service.ts"
     assert hits <= {svc + "order_model.py", svc + "bot.py", web}, hits
