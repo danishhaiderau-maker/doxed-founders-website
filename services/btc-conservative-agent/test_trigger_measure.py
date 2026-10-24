@@ -220,6 +220,9 @@ def test_trigger_measure_used_only_by_measurement_sites():
 # HM C6: the ONLY top-level names of paper_fill.py the realism-v2 stack may change vs master (explicit allowlist; no
 # keyword guard). Anything else that differs fails - #809's measurement work leaves the pricer untouched.
 PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
+    # REALISM_V2 SHARED A5 REST FILL (FADE3 PR, RK PASS 25 Oct 06:24 AEDT): new names only; pricers above unchanged
+    "REST_TTL_S", "REST_RULE_A5", "NO_FILL_REST_TTL", "REST_SOURCE", "rest_fill", "REST_FILL_SITES",
+    "rest_site_violations",
     # RK PASS 24 Oct (CPU fix): incremental BookTail + memo key accessors + refresh telemetry (rule unchanged)
     "BookTail", "book_tail_stats", "_ensure_book_tail", "_book10l_newest_key", "_book10l_newest_eligible",
     # REALISM_V2 PR2: exchange-resident stop leg (delay 0) + forced first-row leg (RK 17:18 (2)/(4))

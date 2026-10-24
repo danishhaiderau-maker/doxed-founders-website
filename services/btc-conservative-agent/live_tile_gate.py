@@ -32,6 +32,7 @@ TILE_KEY_CODES: dict = {
     "gb1": 3,   # FAMILY_GSB1_CVD_DIV_REGIME
     "gb2": 4,   # FAMILY_GSB2_REGIME_SWITCHER
     "gs6": 5,   # FAMILY_GS06_COMMITTED_FADE_ATR_TP
+    "gf3": 8,   # FAMILY_GSF3_FADE3_TP30 (GS-FADE3-TP30; paper only, see PAPER_ONLY_TILE_KEYS)
 }
 # Retired tiles keep their codes reserved forever (never reissued): dsl=6, dsf=7.
 RESERVED_TILE_KEY_CODES = {"dsl": 6, "dsf": 7}
@@ -129,6 +130,11 @@ G4C_DISARMED_TILES = ("gs1", "gf3")   # G4(c'): GS-01 stays disarmed, and so doe
 DENY_G4_STOP_REEVAL = "LIVE_G4C_STOP_REEVAL"
 DENY_G6_NO_FIRST_L = "LIVE_G6_GS01_FIRST_L_PENDING"
 DENY_G6_HM_GATE = "LIVE_G6_HM_GATE_NOT_PASSED"
+# GS-FADE3-TP30 PAPER tile PR (RK PASS 25 Oct 06:24 AEDT): gf3 ships PAPER ONLY. Every arm path refuses it, whatever
+# LIVE_HM_GATE_FADE3 says, until a later reviewed PR removes it from this set (the env stays unset in this PR).
+PAPER_ONLY_TILE_KEYS = frozenset({"gf3"})
+PAPER_ONLY_LANES = frozenset({"FAMILY_GSF3_FADE3_TP30"})
+DENY_PAPER_ONLY_TILE = "LIVE_TILE_PAPER_ONLY"
 # RK ruling (24 Oct) L27: no pre-entry liq ESTIMATE path (G5 bans estimates). Instead the arm gate refuses while the latest
 # RECORDED real L (Bitfinex, persisted across restarts) is <= 15 bp past the stop, until a NEW stop amendment has passed
 # (LIVE_STOP_AMENDMENT_PASSED=PASS:<ref>, different from the value in force when that L was recorded).
@@ -556,6 +562,14 @@ def g4_outcome(stop_liq_bp: float | None) -> str | None:
     if liq_too_close(d):
         return G4_C
     return G4_B if d < LIQ_NORMAL_MIN_BP else G4_A
+
+
+def paper_only_arm_block(lane: str | None = None, tile_key: str | None = None) -> str | None:
+    """Fail-closed live refusal for a paper-only tile (gf3), by lane name OR tile key (the gf3 lane is not in the
+    active registry, so tile_key_for_lane() cannot be relied on to name it)."""
+    if str(lane or "").upper() in PAPER_ONLY_LANES or str(tile_key or "").lower() in PAPER_ONLY_TILE_KEYS:
+        return DENY_PAPER_ONLY_TILE
+    return None
 
 
 def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, hm_gate: str | None = None,

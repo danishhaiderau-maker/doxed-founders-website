@@ -795,6 +795,10 @@ TILE_FILL_SITES = {
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
+    # GS-FADE3-TP30 (gf3, paper only; RK PASS 25 Oct 06:24 AEDT): same four sites; its resting remainder is priced
+    # by the shared A5 helper via REST_FILL_SITES (tile_fill.price_entry_rest).
+    "FAMILY_GSF3_FADE3_TP30": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
+                               ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
 }
 # R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
 # (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five
@@ -1174,3 +1178,93 @@ def _post_fill_overrides(tree, module: str, fill_sites) -> list:
                     and isinstance(n.func.value, ast.Name) and n.func.value.id in bound:
                 out.append(f"{module}:{fn.name}: mutates fill result via .{n.func.attr}()")
     return out
+
+
+# ---------------------------------------------------------------- REALISM_V2 SHARED A5 REST FILL (AMEND1 A5)
+# ONE shared helper for the resting remainder of a marketable GTC entry (R4). Reached only through the registered
+# tile_fill.price_entry_rest site (REST_FILL_SITES / rest_site_violations). Existing lanes are untouched.
+REST_TTL_S = 3.0  # the ONE rest TTL; pinned equal to order_model.DEFAULT_TAKER_TTL_S (the live GTC cancel TTL)
+REST_RULE_A5 = "A5_TRADE_THROUGH"
+NO_FILL_REST_TTL = "NO_FILL_REST_TTL"
+REST_SOURCE = "BFX_TRADES"  # the receive-stamped trades feed of the exchange-stop trigger; never the ticker/tape
+
+
+def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, trades, ttl_s: float = REST_TTL_S) -> dict:
+    """AMEND1 A5: a resting entry fills ONLY from real trade prints with ts in (t_start, t_start + ttl_s] at prices
+    STRICTLY beyond the limit (buy: px < limit; sell: px > limit). qty = min(remaining, sum |amount| of those prints),
+    price = the limit. Touch / at-limit / book-cross never fill. Otherwise NO_FILL_REST_TTL.
+
+    ``trades`` is a list of {"ts", "px", "amt"} prints (quote_trigger.trades_between over (t_start, t_start+ttl_s])."""
+    q = _f(qty_remaining) or 0.0
+    lim = _f(limit_px)
+    t0 = float(t_start)
+    t1 = t0 + float(ttl_s)
+    buy = str(side).upper() in ("LONG", "BUY")
+    base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "leg": "entry_rest",
+            "rest_rule": REST_RULE_A5, "rest_ttl_s": float(ttl_s), "rest_t_start": t0, "rest_t_end": t1,
+            "side": str(side).upper(), "qty": q, "limit_px": lim, "price_source": None}
+    beyond = []
+    for p in trades or ():
+        ts, px, amt = _f((p or {}).get("ts")), _f((p or {}).get("px")), _f((p or {}).get("amt"))
+        if ts is None or px is None or amt is None or lim is None:
+            continue
+        if not (t0 < ts <= t1):
+            continue
+        if (px < lim) if buy else (px > lim):
+            beyond.append((ts, abs(amt)))
+    vol = sum(a for _, a in beyond)
+    base.update(trades_n=len(beyond), trade_vol_beyond=round(vol, 8))
+    if q <= 0 or lim is None or vol <= 0:
+        return {**base, "status": NO_FILL_REST_TTL, "price": None, "filled_qty": 0.0, "fill_ts": None,
+                "evidence_status": "NO_FILL"}
+    filled = min(q, vol)
+    # the fill completes at the print that exhausts the remaining qty (or the last beyond print)
+    acc, fill_ts = 0.0, beyond[-1][0]
+    for ts, a in sorted(beyond):
+        acc += a
+        if acc + 1e-12 >= filled:
+            fill_ts = ts
+            break
+    full = filled + 1e-12 >= q
+    return {**base, "status": "FILLED" if full else "PARTIAL", "price": lim, "filled_qty": round(filled, 8),
+            "fill_ts": fill_ts, "price_source": REST_SOURCE, "evidence_status": "COMPLETE" if full else "INCOMPLETE"}
+
+
+# lane -> the registered rest sites (each must be a single `return paper_fill.rest_fill(...)` over trades_between)
+REST_FILL_SITES = {
+    "FAMILY_GSF3_FADE3_TP30": (("tile_fill.py", "price_entry_rest"),),
+}
+
+
+def rest_site_violations(source: str, func_name: str) -> list:
+    """AST check of a rest site: single `return paper_fill.rest_fill(...)`; trades from quote_trigger.trades_between;
+    no ticker / tape / state / dynamic lookups."""
+    import ast
+    tree = ast.parse(source)
+    fn = next((n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name == func_name), None)
+    if fn is None:
+        return [f"{func_name}: not found"]
+    out = []
+    body = [b for b in fn.body if not (isinstance(b, ast.Expr) and isinstance(getattr(b, "value", None), ast.Constant))]
+    call = body[0].value if len(body) == 1 and isinstance(body[0], ast.Return) else None
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "rest_fill"
+            and getattr(call.func.value, "id", "") == "paper_fill"):
+        out.append(f"{func_name}: must be a single `return paper_fill.rest_fill(...)`")
+    for n in ast.walk(fn):
+        ident = n.id if isinstance(n, ast.Name) else (n.attr if isinstance(n, ast.Attribute) else "")
+        if ident and any(b in ident.lower() for b in FORBIDDEN_IDENTIFIERS):
+            out.append(f"{func_name}: references {ident}")
+        if isinstance(n, ast.Name) and n.id in ("state", "sys", "importlib"):
+            out.append(f"{func_name}: references {n.id}")
+        if isinstance(n, ast.Call) and getattr(n.func, "id", "") in _DYNAMIC_CALLS:
+            out.append(f"{func_name}: dynamic call")
+    for st in _folded_strings(fn):
+        if any(b in st for b in FORBIDDEN_NAMES):
+            out.append(f"{func_name}: references {st!r}")
+    if call is not None and isinstance(call, ast.Call):
+        tr = call.args[4] if len(call.args) >= 5 else next((k.value for k in call.keywords if k.arg == "trades"), None)
+        if not (isinstance(tr, ast.Call) and isinstance(tr.func, ast.Attribute) and tr.func.attr == "trades_between"
+                and getattr(tr.func.value, "id", "") in ("quote_trigger", "_qt")):
+            out.append(f"{func_name}: trades must be quote_trigger.trades_between(...)")
+    return sorted(set(out))

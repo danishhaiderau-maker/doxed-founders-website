@@ -9,6 +9,7 @@ The helpers below never read bot state: callers hand in plain values.
 from __future__ import annotations
 
 import paper_fill
+import quote_trigger  # A5 rest site: the receive-stamped trades feed (trades_between); never the ticker
 
 # The five paper lanes migrated off the legacy touch model (Tiles 6/7 DISLOC / DISLOC-FOI removed 23 Oct 2026, R9).
 MIGRATED_LANES = frozenset({
@@ -46,6 +47,13 @@ def price_exit_forced(p, ex):
     available at or after its model fill time (price age recorded), UNVERIFIED, kept; no synthetic penalty."""
     return paper_fill.paper_fill(p["side"], p["open_qty"], ex["trigger_ts"], ex["delay_s"], paper_fill.book10l_at,
                                  leg="exit_forced", delay_source=ex["delay_source"])
+
+
+def price_entry_rest(o):
+    """AMEND1 A5: the resting remainder of a marketable GTC entry, ONE shared helper (paper_fill.rest_fill) over the
+    receive-stamped trades feed in (t_start, t_start + REST_TTL_S]."""
+    return paper_fill.rest_fill(o["side"], o["qty_remaining"], o["limit_px"], o["t_start"],
+                                quote_trigger.trades_between(o["t_start"], o["t_start"] + paper_fill.REST_TTL_S))
 
 
 def signal_cap_px(direction: str, signal_ts: float):

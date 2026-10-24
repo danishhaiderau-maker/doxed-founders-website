@@ -17,6 +17,7 @@ export const LIVE_TILE_KEY_CODES: Readonly<Record<string, number>> = Object.free
   gb1: 3,
   gb2: 4,
   gs6: 5,
+  gf3: 8, // GS-FADE3-TP30 (paper only; arm refused: PAPER_ONLY_TILE_KEYS on Fly)
 });
 export const RESERVED_LIVE_TILE_KEY_CODES: Readonly<Record<string, number>> = Object.freeze({ dsl: 6, dsf: 7 });
 

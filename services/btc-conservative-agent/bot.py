@@ -62670,6 +62670,9 @@ def _live_guardian_tile_arm_block(lane: str) -> str | None:
     """AMEND5 G4(c') + G6 per-tile arm refusal (shared live_tile_gate.arm_gate_block): GS-01 + FADE3 stay disarmed after a
     (c') first L; FADE3 arms only after GS-01's first real L is (a)/(b) AND HM's live gate passed (LIVE_HM_GATE_FADE3=PASS:<ref>)."""
     import live_tile_gate as _ltg
+    paper_only = _ltg.paper_only_arm_block(lane, _ltg.tile_key_for_lane(lane))
+    if paper_only:
+        return paper_only  # gf3 (GS-FADE3-TP30) is PAPER ONLY: refused on every arm path, LIVE_HM_GATE_FADE3 irrelevant
     return _ltg.arm_gate_block(_ltg.tile_key_for_lane(lane), _LIVE_GUARDIAN_STATE.get("g4_first_l"),
                                os.environ.get("LIVE_HM_GATE_FADE3"), _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
                                os.environ.get(_ltg.STOP_AMENDMENT_ENV), _LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))

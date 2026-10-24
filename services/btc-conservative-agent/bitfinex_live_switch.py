@@ -88,6 +88,8 @@ DENY_STOP_COVERAGE = "STOP_COVERAGE_UNVERIFIED"
 DENY_REDUCE_ONLY = "REDUCE_ONLY_UNSUPPORTED"
 DENY_SWITCH_NOT_REQUESTED = "SWITCH_NOT_REQUESTED"
 DENY_TILE_PRE_ARMING = "TILE_LIVE_SWITCH_PRE_ARMING"
+DENY_PAPER_ONLY_TILE = "LIVE_TILE_PAPER_ONLY"  # = live_tile_gate.DENY_PAPER_ONLY_TILE (gf3 GS-FADE3-TP30)
+PAPER_ONLY_LANES = frozenset({"FAMILY_GSF3_FADE3_TP30"})  # = live_tile_gate.PAPER_ONLY_LANES (test pins equality)
 # Terminal state meaning the lane is genuinely allowed and armed.
 ALLOW_ARMED = "ARMED"
 # Registry capability blocks the operator's live-eligibility switch may waive.
@@ -301,6 +303,10 @@ class BitfinexLiveSwitch:
             operator_eligible and capability in operator_waivable_capabilities()
         ):
             denials.append(DENY_RELAY_CAPABILITY_BLOCKED)
+
+        # 4b. Paper-only tiles (gf3): never armable; not waivable by operator eligibility.
+        if lane in PAPER_ONLY_LANES:
+            denials.append(DENY_PAPER_ONLY_TILE)
 
         # 5. Size / leverage / protection.
         margin = s.get("margin_usd")
