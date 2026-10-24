@@ -330,3 +330,24 @@ def test_read_only_archive_files_are_deleted(tmp_path):
     os.chmod(path, stat.S_IREAD)
     wipe._unlink(str(path))
     assert not path.exists()
+
+
+# ------------------------------------------------------------------ B5 (24 Oct, #852): the live-guardian latch is never wiped
+@pytest.mark.parametrize("rel", ["live_guardian_state.json", "runtime/live_guardian_state.json",
+                                 "runtime/live_guardian_state.json.tmp", "live_guardian_state.json.3"])
+def test_b5_live_guardian_state_is_hard_kept_in_every_scope(rel):
+    for scope in ("laptop", "fly"):
+        assert wipe.keep_reason(rel, scope=scope) == "LIVE_GUARDIAN_LATCH", (rel, scope)
+
+
+def test_b5_fly_plan_never_lists_live_guardian_state_even_as_an_old_rotation(tmp_path):
+    root = _fly_volume(tmp_path)
+    _write(root / "live_guardian_state.json", '{"red_alert": {"code": "X"}}', age_sec=3 * DAY)
+    _write(root / "runtime" / "live_guardian_state.json", "{}", age_sec=3 * DAY)
+    _write(root / "runtime" / "live_guardian_state.json.1", "{}", age_sec=3 * DAY)
+    now = time.time()
+    plan = wipe.Plan("fly", EPOCH, now - 7 * 3600, simulated=False)
+    wipe.plan_fly(plan, root, now=now)
+    doc = plan.doc()
+    assert not any("live_guardian_state" in c["path"] for c in doc["candidates"])
+    assert doc["kept_by_reason"]["LIVE_GUARDIAN_LATCH"]["files"] >= 2

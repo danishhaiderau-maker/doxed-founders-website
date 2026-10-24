@@ -211,12 +211,91 @@ export class TradingAgentsController {
     const uid = userId.trim();
     const reason = (body.reason?.trim() || 'OPS_REARM').slice(0, 200);
     const startedAt = new Date().toISOString();
+    // RK L27 (#852): refuse BEFORE flattening/arming; setInstancePaused re-checks (TOCTOU-safe).
+    await this.instances.assertLiveArmL27('ops/rearm', 'bitfinex');
     const flat = await this.execution.emergencyFlattenOpenCopyLots(uid, slug);
     const armed = await this.instances.setInstancePaused(uid, slug, false);
     // Audit line (Railway logs are retained; grep OPS-REARM).
     // eslint-disable-next-line no-console
     console.log(`[OPS-REARM] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} flattened=${flat.flattened} at=${startedAt}`);
     return { ok: true, flattened: flat.flattened, armed, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
+  }
+
+  /**
+   * RK ruling 24 Oct (#852): Fly's live guardian calls this on EVERY auto-disarm (any violation, guardian error or stale
+   * guardian). Pauses the instance FIRST (no new entry can be placed; never resumes it - only a strict operator re-arm
+   * can), then force-flats the account and reads it back (forceFlatDisarmAccount). Admin-token only, throttled, audit
+   * line without the token. Returns the read-back verdict; ok only when paused AND FLAT_NO_STOPS.
+   */
+  @Public()
+  @Throttle({ default: { limit: 6, ttl: 60000 } })
+  @Post(':slug/ops/force-flat-disarm')
+  async opsForceFlatDisarm(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { confirmation?: string; reason?: string },
+  ) {
+    assertBotAdminToken(adminHeader, authorization);
+    if (!userId?.trim()) throw new BadRequestException('userId query param is required');
+    if (body?.confirmation !== 'FORCE_FLAT_AND_DISARM') {
+      throw new BadRequestException('confirmation must equal FORCE_FLAT_AND_DISARM');
+    }
+    const uid = userId.trim();
+    const reason = (body.reason?.trim() || 'GUARDIAN_AUTO_DISARM').slice(0, 200);
+    const startedAt = new Date().toISOString();
+    let paused = false;
+    let pauseError: string | null = null;
+    try {
+      await this.instances.setInstancePaused(uid, slug, true);
+      paused = true;
+    } catch (e) {
+      pauseError = (e instanceof Error ? e.message : String(e)).slice(0, 160);
+    }
+    // flatten even if the pause failed (fail safe); ok stays false so Fly raises RED
+    const flat = await this.execution.forceFlatDisarmAccount(uid, slug, reason);
+    // HM1: ok also requires the account entry fence to have been held for the whole route
+    // HM2: ...and the DB rows reconciled to the exchange (no OPEN/PENDING_ENTRY left); otherwise ok=false -> Fly RED
+    const ok = paused && flat.verdict === 'FLAT_NO_STOPS' && flat.fenced && flat.dbReconciled;
+    // eslint-disable-next-line no-console
+    console.log(`[OPS-FORCE-FLAT-DISARM] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} paused=${paused} verdict=${flat.verdict} flattened=${flat.flattened} cancelled=${flat.cancelled} errors=${flat.errors.length} at=${startedAt}`);
+    return { ok, paused, pauseError, ...flat, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
+  }
+
+  /**
+   * Prereg AMEND5 rev 4 G4(b) (sha 4407d5a2, L22): Fly's live guardian calls this when the L - 10 bp liquidation clamp fires
+   * while the exchange stop is confirmed resident (LIQ_CLAMP_FLATTEN). Flattens THAT position only (one live position
+   * account-wide): emergency-close the open copy lot, reduce-only residual flatten, cancel its stops, FLAT_NO_STOPS read-back
+   * (forceFlatDisarmAccount). It does NOT pause the instance and never disarms (the tiles stay armed). Admin-token only,
+   * throttled, audit line without the token. ok only when the read-back is FLAT_NO_STOPS; otherwise Fly escalates to
+   * ops/force-flat-disarm (disarm ALL, RED).
+   */
+  @Public()
+  @Throttle({ default: { limit: 6, ttl: 60000 } })
+  @Post(':slug/ops/position-flatten')
+  async opsPositionFlatten(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { confirmation?: string; reason?: string },
+  ) {
+    assertBotAdminToken(adminHeader, authorization);
+    if (!userId?.trim()) throw new BadRequestException('userId query param is required');
+    if (body?.confirmation !== 'FLATTEN_POSITION_ONLY') {
+      throw new BadRequestException('confirmation must equal FLATTEN_POSITION_ONLY');
+    }
+    const uid = userId.trim();
+    const reason = (body.reason?.trim() || 'LIQ_CLAMP_FLATTEN').slice(0, 200);
+    const startedAt = new Date().toISOString();
+    const flat = await this.execution.forceFlatDisarmAccount(uid, slug, reason);
+    // HM1: ok also requires the account entry fence to have been held for the whole route
+    // HM2: ...and the DB rows reconciled to the exchange (no OPEN/PENDING_ENTRY left); otherwise ok=false -> Fly RED
+    const ok = flat.verdict === 'FLAT_NO_STOPS' && flat.fenced && flat.dbReconciled;
+    // eslint-disable-next-line no-console
+    console.log(`[OPS-POSITION-FLATTEN] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} verdict=${flat.verdict} flattened=${flat.flattened} cancelled=${flat.cancelled} errors=${flat.errors.length} at=${startedAt}`);
+    return { ok, ...flat, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
   }
 
   @Public()

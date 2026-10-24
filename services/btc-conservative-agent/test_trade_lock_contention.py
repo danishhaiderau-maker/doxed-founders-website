@@ -210,6 +210,7 @@ def test_api_pause_returns_fast_while_trade_lock_is_held(bot_module, monkeypatch
         lambda reason="TEST": {"cancel": {"failed": [], "cancelled": []}, "exit_only": {}},
     )
     monkeypatch.setattr(bot, "PAUSE_FINALIZE_WAIT_SEC", 0.5)
+    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "test-admin-token-rk4")   # RK (4) #852 R3: loopback is not admin
     monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
     monkeypatch.setattr(bot, "pipeline_state_sync", lambda: None)
     with bot.state_lock:
@@ -236,7 +237,7 @@ def test_api_pause_returns_fast_while_trade_lock_is_held(bot_module, monkeypatch
         with bot.app.test_client() as client:
             response = client.post(
                 "/api/pause", json={"owner": "DEPLOY_MAINTENANCE"},
-                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
             )
         elapsed = time.monotonic() - started
         body = response.get_json() or {}

@@ -1,3 +1,4 @@
+import { terminalExitPriceFromHelper } from './live-row-countability';
 import {
   BadRequestException,
   ForbiddenException,
@@ -790,7 +791,6 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
       local_mark_at_signal?: number;
       limit_price?: number;
       fill_price?: number;
-      exit_price?: number;
       qty?: number;
       pnl_usd?: number;
       pnl_margin_pct?: number;
@@ -825,12 +825,19 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
+    // HM R6 B2 / RK 10:26: this caller-reported route has no exit-fill read, so it can never price an exit: any
+    // exit_price (or helper-looking stamp) the caller sends is discarded and an EXIT / EXPIRED is stored with
+    // exit_price null + EXIT_FILL_UNREADABLE (terminalExitPriceFromHelper). The reporter forwards no non-fill exit.
+    const terminal = event === 'EXIT' || event === 'EXPIRED';
+    const stored = terminal
+      ? terminalExitPriceFromHelper(event, { ...(body as unknown as Record<string, unknown>), exit_fill_status: null, exit_fill_vwap: null, exit_fill_order_ids: null }).payload
+      : (() => { const { exit_price: _x, ...rest } = body as unknown as Record<string, unknown>; return rest; })();
     await this.prisma.signalCycleEvent.create({
       data: {
         cycleId,
         participantId: participant.id,
         eventType: event,
-        payload: body as unknown as Prisma.InputJsonValue,
+        payload: stored as unknown as Prisma.InputJsonValue,
       },
     });
 
@@ -934,7 +941,7 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
         where: { id: participant.id },
         data: {
           status: SignalCycleStatus.CLOSED,
-          exitPrice: body.exit_price ?? null,
+          exitPrice: null,   // HM R6 B2: never a caller-supplied price (no real-fill read on this route)
           pnlUsd: pnlUsd,
           pnlMarginPct: body.pnl_margin_pct ?? null,
           feeUsd,
@@ -1061,7 +1068,10 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
     if (event === 'EXIT' || event === 'EXPIRED') {
       const pnlUsd = typeof body.pnl_usd === 'number' ? body.pnl_usd : null;
       const pnlMarginPct = typeof body.pnl_margin_pct === 'number' ? body.pnl_margin_pct : null;
-      const exitPrice = typeof body.exit_price === 'number' ? body.exit_price : null;
+      // HM R6 B2 / RK 10:26: only the shared real-fill helper's stamp prices an exit; else null + EXIT_FILL_UNREADABLE
+      const priced = terminalExitPriceFromHelper(event, body);
+      const exitPrice = priced.exitPrice;
+      body = priced.payload;
       const terminalStatus = event === 'EXPIRED' ? SignalCycleStatus.EXPIRED : SignalCycleStatus.CLOSED;
       const now = new Date();
       const wonTerminalClaim = await this.prisma.$transaction(async (tx) => {

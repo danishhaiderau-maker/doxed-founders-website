@@ -24,12 +24,19 @@ const RETIRED = [
   ['FAMILY_DISLOC_FOI_LONG_1M', 'dsf-1791785201-2'],
 ] as const;
 
+/** Two-tile gate: Fly signs the trade's tile key (mandatory for live entries). */
+function testTileKey(tradeId: string) {
+  const head = String(tradeId).split('-')[0].toLowerCase();
+  const code = ({ rnd: 1, gs1: 2, gb1: 3, gb2: 4, gs6: 5, dsl: 6, dsf: 7 } as Record<string, number>)[head];
+  return code == null ? {} : { tile_key: head, tile_key_code: code };
+}
+
 function signed(tradeId: string, lane: string, over: Record<string, unknown> = {}) {
   const approval = {
     schema: 'fly_live_copy_approval_v1', correlation_id: tradeId, trade_id: tradeId, event: 'ORDER_PLACED',
     research_lane: lane, relay_eligible: true, eligibility_source: 'OPERATOR',
     entry_allowed: true, output_on: true, tile_live_on: true, created_at_ts: NOW_MS / 1000 - 1,
-    max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT', hard_stop_bp: 35, exchange_stop_bp: 35, ...over,
+    max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT', hard_stop_bp: 35, exchange_stop_bp: 35, ...testTileKey(tradeId), ...over,
   };
   const text = JSON.stringify(approval);
   const key = createHmac('sha256', 's').update('fly-live-copy-approval-v1').digest();

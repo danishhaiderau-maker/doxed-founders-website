@@ -73,10 +73,10 @@ def test_fly_chain_carries_exit_order_class_and_exit_stamps_into_the_leg_check()
     import live_vs_paper as lv
     tl = {"fly_signal_at_ts": 1.0, "fly_intent_emitted_at_ts": 1.1, "railway_received_at_ts": 1.2,
           "exchange_ack_at_ts": 1.3, "fill_at_ts": 1.4}
-    rep = [{"type": "ORDER_FILLED", "correlation_id": "c1", "account": "a", "timeline": tl, "fill": {"price": 100.0}},
+    rep = [{"type": "ORDER_FILLED", "correlation_id": "c1", "account": "a", "timeline": tl, "fill": {"price": 100.0, "source": "exchange_trades"}},
            {"type": "POSITION_CLOSED", "correlation_id": "c1", "account": "a",
             "timeline": {**tl, "exit_trigger_print_at_ts": 5.0, "exit_fill_record_at_ts": 5.2},
-            "close": {"price": 99.0, "reason": "EXCHANGE_STOP_25BP", "exit_order_class": "EXCHANGE_RESIDENT"}}]
+            "close": {"price": 99.0, "price_source": "stop_fill", "fill_at_ts": 52.0, "reason": "EXCHANGE_STOP_25BP", "exit_order_class": "EXCHANGE_RESIDENT"}}]
     appr = [{"correlation_id": "c1", "signal_at_ts": 1.0, "created_at_ts": 1.1, "entry_allowed": True}]
     ch = next(iter(lcm.build_chains(appr, rep)["accounts"].values()))
     assert ch["exit_order_class"] == "EXCHANGE_RESIDENT" and ch["exit_fill_record_at_ts"] == 5.2

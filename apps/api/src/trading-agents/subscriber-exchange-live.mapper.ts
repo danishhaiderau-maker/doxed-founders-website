@@ -6,7 +6,7 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
-import { liveRowCountabilityWithLegs, liveRowUncheckedCountability } from './live-row-countability';
+import { liveExitFillEvidenceFromEvents, liveRowCountabilityWithLegs, liveRowUncheckedCountability, type LiveRowStopEvidence } from './live-row-countability';
 import { liveLegStamps } from './live-trade-export.mapper';
 
 type IntentEnvelope = {
@@ -46,6 +46,8 @@ export type SubscriberCycleRow = {
   exchangeFillAt?: Date | null;
   exchangeExitAt?: Date | null;
   negativeEvidence?: string | null;
+  /** #852 item 4: the guardian's stop evidence for this row (liveRowStopEvidenceFromEvents). */
+  stopEvidence?: LiveRowStopEvidence | null;
   /** RK (1): the participant's execution events, read by the ONE shared liveLegStamps (R4); absent = no legs. */
   events?: Array<{ eventType: string; payload: unknown }>;
   updatedAt: Date;
@@ -124,6 +126,8 @@ export function mapSubscriberExchangeLiveBook(input: {
   markPrice?: number;
   participants: SubscriberCycleRow[];
   ledgerCloses?: BitfinexPositionCloseLedgerRow[];
+  /** #852 item 4: live (real-money) books: a row counts only with the guardian's stop evidence. */
+  requireStopEvidence?: boolean;
 }): TradingAgentDashboardState['liveBook'] {
   const mark = input.markPrice ?? 0;
   const positions: TradingAgentDashboardState['liveBook']['positions'] = [];
@@ -368,12 +372,14 @@ export function mapSubscriberExchangeLiveBook(input: {
           ? 'Exchange-linked participant lifecycle'
           : 'Neon lifecycle; exchange linkage incomplete',
         negativeEvidence: row.negativeEvidence ?? null,
-        // HM B4: forced closes carry non_countable on the website live row; RK (1)/R17: otherwise every measured
-        // leg (bot-sent: trigger -> Fly send -> relay receive -> ack/fill; resident: trade print -> BFX fill record)
-        // must be present and ordered, via the same liveLegStamps the export uses.
+        // ONE live-row rule (live-row-countability.liveRowCountabilityWithLegs): HM B4 forced close -> #852 item 4 guardian
+        // stop evidence (Bitfinex live books) -> RK (1)/R17 measured legs (bot-sent: trigger -> Fly send -> relay receive
+        // -> ack/fill; resident: trade print -> BFX fill record), via the same liveLegStamps the export uses.
         ...liveRowCountabilityWithLegs(
           [row.cycle.showcaseExitReason, row.terminalReason],
           ...liveLegStamps(row.cycle.intentEnvelope, row.events ?? [], true),
+          input.requireStopEvidence ? row.stopEvidence ?? null : undefined,
+          liveExitFillEvidenceFromEvents(row.events ?? []),   // HM R4 B1 / RK 08:03: real exit fill or non-countable (R17)
         ),
       });
     }
@@ -434,7 +440,8 @@ export function mapSubscriberExchangeLiveBook(input: {
   trades.push(...mergedParticipantRows, ...unmatchedLedger);
 
   for (const t of trades) {
-    // HM 02:55 blocker 4: rows not built through the leg check (ledger-only closes) default to non-countable.
+    // HM 02:55 blocker 4: rows not built through the leg check (ledger-only closes) default to non-countable; this also
+    // covers #852 item 4 (an unlinked cash-ledger row has no stop evidence), so no separate stop branch is needed.
     if (t.nonCountable === undefined) Object.assign(t, liveRowUncheckedCountability(t.exitReason));
   }
   trades.sort((a, b) => {

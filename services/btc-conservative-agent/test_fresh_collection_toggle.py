@@ -18,7 +18,7 @@ class FreshCollectionToggleTests(unittest.TestCase):
         self.original_mode = bool(bot.state.get("fresh_collection_mode", False))
         self.original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
-        self._token_patch = mock.patch.object(bot, "_BOT_ADMIN_TOKEN", "")
+        self._token_patch = mock.patch.object(bot, "_BOT_ADMIN_TOKEN", "test-admin-token-rk4")   # RK (4) #852 R3
         self._token_patch.start()
         with bot.state_lock:
             bot.state["fresh_collection_mode"] = False
@@ -33,6 +33,7 @@ class FreshCollectionToggleTests(unittest.TestCase):
         fake_reset = {"ok": True, "summary": "test reset"}
         with mock.patch.object(bot, "perform_fresh_collection_reset", return_value=fake_reset) as reset:
             with bot.app.test_client() as client:
+                client.environ_base["HTTP_X_BOT_ADMIN_TOKEN"] = "test-admin-token-rk4"
                 first = client.post(
                     "/api/toggle_fresh_collection",
                     json={"enabled": True, "expected_current": False},
@@ -51,6 +52,7 @@ class FreshCollectionToggleTests(unittest.TestCase):
 
     def test_invalid_expected_state_fails_closed(self):
         with bot.app.test_client() as client:
+            client.environ_base["HTTP_X_BOT_ADMIN_TOKEN"] = "test-admin-token-rk4"
             response = client.post(
                 "/api/toggle_fresh_collection",
                 json={"enabled": True, "expected_current": "false"},

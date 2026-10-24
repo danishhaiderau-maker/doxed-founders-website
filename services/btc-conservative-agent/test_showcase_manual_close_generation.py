@@ -15,6 +15,12 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 import bot
 
 
+@pytest.fixture(autouse=True)
+def _rk4_test_admin_token(monkeypatch):
+    """RK (4) #852 R3: loopback is no longer an admin credential; requests carry a throwaway test token."""
+    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "test-admin-token-rk4")
+
+
 @pytest.fixture
 def isolated_manual_close(monkeypatch):
     position = {"trade_id": "paper-generation-test", "status": "OPEN"}
@@ -76,7 +82,7 @@ def test_manual_close_returns_the_advanced_relay_money_generation(isolated_manua
         response = client.post(
             "/api/positions/close",
             json={"trade_id": isolated_manual_close["trade_id"]},
-            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
         )
 
     assert response.status_code == 200
@@ -98,7 +104,7 @@ def test_manual_close_returns_the_advanced_relay_money_generation(isolated_manua
     with bot.app.test_client() as client:
         fresh = client.get(
             "/api/relay-execution-state?fresh=1",
-            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
         )
 
     assert fresh.status_code == 200

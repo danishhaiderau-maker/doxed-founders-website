@@ -230,6 +230,10 @@ test_genome_reset_mode_bridge.py
 test_genome_search_space_disclosure.py
 test_genome_source_preflight.py
 test_gs_regime_engine.py
+test_hm_r4_b1_exit_fill.py
+test_hm_r5_fill_provenance.py
+test_hm_r6_report_contract.py
+test_hm_r7_a1_fade3_key.py
 test_hm_audit_20261010.py
 test_hm_missing_checks.py
 test_horizon_source_truth.py
@@ -288,6 +292,8 @@ test_live_guardian.py
 test_live_monitor_extra_routes.py
 test_live_policy_provenance.py
 test_live_test_gaps_20261011.py
+test_live_tile_gate.py
+test_live_protection.py
 test_local_dynamic_input.py
 test_local_dynamic_mapping.py
 test_local_fresh_collection.py
@@ -616,3 +622,4 @@ test_r17_close_position_row.py
 test_live_ack_pool.py
 test_first_after_rk3.py
 test_rk1_live_exit_stamps.py
+test_hm_r4_b2_guardian.py

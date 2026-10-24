@@ -27,6 +27,8 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 import bot
 
 
+_TEST_ADMIN_TOKEN = "test-admin-token-rk4"
+
 class FreshCollectionSignalTests(unittest.TestCase):
     def test_normal_restart_preserves_official_collector_epoch_binding(self):
         old_cwd = os.getcwd()
@@ -146,14 +148,19 @@ class FreshCollectionSignalTests(unittest.TestCase):
         finally:
             os.chdir(old_cwd)
 
+    def _admin_client(self):
+        client = bot.app.test_client()
+        client.environ_base["HTTP_X_BOT_ADMIN_TOKEN"] = _TEST_ADMIN_TOKEN
+        return client
+
     def setUp(self):
         self.original_signal = float(bot.state.get("fresh_collection_signal_ts") or 0.0)
         self.original_mode = bool(bot.state.get("fresh_collection_mode", False))
         self.original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
-        # Flask test_client is loopback. A developer machine with BOT_ADMIN_TOKEN
-        # set would otherwise 401 every mutation before the handler runs.
-        self._token_patch = mock.patch.object(bot, "_BOT_ADMIN_TOKEN", "")
+        # RK binding ruling (4) (#852 R3): loopback is no longer an admin credential, so every mutation carries a
+        # throwaway test token (never a real secret).
+        self._token_patch = mock.patch.object(bot, "_BOT_ADMIN_TOKEN", _TEST_ADMIN_TOKEN)
         self._token_patch.start()
         with bot.state_lock:
             bot.state["fresh_collection_signal_ts"] = 0.0
@@ -178,7 +185,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
         with mock.patch.object(
             bot, "perform_fresh_collection_reset", return_value=fake_reset
         ) as reset:
-            with bot.app.test_client() as client:
+            with self._admin_client() as client:
                 # Local loopback is admin-authed by default; that's fine — the
                 # auth path itself is covered by test_wipe_endpoints_require_admin.
                 response = client.post("/api/wipe_fly_only", json={})
@@ -215,7 +222,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
         with mock.patch.object(
             bot, "perform_fresh_collection_reset", side_effect=_capture
         ):
-            with bot.app.test_client() as client:
+            with self._admin_client() as client:
                 response = client.post(
                     "/api/toggle_fresh_collection",
                     json={"enabled": True, "expected_current": False},
@@ -239,7 +246,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
             with mock.patch.object(
                 bot, "perform_fresh_collection_reset"
             ) as reset:
-                with bot.app.test_client() as client:
+                with self._admin_client() as client:
                     wipe_resp = client.post("/api/wipe_fly_only", json={})
 
         self.assertEqual(wipe_resp.status_code, 401)
@@ -266,14 +273,14 @@ class FreshCollectionSignalTests(unittest.TestCase):
         with mock.patch.object(bot, "_admin_authed_strict", return_value=False), mock.patch.object(
             bot, "perform_fresh_collection_reset"
         ) as reset:
-            with bot.app.test_client() as client:
+            with self._admin_client() as client:
                 response = client.post("/api/fresh_epoch_reset", json={})
         self.assertEqual(response.status_code, 401)
         reset.assert_not_called()
 
     def test_fresh_epoch_reset_requires_confirmation_and_fresh_zero_proof(self):
         with mock.patch.object(bot, "perform_fresh_collection_reset") as reset:
-            with bot.app.test_client() as client:
+            with self._admin_client() as client:
                 missing = client.post("/api/fresh_epoch_reset", json={})
                 nonflat_proof = self._strict_flat_proof()
                 nonflat_proof["exchange_active_orders"] = 1
@@ -308,7 +315,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
         with mock.patch.object(
             bot, "perform_fresh_collection_reset", return_value=fake_reset
         ) as reset:
-            with bot.app.test_client() as client:
+            with self._admin_client() as client:
                 response = client.post(
                     "/api/fresh_epoch_reset",
                     json={
@@ -328,7 +335,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
 
     def test_get_fresh_epoch_reset_is_dry_run_and_never_wipes(self):
         with mock.patch.object(bot, "perform_fresh_collection_reset") as reset:
-            with bot.app.test_client() as client:
+            with self._admin_client() as client:
                 response = client.get("/api/fresh_epoch_reset")
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
@@ -344,7 +351,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
 
     def test_post_dry_run_does_not_wipe(self):
         with mock.patch.object(bot, "perform_fresh_collection_reset") as reset:
-            with bot.app.test_client() as client:
+            with self._admin_client() as client:
                 response = client.post("/api/fresh_epoch_reset", json={"dry_run": True})
         self.assertEqual(response.status_code, 200)
         body = response.get_json()

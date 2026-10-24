@@ -18,6 +18,7 @@ os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
+bot._BOT_ADMIN_TOKEN = "test-admin-token-rk4"  # RK(4) 24 Oct: admin routes need the token even on loopback
 
 # This module runs at collection time; keep the collector epoch bind out of the source folder.
 bot.RESEARCH_SESSION_FILE = os.path.join(
@@ -328,7 +329,7 @@ with bot.app.test_client() as client:
     retained = client.post(
         "/api/resume",
         json={"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"},
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN},
     )
     retained_body = retained.get_json() or {}
     check(
@@ -338,7 +339,7 @@ with bot.app.test_client() as client:
     )
     check("deploy resume leaves manual pause armed", bot.state.get("manual_admin_pause") is True)
     check("operator pause owner surfaced", retained_body.get("pause_owner") == "OPERATOR")
-    cleared = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    cleared = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
     cleared_body = cleared.get_json() or {}
     check(
         "bare operator resume clears ADMIN_MANUAL",
@@ -372,12 +373,12 @@ with bot.app.test_client() as client:
             "orders": [{"trade_id": "stale-cache-order"}],
             "positions": [],
         }
-    direct_pause = client.post("/api/pause", environ_base={"REMOTE_ADDR": "127.0.0.1"})
-    check("direct loopback pause is accepted without a token", direct_pause.status_code == 200)
+    direct_pause = client.post("/api/pause", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
+    check("direct loopback pause is accepted with the admin token (RK(4))", direct_pause.status_code == 200)
     check("direct loopback pause changes state", bot.state.get("execution_paused") is True)
     direct_state = client.get(
         "/api/state",
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN},
     ).get_json()
     check("pause immediately patches cached execution state", direct_state.get("execution_paused") is True)
     check("pause immediately patches cached manual flag", direct_state.get("manual_admin_pause") is True)
@@ -390,7 +391,7 @@ with bot.app.test_client() as client:
     )
     check("proxied loopback resume remains token-protected", forwarded_resume.status_code == 401)
     check("rejected proxied resume leaves pause active", bot.state.get("execution_paused") is True)
-    unready_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    unready_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
     check("unready direct loopback resume fails closed", unready_resume.status_code == 409)
     check("unready direct loopback resume leaves pause active", bot.state.get("execution_paused") is True)
     bot._recompute_system_readiness = lambda: {
@@ -400,13 +401,13 @@ with bot.app.test_client() as client:
     ready_resume = client.post(
         "/api/resume",
         json={"clear_admin_manual_pause": True},
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN},
     )
-    check("ready direct loopback resume is accepted without a token", ready_resume.status_code == 200)
+    check("ready direct loopback resume is accepted with the admin token (RK(4))", ready_resume.status_code == 200)
     check("ready direct loopback resume changes state", bot.state.get("execution_paused") is False)
     resumed_state = client.get(
         "/api/state",
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN},
     ).get_json()
     check("resume immediately patches cached execution state", resumed_state.get("execution_paused") is False)
     check("resume immediately patches cached manual flag", resumed_state.get("manual_admin_pause") is False)

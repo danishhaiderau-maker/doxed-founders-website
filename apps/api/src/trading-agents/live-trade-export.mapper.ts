@@ -1,6 +1,13 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
-import { liveRowCountabilityWithLegs, type LiveExitSide, type LiveLegStamps } from './live-row-countability';
+import {
+  liveRowCountabilityWithLegs,
+  latestLiveExitEvent,
+  liveExitFillEvidenceFromEvents,
+  liveRowStopEvidenceFromEvents,
+  type LiveExitSide,
+  type LiveLegStamps,
+} from './live-row-countability';
 
 type IntentEnvelope = {
   direction?: string;
@@ -146,7 +153,8 @@ export function liveLegStamps(
   const pl = (type: string) => recOf(events.find((e) => e.eventType === type)?.payload);
   const placed = pl('ORDER_PLACED');
   const filled = pl('FILLED');
-  const exitPl = recOf([...events].reverse().find((e) => e.eventType === 'EXIT')?.payload);
+  // HM R5 C1: the latest EXIT or its EXIT_FILL_RECONCILED re-stamp (merged payload keeps the original exit legs).
+  const exitPl = recOf(latestLiveExitEvent(events)?.payload);
   const entry: LiveLegStamps = {
     fly_signal_at_ts: secOf(approval.signal_at_ts),
     fly_intent_emitted_at_ts: secOf(approval.created_at_ts),
@@ -208,9 +216,11 @@ export function mapParticipantToExportRow(input: {
   const orderEvent = events.find((e) => e.eventType === 'ORDER_PLACED');
 
   const fillPrice = num(input.participant.fillPrice) ?? filledEvent?.fillPrice ?? null;
-  const exitPrice = num(input.participant.exitPrice) ?? exitEvent?.exitPrice ?? null;
-  const pnlUsd = num(input.participant.pnlUsd) ?? exitEvent?.pnlUsd ?? null;
-  const pnlMarginPct = num(input.participant.pnlMarginPct) ?? exitEvent?.pnlMarginPct ?? null;
+  // HM R5 C1: prices / P&L from the latest exit fill stamp (EXIT_FILL_RECONCILED re-stamp wins); the close time stays the EXIT's.
+  const exitFillEvent = latestLiveExitEvent(events) ?? exitEvent;
+  const exitPrice = num(input.participant.exitPrice) ?? exitFillEvent?.exitPrice ?? null;
+  const pnlUsd = num(input.participant.pnlUsd) ?? exitFillEvent?.pnlUsd ?? null;
+  const pnlMarginPct = num(input.participant.pnlMarginPct) ?? exitFillEvent?.pnlMarginPct ?? null;
 
   const filledAt = filledEvent?.timestamp ?? null;
   const closedAt =
@@ -263,9 +273,12 @@ export function mapParticipantToExportRow(input: {
     regime: intent.regime ?? null,
     strategy: intent.strategy ?? null,
     showcaseExitReason: input.cycle.showcaseExitReason,
+    // ONE live-row rule: forced close -> #852 item 4 guardian stop evidence (filled rows only) -> per-leg check.
     ...liveRowCountabilityWithLegs(
       [exitEvent?.exitReason, input.cycle.showcaseExitReason],
       ...liveLegStamps(input.cycle.intentEnvelope, input.participant.events, closedAt != null),
+      filledEvent ? liveRowStopEvidenceFromEvents(input.participant.events) : undefined,
+      closedAt != null ? liveExitFillEvidenceFromEvents(input.participant.events) : undefined,   // HM R4 B1 / RK 08:03
     ),
     events,
   };
