@@ -315,3 +315,56 @@ def test_refuse_multi_stream_list(tmp_path):
     with pytest.raises(lds.DeleteRefused) as e:  # dry run refuses too
         lds.delete_ledger_rows_by_sha(s, text, sha)
     assert e.value.code == "MULTI_STREAM_LIST_REFUSED"
+
+
+def _deleted_store(tmp_path):
+    s = _store(tmp_path, n=4, ledgers=("decision",))
+    text, sha = _list(_entries(s, "decision", [1]))
+    lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=False)
+    return s
+
+
+def test_tombstone_integrity_pin_survives_appends(tmp_path):
+    s = _deleted_store(tmp_path)
+    assert s.append("decision", {"record_id": "decision-x", "i": 7})["written"]
+    pin = json.loads(s._completeness_path("decision").read_text())[lds.TOMBSTONE_PIN_KEY]
+    assert pin == json.loads(lds._tombstone_path(s, "decision").read_text())["integrity_sha256"]
+
+
+def test_tombstone_missing_fails_closed(tmp_path, caplog):
+    s = _deleted_store(tmp_path)
+    lds._tombstone_path(s, "decision").unlink()
+    res = s.append("decision", {"record_id": "decision-y", "i": 8})
+    assert res["blocked"] and res["reason"] == "DELETED_ROW_TOMBSTONES_MISSING"
+    assert "[ALERT]" in caplog.text
+    with pytest.raises(lds.DeleteRefused) as e:
+        lds.load_tombstones(s.root, "decision")
+    assert e.value.code == "DELETED_ROW_TOMBSTONES_MISSING"
+
+
+@pytest.mark.parametrize("mutate", ["garbage", "drop_sha", "bad_integrity"])
+def test_tombstone_corrupt_fails_closed(tmp_path, mutate):
+    s = _deleted_store(tmp_path)
+    p = lds._tombstone_path(s, "decision")
+    row = json.loads(p.read_text())
+    if mutate == "garbage":
+        p.write_text("{not json")
+    elif mutate == "drop_sha":  # consistent self-hash but not the pinned one
+        row["row_sha256"] = []
+        row["integrity_sha256"] = lds.tombstone_integrity([])
+        p.write_text(json.dumps(row))
+    else:
+        row["integrity_sha256"] = "0" * 64
+        p.write_text(json.dumps(row))
+    res = s.append("decision", {"record_id": "decision-z", "i": 9})
+    assert res["blocked"] and res["reason"] == "DELETED_ROW_TOMBSTONES_CORRUPT"
+    # a further delete on that stream is refused too
+    text, sha = _list(_entries(s, "decision", [0]))
+    with pytest.raises(lds.DeleteRefused) as e:
+        lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=False)
+    assert e.value.code == "DELETED_ROW_TOMBSTONES_CORRUPT"
+
+
+def test_other_streams_unaffected_without_deletes(tmp_path):
+    s = _store(tmp_path, n=1, ledgers=("decision", "lifecycle"))
+    assert s.append("lifecycle", {"record_id": "lifecycle-9", "i": 9})["written"]

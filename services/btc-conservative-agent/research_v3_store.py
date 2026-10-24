@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import hmac
 import errno
 import json
@@ -33,7 +34,7 @@ from transactional_receipt_store import (
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, set[str]]] = {}
-_tombstone_cache: dict[str, tuple[tuple[int, int, int, int], frozenset[str]]] = {}
+_tombstone_cache: dict[str, tuple[tuple[Any, Any], frozenset[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _provenance_cache: dict[str, str] | None = None
 _config_signature_provider = None
@@ -1655,7 +1656,7 @@ class V3EvidenceStore:
                 ledger, None if signature is None else self._signature_payload(signature), anchor,
             )
             return
-        self._atomic_json_receipt(self._completeness_path(ledger), {
+        payload = {
             "schema": "emergency_record_index_complete_v1", "ledger": ledger,
             "identity": self._identity_binding(),
             "ledger_generation": self._active_ledger_generation(ledger),
@@ -1663,7 +1664,16 @@ class V3EvidenceStore:
                 None if signature is None else self._signature_payload(signature)
             ),
             "tail_anchor": anchor,
-        })
+        }
+        # Carry the R17 deleted-row tombstone integrity pin forward (fail-closed detection).
+        try:
+            pin = json.loads(self._completeness_path(ledger).read_text("utf-8")).get(
+                "deleted_row_tombstones_integrity_sha256")
+        except (OSError, ValueError, AttributeError):
+            pin = None
+        if pin:
+            payload["deleted_row_tombstones_integrity_sha256"] = pin
+        self._atomic_json_receipt(self._completeness_path(ledger), payload)
 
     def advance_transactional_receipt_import(
         self, ledger: str, *, max_bytes: int = 8 * 1024 * 1024,
@@ -2327,20 +2337,28 @@ class V3EvidenceStore:
         """Count exact durable IDs without copying a warm cache."""
         return len(cls._cached_ids(path))
 
-    def _row_tombstoned(self, ledger: str, line: str) -> bool:
-        """True when this exact line (sans terminator) was deleted via ledger_delete_by_sha."""
+    def _tombstone_block_reason(self, ledger: str, line: str) -> str:
+        """'' when the append may proceed; else a fail-closed reason (R17 no-resurrect, HM R2).
+
+        Called under the ledger's exclusive lock so it cannot race a concurrent delete.
+        """
         tomb = self.receipt_dir / "deleted_row_tombstones_v1" / f"{ledger}.json"
-        signature = _path_signature(tomb)
-        if signature is None:
-            return False
-        key = str(tomb)
-        cached = _tombstone_cache.get(key)
-        if cached is None or cached[0] != signature:
-            from ledger_delete_by_sha import load_tombstones
-            cached = (signature, load_tombstones(self.root, ledger))
-            _tombstone_cache[key] = cached
+        key = (str(tomb), _path_signature(tomb), _path_signature(self._completeness_path(ledger)))
+        cached = _tombstone_cache.get(key[0])
+        if cached is None or cached[0] != key[1:]:
+            from ledger_delete_by_sha import tombstone_state
+            ok, shas, reason = tombstone_state(self.root, ledger)
+            if not ok:
+                logging.getLogger(__name__).error(
+                    f"[ALERT] [LEDGER-TOMBSTONES] {ledger} {reason}: appends to this stream refused "
+                    "(fail closed) [PIPELINE ENFORCEMENT]")
+                return reason
+            cached = (key[1:], shas)
+            _tombstone_cache[key[0]] = cached
+        if not cached[1]:
+            return ""
         digest = hashlib.sha256(line.rstrip("\r\n").encode("utf-8")).hexdigest()
-        return digest in cached[1]
+        return "DELETED_ROW_TOMBSTONED" if digest in cached[1] else ""
 
     def append(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
         path = self.ledger_path(ledger)
@@ -2371,13 +2389,6 @@ class V3EvidenceStore:
             material['research_timing_capture_status'] = timing
             material['research_timing_declarations'] = timing['declarations']
         line = canonical_json(material) + "\n"
-        if self._row_tombstoned(ledger, line):
-            # R17 no-resurrect: a row deleted by ledger_delete_by_sha never comes back.
-            return {
-                "written": False, "duplicate": False, "blocked": True,
-                "record_id": record_id, "ledger": ledger,
-                "reason": "DELETED_ROW_TOMBSTONED",
-            }
         if not storage_blocks_new_nonessential_research(str(self.root)):
             # Empty-ledger completeness is constant work and is required so a
             # later emergency can safely continue an already-open lifecycle.
@@ -2391,6 +2402,14 @@ class V3EvidenceStore:
                     raise
                 return self._defer_mandatory_to_wal(ledger, record_id, material, line)
         with self._exclusive(path):
+            tomb_reason = self._tombstone_block_reason(ledger, line)
+            if tomb_reason:
+                # R17 no-resurrect: a row deleted by ledger_delete_by_sha never comes back;
+                # a missing/corrupt tombstone file fails closed for the whole stream.
+                return {
+                    "written": False, "duplicate": False, "blocked": True,
+                    "record_id": record_id, "ledger": ledger, "reason": tomb_reason,
+                }
             try:
                 head_recovery = self._recover_append_head(ledger, path)
             except OSError as exc:

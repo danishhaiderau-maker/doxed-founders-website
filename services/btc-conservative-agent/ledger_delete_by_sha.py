@@ -47,6 +47,7 @@ from typing import Any
 ALLOWED_LEDGERS = ("decision", "lifecycle", "market_segment", "order_intent")
 SNAPSHOT_DIRNAME = ".ledger_delete_rollback"
 TOMBSTONE_DIRNAME = "deleted_row_tombstones_v1"
+TOMBSTONE_PIN_KEY = "deleted_row_tombstones_integrity_sha256"
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _SNAPSHOT_RE = re.compile(r"^[0-9]{13}-[0-9a-f]{12}$")
 _STREAM_RE = re.compile(r"^v3/ledgers/([a-z_]+)\.jsonl$")
@@ -58,7 +59,7 @@ REFUSAL_CODES = (
     "ROW_MISSING", "DUPLICATE_LINES_WITHOUT_MULTIPLICITY", "MULTIPLICITY_MISMATCH",
     "ROW_UNPARSEABLE", "RECORD_ID_SHARED_WITH_SURVIVOR", "RECEIPT_MISSING", "RECEIPT_INVALID",
     "INVARIANT_FAILED_RESTORED", "SNAPSHOT_PATH_NOT_ALLOWED", "SNAPSHOT_MISSING",
-    "MULTI_STREAM_LIST_REFUSED",
+    "MULTI_STREAM_LIST_REFUSED", "DELETED_ROW_TOMBSTONES_MISSING", "DELETED_ROW_TOMBSTONES_CORRUPT",
 )
 
 
@@ -176,6 +177,7 @@ def _plan_ledger(store, ledger: str, wanted: dict[str, int]) -> dict[str, Any]:
     path = store.ledger_path(ledger)
     if not path.is_file():
         raise DeleteRefused("LEDGER_MISSING", {"ledger": ledger})
+    load_tombstones(store.root, ledger)  # fail closed on a missing/corrupt tombstone file
     signature = _path_signature(path)
     if not store._complete_generation(ledger, signature):
         raise DeleteRefused("INDEX_NOT_COMPLETE", {"ledger": ledger})
@@ -233,13 +235,45 @@ def _tombstone_path(store, ledger: str) -> Path:
     return store.receipt_dir / TOMBSTONE_DIRNAME / f"{ledger}.json"
 
 
-def load_tombstones(root: str | Path, ledger: str) -> frozenset[str]:
-    p = Path(root).resolve() / "v3" / "receipts" / TOMBSTONE_DIRNAME / f"{ledger}.json"
+def tombstone_integrity(shas) -> str:
+    return hashlib.sha256("\n".join(sorted(shas)).encode("ascii")).hexdigest()
+
+
+def tombstone_state(root: str | Path, ledger: str) -> tuple[bool, frozenset[str], str]:
+    """(ok, shas, reason).  Fail closed when deletes are recorded but the tombstone file is missing/corrupt.
+
+    The expected integrity hash is pinned in the ledger's complete.json (rebound by every delete), and the
+    tombstone file carries its own integrity hash; both must agree with the file's sha set.
+    """
+    root = Path(root).resolve()
+    p = root / "v3" / "receipts" / TOMBSTONE_DIRNAME / f"{ledger}.json"
+    comp_p = root / "v3" / "receipts" / "emergency_record_idempotency_v1" / ledger / "complete.json"
+    expected = None
+    try:
+        expected = json.loads(comp_p.read_text("utf-8")).get(TOMBSTONE_PIN_KEY)
+    except (FileNotFoundError, ValueError, AttributeError):
+        expected = None
     try:
         row = json.loads(p.read_text("utf-8"))
     except FileNotFoundError:
-        return frozenset()
-    return frozenset(row.get("row_sha256") or ())
+        if expected:
+            return False, frozenset(), "DELETED_ROW_TOMBSTONES_MISSING"
+        return True, frozenset(), ""
+    except (ValueError, UnicodeDecodeError, OSError):
+        return False, frozenset(), "DELETED_ROW_TOMBSTONES_CORRUPT"
+    shas = row.get("row_sha256") if isinstance(row, dict) else None
+    if (not isinstance(shas, list) or not all(isinstance(x, str) and _SHA_RE.match(x) for x in shas)
+            or row.get("integrity_sha256") != tombstone_integrity(shas)
+            or (expected is not None and expected != row.get("integrity_sha256"))):
+        return False, frozenset(), "DELETED_ROW_TOMBSTONES_CORRUPT"
+    return True, frozenset(shas), ""
+
+
+def load_tombstones(root: str | Path, ledger: str) -> frozenset[str]:
+    ok, shas, reason = tombstone_state(root, ledger)
+    if not ok:
+        raise DeleteRefused(reason, {"ledger": ledger})
+    return shas
 
 
 def _apply_ledger(store, plan: dict[str, Any], snap: Path) -> dict[str, Any]:
@@ -296,8 +330,13 @@ def _apply_ledger(store, plan: dict[str, Any], snap: Path) -> dict[str, Any]:
             anchor = {"offset": offset - len(last), "length": len(last),
                       "sha256": hashlib.sha256(last).hexdigest()}
         sigp = None if sig is None else store._signature_payload(sig)
+        tomb = set(load_tombstones(store.root, ledger)) | {_line_sha(l) for _o, l, _r in plan["drop"]}
+        integrity = tombstone_integrity(tomb)
+        store._atomic_json_receipt(_tombstone_path(store, ledger), {
+            "schema": "v3_deleted_row_tombstones_v1", "ledger": ledger, "row_sha256": sorted(tomb),
+            "integrity_sha256": integrity})
         comp = json.loads(store._completeness_path(ledger).read_text("utf-8"))
-        comp.update({"ledger_signature": sigp, "tail_anchor": anchor})
+        comp.update({"ledger_signature": sigp, "tail_anchor": anchor, TOMBSTONE_PIN_KEY: integrity})
         store._atomic_json_receipt(store._completeness_path(ledger), comp)
         bpath = store._bootstrap_path(ledger)
         if bpath.exists():
@@ -308,9 +347,6 @@ def _apply_ledger(store, plan: dict[str, Any], snap: Path) -> dict[str, Any]:
             cur = json.loads(membership.read_text("utf-8"))
             cur.update({"generation_id": str(uuid.uuid4()), "lifecycle_ledger": sigp, "tail_anchor": anchor})
             store._atomic_json_receipt(membership, cur)
-        tomb = set(load_tombstones(store.root, ledger)) | {_line_sha(l) for _o, l, _r in plan["drop"]}
-        store._atomic_json_receipt(_tombstone_path(store, ledger), {
-            "schema": "v3_deleted_row_tombstones_v1", "ledger": ledger, "row_sha256": sorted(tomb)})
         # read back
         after = path.read_bytes().splitlines(keepends=True)
         ok = (len(after) == plan["before_count"] - plan["removed_count"]
