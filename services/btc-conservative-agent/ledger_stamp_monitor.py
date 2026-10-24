@@ -63,15 +63,41 @@ def _reverse_lines(path: Path, max_bytes: int) -> Iterator[tuple[bytes, bool]]:
             yield buf, False
 
 
+# HM R2 #872: explicit {stream: reason} allowlist of retired streams. A stream is IDLE only when it is
+# listed here AND every writer module's retirement flag is True. Any other stream with no write since the
+# cutoff is RED (NO_WRITE_SINCE_NOT_ALLOWLISTED); any write since the cutoff to a retired stream is RED
+# (WRITE_TO_RETIRED_STREAM), stamped or not.
+RETIRED_STREAMS: dict[str, str] = {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+RETIREMENT_FLAGS: dict[str, tuple[tuple[str, str], ...]] = {
+    "market_segment": (
+        ("research_v3_bridge", "MARKET_SEGMENT_WRITES_RETIRED"),
+        ("research_v3_future_paths", "SEGMENT_WRITES_RETIRED_R17"),
+        ("recover_archived_future_paths", "SEGMENT_WRITES_RETIRED_R17"),
+        ("qualification_horizon_index", "SEGMENT_WRITES_RETIRED_R17"),
+    ),
+}
+
+
+def retirement_flags(name: str) -> dict[str, bool | None]:
+    """Each writer's flag (None = import failed or flag absent)."""
+    import importlib
+    out: dict[str, bool | None] = {}
+    for module, attr in RETIREMENT_FLAGS.get(name, ()):
+        try:
+            value = getattr(importlib.import_module(module), attr, None)
+        except Exception:  # noqa: BLE001
+            value = None
+        out[f"{module}.{attr}"] = value if isinstance(value, bool) else None
+    return out
+
+
 def _retired_reason(name: str) -> str | None:
-    """Code-level retirement of a stream's writers (R17). Import failure = not retired (fail closed)."""
-    if name != "market_segment":
+    """Allowlisted AND all writer flags True; anything else = not retired (fail closed)."""
+    reason = RETIRED_STREAMS.get(name)
+    flags = retirement_flags(name)
+    if reason is None or not flags or not all(v is True for v in flags.values()):
         return None
-    try:
-        import research_v3_bridge as bridge
-    except Exception:  # noqa: BLE001
-        return None
-    return "MARKET_SEGMENTS_RETIRED_R17" if getattr(bridge, "MARKET_SEGMENT_WRITES_RETIRED", False) is True else None
+    return reason
 
 
 def generation_paths(ledger_dir: Path, name: str) -> list[Path]:
@@ -107,7 +133,21 @@ def load_exclusions(path: str | os.PathLike | None) -> set[str]:
 def _new_info() -> dict:
     return {"status": None, "unstamped": 0, "excluded_listed": 0, "stamped": 0, "boundary_reached": False,
             "boundary": None, "legacy_unstamped_before_first_stamp": 0, "unclassified_at_cap": 0,
-            "generations_scanned": [], "idle_reason": None, "reasons": {}, "sample_row_ids": []}
+            "generations_scanned": [], "idle_reason": None, "red_reason": None, "reasons": {}, "sample_row_ids": [],
+            "warnings": [], "last_write_ts": None}
+
+
+def _last_written_at(path: Path):
+    """written_at_ts of the file's last row (None if absent/unparseable)."""
+    try:
+        for line, _ in _reverse_lines(path, 4 * 1024 * 1024):
+            row = json.loads(line)
+            stamp = row.get(lws.STAMP_KEY) if isinstance(row, dict) else None
+            value = stamp.get("written_at_ts") if isinstance(stamp, dict) else None
+            return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[str], max_bytes: int,
@@ -116,6 +156,11 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
     gens = generation_paths(ledger_dir, name)
     if not gens:
         info.update(boundary_reached=True, boundary="NO_FILE")
+        retired = _retired_reason(name)
+        if retired:
+            info["idle_reason"] = retired
+        else:
+            info["red_reason"] = "NO_WRITE_SINCE_NOT_ALLOWLISTED"
         return info
     pending: list[tuple[str, object]] = []  # unstamped rows newer than nothing-yet-stamped (newest first)
     seen_stamped = False
@@ -142,6 +187,14 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
         info["generations_scanned"].append(path.name)
         if st.st_mtime < since_ts:
             commit()  # rows above this point in newer generations: fail closed
+            # HM nit: mtime is ambiguous after a timestamp-preserving restore/copy. Never skip silently:
+            # cross-check the last row's stamp; a stamp >= since contradicts the mtime (AMBER via unverified).
+            tail = _last_written_at(path)
+            if tail is None:
+                info["warnings"].append(f"MTIME_BOUNDARY_UNCONFIRMED_BY_STAMP:{path.name}")
+            elif tail >= since_ts:
+                info["warnings"].append(f"MTIME_BOUNDARY_CONTRADICTED_BY_STAMP:{path.name}")
+                unverified.append(f"{name}:MTIME_BOUNDARY_AMBIGUOUS:{path.name}")
             info.update(boundary_reached=True, boundary="FILE_MTIME_BEFORE_SINCE")
             done = True
             break
@@ -203,10 +256,16 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
             pending.clear()
         else:
             commit()
-    if not seen_stamped and info["unstamped"] == 0 and newest_mtime is not None and newest_mtime < since_ts:
-        retired = _retired_reason(name)
-        info["idle_reason"] = retired or "NO_WRITE_SINCE"
-        info["last_write_ts"] = newest_mtime
+    info["last_write_ts"] = newest_mtime
+    retired = _retired_reason(name)
+    wrote_since = info["stamped"] > 0 or info["unstamped"] > 0 or (newest_mtime is not None and newest_mtime >= since_ts)
+    if retired and wrote_since:
+        info["red_reason"] = "WRITE_TO_RETIRED_STREAM"
+    elif not wrote_since:
+        if retired:
+            info["idle_reason"] = retired
+        else:
+            info["red_reason"] = "NO_WRITE_SINCE_NOT_ALLOWLISTED"
     return info
 
 
@@ -219,7 +278,8 @@ def check(data_dir: str | os.PathLike, since_ts: float, *, exclusions: set[str] 
     for name in LEDGERS:
         n_before = len(unverified)
         info = _scan_ledger(name, ledger_dir, float(since_ts), exclusions, max_bytes, unverified)
-        if info["unstamped"] > 0:
+        info["retirement_flags"] = retirement_flags(name)
+        if info["unstamped"] > 0 or info["red_reason"]:
             info["status"] = "RED"
         elif len(unverified) > n_before:
             info["status"] = "AMBER"
@@ -230,9 +290,12 @@ def check(data_dir: str | os.PathLike, since_ts: float, *, exclusions: set[str] 
         per[name] = info
     count = sum(v["unstamped"] for v in per.values())
     idle = {k: v["idle_reason"] for k, v in per.items() if v["status"] == "IDLE"}
-    status = "RED" if count > 0 else ("AMBER" if unverified else ("IDLE" if idle else "GREEN"))
+    red_streams = {k: v["red_reason"] for k, v in per.items() if v["red_reason"]}
+    status = "RED" if count > 0 or red_streams else ("AMBER" if unverified else ("IDLE" if idle else "GREEN"))
     return {"check": CHECK_ID, "since_ts": float(since_ts), "status": status, "alert": status in ("RED", "AMBER"),
-            "unstamped_rows_since": count, "unverified": unverified, "idle_ledgers": idle,
+            "unstamped_rows_since": count, "unverified": unverified, "idle_ledgers": idle, "red_streams": red_streams,
+            "retired_streams_allowlist": dict(RETIRED_STREAMS),
+            "warnings": [w for v in per.values() for w in v["warnings"]],
             "legacy_unstamped_before_first_stamp": sum(v["legacy_unstamped_before_first_stamp"] for v in per.values()),
             "boundary_key": "write_stamp.written_at_ts", "ledgers": per}
 

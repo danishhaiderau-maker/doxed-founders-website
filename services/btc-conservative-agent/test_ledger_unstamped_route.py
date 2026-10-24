@@ -25,6 +25,10 @@ def _write(tmp_path, rows):
     d = tmp_path / "v3" / "ledgers"
     d.mkdir(parents=True, exist_ok=True)
     (d / "decision.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    # HM R2: every non-allowlisted stream must show a write since the cutoff, else it is RED.
+    for name in mon.LEDGERS:
+        if name != "decision" and name not in mon.RETIRED_STREAMS:
+            (d / f"{name}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows if r.get("record_id") == "ok"))
 
 
 def test_route_red_when_unstamped_since_and_green_otherwise(tmp_path, monkeypatch):
@@ -46,7 +50,9 @@ def test_route_red_when_unstamped_since_and_green_otherwise(tmp_path, monkeypatc
     _write(tmp_path, [{"record_id": "old", "write_stamp": st(1792000000.0)},
                       {"record_id": "ok", "write_stamp": st(1792002000.0)}])
     body = _client().get(PATH + "?since=1792001000").get_json()
-    assert body["status"] == "GREEN" and body["unstamped_rows_since"] == 0
+    # retired market_segment is IDLE with its reason, never GREEN (RK/HM R2)
+    assert body["status"] == "IDLE" and body["unstamped_rows_since"] == 0
+    assert body["idle_ledgers"] == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
 
 
 def test_route_bad_since_is_400(monkeypatch):

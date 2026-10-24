@@ -33,6 +33,13 @@ def _led(tmp_path):
     return tmp_path / "v3" / "ledgers"
 
 
+def _others(tmp_path, *skip):
+    """HM R2: non-allowlisted streams with no write since the cutoff are RED, so fill the rest."""
+    for n in mon.LEDGERS:
+        if n not in skip and n not in mon.RETIRED_STREAMS:
+            _write(_led(tmp_path) / f"{n}.jsonl", [{"record_id": n, "write_stamp": _st(SINCE + 5)}])
+
+
 def test_m1_new_unstamped_row_with_old_fallback_ts_is_counted_not_a_boundary(tmp_path):
     _write(_led(tmp_path) / "decision.jsonl", [
         {"record_id": "old", "write_stamp": _st(SINCE - 10)},
@@ -79,6 +86,7 @@ def test_m3_cap_never_green_and_never_hides(tmp_path):
     _write(_led(tmp_path) / "order_intent.jsonl",
            [{"record_id": f"legacy{i}", "pad": "x" * 200} for i in range(50)]
            + [{"record_id": "n", "write_stamp": _st(SINCE + 5)}])
+    _others(tmp_path, "order_intent")
     res = mon.check(tmp_path, FLOOR, max_bytes=2000)
     assert res["status"] == "AMBER" and res["alert"] and "order_intent:SCAN_BUDGET_EXHAUSTED" in res["unverified"]
     assert res["ledgers"]["order_intent"]["unclassified_at_cap"] > 0
@@ -92,7 +100,7 @@ def test_unstamped_only_stream_written_since_is_red_fail_closed(tmp_path):
 
 def test_retired_market_segment_idle_with_reason_never_green(tmp_path):
     _write(_led(tmp_path) / "market_segment.jsonl", [{"record_id": "market-context:x"}], mtime=SINCE - 100)
-    _write(_led(tmp_path) / "decision.jsonl", [{"record_id": "n", "write_stamp": _st(SINCE + 5)}])
+    _others(tmp_path)
     res = mon.check(tmp_path, SINCE)
     ms = res["ledgers"]["market_segment"]
     assert ms["status"] == "IDLE" and ms["idle_reason"] == "MARKET_SEGMENTS_RETIRED_R17"
