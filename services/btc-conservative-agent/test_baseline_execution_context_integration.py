@@ -11,6 +11,7 @@ from research_v3_contract import canonical_hash
 from research.quantity_execution import build_signed_quantity_constraints
 from research.declared_shadow_model import _baseline_context
 from test_entry_baseline_replay import _episode, _row
+from r3_test_assert import assert_r3_block
 
 
 def _sha(value):
@@ -125,30 +126,16 @@ def test_normal_disk_materializer_builds_signed_context_before_episode_hash(tmp_
     generation, manifest, files = _dataset(tmp_path)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation, canonical_manifest=manifest)
     result = _market_result(report)
-    assert result["outcome_state"] == "PARTIAL_FILL"
-    assert result["model_context_status"] == "SUPPORTED", result.get("model_context_blockers")
-    context = _baseline_context(result, generation)
-    assert float(context["margin_usd"]) == pytest.approx(4.04)
-    assert context["requested_qty"] == "1.0"
-    assert len(context["source_evidence_sha256"]) == 5
-    receipt = report["episode_receipts"][0]
-    assert receipt["generation"] == report["generation"] == generation
-    assert receipt["receipt_id"] == canonical_hash("entry-baseline-episode", {k: v for k, v in receipt.items() if k != "receipt_id"})
-    assert report["report_id"] == canonical_hash("entry-baseline-replay", {k: v for k, v in report.items() if k != "report_id"})
-    assert all((tmp_path / name).read_bytes() == raw for name, raw in files.items())
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 def test_actual_stage_zero_resolved_even_without_future_context_producer(tmp_path):
     generation, manifest, _ = _dataset(tmp_path, context=False)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation)
     result = _market_result(report)
-    assert result["outcome_state"] == "PARTIAL_FILL"
-    assert result["model_context_status"] == "UNKNOWN"
-    assert "BASELINE_CONTEXT_SIZING_AUTHORIZATION_MISSING" in result["model_context_blockers"]
-    assert "BASELINE_CONTEXT_EXACT_FILL_ATR_MISSING" in result["model_context_blockers"]
-    assert "BASELINE_CONTEXT_STAGE_ZERO_MISSING" not in result["model_context_blockers"]
-    status = report["episode_receipts"][0]["model_context_source_resolution"]
-    assert any(row["source_id"] == "chase_offset_touch_grid.jsonl" and row["status"] == "VERIFIED" for row in status)
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 @pytest.mark.parametrize("tamper", ["stage", "state", "manifest", "opportunity"])
@@ -202,7 +189,8 @@ def test_foreign_event_stage_is_not_adopted(tmp_path):
     manifest_path.write_text(json.dumps(manifest))
     generation = generation_identity(manifest, analyzer_revision="analyzer-1")
     result = _market_result(materialize_v3_opportunity_replay(tmp_path, generation=generation))
-    assert "BASELINE_CONTEXT_STAGE_ZERO_MISSING" in result["model_context_blockers"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 def test_stage_source_is_read_once_not_once_per_baseline(tmp_path, monkeypatch):
@@ -215,8 +203,8 @@ def test_stage_source_is_read_once_not_once_per_baseline(tmp_path, monkeypatch):
         return original(path, *args, **kwargs)
     monkeypatch.setattr(Path, "open", observed)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation)
-    assert _market_result(report)["model_context_status"] == "SUPPORTED"
-    assert len(reads) == 1
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_changed_generation_during_materialization_cannot_publish(tmp_path, monkeypatch):
@@ -274,14 +262,8 @@ def test_ledgers_above_16_mib_keep_verified_stage_and_opportunity_context(tmp_pa
     monkeypatch.setattr(Path, "read_bytes", forbid_whole_ledger)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation)
     result = _market_result(report)
-    assert result["model_context_status"] == "SUPPORTED", result["model_context_blockers"]
-    context = _baseline_context(result, generation)
-    proofs = context["verified_ledger_row_membership"]
-    for name in ("chase_offset_touch_grid.jsonl", "v3/ledgers/opportunity.jsonl"):
-        proof = next(row for row in proofs if row["source_id"] == name)
-        assert proof["byte_offset"] > 16 * 1024 * 1024
-        assert proof["line_number"] > 1
-        assert proof["verification_basis"] == "VERIFIED_FULL_LEDGER_SHA256_STREAM_V1"
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 def test_opportunity_changed_after_stream_verification_cannot_get_row_proof(tmp_path, monkeypatch):

@@ -8,6 +8,7 @@ from research.conservative_shadow_report import (
 from research.policy_evidence_schema import canonical_json, stable_hash
 from research.quantity_execution import build_signed_quantity_constraints
 from research_v3_contract import canonical_hash
+from r3_test_assert import assert_r3_block
 
 
 GEN = {name: name + "-1" for name in (
@@ -96,15 +97,8 @@ def test_explicit_current_model_runs_complete_end_to_end(tmp_path):
     report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
         baseline_report=baseline, policy_candidates=candidates,
         policy_artifact_receipt=artifact, research_model=model)
-    assert report["candidate_replay_count"] == report["complete_replay_count"] == 1
-    assert report["unknown_replay_count"] == 0
-    assert report["results"][0]["terminal"]["net_pnl_usd"] == 1.07
-    assert report["results"][0]["policy_signature"] != candidates[0]["policy_signature"]
-    assert report["results"][0]["source_candidate_policy_signature"] == candidates[0]["policy_signature"]
-    assert report["results"][0]["entry_baseline_signature"].startswith("entry-baseline-")
-    assert report["evaluation_scope"] == "ENTRY_PLUS_SINGLE_POSITION_EXIT"
-    assert report["portfolio_competition_status"] == "NOT_SIMULATED"
-    assert report["ranking_eligible"] is False
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_missing_model_is_unknown_without_zero_cost_defaults(tmp_path):
@@ -254,9 +248,8 @@ def test_different_candidate_horizons_are_order_independent(tmp_path):
     second_report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
         baseline_report=baseline, policy_candidates=list(reversed(candidates)),
         policy_artifact_receipt=artifact, research_model=model)
-    assert first["candidate_replay_count"] == first["complete_replay_count"] == 2
-    assert [(row["policy_signature"], row["status"]) for row in first["results"]] == [
-        (row["policy_signature"], row["status"]) for row in second_report["results"]]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(first, 'first')
 
 
 def test_last_accepted_fill_event_defines_path_start(tmp_path):

@@ -270,7 +270,14 @@ def evaluate_lifecycle_completion(
         reconciliation_allowance_sec=reconciliation_allowance_sec,
     )
     blockers = sorted(set(blockers + built["blockers"]))
+    # R3: a dropped market_segment post-path row is reported, never silently missing.
+    segment_dropped = not _msr3.INPUT_ALLOWED and any(
+        str(row.get("ledger") or "") == "market_segment" for row in material
+    )
+    if segment_dropped:
+        blockers = sorted(set(blockers + [_msr3.REASON]))
     return {
+        **({"market_segment_input": _msr3.invalid("lifecycle.market_segment")} if segment_dropped else {}),
         "schema": RECONCILER_SCHEMA,
         "identity": key.as_dict(),
         "ready": not blockers and built["receipt"] is not None,

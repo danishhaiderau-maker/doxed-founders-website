@@ -3,13 +3,15 @@
 A test listed in ci/r3_legacy_segment_tests.txt is reported as xfailed ONLY if it
 fails because of the R3 market_segment gate:
 
-* the market_segment_r3 gate was touched during that test (HIT_COUNT grew), and
-* the failure is ``MarketSegmentInputInvalid``, or one of the assertion-style
-  types that fail-closed outputs produce (AssertionError, KeyError, StopIteration).
+* the market_segment_r3 gate fired during that test (HIT_COUNT grew; reading
+  ``_msr3.REASON`` does not count), and
+* the failure is ``MarketSegmentInputInvalid`` itself, or its failure text carries
+  ``INVALID_R3_MARKET_SEGMENT_INPUT``.
 
-Anything else is a real failure and breaks CI: a pass (strict XPASS), a failure
-of any other type (TypeError, ImportError, ...), or any failure without a gate
-hit. ``R3_LEGACY_LIST`` overrides the list path (used by the self-test).
+Anything else is a real failure and breaks CI: a pass (strict XPASS), any other
+failure (a bare AssertionError, KeyError, StopIteration, TypeError, ...), or any
+failure without a gate hit. HM #873 R2: the list is now empty; the plugin stays so
+that any re-listed test is held to this rule. ``R3_LEGACY_LIST`` overrides the list path (used by the self-test).
 """
 from __future__ import annotations
 
@@ -20,8 +22,9 @@ import pytest
 import market_segment_r3 as _msr3
 
 _DEFAULT_LIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ci", "r3_legacy_segment_tests.txt")
-SCOPED_TYPES = (_msr3.MarketSegmentInputInvalid, AssertionError, KeyError, StopIteration)
-XFAIL_REASON = "INVALID_R3_MARKET_SEGMENT_INPUT (scoped: gate hit + allowed failure type)"
+SCOPED_TYPES = (_msr3.MarketSegmentInputInvalid,)
+R3_MARKER = "INVALID_R3_MARKET_SEGMENT_INPUT"
+XFAIL_REASON = "INVALID_R3_MARKET_SEGMENT_INPUT (scoped: gate hit + R3 error)"
 _START = pytest.StashKey[int]()
 _LEGACY = pytest.StashKey[bool]()
 
@@ -35,15 +38,17 @@ def load_list(path: str | None = None) -> set[str]:
         return set()
 
 
-def classify(excinfo, gate_hits: int) -> str:
-    """'xfail' when the failure is attributable to the R3 gate, else 'fail'."""
+def classify(excinfo, gate_hits: int, text: str = "") -> str:
+    """'xfail' only when the failure IS the R3 error, else 'fail'."""
     if excinfo is None:
         return "xpass"
     if gate_hits <= 0:
         return "fail"
-    if not isinstance(excinfo.value, SCOPED_TYPES):
-        return "fail"
-    return "xfail"
+    if isinstance(excinfo.value, SCOPED_TYPES):
+        return "xfail"
+    if R3_MARKER in (text or "") or R3_MARKER in str(excinfo.value):
+        return "xfail"
+    return "fail"
 
 
 def pytest_collection_modifyitems(config, items):
@@ -73,7 +78,7 @@ def pytest_runtest_makereport(item, call):
         report.longrepr = f"[XPASS(strict)] R3 legacy test passed; remove it from ci/r3_legacy_segment_tests.txt"
         return
     if call.when in ("setup", "call") and report.failed:
-        verdict = classify(call.excinfo, hits)
+        verdict = classify(call.excinfo, hits, str(report.longrepr))
         if verdict == "xfail":
             report.outcome = "skipped"
             report.wasxfail = f"{XFAIL_REASON}; last gate touch={_msr3.LAST_HIT}"

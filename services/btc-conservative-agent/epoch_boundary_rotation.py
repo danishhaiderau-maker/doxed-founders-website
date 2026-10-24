@@ -117,7 +117,7 @@ def assess_v3_ledgers(runtime_root: str | os.PathLike, manifest: dict) -> dict:
     root = Path(runtime_root)
     started = float(manifest["started_at_ts"])
     ledgers = {}
-    for ledger in V3_LEDGERS:
+    for ledger in V3_LEDGERS:  # R3-NON-INPUT: rotation head/size probe only
         decision, ts, size = head_decision(root / "v3" / "ledgers" / f"{ledger}.jsonl", started)
         pointer = root / "v3" / "receipts" / "ledger_generations_v1" / ledger / "ACTIVE.json"
         entry = {"head_decision": decision, "head_first_row_ts": ts, "head_bytes": size,

@@ -4,6 +4,7 @@ from research.quantity_execution import build_signed_quantity_constraints
 from research.conservative_limit_fill import evaluate_limit_fill
 from research_v3_contract import canonical_hash
 import hashlib
+from r3_test_assert import assert_r3_block
 
 
 def _sha(value):
@@ -179,8 +180,8 @@ def test_signed_two_second_sampling_policy_is_used_without_one_second_default():
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["required_horizon_end_ts"] == 13
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(receipt, 'receipt')
 
 
 def test_position_notional_must_exactly_match_partial_filled_quantity():
@@ -241,8 +242,8 @@ def test_negative_funding_credit_is_permitted_when_signed():
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["funding_usd"] == -.02
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(receipt, 'receipt')
 
 
 def test_required_horizon_must_be_divisible_by_signed_sampling_interval():

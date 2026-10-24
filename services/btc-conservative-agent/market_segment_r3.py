@@ -32,8 +32,7 @@ def __getattr__(name: str):
     if name == "INPUT_ALLOWED":
         _hit("INPUT_ALLOWED")
         return _INPUT_ALLOWED
-    if name == "REASON":
-        _hit("REASON")
+    if name == "REASON":  # reading the reason string is not a gate firing (HM #873 R2 a1)
         return _REASON
     raise AttributeError(name)
 LEDGERS = ("v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl")

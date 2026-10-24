@@ -982,6 +982,7 @@ def materialize_bundle(
             row_count=len(frozen), first_timestamp=_utc_iso(min(timestamps)),
             last_timestamp=_utc_iso(max(timestamps)),
         )]
+        segments = segments if _msr3.INPUT_ALLOWED else []  # R3: never copied as evidence
         for source in segments:
             relative = source.relative_to(root).as_posix()
             destination = temporary / "market_segments" / source.stem[:2] / source.name
@@ -1221,6 +1222,7 @@ def materialize_transfer_bundle(
             row_count=len(frozen), first_timestamp=_utc_iso(min(timestamps)),
             last_timestamp=_utc_iso(max(timestamps)),
         )]
+        segments = segments if _msr3.INPUT_ALLOWED else []  # R3: never copied as evidence
         for source in segments:
             relative = source.relative_to(root).as_posix()
             destination = temporary / "market_segments" / source.stem[:2] / source.name

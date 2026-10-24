@@ -1217,6 +1217,9 @@ class CandidateInputStream:
                 for ref in _msr3.rows("lifecycle.market_segment_refs")  # R3
                 if isinstance(ref, Mapping) and ref.get("sha256")
             ],
+            # R3: lifecycle segment refs are dropped input; say so instead of an empty tape.
+            **({"market_segment_input": _msr3.invalid("lifecycle.market_segment_refs")}
+               if lifecycle.get("market_segment_refs") and not _msr3.INPUT_ALLOWED else {}),
             "signal_ts": opportunity.get("signal_ts"),
             "regime": (
                 _regime_label(feature.get("regime"))

@@ -3,7 +3,7 @@ import pytest
 
 from research.discovery_scorecard_publication import build_discovery_scorecard_publication
 from research.shadow_result_stream import digest
-from test_discovery_scorecard_publication import GENERATION, inputs, shadow_inputs
+from test_discovery_scorecard_publication import GENERATION, inputs, declared_shadow_inputs as shadow_inputs
 
 
 def fixture(tmp_path):

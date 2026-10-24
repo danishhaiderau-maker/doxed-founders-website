@@ -552,6 +552,10 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 "status": "EMPTY",
             },
         )
+        # Deterministic: the stale mirror copy is strictly older than the current report
+        # (equal mtimes made the pick depend on filesystem timestamp granularity).
+        import os
+        os.utime(mirror / "exit_reports_validation.json", (1_000_000, 1_000_000))
         _write_json(
             root / "safe_policy_genome_v3_report.json",
             {
@@ -656,10 +660,9 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         "raw/current_fly_mirror/v3/ledgers/execution.jsonl"
                         in names
                     )
-                    assert (
-                        "raw/current_fly_mirror/v3/market_segments/aa/segment.json"
-                        in names
-                    )
+                    # R3 rewrite (HM #873 a1): segment envelopes are not evidence and are
+                    # never shipped in the research download.
+                    assert not any("/v3/market_segments/" in name for name in names)
                     assert "raw/research_history/trades_3factor.csv" in names
                     assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
                     manifest = json.loads(zf.read("MANIFEST.json"))

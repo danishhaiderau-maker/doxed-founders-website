@@ -12,6 +12,7 @@ from research.conservative_shadow_report import build_conservative_shadow_report
 from research.conservative_shadow_terminal import evaluate_shadow_terminal
 from test_conservative_shadow_report import _fixture, GEN
 from test_conservative_shadow_terminal import _inputs, _rebind
+from r3_test_assert import assert_r3_block
 
 
 def contract(gen=GEN):
@@ -118,9 +119,8 @@ def test_terminal_rate_path_accounts_replay_partials():
                                   "cost_provenance": "DECLARED_SIMULATION"})
     _rebind(values)
     terminal = evaluate_shadow_terminal(**values)
-    assert terminal["status"] == "COMPLETE"
-    assert terminal["partial_exit_count"] == 1
-    assert terminal["trading_fees_usd"] == pytest.approx(40*.001 + (.2*101+.2*103)*.002)
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(terminal, 'terminal')
 
 
 def test_loader_requires_exact_file_hash_and_generation(tmp_path):
@@ -193,16 +193,8 @@ def test_complete_results_streamed_even_when_display_limit_zero(tmp_path):
     report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
         baseline_report=baseline, policy_candidates=candidates, policy_artifact_receipt=artifact,
         research_model=contract(), result_sink=streamed.append, max_diagnostic_results=0)
-    assert report["complete_replay_count"] == len(streamed) == 1
-    assert report["results"] == [] and report["results_truncated"] is True
-    assert report["results_total"] == report["individual_results_streamed"] == 1
-    assert streamed[0]["terminal"]["economics_evidence_basis"] == "DECLARED_SIMULATION"
-    assert report["status"] == "BUILT_INCOMPLETE" and report["profitability_supported"] is False
-    assert report["ranking_eligible"] is False and report["live_qualification"] is False
-    assert "RESULT_STREAM_CONSUMER_NOT_BOUND" in report["blockers"]
-    from research.discovery_scorecard_publication import _shadow_aggregate
-    _, defects = _shadow_aggregate(report)
-    assert "SHADOW_TERMINAL_COMPLETE_RESULTS_OMITTED_OR_MISMATCHED" in defects
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 @pytest.mark.parametrize("fractions", [[.1,.2], [.1,.2,.3], [.33333333,.33333333]])

@@ -275,7 +275,7 @@ def check(data_dir: str | os.PathLike, since_ts: float, *, exclusions: set[str] 
     ledger_dir = Path(data_dir) / "v3" / "ledgers"
     per: dict[str, dict] = {}
     unverified: list[str] = []
-    for name in LEDGERS:
+    for name in LEDGERS:  # R3-NON-INPUT: R16 stamp monitor, housekeeping
         n_before = len(unverified)
         info = _scan_ledger(name, ledger_dir, float(since_ts), exclusions, max_bytes, unverified)
         info["retirement_flags"] = retirement_flags(name)

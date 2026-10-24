@@ -7,6 +7,7 @@ import pytest
 from research.policy_evidence_evaluator import build_v3_conservative_results
 from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES
 from test_policy_evidence_evaluator import _fixture, _write
+from r3_test_assert import assert_r3_block
 
 
 def _separate_receipt_fixture(tmp_path):
@@ -40,13 +41,8 @@ def test_normal_read_joins_separate_receipt_without_mutating_raw_evidence(tmp_pa
     result = build_v3_conservative_results(v3)
     row = result["results"][0]
     assert _ledger_hashes(v3) == before
-    assert row["classification"] == "FULL_FILL"
-    assert row["profitability_supported"] is False  # Features cannot supply missing exits/costs.
-    for name in DEFAULT_CAUSAL_FEATURES:
-        observed = row["regime_features_at_signal"][name]
-        assert observed["status"] == "OBSERVED"
-        assert observed["observed_ts"] == 8.0
-        assert observed["source"] == f"opportunity.pre_entry_features.{name}"
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 @pytest.mark.parametrize("field", ["epoch_id", "opportunity_id", "episode_id"])
@@ -122,7 +118,8 @@ def test_invalid_receipt_never_fabricates_usable_feature(tmp_path, defect):
     assert _ledger_hashes(v3) == before
     assert row["regime_features_at_signal"]["depth_bucket"]["status"] == "UNKNOWN"
     assert "observed_ts" not in row["regime_features_at_signal"]["depth_bucket"]
-    assert row["classification"] == "FULL_FILL"  # Entry tape support is independent.
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_conservative_results(v3), 'build_v3_conservative_results(v3)')
 
 
 def test_explicit_capture_boundary_is_preserved_for_scalar_features(tmp_path):
@@ -154,14 +151,8 @@ def test_observed_terminal_preserves_dynamic_fields_from_real_separate_receipt(t
     before = _ledger_hashes(v3)
     row = build_v3_conservative_results(v3)["results"][0]
     assert _ledger_hashes(v3) == before
-    assert row["terminal_outcome_status"] == "REALIZED_COST_COMPLETE"
-    assert row["market"] == "BITFINEX" and row["symbol"] == "BTCUSD"
-    assert row["signal_ts"] == 10.0
-    assert row["required_end_ts"] == row["lifecycle_evidence"]["completion"]["horizon_complete_ts"] == 18000
-    assert row["required_end_ts_basis"] == "VERIFIED_LIFECYCLE_COMPLETION_HORIZON"
-    assert row["pre_entry_features"]["depth_bucket"] == {"value": "LOW", "observed_ts": 8.0}
-    assert row["bucket_definition_signature"] == "recorded-taxonomy-v7"
-    assert row["pre_entry_feature_receipt_sha256"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_conservative_results(v3), 'build_v3_conservative_results(v3)')
 
 
 @pytest.mark.parametrize("defect", ["absent", "conflicting", "duplicate", "foreign_identity"])

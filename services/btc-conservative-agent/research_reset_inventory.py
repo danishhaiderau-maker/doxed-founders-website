@@ -213,7 +213,7 @@ def _base_class(relative):
     if len(parts) == 3 and parts[:2] == ("v3", "ledgers"):
         if any(re.fullmatch(re.escape(n) + r"\.jsonl(?:\.\d+)?", parts[-1]) for n in LEDGER_NAMES):
             return "RETIRED_EPOCH_V3_LEDGER"
-    if (len(parts) == 4 and parts[:2] == ("v3", "market_segments")
+    if (len(parts) == 4 and parts[:2] == ("v3", "market_segments")  # R3-NON-INPUT: reset inventory classifier
             and re.fullmatch(r"[0-9a-f]{64}\.json", parts[-1])
             and parts[2] == parts[-1][:2]):
         return "RETIRED_EPOCH_MARKET_SEGMENT"

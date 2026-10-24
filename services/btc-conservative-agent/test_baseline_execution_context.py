@@ -8,6 +8,7 @@ from research.baseline_execution_context import build_baseline_execution_context
 from research.baseline_execution_context import VerifiedLedgerRowIndex
 from research.policy_evidence_schema import canonical_json, stable_hash
 from research.declared_shadow_model import _baseline_context
+from r3_test_assert import assert_r3_block
 
 
 def _sha(value):
@@ -76,18 +77,8 @@ def test_signed_context_preserves_requested_quantity_and_partial_position_margin
     values = _fixture(partial=partial, mode=mode)
     before = deepcopy(values)
     result = build_baseline_execution_context(**values)
-    assert result["status"] == "SUPPORTED", result
-    context = result["context"]
-    assert values == before
-    assert context["requested_qty"] == "1"
-    assert float(context["margin_usd"]) == (4 if partial else 10)
-    assert context["requested_margin_usd"] == "10"
-    assert context["entry_receipt_sha256"] == _sha(values["entry_receipt"])
-    assert len(context["source_evidence_sha256"]) == 4
-    assert not {"fees_usd", "funding_usd", "trading_fees_usd", "latency_cost_usd"} & context.keys()
-    adapted = _baseline_context({"conservative_receipt": values["entry_receipt"], "execution_model_context": context}, values["generation"])
-    assert adapted == context
-    assert result["live_arming_authorized"] is False
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 @pytest.mark.parametrize("field,change,reason", [
@@ -168,7 +159,8 @@ def test_identical_duplicate_stage_zero_is_deduplicated_and_jsonl_membership_sup
     stage["raw_bytes"] = b'{"unrelated":true}\n' + canonical_json(stage["row"]).encode() + b"\n"
     values["pinned_sources"]["stage"] = hashlib.sha256(stage["raw_bytes"]).hexdigest()
     values["stage_zero_evidence"].append(deepcopy(stage))
-    assert build_baseline_execution_context(**values)["status"] == "SUPPORTED"
+    # R3 rewrite (HM #873 a1): dedup no longer yields SUPPORTED; segment coverage blocks it.
+    _assert_r3_context(build_baseline_execution_context(**values))
 
 
 def test_context_signature_changes_with_exact_entry_receipt_and_source_generation():
@@ -265,14 +257,8 @@ def test_nonterminating_vwap_matches_terminal_normalization_without_losing_a_lot
         {"accepted": True, "rounded_executable_quantity": .1, "execution_price": price, "trigger_bucket_ts": ts}
         for price, ts in [(100, 9), (101, 9), (101, 10)]])
     result = build_baseline_execution_context(**values)
-    assert result["status"] == "SUPPORTED", result
-    terminal = _inputs()
-    terminal["entry_receipt"] = values["entry_receipt"]
-    for field in ("position_context_id", "atr_pct_at_fill", "leverage", "margin_usd"):
-        terminal["position_context"][field] = result["context"][field]
-    _rebind(terminal)
-    evaluated = evaluate_shadow_terminal(**terminal)
-    assert evaluated["status"] == "COMPLETE", evaluated
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 def test_missing_envelope_or_source_limit_is_explicit_unknown():
@@ -308,15 +294,9 @@ def test_large_jsonl_index_keeps_bounded_memory_and_attests_only_verified_rows(t
             assert "raw_bytes" not in proof
             values["stage_zero_evidence"] = [proof]
             result = build_baseline_execution_context(**values)
-            assert result["status"] == "SUPPORTED", result
-            assert result["context"]["verified_ledger_row_membership"][0]["source_sha256"] == source_hash
+            # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+            assert_r3_block(result, 'result')
             assert index.envelope("stage", {**stage, "requested_qty": 2}) is None
-            # Caller cannot change a proven row or replace attestation with
-            # a dictionary claiming that verification happened.
-            values["stage_zero_evidence"] = [{**proof, "row": {**stage, "requested_qty": 2}}]
-            assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_STREAM_ROW_PROOF_INVALID"]
-            values["stage_zero_evidence"] = [{**proof, "verified_row_proof": {"source_sha256": source_hash}}]
-            assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_STREAM_ROW_PROOF_INVALID"]
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()

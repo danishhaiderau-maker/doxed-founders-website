@@ -566,7 +566,9 @@ class V3CandidateTests(unittest.TestCase):
             self.assertEqual(rows[0]["atr14_pct"], 0.1)
             self.assertEqual(rows[0]["epoch_id"], "epoch-clean")
             self.assertEqual(rows[0]["opportunity_id"], "opportunity:episode-1")
-            self.assertEqual(rows[0]["tape_ids"], [segment["sha256"]])
+            # R3 rewrite (HM #873 a1): segment refs are dropped input, visibly marked.
+            self.assertEqual(rows[0]["tape_ids"], [])
+            self.assertEqual(rows[0]["market_segment_input"]["reason"], "INVALID_R3_MARKET_SEGMENT_INPUT")
             self.assertEqual(rows[0]["source_fill_ids"], ["execution:event-1:primary-fill"])
             self.assertEqual(rows[0]["entry_children"][0]["fill_price"], 100)
             self.assertEqual(rows[0]["entry_children"][0]["offset_pct"], 0.29)

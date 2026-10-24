@@ -37,7 +37,25 @@ def _row(ledger, record_id, **extra):
     }
 
 
-def _terminal_rows():
+def _terminal_rows(segment_post=False):
+    """Terminal lifecycle rows. Post-exit observation is an explicit gap-free proof on the
+    lifecycle row (R3: market_segment coverage is not evidence; ``segment_post=True``
+    builds the legacy segment-carried form, which must fail closed)."""
+    post = {"complete": True, "gaps_absent": True, "complete_through_ts": 18_000.0}
+    if not segment_post:
+        return [
+            _row(
+                "order_intent", "schedule",
+                intent_kind="AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
+                schedule_lifecycle_final=True, chase_schedule_authoritative=True,
+                schedule_sha256="c" * 64, requested_qty=1.0,
+                chase_schedule={
+                    "terminal_ts": 10_000.0, "terminal_reason": "TTL_EXPIRED",
+                },
+            ),
+            _row("lifecycle", "terminal", terminal=True, terminal_no_fill=True,
+                 post_observation=post),
+        ]
     return [
         _row(
             "order_intent", "schedule",
@@ -87,10 +105,12 @@ def test_receipt_rejects_early_and_non_terminal_completion():
 def test_exact_post_exit_horizon_and_provenance_are_content_bound():
     # R3 rewrite: a market_segment POST_EXIT_PATH row is not post-exit evidence, so the
     # lifecycle is not complete and no evidence-collected receipt / qualification time exists.
-    result = evaluate_lifecycle_completion(KEY, _terminal_rows(), now=NOW)
+    result = evaluate_lifecycle_completion(KEY, _terminal_rows(segment_post=True), now=NOW)
     assert result["ready"] is False
     assert result["terminal_proof"]["post_observation"] is None
     assert "POST_OBSERVATION_MISSING" in result["blockers"]
+    assert "INVALID_R3_MARKET_SEGMENT_INPUT" in result["blockers"]
+    assert result["market_segment_input"]["reason"] == "INVALID_R3_MARKET_SEGMENT_INPUT"
     assert not result.get("receipt")
 
 

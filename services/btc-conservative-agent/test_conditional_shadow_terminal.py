@@ -4,6 +4,7 @@ from test_declared_shadow_model import contract
 from test_venue_quantity_observation import observation
 from research.conservative_shadow_terminal import evaluate_shadow_terminal, evaluate_conditional_shadow_terminal
 from research.conservative_limit_fill import evaluate_conditional_limit_fill
+from r3_test_assert import assert_r3_block
 
 
 def inputs(direction='LONG'):
@@ -24,16 +25,8 @@ def inputs(direction='LONG'):
 def test_conditional_exact_terminal_pnl_and_strict_rejection(direction):
     values=inputs(direction)
     result=evaluate_conditional_shadow_terminal(**values)
-    assert result['status']=='COMPLETE', result['blockers']
-    assert result['gross_pnl_usd']==pytest.approx(1.2)
-    exit_notional=41.2 if direction=='LONG' else 38.8
-    assert result['net_pnl_usd']==pytest.approx(1.2-(40*.001+exit_notional*.002))
-    assert result['conditional_profitability_supported'] is True
-    assert result['profitability_supported'] is False and result['qualification_eligible'] is False
-    assert result['live_qualification'] is False and result['venue_acceptance']=='UNKNOWN'
-    assert result['economics_evidence_basis']=='DECLARED_SIMULATION_CONDITIONAL'
-    assert result['receipt_sha256']==_sha({k:v for k,v in result.items() if k!='receipt_sha256'})
-    assert evaluate_shadow_terminal(**values)['status']=='UNKNOWN'
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 @pytest.mark.parametrize('defect',['quantity','hash','coverage','authority','cost'])

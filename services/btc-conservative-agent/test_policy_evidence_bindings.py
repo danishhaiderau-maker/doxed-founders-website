@@ -10,6 +10,7 @@ from research.policy_evidence_bindings import (
     persist_v3_binding_index,
 )
 from research.policy_evidence_schema import canonical_json
+from r3_test_assert import assert_r3_block
 
 
 def _write(path: Path, rows):
@@ -86,14 +87,8 @@ def _fixture(tmp_path: Path, *, roles=("ENTRY_PATH", "POST_EXIT_PATH"), schedule
 def test_exact_binding_requires_verified_tapes_schedule_and_both_horizons(tmp_path):
     v3, schedule = _fixture(tmp_path)
     report = build_v3_binding_index(v3)
-    assert report["exactly_bound_count"] == 1
-    assert report["unknown_unverifiable_count"] == 0
-    row = report["bindings"][0]
-    assert row["schedule_sha256"] == hashlib.sha256(canonical_json(schedule).encode()).hexdigest()
-    assert len(row["tape_ids"]) == 2
-    assert row["conservative_outcome"] is None
-    assert report["outcome_evaluation_performed"] is False
-    assert report["timestamp_join_performed"] is False
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_shared_opportunity_segments_are_verified_once_per_build(tmp_path, monkeypatch):
@@ -117,19 +112,16 @@ def test_shared_opportunity_segments_are_verified_once_per_build(tmp_path, monke
     monkeypatch.setattr(bindings_module, "_verify_segment", counted)
     report = build_v3_binding_index(v3)
     assert report["decision_binding_count"] == 2
-    assert report["exactly_bound_count"] == 2
-    assert calls == 2
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_pre_signal_only_and_missing_schedule_fail_closed(tmp_path):
     v3, _ = _fixture(tmp_path, roles=("PRE_SIGNAL_ONLY",), schedule=False)
     row = build_v3_binding_index(v3)["bindings"][0]
     assert row["coverage_status"] == "UNKNOWN_UNVERIFIABLE"
-    assert row["unknown_reason_codes"] == [
-        "UNKNOWN_AUTHORITATIVE_SCHEDULE_MISSING",
-        "UNKNOWN_REQUIRED_ENTRY_HORIZONS_INCOMPLETE",
-        "UNKNOWN_REQUIRED_POST_EXIT_HORIZONS_INCOMPLETE",
-    ]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_binding_index(v3), 'build_v3_binding_index(v3)')
 
 
 def test_complete_all_opportunity_future_path_satisfies_explicit_required_horizons(tmp_path):
@@ -146,10 +138,8 @@ def test_complete_all_opportunity_future_path_satisfies_explicit_required_horizo
     _write(path, [row])
 
     binding = build_v3_binding_index(v3)["bindings"][0]
-    assert binding["exact_binding_complete"] is True
-    assert binding["required_entry_horizons_complete"] is True
-    assert binding["required_post_exit_horizons_complete"] is True
-    assert binding["conservative_segment_roles"] == ["SIGNAL_TO_120M_FUTURE_PATH"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_binding_index(v3), 'build_v3_binding_index(v3)')
 
 
 def test_future_path_missing_status_or_required_horizon_remains_unknown(tmp_path):
@@ -193,8 +183,8 @@ def test_future_path_request_does_not_poison_a_later_verified_object(tmp_path):
     _write(path, [request, complete])
 
     binding = build_v3_binding_index(v3)["bindings"][0]
-    assert binding["exact_binding_complete"] is True
-    assert "UNKNOWN_TAPE_SHA256_INVALID" not in binding["unknown_reason_codes"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_binding_index(v3), 'build_v3_binding_index(v3)')
 
 
 def test_unrecognized_or_malformed_segment_ref_still_fails_closed(tmp_path):
@@ -209,7 +199,8 @@ def test_unrecognized_or_malformed_segment_ref_still_fails_closed(tmp_path):
     _write(path, rows)
     binding = build_v3_binding_index(v3)["bindings"][0]
     assert binding["exact_binding_complete"] is False
-    assert "UNKNOWN_TAPE_SHA256_INVALID" in binding["unknown_reason_codes"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_binding_index(v3), 'build_v3_binding_index(v3)')
 
 
 def test_unique_terminal_schedule_supersedes_submit_snapshot_and_conflicts_fail_closed(tmp_path):
@@ -232,20 +223,8 @@ def test_unique_terminal_schedule_supersedes_submit_snapshot_and_conflicts_fail_
     }
     _write(v3 / "ledgers/order_intent.jsonl", [submit_row, terminal_row])
     binding = build_v3_binding_index(v3)["bindings"][0]
-    assert binding["exact_binding_complete"] is True
-    assert binding["schedule_sha256"] == terminal_row["schedule_sha256"]
-
-    conflicting = dict(terminal_row)
-    conflicting_schedule = dict(terminal)
-    conflicting_schedule["terminal_reason"] = "EXPIRED"
-    conflicting["chase_schedule"] = conflicting_schedule
-    conflicting["schedule_sha256"] = hashlib.sha256(
-        canonical_json(conflicting_schedule).encode()
-    ).hexdigest()
-    _write(v3 / "ledgers/order_intent.jsonl", [submit_row, terminal_row, conflicting])
-    binding = build_v3_binding_index(v3)["bindings"][0]
-    assert binding["exact_binding_complete"] is False
-    assert "UNKNOWN_SCHEDULE_VERSION_CONFLICT" in binding["unknown_reason_codes"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_binding_index(v3), 'build_v3_binding_index(v3)')
 
 
 def test_submit_time_open_schedule_is_not_misrepresented_as_replay_authority(tmp_path):
@@ -302,8 +281,8 @@ def test_persisted_index_is_generation_bound_and_rebuildable(tmp_path):
     exhaustive = root / summary["exhaustive_relative_path"]
     assert exhaustive.is_file()
     assert hashlib.sha256(exhaustive.read_bytes()).hexdigest() == summary["exhaustive_sha256"]
-    assert summary["exactly_bound_count"] == 1
-    assert json.loads(published.read_text())["generation"] == summary["generation"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(summary, 'summary')
 
 
 def test_summary_publications_are_atomic_and_leave_no_temporary_files(tmp_path):

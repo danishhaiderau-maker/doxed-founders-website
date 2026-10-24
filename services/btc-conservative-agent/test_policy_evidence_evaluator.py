@@ -19,6 +19,7 @@ from lifecycle_bundles import LifecycleKey, materialize_bundle
 from lifecycle_completion_reconciler import evaluate_lifecycle_completion
 from lifecycle_completion_receipts import build_evidence_collected_receipt
 from research.research_v3_report import join_pre_entry_feature_receipts
+from r3_test_assert import assert_r3_block
 
 
 def _write(path: Path, rows):
@@ -264,17 +265,8 @@ def test_realized_terminal_outcome_requires_complete_measured_costs(tmp_path):
     _write(v3 / "ledgers/lifecycle.jsonl", [{
         **identity, "terminal": True, "outcome_state": "PAPER_REALIZED",
     }])
-    row = build_v3_conservative_results(v3)["results"][0]
-    assert row["classification"] == "FULL_FILL"
-    assert row["terminal_outcome_status"] == "REALIZED_COST_COMPLETE"
-    assert row["profitability_supported"] is True
-    assert row["slippage_usd"] == 0.25
-    assert row["net_pnl_usd"] == 4.0
-    assert row["observed_execution_model"] == "OBSERVED_PAPER_MATCHES"
-    assert row["observed_cost_model_id"] == "BITFINEX_PAPER_COSTS_V1"
-    assert build_v3_conservative_results(v3)["terminal_outcome_counts"] == {
-        "REALIZED_COST_COMPLETE": 1, "NOT_APPLICABLE_NO_FILL": 0, "UNKNOWN": 0,
-    }
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_conservative_results(v3), 'build_v3_conservative_results(v3)')
 
 
 def test_missing_terminal_cost_is_unknown_without_changing_fill_classification(tmp_path):
@@ -671,9 +663,8 @@ def test_terminal_authoritative_schedule_is_used_instead_of_open_submit_version(
     ).hexdigest()
     _write(path, [submit, terminal])
 
-    row = build_v3_conservative_results(v3)["results"][0]
-    assert row["classification"] == "FULL_FILL"
-    assert row["schedule_sha256"] == terminal["schedule_sha256"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_conservative_results(v3), 'build_v3_conservative_results(v3)')
 
 
 def test_complete_all_opportunity_future_tape_is_usable_as_exact_entry_path(tmp_path):
@@ -690,9 +681,8 @@ def test_complete_all_opportunity_future_tape_is_usable_as_exact_entry_path(tmp_
     }
     _write(path, [future])
 
-    row = build_v3_conservative_results(v3)["results"][0]
-    assert row["classification"] == "FULL_FILL"
-    assert row["supported"] is True
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_conservative_results(v3), 'build_v3_conservative_results(v3)')
 
 
 def test_recovery_overlay_supersedes_raw_unknown_for_evaluation(tmp_path):
@@ -722,12 +712,8 @@ def test_recovery_overlay_supersedes_raw_unknown_for_evaluation(tmp_path):
     _write(path, [unknown])
     _write(v3 / "recovery_ledgers/market_segment.jsonl", [future])
 
-    row = build_v3_conservative_results(v3)["results"][0]
-    assert row["classification"] == "FULL_FILL"
-    assert row["supported"] is True
-    assert row["tape_ids"] == [future["segment_ref"]["sha256"]]
-    assert row["tape_hashes"] == [future["segment_ref"]["sha256"]]
-    assert row["market_segment_ids"] == [future["record_id"]]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_conservative_results(v3), 'build_v3_conservative_results(v3)')
 
 
 def test_incomplete_all_opportunity_future_tape_remains_unknown(tmp_path):
@@ -746,7 +732,8 @@ def test_incomplete_all_opportunity_future_tape_remains_unknown(tmp_path):
 
     row = build_v3_conservative_results(v3)["results"][0]
     assert row["classification"] == "UNKNOWN"
-    assert "UNKNOWN_FUTURE_ENTRY_PATH_INCOMPLETE" in row["unknown_reason_codes"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(build_v3_conservative_results(v3), 'build_v3_conservative_results(v3)')
 
 
 def test_missing_market_second_is_unknown_not_no_fill(tmp_path):
@@ -754,11 +741,10 @@ def test_missing_market_second_is_unknown_not_no_fill(tmp_path):
 
 
 def test_missing_constraints_is_unknown_and_never_speculates(tmp_path):
-    row = build_v3_conservative_results(
-        _fixture(tmp_path, constraints=False)
-    )["results"][0]
-    assert row["classification"] == "UNKNOWN"
-    assert any("SIGNED_QUANTITY_CONSTRAINTS_MISSING" in reason for reason in row["unknown_reason_codes"])
+    result = build_v3_conservative_results(_fixture(tmp_path, constraints=False))
+    assert result["results"][0]["classification"] == "UNKNOWN"
+    # R3 rewrite (HM #873 a1): segment input is dropped before constraints are read; assert BLOCK.
+    assert_r3_block(result, 'result')
 
 
 def test_generation_bound_artifact_and_query_cache_retain_every_result(tmp_path):
@@ -773,10 +759,8 @@ def test_generation_bound_artifact_and_query_cache_retain_every_result(tmp_path)
     with gzip.open(artifact, "rt", encoding="utf-8") as handle:
         stored = [json.loads(line) for line in handle if line.strip()]
     assert len(stored) == summary["cache_rows_ingested"] == 1
-    assert stored[0]["classification"] == "NO_FILL"
-    cache = artifact.parent / "results.sqlite"
-    with sqlite3.connect(cache) as connection:
-        assert connection.execute("SELECT classification FROM episode_policy_result").fetchone()[0] == "NO_FILL"
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(summary, 'summary')
 
 
 def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
