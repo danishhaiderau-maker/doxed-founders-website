@@ -5334,6 +5334,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         pos["exit_trigger_real_mark"] = _real_mark_at(now)
         pos["exit_trigger_source"] = str(exit_source)
         pos["exit_mark_source"] = EXIT_MARK_SOURCE_BOOK  # RK C: the evaluated price is the book-side mark
+        pos.update(_exit_scan_stamp(exit_source))
         _stamp_trigger_basis(pos, direction, now, price, _tmeta)
         with trade_lock:
             source_pos.clear()
@@ -5722,6 +5723,7 @@ def _realism_level_stops(pos: dict, price: float, now: float, src: str = None, *
     pos["exit_trigger_mark_price"] = float(pos["exchange_stop_px"])  # DEPRECATED alias of exit_trigger_price
     pos["exit_trigger_real_mark"] = _real_mark_at(float(hit["trigger_ts"]))
     pos["exit_trigger_source"] = str(exit_source)
+    pos.update(_exit_scan_stamp(exit_source))
     pos["exit_order_class"] = _om.EXCHANGE_RESIDENT
     pos["exit_policy_id"] = getattr(_patient_chase_policy(str(pos.get("research_lane") or "").upper()), "POLICY_ID", None)
     opts = _om.tile_options(ACTIVE_TILE_REGISTRY.get(str(pos.get("research_lane") or "").upper()))
@@ -28280,8 +28282,72 @@ def _protective_exit_due(pos: dict, mark: float, now: float):
 _PROTECTIVE_COVERAGE = {"rows": [], "ts": None}
 
 
+_EXIT_SCAN_CTX = threading.local()
+EXIT_STAMP_SCHEMA = "exit_scan_stamp_v1"
+
+
+def _exit_scan_begin(source: str, interval_s: float = None, loop_lag_ms: float = None) -> None:
+    """RK PASS (6): open this thread's current exit scan. worker_loop_lag_ms = how late this scan started relative
+    to its intended period (prev scan end + interval), or the given lag (WS tick: queue age)."""
+    import paper_fill as _pf
+    c = _EXIT_SCAN_CTX
+    mono = time.monotonic()
+    if loop_lag_ms is None and interval_s is not None and getattr(c, "end_mono", None) is not None:
+        loop_lag_ms = max(0.0, (mono - c.end_mono - float(interval_s)) * 1000.0)
+    c.source, c.started_ts, c.started_perf = str(source), time.time(), time.perf_counter()
+    c.loop_lag_ms = round(loop_lag_ms, 3) if loop_lag_ms is not None else None
+    c.bt0 = _pf.book_tail_stats()
+    c.active = True
+
+
+def _exit_scan_end() -> None:
+    c = _EXIT_SCAN_CTX
+    c.end_mono = time.monotonic()
+    c.active = False
+
+
+def _exit_scan_stamp(exit_source=None) -> dict:
+    """Per-exit stamp from the CURRENT epoch's scan that triggered it (all None outside a scan, e.g. admin close).
+    book_refresh_* are process-wide BookTail counters accrued during this scan."""
+    import paper_fill as _pf
+    c = _EXIT_SCAN_CTX
+    active = bool(getattr(c, "active", False))
+    bt1 = _pf.book_tail_stats()
+    bt0 = getattr(c, "bt0", None) if active else None
+    sampler = globals().get("_RUNTIME_TELEMETRY")
+    lag = getattr(getattr(sampler, "lag", None), "last_ms", None)
+    th = threading.current_thread()
+    return {
+        "exit_stamp_schema": EXIT_STAMP_SCHEMA,
+        "exit_source": str(exit_source) if exit_source else (getattr(c, "source", None) if active else None),
+        "exit_scan_source": getattr(c, "source", None) if active else None,
+        "exit_scan_started_ts": round(c.started_ts, 6) if active else None,
+        "exit_scan_duration_ms": round((time.perf_counter() - c.started_perf) * 1000.0, 3) if active else None,
+        "exit_worker_loop_lag_ms": getattr(c, "loop_lag_ms", None) if active else None,
+        "exit_scheduler_lag_ms": lag,
+        "exit_book_refresh_ms": (round(bt1["refresh_ms_total"] - bt0["refresh_ms_total"], 3) if bt0 else None),
+        "exit_book_refreshes_in_scan": (bt1["refresh_count"] - bt0["refresh_count"] if bt0 else None),
+        "exit_trigger_wall_ts": round(time.time(), 6),  # sub-second: when the bot decided the trigger
+        "exit_thread_name": th.name, "exit_thread_native_id": getattr(th, "native_id", None),
+    }
+
+
+EXIT_SCAN_STAMP_KEYS = ("exit_stamp_schema", "exit_source", "exit_scan_source", "exit_scan_started_ts",
+                        "exit_scan_duration_ms", "exit_worker_loop_lag_ms", "exit_scheduler_lag_ms",
+                        "exit_book_refresh_ms", "exit_book_refreshes_in_scan", "exit_trigger_wall_ts",
+                        "exit_thread_name", "exit_thread_native_id")
+
+
 def protective_exit_scan(now: float = None) -> int:
     """One pass of the fast exit path; returns the number of exits fired."""
+    _exit_scan_begin("PROTECTIVE_EXIT_WORKER", PROTECTIVE_EXIT_INTERVAL_SEC)
+    try:
+        return _protective_exit_scan_body(now)
+    finally:
+        _exit_scan_end()
+
+
+def _protective_exit_scan_body(now: float = None) -> int:
     started = time.perf_counter()
     now = time.time() if now is None else float(now)
     fired = 0
@@ -28373,6 +28439,7 @@ def process_positions():
     # redundant workers skip a busy cycle instead of starving API snapshots.
     if not position_evaluation_lock.acquire(blocking=False):
         return
+    globals().get("_exit_scan_begin", lambda *a, **k: None)("POSITION_MANAGER", globals().get("_position_monitor_interval_sec", lambda: None)())
     try:
         refresh_bbo_state()
         refresh_order_book_state()
@@ -28395,6 +28462,7 @@ def process_positions():
             # 10 Oct: 6.9/9.6/12.0 s serialized PROFIT_PROTECTION_STOP burst).
             _evaluate_position_exit(pos, mark, now, exit_source="POSITION_MANAGER", close_async=True)
     finally:
+        globals().get("_exit_scan_end", lambda: None)()
         position_evaluation_lock.release()
 
 def place_postonly_tp(pos, target_pct):
@@ -30473,6 +30541,7 @@ def _tick_driven_position_exits(price: float):
     # busy cycle instead of evaluating/closing the same position twice.
     if not position_evaluation_lock.acquire(timeout=0.25):
         return False
+    globals().get("_exit_scan_begin", lambda *a, **k: None)("WS_TICK")  # worker_loop_lag_ms None: tick-driven, no fixed period
     try:
         now = time.time()
         with trade_lock:
@@ -30486,6 +30555,7 @@ def _tick_driven_position_exits(price: float):
             _evaluate_position_exit(pos, mark, now, exit_source=EXIT_SOURCE_WS_TRADE_WAKE, close_async=True)
         return True
     finally:
+        globals().get("_exit_scan_end", lambda: None)()
         position_evaluation_lock.release()
 
 
@@ -32677,6 +32747,8 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
                                "entry": pos.get("entry_lock_wait_ms")},
         "signal_to_fill_sec": round(fill_ts - signal_ts, 3) if fill_ts and signal_ts else None,
         "venue": "PAPER" if not pos.get("bitfinex_live_entry") else "BITFINEX",
+        # RK PASS (6): current-epoch per-exit scan stamps (None when not stamped, e.g. pre-fix rows)
+        **{k: pos.get(k) for k in EXIT_SCAN_STAMP_KEYS},
     }
     for key in ("signal_ts", "decision_ts", "order_queued_ts", "order_sent_ts", "relay_received_ts",
                 "exchange_ack_ts", "first_fill_ts", "final_fill_ts", "bot_saw_fill_ts", "fill_ts",
@@ -32695,6 +32767,7 @@ def _stamp_admin_close_trigger(pos: dict, close_reason: str, now: float) -> bool
         return False
     pos["exit_trigger_ts"] = float(now)
     pos["exit_trigger_source"] = str(close_reason)
+    pos.update(_exit_scan_stamp(close_reason))
     return True
 
 
@@ -32788,6 +32861,9 @@ def close_position(pos: dict, exit_reason: str):
             "research_lane": pos.get("research_lane"),
             "peak_pct": pos.get("max_pnl_pct"),
             "mae_pct": pos.get("max_drawdown"),
+            "exit_trigger_ts": pos.get("exit_trigger_ts"),
+            "exit_decision_ts": pos.get("exit_trigger_eval_ts"),
+            **{k: pos.get(k) for k in EXIT_SCAN_STAMP_KEYS},
         })
         entry = pos.get("entry", 0)
         qty = pos.get("qty", 0)

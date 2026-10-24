@@ -314,9 +314,13 @@ class LagProbe:
         self._lock = threading.Lock()
         self._samples: list = []
 
+    last_ms: Optional[float] = None   # newest overshoot (per-exit stamp: scheduler_lag_ms)
+    last_ts: Optional[float] = None
+
     def record(self, overshoot_ms: float) -> None:
         with self._lock:
             self._samples.append(max(0.0, float(overshoot_ms)))
+            self.last_ms, self.last_ts = round(max(0.0, float(overshoot_ms)), 3), time.time()
 
     def drain(self) -> dict:
         with self._lock:
@@ -324,6 +328,48 @@ class LagProbe:
         return {"n": len(samples), "p50_ms": _percentile(samples, 50),
                 "p95_ms": _percentile(samples, 95),
                 "max_ms": round(max(samples), 1) if samples else None}
+
+
+def thread_names() -> dict:
+    """native_id -> Python thread name (RK PASS (6)): maps a hot OS thread (top -H / /proc tid) to its worker."""
+    out = {}
+    for t in threading.enumerate():
+        nid = getattr(t, "native_id", None)
+        if nid is not None:
+            out[str(nid)] = t.name
+    return out
+
+
+def thread_cpu_ticks(task_dir: str = "/proc/self/task") -> dict:
+    """tid -> utime + stime clock ticks (Linux only; {} elsewhere)."""
+    out = {}
+    try:
+        tids = os.listdir(task_dir)
+    except OSError:
+        return out
+    for tid in tids:
+        try:
+            with open(os.path.join(task_dir, tid, "stat")) as fh:
+                rest = fh.read().rsplit(")", 1)[1].split()
+            out[tid] = int(rest[11]) + int(rest[12])
+        except (OSError, IndexError, ValueError):
+            continue
+    return out
+
+
+def top_threads(prev: Optional[dict], cur: dict, names: dict, wall_s: float, n: int = 8) -> list:
+    """Top-n threads by CPU % over the interval, each labelled with its Python thread name (or None = native)."""
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError, AttributeError):
+        hz = 100
+    rows = []
+    for tid, ticks in cur.items():
+        d = ticks - (prev or {}).get(tid, ticks)
+        if d > 0:
+            rows.append({"tid": int(tid), "name": names.get(tid), "cpu_pct": round(100.0 * d / hz / max(1e-6, wall_s), 1)})
+    rows.sort(key=lambda r: -r["cpu_pct"])
+    return rows[:n]
 
 
 def _delta(cur: dict, prev: dict, key: str):
@@ -506,6 +552,7 @@ class RuntimeTelemetry(threading.Thread):
         self._prev_proc_stat = read_proc_stat()
         self._prev_lock: Optional[dict] = None
         self._prev_rss = None
+        self._prev_thread_ticks = thread_cpu_ticks()
         self._wall_mono0 = clock() - self._prev_mono
         self._prev_wall_mono = self._wall_mono0
 
@@ -545,6 +592,7 @@ class RuntimeTelemetry(threading.Thread):
                 handlers = None
         wall_mono = now - mono
         rss = pressure.get("rss_bytes")
+        _names, _ticks = thread_names(), thread_cpu_ticks()
         row = {
             "schema": SCHEMA,
             "ts": round(now, 3),
@@ -568,7 +616,9 @@ class RuntimeTelemetry(threading.Thread):
                 "rss_bytes": rss,
                 "rss_delta_bytes": (rss - self._prev_rss) if rss and self._prev_rss else None,
             },
-            "threads": {"python": threading.active_count(), "native": native_thread_count()},
+            "threads": {"python": threading.active_count(), "native": native_thread_count(),
+                        "native_id_names": _names, "top_cpu": top_threads(self._prev_thread_ticks, _ticks, _names,
+                                                                           wall_span)},
             "scheduler_lag": self.lag.drain(),
             "http_handlers": handlers,
             "trade_lock": lock_interval(lock_now, self._prev_lock),
@@ -591,6 +641,7 @@ class RuntimeTelemetry(threading.Thread):
         self._prev_proc_stat = proc_stat
         self._prev_lock = lock_now
         self._prev_rss = rss or self._prev_rss
+        self._prev_thread_ticks = _ticks
         self._prev_wall_mono = wall_mono
         return row
 
