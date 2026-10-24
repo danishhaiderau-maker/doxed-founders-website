@@ -2228,7 +2228,13 @@ class V3EvidenceStore:
     def _load_ids(path: Path) -> set[str]:
         ids: set[str] = set()
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            # Write-side idempotency inventory (every durable record id, so a re-append is refused); it never
+            # feeds a cohort result, so the open is inventory, not an unguarded evidence read.
+            from analyzer_epoch_guard import guarded_read
+            rel = f"v3/ledgers/{path.name}" if path.parent.name == "ledgers" else path.name
+            with guarded_read(rel, "inventory"):
+                handle = path.open("r", encoding="utf-8")
+            with handle:
                 for line_no, line in enumerate(handle, 1):
                     if not line.endswith("\n"):
                         raise ValueError(f"TRUNCATED_JSONL_LINE:{line_no}")

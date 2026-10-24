@@ -243,8 +243,11 @@ def _deployed_policy_collection() -> dict[str, Any]:
 def _iter_ledger(path: Path):
     guard = process_guard()
     rel = f"v3/ledgers/{path.name}" if path.parent.name == "ledgers" else None
+    from analyzer_epoch_guard import guarded_read
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with guarded_read(rel or path.name):  # every row is filtered below: an epoch-filtered read
+            handle = path.open("r", encoding="utf-8")
+        with handle:
             for line in handle:
                 row = json.loads(line)
                 if isinstance(row, dict):

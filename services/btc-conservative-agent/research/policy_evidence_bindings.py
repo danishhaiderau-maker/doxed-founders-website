@@ -82,7 +82,10 @@ def _binding_inputs_digest(root: Path) -> str:
         if not path.is_file():
             digest.update(b"\0MISSING\n")
             continue
-        with path.open("rb") as handle:
+        from analyzer_epoch_guard import guarded_read
+        with guarded_read(f"v3/ledgers/{path.name}", "inventory"):  # byte digest (cache key), never a result
+            handle = path.open("rb")
+        with handle:
             for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
                 digest.update(block)
         digest.update(b"\n")

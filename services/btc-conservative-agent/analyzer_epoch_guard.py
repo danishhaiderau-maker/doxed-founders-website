@@ -309,6 +309,80 @@ def file_epoch_row_counts(path: str | os.PathLike, relpath: str, manifest: dict 
     return counts
 
 
+UNPLACED_LIST_SCHEMA = "analyzer_epoch_unplaced_rows_v1"
+_ROW_ID_KEYS = ("record_id", "event_id", "decision_id", "lifecycle_id", "segment_id", "trade_id", "id")
+
+
+def file_unplaced_rows(path: str | os.PathLike, relpath: str, manifest: dict | None,
+                       floor_ts: float | None = None) -> Iterator[dict]:
+    """The exact straddle/unstamped rows of one JSONL stream file (same classification as
+    :func:`file_epoch_row_counts`). Each item names the row by file, 1-based line number, byte offset, the
+    sha256 of its raw bytes and its record id when it has one. These rows are EXCLUDED (never admitted, never
+    guessed into the epoch); the list exists so they can be reviewed before any deletion. Read-only."""
+    import hashlib
+    import json
+    if not manifest or relpath.endswith(".csv"):
+        return
+    floor = float(floor_ts or manifest.get("started_at_ts") or 0)
+    if not floor:
+        return
+    with guarded_read(relpath, "inventory"):
+        handle = open(path, "rb")
+    with handle:
+        offset = 0
+        for line_no, line in enumerate(handle, 1):
+            start, offset = offset, offset + len(line)
+            if not line.strip():
+                continue
+            ts = de.line_ts(line)
+            cls = de.classify(relpath, stamp_value=de.line_stamp(line), ts=ts, manifest=manifest, floor_ts=floor_ts)
+            if cls in ADMITTED_CLASSES or not (cls == de.UNDATED and ts is None):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                row = None
+            kind = nested_ts_class(row, floor) if isinstance(row, dict) else NESTED_UNSTAMPED
+            if kind not in (NESTED_STRADDLE, NESTED_UNSTAMPED):
+                continue
+            row_id = None
+            if isinstance(row, dict):
+                row_id = next((str(row[k]) for k in _ROW_ID_KEYS if row.get(k) not in (None, "")), None)
+            yield {"stream": relpath, "file": os.path.basename(str(path)), "line_no": line_no, "byte_offset": start,
+                   "kind": "straddle" if kind == NESTED_STRADDLE else "unstamped", "row_id": row_id,
+                   "row_sha256": hashlib.sha256(line.rstrip(b"\r\n")).hexdigest()}
+
+
+def unplaced_rows_document(data_root: str | os.PathLike, manifest: dict | None, floor_ts: float | None = None,
+                           streams: Iterable[str] | None = None) -> dict:
+    """Exclusion list of every straddle/unstamped row under ``data_root`` (default: the v3 ledgers), with a
+    sha256 over the canonical JSONL of the list. Deterministic: same files, same digest."""
+    import hashlib
+    import json
+    root = Path(data_root)
+    if streams is None:
+        ledgers = root / "v3" / "ledgers"
+        streams = sorted(f"v3/ledgers/{p.name}" for p in ledgers.glob("*.jsonl")) if ledgers.is_dir() else []
+    rows: list[dict] = []
+    for rel in streams:
+        base = root / rel
+        files = sorted(base.parent.glob(base.name + ".*")) if base.parent.is_dir() else []
+        files = [p for p in files if re.fullmatch(re.escape(base.name) + r"\.\d+", p.name)]
+        for path in ([base] if base.is_file() else []) + files:
+            rows.extend(file_unplaced_rows(path, rel, manifest, floor_ts))
+    body = "".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in rows)
+    by_stream: dict[str, dict[str, int]] = {}
+    for r in rows:
+        bucket = by_stream.setdefault(r["stream"], {})
+        bucket[r["kind"]] = bucket.get(r["kind"], 0) + 1
+    return {"schema": UNPLACED_LIST_SCHEMA, "epoch_id": (manifest or {}).get("epoch_id"), "floor_ts": floor_ts,
+            "treatment": "EXCLUDED (never admitted, never guessed into the epoch, not deleted)",
+            "count": len(rows), "by_stream": dict(sorted(by_stream.items())),
+            "list_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "list_sha256_basis": "sha256 of the rows as sorted-key compact JSON lines, in file/line order",
+            "rows": rows}
+
+
 def file_pre_epoch_rows(path: str | os.PathLike, relpath: str, manifest: dict | None,
                         floor_ts: float | None = None) -> int:
     """Rows of one stream file that are provably pre-epoch (straddle/unstamped rows are counted separately by

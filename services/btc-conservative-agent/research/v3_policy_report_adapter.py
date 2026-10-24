@@ -39,13 +39,16 @@ def _iter_jsonl(path: Path, *, byte_limit: int | None = None):
     limit = _snapshot_size(path) if byte_limit is None else max(0, int(byte_limit))
     if limit <= 0:
         return
-    try:
-        handle = path.open("rb")
-    except OSError:
-        return
-    from analyzer_epoch_guard import process_guard
+    from analyzer_epoch_guard import guarded_read, process_guard
     guard = process_guard()
     rel = f"v3/ledgers/{path.name}" if path.parent.name == "ledgers" else None
+    try:
+        # Every row below goes through guard.admit_v3_ledger_row (straddle/unstamped rows are EXCLUDED), so the
+        # open is an epoch-filtered read, not an unguarded one.
+        with guarded_read(rel or path.name):
+            handle = path.open("rb")
+    except OSError:
+        return
     with handle:
         remaining = limit
         while remaining > 0:
@@ -65,6 +68,24 @@ def _iter_jsonl(path: Path, *, byte_limit: int | None = None):
                 if rel is not None and not guard.admit_v3_ledger_row(rel, value):
                     continue  # fail closed on pre-epoch / straddle / unstamped ledger rows (HM 19 Oct)
                 yield value
+
+
+def _admitted_canonical_rows(path: Path, boundary: int):
+    """``iter_canonical_rows`` restricted to rows the epoch guard admits: straddle/unstamped (and pre-epoch) V3
+    ledger rows are EXCLUDED from counts and digests, exactly as ``_iter_jsonl`` excludes them."""
+    from analyzer_epoch_guard import guarded_read, process_guard
+    guard = process_guard()
+    rel = f"v3/ledgers/{path.name}" if path.parent.name == "ledgers" else None
+    with guarded_read(rel or path.name):
+        for canonical in iter_canonical_rows(path, byte_limit=boundary):
+            if rel is not None and guard.manifest:
+                try:
+                    row = json.loads(canonical)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or not guard.admit_v3_ledger_row(rel, row):
+                    continue
+            yield canonical
 
 
 def _jsonl(path: Path) -> list[dict]:
@@ -92,7 +113,7 @@ def load_v3_cycle_snapshot(data_dir=".") -> dict:
         if name not in ("opportunity", "decision"):
             # Only counted and digested: hash the verified canonical bytes
             # instead of re-parsing and re-serializing every row.
-            for canonical in iter_canonical_rows(path, byte_limit=boundary):
+            for canonical in _admitted_canonical_rows(path, boundary):
                 count += 1
                 digest.update(name.encode("utf-8"))
                 digest.update(b"\0")

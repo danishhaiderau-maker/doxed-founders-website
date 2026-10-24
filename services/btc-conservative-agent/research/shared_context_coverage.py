@@ -11,7 +11,10 @@ from lifecycle_shared_context import attach_shared_context
 def _advance_context_index(root, byte_budget, row_budget):
     """Local derived index, independent of the collector's lifecycle DB."""
     root = Path(root)
-    cache = root / 'analyzer' / 'shared-context-index.sqlite3'
+    from analyzer_epoch_guard import guarded_read, process_guard
+    guard = process_guard()
+    # v2: refs exclude straddle/unstamped rows (an index built before that is never reused)
+    cache = root / 'analyzer' / 'shared-context-index-v2.sqlite3'
     cache.parent.mkdir(parents=True, exist_ok=True)
     if cache.is_symlink() or (cache.exists() and cache.stat().st_size > 256*1024*1024):
         raise ValueError('SHARED_CONTEXT_INDEX_UNSAFE_OR_TOO_LARGE')
@@ -31,7 +34,9 @@ def _advance_context_index(root, byte_budget, row_budget):
             stat = path.stat()
             previous = db.execute('SELECT * FROM cursor WHERE ledger=?', (ledger,)).fetchone()
             offset = previous['offset'] if previous else 0
-            with path.open('rb') as stream:
+            with guarded_read('v3/ledgers/' + ledger + '.jsonl'):
+                stream_handle = path.open('rb')
+            with stream_handle as stream:
                 stream.seek(max(0, offset-4096))
                 anchor = hashlib.sha256(stream.read(min(offset,4096))).hexdigest()
                 if previous and (stat.st_dev != previous['dev'] or stat.st_ino != previous['ino'] or stat.st_size < offset or anchor != previous['anchor']):
@@ -59,6 +64,8 @@ def _advance_context_index(root, byte_budget, row_budget):
                     byte_budget -= len(raw)
                     scanned += 1
                     offset = stream.tell()
+                    if guard.manifest and not guard.admit_v3_ledger_row('v3/ledgers/' + ledger + '.jsonl', row):
+                        continue  # straddle/unstamped/pre-epoch rows are EXCLUDED from the context index
                     if not row.get('policy_signature') and not row.get('research_lane'):
                         db.execute('INSERT OR IGNORE INTO refs VALUES(?,?,?,?,?,?)',
                             (ledger,start,len(raw),hashlib.sha256(raw).hexdigest(),
@@ -182,7 +189,7 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
         # source/anchor cohort invalidates prior counts rather than mixing them.
         results = None
         try:
-            results = sqlite3.connect(Path(root)/'analyzer/shared-context-index.sqlite3', timeout=.1)
+            results = sqlite3.connect(Path(root)/'analyzer/shared-context-index-v2.sqlite3', timeout=.1)
             results.execute('CREATE TABLE IF NOT EXISTS coverage_result(cohort TEXT,lane TEXT,status TEXT,PRIMARY KEY(cohort,lane))')
             results.execute('DELETE FROM coverage_result WHERE cohort<>?', (cohort,))
             for lane in lanes:
