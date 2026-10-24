@@ -19,6 +19,7 @@ import pytest
 from combo_pathway_config import (ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY, COMBO_LANE_SPECS,
                                   RETIRED_TILE_LANES)
 import live_copy_control as lc
+from live_tile_gate import PAPER_ONLY_TILE_KEYS
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -47,6 +48,9 @@ def _retired_like() -> set:
 def test_every_dashboard_tile_has_website_prefix():
     ts = _ts_prefixes()
     for lane in ACTIVE_TILE_ORDER:
+        if ACTIVE_TILE_REGISTRY[lane]["id_prefix"] in PAPER_ONLY_TILE_KEYS:
+            assert lane not in ts, f"{lane}: live-refused paper tile must not be live-copyable on the website"
+            continue
         assert ts.get(lane) == ACTIVE_TILE_REGISTRY[lane]["id_prefix"], lane
 
 
@@ -55,6 +59,9 @@ def test_every_dashboard_tile_emits_signed_intents():
     assert "_publish(event, trade_id, local_extra)" in bot  # pipeline tiles -> _live_copy_publish
     for lane in ACTIVE_TILE_ORDER:
         spec = ACTIVE_TILE_REGISTRY[lane]
+        if spec["id_prefix"] in PAPER_ONLY_TILE_KEYS:  # gf3: live refused, so no signed intents by design
+            assert not spec.get("live_copy_bridge") and spec["live_copy_eligible"] is False, lane
+            continue
         if spec.get("self_simulated_paper"):
             bridge = spec.get("live_copy_bridge")
             assert bridge in SELF_SIM_BRIDGES, f"{lane}: self-simulated tile without a live-copy bridge"

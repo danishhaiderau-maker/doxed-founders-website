@@ -312,7 +312,7 @@ def test_counters_route_and_specs_route(bot):
     assert gs1["epoch"]["fills"] == 2 and gs1["epoch"]["expiries"] == 1 and gs1["epoch"]["open"] == 1
     assert len(json.dumps(counters).encode()) <= mt.MAX_TILE_COUNTERS_BYTES
     specs = _get(bot, "/api/monitor/tiles/specs", {"X-Bot-Admin-Token": ADMIN}).get_json()
-    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 5  # Tiles 6/7 removed 23 Oct 2026
+    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 6  # Tiles 6/7 removed 23 Oct; Tile 6 gf3 added 25 Oct
     assert not specs.get("truncated")
     reg = bot.ACTIVE_TILE_REGISTRY
     for tile in specs["tiles"]:
@@ -826,3 +826,23 @@ def test_r5_live_orders_refused_on_tile_arm_block(bot, monkeypatch):
     monkeypatch.setattr(bot, "_live_guardian_tile_arm_block", lambda lane: ltg_.DENY_G6_NO_FIRST_L)
     r = _post_gs01(bot)
     assert r.status_code == 409 and r.get_json()["error"] == ltg_.DENY_G6_NO_FIRST_L and sw.on == []
+
+
+def test_gf3_route_a5_count_is_ledger_derived_not_engine(bot, monkeypatch, tmp_path):
+    import tile_fade3 as tf
+    ledger = tmp_path / tf.LEDGER_FILE
+    rows = [{"event": "OPEN", "signal_ts": float(i), "rest_fill": {"status": "FILLED"}}
+            for i in range(tf.A5_VERIFIED_MIN_TRADES)]
+    rows += [{"event": "ENTRY_NO_FILL", "signal_ts": 99.0, "rest_fill": {"status": "NO_FILL_REST_TTL"}},
+             {"event": "CLOSE", "pool_ready_at_write": True, "evidence_status": "COMPLETE"}]
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    eng = tf.Fade3PaperEngine(features_fn=lambda now: (None, None, {}), delay_fn=lambda leg: (0.0, "x"),
+                              write_fn=lambda row: None)  # unseeded engine: rest_trades_n == 0
+    monkeypatch.setattr(bot, "_gf3_ledger_path", lambda: str(ledger))
+    monkeypatch.setattr(bot, "_gf3_engine", eng)
+    monkeypatch.setenv(tf.A5_VERIFIED_ENV, "PASS:test")
+    r = _get(bot, "/api/monitor/tiles/gf3", {"Authorization": f"Bearer {MONITOR}"})
+    assert r.status_code == 200, r.data[:300]
+    closed = r.get_json()["closed"]
+    assert len(closed) == 1 and "A5_NOT_VERIFIED" not in closed[0]["non_countable_reasons"]
+    assert "E8_REAL_PARITY_UNPROVEN" in closed[0]["non_countable_reasons"]

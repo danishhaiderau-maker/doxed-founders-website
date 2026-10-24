@@ -402,7 +402,8 @@ def test_disloc_removed_from_fill_sites_pure_deletion():
           ("tile_fill.py", "price_exit_forced"))
     assert pf.TILE_FILL_SITES == {lane: tf for lane in (
         "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
-        "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP")}
+        "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
+        "FAMILY_GS_FADE3_TP30")}  # gf3 GS-FADE3-TP30 paper tile (25 Oct): standard sites + its A5 rest site
 
 
 def test_book_tail_no_look_ahead(tmp_path):

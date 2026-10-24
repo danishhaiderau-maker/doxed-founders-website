@@ -2,9 +2,9 @@
 // Source: services/btc-conservative-agent/combo_pathway_config.py
 // Regenerate: python scripts/generate-tile-registry-ts.py
 
-export const ACTIVE_TILE_LANES: readonly string[] = ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP"];
+export const ACTIVE_TILE_LANES: readonly string[] = ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_GS_FADE3_TP30"];
 
-export const ACTIVE_TILE_ID_PREFIXES: readonly string[] = ["rnd", "gs1", "gb1", "gb2", "gs6"];
+export const ACTIVE_TILE_ID_PREFIXES: readonly string[] = ["rnd", "gs1", "gb1", "gb2", "gs6", "gf3"];
 
 /** Lanes and trade-id prefixes of tiles the registry marks platform_relay_eligible. */
 export const RELAY_ELIGIBLE_TILE_LANES: readonly string[] = [];

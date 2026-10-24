@@ -382,7 +382,9 @@ def test_website_tile_prefix_map_matches_active_registry():
     block = block[:block.index("});")]
     website = dict(re.findall(r"(FAMILY_[A-Z0-9_]+):\s*'([a-z0-9]+)'", block))
     # Danish 12 Oct: dashboard tiles == live-copyable tiles, both directions.
-    fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER}
+    from live_tile_gate import PAPER_ONLY_TILE_KEYS  # live-refused paper tiles (gf3) are never live-copyable
+    fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER
+           if ACTIVE_TILE_REGISTRY[lane].get("id_prefix") not in PAPER_ONLY_TILE_KEYS}
     assert website == fly
 
 

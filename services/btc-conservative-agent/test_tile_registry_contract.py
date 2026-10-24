@@ -104,7 +104,10 @@ PHASE03_ORDER = ("FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER",
 # FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
 TILE14_ORDER = ("FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
                 "FAMILY_DISLOC_FOI_LONG_1M")
-EXPECTED_ORDER_ALL = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER + TILE14_ORDER
+# Tile 6 · GS-FADE3-TP30 (gf3) added 25 Oct 2026: self-simulated PAPER tile (tile_fade3), live refused.
+GF3_ORDER = ("FAMILY_GS_FADE3_TP30",)
+EXPECTED_ORDER_ALL = (FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER + TILE14_ORDER
+                      + GF3_ORDER)
 # 2026-10-11 retirement (owner): H-C, B3, FADE-POOL and V07 leave the roster.
 RETIRED_20261011_LANES = ("FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
                           "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M",
@@ -456,6 +459,10 @@ def test_every_policy_module_is_owned_by_one_active_tile():
     from combo_pathway_config import RETIRED_KEPT_POLICY_MODULES
     assert not (RETIRED_KEPT_POLICY_MODULES & set(declared)), "retired module still owned by an active tile"
     discovered -= RETIRED_KEPT_POLICY_MODULES
+    # Self-simulated tiles (gf3) own a tile_*.py engine module, not a paper_policy_*.py.
+    self_sim = {m for m in declared if not m.startswith("paper_policy_")}
+    assert self_sim == {"tile_fade3.py"} and all((service_dir / m).is_file() for m in self_sim)
+    declared = [m for m in declared if m not in self_sim]
     assert discovered == set(declared), (
         "orphan or unregistered policy module; register it or physically delete it: "
         f"discovered={sorted(discovered)} declared={sorted(declared)}"
@@ -527,8 +534,8 @@ def test_ha_gs07_and_tiles67_retired_and_roster_renumbered_1_to_5():
     for lane in RETIRED_TILE67_LANES:
         assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_REGISTRY
         assert lane not in registry.COMBO_LANE_SPECS  # code spec deleted with disloc_engine; ledgers stay on disk (R5)
-    assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 6))
+    assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 7))
     assert ACTIVE_TILE_ORDER == (
         "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
         "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP")
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_GS_FADE3_TP30")

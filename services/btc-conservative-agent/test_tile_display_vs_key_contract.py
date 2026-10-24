@@ -19,6 +19,7 @@ EXPECTED = (
     ("FAMILY_GSB1_CVD_DIV_REGIME", "gb1", "Tile 3 · B1"),
     ("FAMILY_GSB2_REGIME_SWITCHER", "gb2", "Tile 4 · B2"),
     ("FAMILY_GS06_COMMITTED_FADE_ATR_TP", "gs6", "Tile 5 · GS-06"),
+    ("FAMILY_GS_FADE3_TP30", "gf3", "Tile 6 · GS-FADE3"),  # 25 Oct: self-simulated PAPER tile, live refused
 )
 DISLOC = ("FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M")
 
