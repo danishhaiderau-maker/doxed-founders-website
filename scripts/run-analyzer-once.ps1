@@ -243,14 +243,16 @@ try {
     }
   }
   $status.state = $(if ($exitCode -eq 0) { 'COMPLETED' } elseif ($exitCode -eq 124) { 'TIMEOUT' } else { 'FAILED' })
-  try { Update-AnalyzerDashboardCode } catch {
-    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_CODE_REFRESH_FAILED {0}" -f $_.Exception.Message)
-  }
 } catch {
   $exitCode = 1
   $status.state = 'FAILED'
   $status.detail = [string]$_.Exception.Message
 } finally {
+  # Item 3: refresh the served-code revision (analyzer-dashboard-revision.txt) after EVERY generation,
+  # including failed/timed-out passes, so the dashboard never serves a stale checkout.
+  try { Update-AnalyzerDashboardCode } catch {
+    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_CODE_REFRESH_FAILED {0}" -f $_.Exception.Message)
+  }
   $status.exitCode = $exitCode
   $status.finishedAt = Get-UtcNowIso
   Write-JsonAtomic -Path $cfg.AnalyzerStatus -Value $status

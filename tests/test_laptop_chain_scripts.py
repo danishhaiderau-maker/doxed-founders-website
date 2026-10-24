@@ -1100,3 +1100,10 @@ def test_cycle_fast_forwards_inline_instead_of_discarding_a_post_deploy_migratio
     assert "if (-not $CycleLockHeld)" in auto_ff
     # The analyzer-run mutex is always taken, whoever calls.
     assert auto_ff.count("Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerRun')") == 1
+
+def test_dashboard_revision_refreshes_after_every_generation():
+    runner = _source("run-analyzer-once.ps1")
+    main_finally = runner.rsplit("} finally {", 1)[1]
+    assert "Update-AnalyzerDashboardCode" in main_finally.split("$status.exitCode = $exitCode", 1)[0]
+    body = runner.split("function Update-AnalyzerDashboardCode {", 1)[1].split("\n}\n", 1)[0]
+    assert "Set-DashboardCodeRevision $head" in body

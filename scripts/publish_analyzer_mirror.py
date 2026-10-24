@@ -354,6 +354,35 @@ def write_receipt(path: Path | None, receipt: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+PUBLISH_STALE_AFTER_SEC = 2 * 3600
+PUBLISH_STALE_ALERT = "ANALYZER_MIRROR_PUBLISH_STALE"
+
+
+def _parse_iso(value: Any) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def publish_staleness(receipt: dict[str, Any] | None, now: float | None = None,
+                      max_age_sec: float = PUBLISH_STALE_AFTER_SEC) -> dict[str, Any]:
+    """HM-readable freshness of the last VERIFIED mirror publish. No publish on record counts as stale."""
+    receipt = receipt or {}
+    now = time.time() if now is None else now
+    if receipt.get("state") == "PUBLISHED" and receipt.get("published_at"):
+        last = receipt.get("published_at")
+    else:
+        last = (receipt.get("last_published") or {}).get("published_at")
+    ts = _parse_iso(last)
+    age = None if ts is None else max(0.0, round(now - ts, 1))
+    stale = age is None or age > max_age_sec
+    return {"last_published_at": last, "last_published_age_sec": age, "stale_after_sec": max_age_sec,
+            "publish_stale": stale, "alert": PUBLISH_STALE_ALERT if stale else None}
+
+
 def publish(args: argparse.Namespace, *, opener: Opener = _default_open,
             sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     report_root = Path(args.report_root)
@@ -416,13 +445,17 @@ def publish(args: argparse.Namespace, *, opener: Opener = _default_open,
     finally:
         receipt["finished_at"] = utc_now()
         receipt["duration_sec"] = round(time.monotonic() - started, 1)
+        receipt["publish_freshness"] = publish_staleness(receipt if receipt.get("state") == "PUBLISHED" else
+                                                         {**receipt, "last_published": receipt.get("last_published")
+                                                          or ({"published_at": previous.get("published_at")}
+                                                              if previous.get("state") == "PUBLISHED" else {})})
         shutil.rmtree(work, ignore_errors=True)
         write_receipt(Path(args.receipt) if args.receipt else None, receipt)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--report-root", required=True, help="analyzer output dir holding report_manifest.json")
+    parser.add_argument("--report-root", default="", help="analyzer output dir holding report_manifest.json")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--vault-env", default="", help="env file with BOT_ADMIN_TOKEN (used if env var unset)")
     parser.add_argument("--receipt", default="", help="JSON receipt path (laptop-chain state dir)")
@@ -433,7 +466,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verify-attempts", type=int, default=6)
     parser.add_argument("--force", action="store_true", help="republish even if this generation is already published")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--check-stale", action="store_true",
+                        help="monitor mode: read --receipt only, print freshness, exit 5 when the last publish is >2 h old")
     args = parser.parse_args(argv)
+    if args.check_stale:
+        try:
+            current = json.loads(Path(args.receipt).read_text(encoding="utf-8")) if args.receipt else {}
+        except (OSError, ValueError):
+            current = {}
+        fresh = publish_staleness(current)
+        print(json.dumps(fresh, sort_keys=True))
+        return 5 if fresh["publish_stale"] else 0
+    if not args.report_root:
+        parser.error("--report-root is required")
     args.base_url = args.base_url.rstrip("/")
     receipt = publish(args)
     summary = {k: receipt.get(k) for k in ("state", "analyzer_generated_at", "fly_generation", "bundle_bytes",

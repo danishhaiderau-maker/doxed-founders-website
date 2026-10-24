@@ -224,3 +224,20 @@ def test_invalid_generation_is_refused(tmp_path):
     work.mkdir()
     with pytest.raises(pub.PublishError, match="GENERATION_INTEGRITY_FAILED"):
         pub.build_bundle(root, work)
+
+
+def test_publish_staleness_alerts_after_two_hours(tmp_path):
+    import time as _t
+    from datetime import datetime, timezone
+    now = _t.time()
+    iso = lambda age: datetime.fromtimestamp(now - age, timezone.utc).isoformat()
+    fresh = pub.publish_staleness({"state": "PUBLISHED", "published_at": iso(600)}, now=now)
+    assert fresh["publish_stale"] is False and fresh["alert"] is None and 599 <= fresh["last_published_age_sec"] <= 601
+    old = pub.publish_staleness({"state": "FAILED", "last_published": {"published_at": iso(7300)}}, now=now)
+    assert old["publish_stale"] is True and old["alert"] == "ANALYZER_MIRROR_PUBLISH_STALE"
+    assert pub.publish_staleness({}, now=now)["publish_stale"] is True
+    receipt = tmp_path / "r.json"
+    receipt.write_text(json.dumps({"state": "PUBLISHED", "published_at": iso(7300)}))
+    assert pub.main(["--check-stale", "--receipt", str(receipt)]) == 5
+    receipt.write_text(json.dumps({"state": "PUBLISHED", "published_at": iso(60)}))
+    assert pub.main(["--check-stale", "--receipt", str(receipt)]) == 0
