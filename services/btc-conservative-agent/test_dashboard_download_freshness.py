@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -135,6 +136,28 @@ def test_scope_aware_report_selection() -> None:
             response = client.get("/api/report/lane_retirement_report.json")
             assert response.status_code == 200
             assert response.get_json()["session_scope"] == "FRESH-COLLECTION"
+
+
+def test_equal_mtime_report_pick_is_deterministic() -> None:
+    """HM #873: equal (scope, mtime) keys resolve to the first candidate, whatever the write order."""
+    for first_written in ("root", "reports"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_json(root / "research_session.json", {"fresh_collection_mode": False})
+            copies = {"root": root / "lane_retirement_report.json",
+                      "reports": root / "reports" / "lane_retirement_report.json"}
+            order = [first_written] + [k for k in copies if k != first_written]
+            for label in order:
+                _write_json(copies[label], {"schema": "lane_retirement_v2", "session_scope": "ALL-TIME",
+                                            "copy": label})
+            for path in copies.values():
+                os.utime(path, (1_700_000_000, 1_700_000_000))
+            _write_json(root / "report_manifest.json",
+                        {"reports": [{"file": "lane_retirement_report.json"}],
+                         "generated_at": "2026-07-30T23:00:00+00:00"})
+            _set_dashboard_roots(root, root)
+            assert dashboard._best_report_path("lane_retirement_report.json") == copies["root"]
+            assert dashboard._read_report("lane_retirement_report.json")["copy"] == "root"
 
 
 def test_download_everything_includes_compressed_chase_reports_from_manifest() -> None:
@@ -552,9 +575,7 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 "status": "EMPTY",
             },
         )
-        # Deterministic: the stale mirror copy is strictly older than the current report
-        # (equal mtimes made the pick depend on filesystem timestamp granularity).
-        import os
+        # Deterministic: the stale mirror copy is strictly older than the current report.
         os.utime(mirror / "exit_reports_validation.json", (1_000_000, 1_000_000))
         _write_json(
             root / "safe_policy_genome_v3_report.json",

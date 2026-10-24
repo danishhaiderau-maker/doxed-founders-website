@@ -764,6 +764,14 @@ def _scope_priority(payload: dict, *, fresh_collection: bool) -> int:
 
 
 def _iter_data_payloads(name: str):
+    """Yield candidates in the fixed ``_data_file_candidates`` order.
+
+    Tie-break (HM #873): every caller keeps the first candidate on an equal
+    (scope_priority, mtime) key because it only replaces on a strictly greater
+    key, so equal timestamps resolve deterministically to the earlier candidate
+    (DATA_ROOT/name before DATA_ROOT/reports/name before ROOT copies), never to
+    filesystem or timestamp-granularity order.
+    """
     for path in _data_file_candidates(name):
         if not path.is_file():
             continue
