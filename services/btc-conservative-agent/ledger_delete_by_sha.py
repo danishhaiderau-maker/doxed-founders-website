@@ -58,6 +58,7 @@ REFUSAL_CODES = (
     "ROW_MISSING", "DUPLICATE_LINES_WITHOUT_MULTIPLICITY", "MULTIPLICITY_MISMATCH",
     "ROW_UNPARSEABLE", "RECORD_ID_SHARED_WITH_SURVIVOR", "RECEIPT_MISSING", "RECEIPT_INVALID",
     "INVARIANT_FAILED_RESTORED", "SNAPSHOT_PATH_NOT_ALLOWED", "SNAPSHOT_MISSING",
+    "MULTI_STREAM_LIST_REFUSED",
 )
 
 
@@ -146,6 +147,9 @@ def parse_list(list_jsonl: Any, sha: Any) -> dict[str, dict[str, int]]:
         bucket[row_sha] = mult
     if not out:
         raise DeleteRefused("EMPTY_LIST")
+    if len(out) > 1:
+        # HM R2 blocker: multi-ledger applies are not atomic; one stream per call, enforced.
+        raise DeleteRefused("MULTI_STREAM_LIST_REFUSED", {"streams": sorted(out)})
     return out
 
 

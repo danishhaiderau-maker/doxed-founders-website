@@ -60,14 +60,15 @@ def test_dry_run_default_writes_nothing(tmp_path):
 def test_real_delete_counts_hash_receipts_index_snapshot(tmp_path):
     s = _store(tmp_path)
     keep_before = [l for i, l in enumerate(_lines(s, "decision")) if i not in (1, 3)]
-    text, sha = _list(_entries(s, "decision", [1, 3]) + _entries(s, "lifecycle", [0]))
+    text, sha = _list(_entries(s, "decision", [1, 3]))
     dry = lds.delete_ledger_rows_by_sha(s, text, sha)
     out = lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=False)
     d = out["files"]["decision"]
     assert d["after_count"] == d["before_count"] - 2 == d["after_count_read_back"] == 4
     assert d["remaining_rows_sha256"] == dry["files"]["decision"]["remaining_rows_sha256"] == d["remaining_rows_sha256_read_back"]
     assert _lines(s, "decision") == keep_before
-    assert out["files"]["lifecycle"]["after_count"] == 5
+    assert set(out["files"]) == {"decision"}
+    assert len(_lines(s, "lifecycle")) == 6
     # deleted receipts gone; survivors rebased and verifiable
     assert read_legacy_receipt(s.root, "decision", "decision-1") is None
     for rid in ("decision-0", "decision-2", "decision-4", "decision-5"):
@@ -305,3 +306,12 @@ def test_refusal_codes_all_covered():
     src = Path(__file__).read_text()
     for code in lds.REFUSAL_CODES:
         assert f'"{code}"' in src, code
+
+
+def test_refuse_multi_stream_list(tmp_path):
+    s = _store(tmp_path)
+    text, sha = _list(_entries(s, "decision", [1]) + _entries(s, "lifecycle", [0]))
+    _refused("MULTI_STREAM_LIST_REFUSED", s, text, sha)
+    with pytest.raises(lds.DeleteRefused) as e:  # dry run refuses too
+        lds.delete_ledger_rows_by_sha(s, text, sha)
+    assert e.value.code == "MULTI_STREAM_LIST_REFUSED"
