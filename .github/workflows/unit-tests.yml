@@ -95,3 +95,27 @@ jobs:
             echo "::endgroup::"
           done < ci/script_style_tests.txt
           exit $rc
+
+  # Fly deploy run 40063653539 (24 Oct 2026) failed at image build: .dockerignore dropped research/r3_quarantine.py,
+  # which the analyzer imports. Build the real docker context (same Dockerfile dir, same .dockerignore) and require
+  # every module bot.py and each fly-entrypoint.sh process import-reach to be in it and importable there.
+  bot-image-imports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: services/btc-conservative-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install bot runtime requirements (same file the Dockerfile installs)
+        run: pip install --no-cache-dir -r requirements.txt
+      - name: Export the exact Fly image build context (docker applies the real .dockerignore)
+        run: |
+          printf 'FROM scratch\nCOPY . /\n' | DOCKER_BUILDKIT=1 docker build -f - --output type=local,dest=/tmp/bot-image-ctx .
+          test -f /tmp/bot-image-ctx/bot.py
+          echo "context files: $(find /tmp/bot-image-ctx -type f | wc -l)"
+      - name: Every module bot.py (and each entrypoint process) imports is in the image context and imports
+        run: python ci_image_import_check.py --src . --ctx /tmp/bot-image-ctx
