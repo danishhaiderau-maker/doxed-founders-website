@@ -367,69 +367,157 @@ class BookTail:
 
     A row for second s is complete only at s + 1, so at(t) returns the latest row with s + 1 <= t AND a measured
     receive_ts <= t (RK/HM #851: no look-ahead proven per row). A row with no receive_ts (pre-#851) is still returned,
-    labelled receive_ts_source MISSING, and the pricer makes the fill non-countable. Reads only the file tail, and
-    only when cached rows are older than t.
+    labelled receive_ts_source MISSING, and the pricer makes the fill non-countable.
+
+    CPU fix (RK PASS 24 Oct, RCA 21:30 AEDT): the file is read INCREMENTALLY by byte offset. Only complete lines are
+    parsed; a trailing partial line is held until its newline arrives. A reload happens only when the file identity
+    (st_ino, st_size, st_mtime_ns) changes. Size is part of the key, so a same-mtime append is never missed. A shrink,
+    rotation or inode change is a full reset: re-read the last tail_bytes and drop the first, possibly cut, line.
+    at() walks back from the newest row (normally 1 step) and copies one row only. The selection rule is unchanged.
     """
 
     def __init__(self, path: str, keep: int = 600, tail_bytes: int = 512 * 1024) -> None:
         self.path, self.keep, self.tail_bytes = path, keep, tail_bytes
         self._lock = threading.Lock()
         self._rows: dict = {}
+        self._secs: list = []          # sorted keys of _rows
         self._max_s = None
+        self._ident = None             # (st_ino, st_size, st_mtime_ns) last synced
+        self._ino = None
+        self._offset = 0               # bytes consumed (complete lines + held partial)
+        self._partial = b""
+        self.refresh_count = 0         # syncs that actually read bytes (telemetry: book_refreshes_in_scan)
+        self.refresh_ms_total = 0.0    # wall ms spent in those reads + parses (telemetry: book_refresh_ms)
+        self.reset_count = 0
 
-    def _refresh(self) -> None:
+    # ---------------------------------------------------------------- ingest
+    def _ingest(self, line: bytes) -> None:
         import json
-        import os
         try:
-            size = os.path.getsize(self.path)
-            with open(self.path, "rb") as fh:
-                fh.seek(max(0, size - self.tail_bytes))
-                chunk = fh.read()
+            r = json.loads(line)
+            sec = int(r["s"])
+        except (ValueError, KeyError, TypeError):
+            return
+        rx = _f(r.get("receive_ts"))
+        if sec not in self._rows:
+            import bisect
+            if not self._secs or sec > self._secs[-1]:
+                self._secs.append(sec)
+            else:
+                bisect.insort(self._secs, sec)
+        self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or [],
+                           **({"carried": True} if r.get("carried") else {}),
+                           "receive_ts": rx if rx and rx > 0 else None, "receive_mono": _f(r.get("receive_mono")),
+                           "receive_ts_source": (str(r.get("receive_ts_source") or "")
+                                                 if rx and rx > 0 else RECEIVE_TS_MISSING)}
+
+    def _reset(self) -> None:
+        self._rows, self._secs, self._max_s = {}, [], None
+        self._offset, self._partial, self._ident, self._ino = 0, b"", None, None
+        self.reset_count += 1
+
+    def _sync(self) -> None:
+        """Bring the cache up to the file. Cheap no-op (one stat) when the identity is unchanged."""
+        import os
+        import time as _t
+        try:
+            st = os.stat(self.path)
         except OSError:
             return
-        lines = chunk.splitlines()
-        for line in (lines[1:] if size > self.tail_bytes else lines):
-            try:
-                r = json.loads(line)
-                sec = int(r["s"])
-            except (ValueError, KeyError, TypeError):
-                continue
-            rx = _f(r.get("receive_ts"))
-            self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or [],
-                               **({"carried": True} if r.get("carried") else {}),
-                               "receive_ts": rx if rx and rx > 0 else None, "receive_mono": _f(r.get("receive_mono")),
-                               "receive_ts_source": (str(r.get("receive_ts_source") or "")
-                                                     if rx and rx > 0 else RECEIVE_TS_MISSING)}
-        if self._rows:
-            for sec in sorted(self._rows)[:-self.keep]:
+        ident = (st.st_ino, st.st_size, st.st_mtime_ns)
+        if ident == self._ident:
+            return
+        t0 = _t.perf_counter()
+        first = False
+        rewritten = (self._ident is not None and st.st_size == self._offset and st.st_mtime_ns != self._ident[2])
+        if self._ino is None or st.st_ino != self._ino or st.st_size < self._offset or rewritten:
+            if self._ino is not None:
+                self._reset()
+            self._ino = st.st_ino
+            self._offset = max(0, st.st_size - self.tail_bytes)
+            self._partial = b""
+            first = self._offset > 0  # the first line of a mid-file read may be cut: drop it (as before)
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(self._offset)
+                chunk = fh.read(max(0, st.st_size - self._offset))
+        except OSError:
+            return
+        self._offset += len(chunk)
+        data = self._partial + chunk
+        lines = data.split(b"\n")
+        self._partial = lines.pop()  # b"" when data ends with a newline; else the held partial line
+        if first and lines:
+            lines = lines[1:]
+        for line in lines:
+            if line.strip():
+                self._ingest(line)
+        if len(self._secs) > self.keep:
+            drop = self._secs[:-self.keep]
+            self._secs = self._secs[-self.keep:]
+            for sec in drop:
                 del self._rows[sec]
-            self._max_s = max(self._rows)
+        self._max_s = self._secs[-1] if self._secs else None
+        self._ident = (st.st_ino, self._offset, st.st_mtime_ns) if self._offset == st.st_size else None
+        self.refresh_count += 1
+        self.refresh_ms_total += (_t.perf_counter() - t0) * 1000.0
+
+    # kept for callers/tests that poke the old name
+    _refresh = _sync
+
+    # ---------------------------------------------------------------- queries
+    def newest_key(self):
+        """(newest s, newest receive_ts, file size) after a sync: the memo key of book_exit_price (RK (4))."""
+        with self._lock:
+            self._sync()
+            if self._max_s is None:
+                return None
+            r = self._rows[self._max_s]
+            return (self._max_s, r.get("receive_ts"), self._offset)
+
+    def newest_eligible(self, t: float) -> bool:
+        """True when at(t) would return the newest cached row (no sync)."""
+        with self._lock:
+            if self._max_s is None:
+                return False
+            r = self._rows[self._max_s]
+            return self._max_s + 1 <= t and (r.get("receive_ts") is None or r["receive_ts"] <= t)
 
     def at(self, t: float):
         with self._lock:
-            if self._max_s is None or self._max_s + 1 < t - 0.5:
-                self._refresh()
-            ok = [sec for sec, r in self._rows.items()
-                  if sec + 1 <= t and (r.get("receive_ts") is None or r["receive_ts"] <= t)]
-            return dict(self._rows[max(ok)]) if ok else None
-
+            self._sync()
+            rows = self._rows
+            for sec in reversed(self._secs):
+                if sec + 1 <= t:
+                    r = rows[sec]
+                    if r.get("receive_ts") is None or r["receive_ts"] <= t:
+                        return dict(r)
+            return None
 
     def rows_between(self, lo_s: int, hi_s: int) -> list:
         """RK 24 Oct (3): every cached row with lo_s <= s <= hi_s (ordered), for the FIRST_AFTER receive-time search."""
+        import bisect
         with self._lock:
-            if self._max_s is None or self._max_s < hi_s:
-                self._refresh()
-            return [dict(self._rows[k]) for k in sorted(self._rows) if lo_s <= k <= hi_s]
+            self._sync()
+            i, j = bisect.bisect_left(self._secs, lo_s), bisect.bisect_right(self._secs, hi_s)
+            return [dict(self._rows[k]) for k in self._secs[i:j]]
 
     def missing_seconds(self, start: float, end: float) -> int:
-        """Whole seconds in [floor(start), floor(end)] with no book row (read-only; refreshes the tail first)."""
+        """Whole seconds in [floor(start), floor(end)] with no book row (read-only; syncs the tail first)."""
         a, b = int(start), int(end)
         if b < a:
             return 0
         with self._lock:
-            if self._max_s is None or self._max_s < b:
-                self._refresh()
+            self._sync()
             return sum(1 for sec in range(a, b + 1) if sec not in self._rows)
+
+
+def book_tail_stats() -> dict:
+    """Process-wide BookTail counters (telemetry for per-exit stamps)."""
+    bt = _BOOK_TAIL
+    if bt is None:
+        return {"refresh_count": 0, "refresh_ms_total": 0.0, "reset_count": 0}
+    return {"refresh_count": bt.refresh_count, "refresh_ms_total": bt.refresh_ms_total, "reset_count": bt.reset_count}
 
 
 BOOK_FILE = "bfx_book_10l_1s.jsonl"
@@ -452,6 +540,27 @@ def _book10l_rows_between(lo_s: int, hi_s: int) -> list:
 
 
 book10l_at.rows_between = _book10l_rows_between  # RK 24 Oct (3): exact row list for FIRST_AFTER
+
+
+def _ensure_book_tail():
+    global _BOOK_TAIL
+    if _BOOK_TAIL is None:
+        import os
+        _BOOK_TAIL = BookTail(os.path.join(os.getcwd(), BOOK_FILE))
+    return _BOOK_TAIL
+
+
+def _book10l_newest_key():
+    _ensure_book_tail()
+    return _BOOK_TAIL.newest_key() if _BOOK_TAIL is not None else None
+
+
+def _book10l_newest_eligible(t: float) -> bool:
+    return _BOOK_TAIL.newest_eligible(float(t)) if _BOOK_TAIL is not None else False
+
+
+book10l_at.newest_key = _book10l_newest_key          # RK (4): book_exit_price memo key
+book10l_at.newest_eligible = _book10l_newest_eligible
 
 
 def book10l_missing_seconds(start: float, end: float):

@@ -23,7 +23,8 @@ ADMIN = "tiles-test-admin-token"
 MONITOR = "monitor-read-token-for-tiles-0123456789"
 REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
 ROUTES = ("/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
-          "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency")
+          "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
+          "/api/monitor/exit-lag")
 GS1 = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
 HA = "FAMILY_RANDOM_CONTROL_TAKER_90"
 B2 = "FAMILY_GSB2_REGIME_SWITCHER"
@@ -573,3 +574,25 @@ def test_closed_row_carries_trigger_vs_book_and_tape_age():
     assert row["exit"]["trigger_tape_age_s"] == 1.8
     bare = _rows([_closed("t-bare", GS1, close_ts=close)])[0]
     assert bare["exit"]["trigger_vs_book_bp"] is None and bare["exit"]["trigger_tape_age_s"] is None
+
+
+def test_exit_lag_arm_gate_route(bot, monkeypatch):
+    """RK ruling 22:32: HM reads the consecutive-under-threshold count on the receive_ts measure."""
+    import exit_lag_regression as elr
+    t = elr.DEPLOY_TS + 5000
+
+    def ev(rx, dec):
+        return {"exit_trigger_receive_ts": rx, "exit_trigger_receive_ts_source": "WS_FRAME" if rx else None,
+                "exit_decision_ts": dec, "exit_fill_ts": dec + 0.5}
+    rows = [{"trade_id": "a", "event_timestamps": ev(None, t)},
+            {"trade_id": "b", "event_timestamps": ev(t + 9.99, t + 10)},
+            {"trade_id": "c", "event_timestamps": ev(t + 19.98, t + 20)}]
+    monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: rows)
+    r = _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required=3)
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["schema"] == "exit_lag_arm_gate_v1" and body["consecutive_under_threshold"] == 2
+    assert body["armable"] is False and body["run_broken_by"]["status"] == "UNMEASURED"
+    assert body["threshold_s"] == 0.062 and body["recomputed_p95"]["n"] == 0
+    assert MONITOR not in r.get_data(as_text=True) and ADMIN not in r.get_data(as_text=True)
+    assert _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required="x").status_code == 400

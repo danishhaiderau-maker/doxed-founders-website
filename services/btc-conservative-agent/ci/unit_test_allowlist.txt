@@ -650,3 +650,7 @@ test_ledger_unstamped_route.py
 test_ledger_stamp_monitor_m123.py
 test_ledger_stamp_monitor_hm_r2.py
 test_api_state_analytics.py
+test_booktail_incremental.py
+test_exit_lag_regression.py
+test_exit_scan_stamps.py
+test_trigger_receive_stamp.py
