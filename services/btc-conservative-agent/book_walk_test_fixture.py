@@ -42,3 +42,19 @@ def build_tape(start: int, end: int, *, bid: Callable[[int], float] | float = 10
 def flat_tape(start: int = 900, end: int = 8800) -> BookWalkTape:
     """A flat 100.00 / 100.05 book covering every fixture signal plus the 7200 s replay horizon."""
     return build_tape(start, end)
+
+
+@lru_cache(maxsize=None)
+def entry_tape(visible_qty: float = 2.0, crossed: bool = True, start: int = 900, end: int = 8800) -> BookWalkTape:
+    """flat_tape, except seconds 998-1000 quote 99.90 / 99.95 (crossed) or 99.90 / 100.50 with ``visible_qty`` per
+    level, so a LONG buy limit at 100.00 in the [1000, 1005) chase window is decided on the book (two ask levels,
+    99.95 and 100.00, are inside the cap when crossed)."""
+    def row(s: int) -> dict:
+        if 998 <= s <= 1000:
+            out = book_row(s, 99.9, 99.95 if crossed else 100.5)
+            out["a"] = [[px, visible_qty / 2] for px, _ in out["a"]]
+            return out
+        return book_row(s, 100.0, 100.05)
+    books = [row(s) for s in range(start, end + 1)]
+    trades = [trade_row(s, 100.025) for s in range(start, end + 1, 60)]
+    return BookWalkTape.from_rows(books, trades, receipt={"fixture": True})

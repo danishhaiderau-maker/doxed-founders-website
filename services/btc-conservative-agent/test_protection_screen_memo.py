@@ -25,7 +25,7 @@ def _source():
     }
 
 
-def _fill_receipt(source, child, *, microstructure_by_ts):
+def _fill_receipt(source, child, *, book_at=None, window=None):
     return {
         "outcome": "FILL", "trigger_bucket_ts": child["fill_ts"], "fill_price": child["fill_price"],
         "requested_qty": 1.0, "filled_qty": 1.0, "schedule_sha256": "sched-1",
@@ -68,7 +68,7 @@ def test_each_distinct_replay_input_is_replayed_once_and_every_input_is_covered(
 
 def test_receipt_binder_binds_each_signature_like_a_fresh_identity():
     source = _source()
-    receipt = _fill_receipt(source, source["entry_children"][0], microstructure_by_ts={})
+    receipt = _fill_receipt(source, source["entry_children"][0])
     identity_for, bind = rc._candidate_receipt_binder(receipt, source)
     first, second = bind("sig-a"), bind("sig-b")
     assert first["identity"]["candidate_policy_signature"] == "sig-a"

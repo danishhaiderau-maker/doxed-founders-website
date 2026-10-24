@@ -55,6 +55,16 @@ QUARANTINED_FILES: frozenset[str] = frozenset(
 )
 
 
+class R3QuarantinedSource(RuntimeError):
+    """Raised when a quarantined producer tries to open its R3-forbidden price source."""
+
+
+def guard(key: str, what: str) -> None:
+    """Hard stop at the price-source boundary (defence in depth behind the producer's early return)."""
+    if is_active(key):
+        raise R3QuarantinedSource(f"{STATUS} {key}: refusing to open {what}. {REASON}")
+
+
 def is_active(key: str) -> bool:
     return key in ACTIVE
 

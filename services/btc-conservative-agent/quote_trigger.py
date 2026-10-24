@@ -167,8 +167,8 @@ def book_ready_ts(book: Any) -> Optional[float]:
 class TradesTail:
     """Trade prints from the collector's bfx_trades.jsonl rows {"s", "tr": [[id, ms, signed_amount, price], ...]}.
 
-    Tail read only (no archive, no new stored data). ``between(t0, t1)`` returns prints with t0 < ts <= t1, oldest
-    first, as dicts {"ts", "px", "amt", "id", "recv_s"} (id = Bitfinex trade id, recv_s = the collector second the
+    Tail read only (no archive, no new stored data). ``between(t0, t1)`` returns prints with t0 < ts <= t1 that were
+    known by t1 (recv_s + 1 <= t1), oldest first, as dicts {"ts", "px", "amt", "id", "recv_s"} (id = Bitfinex trade id, recv_s = the collector second the
     print was written in, i.e. when this process could first know it). Read-only.
     """
 
@@ -212,8 +212,11 @@ class TradesTail:
         with self._lock:
             if self._max_s is None or self._max_s + 1 < t1 - 0.5:
                 self._refresh()
+            # HM #851 N6: known-by, not exchange time alone. A print in collector second s is knowable only at s+1,
+            # so a replay call ending at t1 never sees prints written in floor(t1) (up to 1 s early). Live this is a
+            # no-op (row s is written ~s+1.3). Prints that become known after t1 are what received_after() returns.
             out = [p for s in range(int(math.floor(t0)) - 1, int(math.floor(t1)) + 1)
-                   for p in self._by_s.get(s, ()) if t0 < p["ts"] <= t1]
+                   for p in self._by_s.get(s, ()) if t0 < p["ts"] <= t1 and p["recv_s"] + 1 <= t1]
         out.sort(key=lambda p: p["ts"])
         return out
 

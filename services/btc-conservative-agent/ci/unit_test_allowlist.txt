@@ -57,6 +57,7 @@ test_best_policy_research_dashboard.py
 test_bitfinex_live_switch.py
 test_bitfinex_pair_constraints.py
 test_blindspot_runtime_telemetry.py
+test_book_limit_entry.py
 test_bot_data_epoch_stamping.py
 test_bot_destructive_research_reset.py
 test_bot_orphan_head_reset_boundary.py
@@ -611,13 +612,6 @@ test_trigger_measure.py
 test_quote_trigger.py
 test_order_model.py
 test_realism_rk_binding.py
-test_delay_pool_f1.py
-test_stop_coverage_c3c7.py
-test_r17_contract_fields.py
-test_r17_close_position_row.py
-test_live_ack_pool.py
-test_first_after_rk3.py
-test_rk1_live_exit_stamps.py
 test_disk_alert.py
 test_r5_retention.py
 test_r5_keep.py
@@ -625,4 +619,12 @@ test_rotation_cap.py
 test_taker_counterfactual_r17.py
 test_signal_replay_r17.py
 test_v22_retired_r17.py
+test_delay_pool_f1.py
+test_stop_coverage_c3c7.py
+test_r17_contract_fields.py
+test_r17_close_position_row.py
+test_live_ack_pool.py
+test_first_after_rk3.py
+test_rk1_live_exit_stamps.py
 test_r17_gap_detector.py
+test_shadow_exit_backfill_r3_blocked.py

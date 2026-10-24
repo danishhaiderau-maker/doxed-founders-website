@@ -392,9 +392,13 @@ def test_entry_priced_on_1s_tape_reason_lives_in_the_one_contract_module():
     assert set(r17_fields.FORBIDDEN) == {"entry_price_source", *r17_fields.ENTRY_STATUS_FIELDS}
     # the stamper imports the constants from the contract module; it does not define its own (R4)
     assert research_v3_candidates.R17_UNPROVEN_ENTRY is r17_fields.R17_UNPROVEN_ENTRY
-    assert research_v3_candidates.ENTRY_PRICE_SOURCE_1S is r17_fields.ENTRY_PRICE_SOURCE_1S
-    src = (ROOT / "research_v3_candidates.py").read_text()
-    assert 'R17_UNPROVEN_ENTRY = "' not in src and 'ENTRY_PRICE_SOURCE_1S = "' not in src
+    import book_limit_entry
+    assert book_limit_entry.R17_UNPROVEN_ENTRY is r17_fields.R17_UNPROVEN_ENTRY
+    # #848: the entry is book-priced now; no 1s source constant is left in the stamper
+    assert book_limit_entry.ENTRY_PRICE_SOURCE_BOOK not in r17_fields.ENTRY_PRICE_SOURCES_1S
+    for name in ("research_v3_candidates.py", "book_limit_entry.py"):
+        src = (ROOT / name).read_text()
+        assert 'R17_UNPROVEN_ENTRY = "' not in src and 'ENTRY_PRICE_SOURCE_1S' not in src
 
 
 def _rows_as_research_v3_candidates_emits_them():
@@ -408,7 +412,12 @@ def _rows_as_research_v3_candidates_emits_them():
     diag = (C._KIND_NO_FILL, None, None, float("nan"))
     store.append(0, 0, 0, 0, store.encode_conservative(cell), store.encode_diagnostic(diag))
     outcome = store.conservative_outcome(0, "BOOK_WALK", {})
-    return {"receipt": dict(receipt), "outcome": dict(outcome)}
+    receipt = dict(receipt)
+    # #848 prices the entry on the book, so a fresh receipt is no longer 1s-priced; stamp it the way pre-#848
+    # (legacy, still on disk) receipts are, so the test exercises exactly those rows.
+    import r17_fields
+    receipt["entry_price_source"] = r17_fields.ENTRY_PRICE_SOURCE_1S
+    return {"receipt": receipt, "outcome": dict(outcome)}
 
 
 @pytest.mark.parametrize("which", ["receipt", "outcome"])
@@ -425,3 +434,35 @@ def test_845_fail_closed_rule_alone_already_rejects_1s_priced_entries(which, mon
     assert {"TRIGGER_SOURCE_MISSING", "DELAY_SOURCE_MISSING", "ENTRY_PRICE_AGE_MISSING",
             "STOP_COVERAGE_MISSING"} <= set(alone)
     assert r17.non_countable_reason(row).startswith("R17_UNPROVEN:")
+
+
+def test_entry_proof_failures_is_the_entry_subset_of_proof_failures():
+    """HM #848 C3: research entry receipts gate on the same entry rule the row check uses (one module)."""
+    assert r17.entry_proof_failures(good_row()) == []
+    bad = good_row(trigger_price_source="ticker", delay_source="default", evidence_status="INCOMPLETE",
+                   entry_book_age_ms=None, entry_price_source="market_microstructure_1s")
+    entry = r17.entry_proof_failures(bad)
+    assert entry == ["TRIGGER_NOT_BOOK", "DELAY_NOT_MEASURED", "ENTRY_EVIDENCE_NOT_COMPLETE",
+                     "ENTRY_PRICE_AGE_MISSING", "ENTRY_PRICED_ON_1S_TAPE"]
+    assert set(entry) <= set(r17.proof_failures(bad))
+    exit_only = good_row(exit_walk_bp=None, stop_coverage=None)
+    assert r17.entry_proof_failures(exit_only) == [] and r17.proof_failures(exit_only)
+
+
+def test_c4_every_1s_limit_fill_receipt_is_stamped_unproven_in_one_place():
+    """HM #848 C4: conservative_limit_fill (1s tape) stamps R17_UNPROVEN_ENTRY + ENTRY_PRICED_ON_1S_TAPE for every
+    caller (analyzer v62, entry_baseline_replay, policy_evidence_evaluator, latency_schedule_replay,
+    conservative_fill_cohort); the analyzer tape join carries it at top level too."""
+    import r17_fields
+    from research.conservative_limit_fill import evaluate_limit_fill
+    r = evaluate_limit_fill([], direction="LONG", requested_qty=1.0, chase_schedule=[])
+    assert r["entry_price_source"] == r17_fields.ENTRY_PRICE_SOURCE_1S
+    assert r["r17_entry_status"] == r17_fields.R17_UNPROVEN_ENTRY
+    assert r["r17_entry_reason"] == r17_fields.REASON_ENTRY_PRICED_ON_1S_TAPE
+    assert "ENTRY_PRICED_ON_1S_TAPE" in r17.proof_failures(good_row(**{k: r[k] for k in (
+        "entry_price_source", "r17_entry_status")}))
+    src = (ROOT / "analyzer_research_engine_v62.py").read_text()
+    join = src[src.index('"schema": "analyzer_compressed_chase_tape_join_v2"'):]
+    join = join[:join.index('"conservative_evaluator_receipt": evaluator')]
+    assert '"r17_entry_status": "R17_UNPROVEN_ENTRY"' in join and '"ENTRY_PRICED_ON_1S_TAPE"' in join
+    assert r17_fields.R17_UNPROVEN_ENTRY == "R17_UNPROVEN_ENTRY" and r17_fields.ENTRY_PRICE_SOURCE_1S == "MARKET_MICROSTRUCTURE_1S"

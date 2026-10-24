@@ -7,14 +7,8 @@ from research_v3_candidates import evaluate_protection_screen, protection_replay
 from book_walk_test_fixture import build_tape
 from research_v3_book_walk import BASIS_BOOK_WALK, R17_UNPROVEN, PreparedBookWalkArrays, coverage_summary
 from research_v3_policy_replay import ReplayPlan, replay_cell
-from research_v3_side_marks import (
-    BASIS_SEGMENT,
-    BASIS_SEGMENT_AND_TAPE,
-    BASIS_TAPE,
-    PATH_HORIZON_SEC,
-    SideMarkTape,
-    event_side_marks,
-)
+import research_v3_side_marks
+from research_v3_book_walk import PATH_HORIZON_SEC
 
 
 def _quote(ts, bid, ask, **extra):
@@ -72,19 +66,14 @@ def _diagnostic_outcomes(monkeypatch, sources, **kwargs):
     return evaluate_protection_screen(sources, **kwargs), captured
 
 
-def test_long_marks_on_bid_short_on_ask_and_segment_rows_win():
-    tape = SideMarkTape.from_rows([_quote(t, 100.0 + t, 101.0 + t) for t in range(0, 10)], start_ts=0, end_ts=20)
-    segment = [_quote(3, 500.0, 501.0), _quote(15, 600.0, 601.0), _quote(4, 9.0, 8.0)]
-    long = event_side_marks(direction="LONG", segment_rows=segment, tape=tape, start_ts=0, end_ts=20)
-    short = event_side_marks(direction="SHORT", segment_rows=segment, tape=tape, start_ts=0, end_ts=20)
-    assert long["basis"] == short["basis"] == BASIS_SEGMENT_AND_TAPE
-    assert dict(zip(long["ts"], long["price"]))[3.0] == 500.0
-    assert dict(zip(short["ts"], short["price"]))[3.0] == 501.0
-    assert dict(zip(long["ts"], long["price"]))[4.0] == 104.0  # crossed segment row rejected
-    assert dict(zip(short["ts"], short["price"]))[5.0] == 106.0
-    assert list(long["ts"]) == sorted(long["ts"]) and 15.0 in long["ts"]
-    assert event_side_marks(direction="LONG", segment_rows=segment, tape=None, start_ts=0, end_ts=20)["basis"] == BASIS_SEGMENT
-    assert event_side_marks(direction="LONG", segment_rows=[], tape=tape, start_ts=0, end_ts=20)["basis"] == BASIS_TAPE
+def test_side_marks_1s_builders_are_retired_under_r3():
+    """RK R3/R4: no 1 s side-mark builder survives; importing one fails loudly."""
+    for name in ("SideMarkTape", "event_side_marks", "load_side_mark_tape", "tape_paths", "TAPE_FILE"):
+        with pytest.raises(research_v3_side_marks.R3Retired):
+            getattr(research_v3_side_marks, name)
+    with pytest.raises(ImportError):
+        exec("from research_v3_side_marks import event_side_marks", {})
+    assert research_v3_side_marks.PATH_HORIZON_SEC == PATH_HORIZON_SEC == 7200
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])

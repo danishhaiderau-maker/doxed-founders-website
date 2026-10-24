@@ -4061,7 +4061,12 @@ def _simulate_ticks_fast_cut_ladder(
     fill_t=None, mfe_protect_pct=None, hard_stop_margin_pct=HARD_STOP_MARGIN_PCT,
 ):
     """Tick walk: fast cut + profit ladder only (no thesis flip — needs live scores).
-    Replay ticks from bot v1.1.18+ use executable depth marks; older ticks used last trade."""
+    Replay ticks from bot v1.1.18+ use executable depth marks; older ticks used last trade.
+
+    R3 WARNING: this walks signal_replay ticker/BBO ticks. exit_ladder_simulator_report is
+    quarantined (research/r3_quarantine.py EXIT_LADDER_SIM); the other callers (stop_* sweeps,
+    qualified_exit_policy_grid_report, _sim_replay_pnl_*, fast_cut_* reports) are flagged for the
+    RK rebuild on paper_fill + quote_trigger and must not feed countable evidence."""
     if not ticks or not entry or entry <= 0:
         return None
     dir_factor = 1 if str(direction).upper() == "LONG" else -1
@@ -14161,6 +14166,9 @@ def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tap
         "slippage_usd": slippage_usd, "slippage_model": slippage_model or None,
         "fee_profile": first.get("fee_profile"), "entry_fee_rate": entry_fee_rate,
         "exit_fee_rate": exit_fee_rate, "points": points,
+        # HM #848 C4 / RK R3: priced on market_microstructure_1s -> never countable (r17_exclusion rejects it)
+        "entry_price_source": "MARKET_MICROSTRUCTURE_1S", "r17_entry_status": "R17_UNPROVEN_ENTRY",
+        "r17_entry_reason": "ENTRY_PRICED_ON_1S_TAPE",
         "conservative_evaluator_receipt": evaluator,
     }
 

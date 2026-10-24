@@ -23,6 +23,7 @@ import numpy as np
 
 from research_v3_book_walk import (
     BASIS_BOOK_WALK,
+    PATH_HORIZON_SEC,
     R17_UNPROVEN,
     STOP_BASIS_UNVERIFIED,
     STOP_TRIGGER_LABEL,
@@ -34,13 +35,17 @@ from research_v3_book_walk import (
     load_book_walk,
 )
 from research_v3_policy_replay import ReplayPlan, replay_cell
-from research_v3_side_marks import PATH_HORIZON_SEC
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
-from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
+from book_limit_entry import (
+    ENTRY_PRICE_SOURCE_BOOK,
+    EVALUATOR_VERSION,
+    R17_UNPROVEN_ENTRY,
+    RECEIPT_SCHEMA as BOOK_ENTRY_RECEIPT_SCHEMA,
+    book_limit_entry,
+)
 from research.fill_model import fill_model_declaration
 from execution_cost_receipt_adapter import build_measured_execution_cost_receipt
-from r17_fields import ENTRY_PRICE_SOURCE_1S, R17_UNPROVEN_ENTRY  # the ONE R17 contract module (R4)
 import r17_gap_detector as _gd  # the ONE R17 gap detector (R4; shared with ENTRY_BOOK_GAP)
 
 
@@ -828,40 +833,40 @@ def _conservative_child_schedule(
 
 def _conservative_child_receipt(
     source: Mapping[str, Any], child: Mapping[str, Any],
-    *, microstructure_by_ts: Mapping[int, Mapping[str, Any]] | None = None,
+    *, book_at: Callable[[float], Any] | None = None, window: Any = None,
 ) -> dict[str, Any]:
+    """CONSERVATIVE entry decided and priced on the 10-level book (RK R3/R4).
+
+    ``book_limit_entry`` composes quote_trigger (book-row trigger at the limit) and paper_fill (capped IOC walk);
+    the 1 s ``market_microstructure_1s`` rows / evaluate_limit_fill are no longer read.  ``book_at`` is the event's
+    BookWalkWindow; without it the entry is UNSUPPORTED (``BOOK_WALK_UNAVAILABLE``).  ``window`` (the same
+    BookWalkWindow) supplies the real trade prints the resting remainder fills on (order_model.maker_rest_step) and
+    the shared C2 gap detector for book touches while resting (HM #848 C1).
+    """
     schedule = _conservative_child_schedule(
         child, event_id=str(source.get("event_id") or "event"),
     )
     qty = _number(source.get("requested_qty"))
     if not schedule:
         return {
-            "schema": "conservative_limit_fill_receipt_v2",
+            "schema": BOOK_ENTRY_RECEIPT_SCHEMA,
             "outcome": "UNSUPPORTED", "supported": False,
             "negative_reasons": ["COUNTERFACTUAL_CHASE_SCHEDULE_MISSING_OR_INVALID"],
         }
     if qty is None or qty <= 0:
         return {
-            "schema": "conservative_limit_fill_receipt_v2",
+            "schema": BOOK_ENTRY_RECEIPT_SCHEMA,
             "outcome": "UNSUPPORTED", "supported": False,
             "negative_reasons": ["REQUESTED_QTY_MISSING_OR_INVALID"],
         }
-    tape_rows: Iterable[Mapping[str, Any]] = source.get("ordered_1s_prices") or ()
-    if microstructure_by_ts is not None:
-        start = min(int(row["start_ts"]) for row in schedule) - 2
-        end = max(int(row["end_ts"]) for row in schedule)
-        tape_rows = (
-            microstructure_by_ts[ts]
-            for ts in range(start, end)
-            if ts in microstructure_by_ts
-        )
-    receipt = evaluate_limit_fill(
-        tape_rows,
-        direction=str(source.get("direction") or "UNKNOWN"),
-        requested_qty=qty,
-        chase_schedule=schedule,
-        symbol=str(source.get("market_microstructure_symbol") or "tBTCF0:USTF0"),
+    receipt = book_limit_entry(
+        str(source.get("direction") or "UNKNOWN"), qty, schedule, book_at,
+        trades_between=getattr(window, "trades_between", None),
+        gap_clause_at=getattr(window, "gap_clause_at", None),
+        delay_s=_number(source.get("entry_delay_s")),
+        delay_source=source.get("entry_delay_source") or None,
         quantity_constraints=source.get("signed_quantity_constraints"),
+        symbol=str(source.get("market_microstructure_symbol") or "tBTCF0:USTF0"),
     )
     receipt.update({
         "event_id": source.get("event_id"),
@@ -869,10 +874,6 @@ def _conservative_child_receipt(
         "entry_policy_id": child.get("entry_policy_id"),
         "chase_id": child.get("chase_id"),
         "evidence_world": "CONSERVATIVE_BBO_DEPTH_V1",
-        "entry_price_source": ENTRY_PRICE_SOURCE_1S,
-        "r17_entry_status": (
-            R17_UNPROVEN_ENTRY if str(receipt.get("outcome") or "") in {"FILL", "PARTIAL_FILL"} else None
-        ),
         "ideal_touch_reference": {
             "fill_ts": child.get("fill_ts"),
             "fill_price": child.get("fill_price"),
@@ -1352,12 +1353,14 @@ _UNSUPPORTED_REASON_BY_KIND = {
     3: "BOOK_WALK_PATH_OR_ATR_MISSING",
 }
 _KIND_NO_FILL, _KIND_REPLAYED = 0, 4
+# HM #848 C2: a NO_FILL decided on an unmeasured send delay (or with a resting touch inside a flagged print gap) is
+# R17_UNPROVEN_ENTRY - whether the order would have filled depends on that delay - never a countable NO_FILL.
+_KIND_NO_FILL_UNPROVEN = 5
 
-# HM #847 (a) / RK R3: the CONSERVATIVE entry (fill_ts, fill_price, NO_FILL decision) is priced by
-# research.conservative_limit_fill.evaluate_limit_fill on market_microstructure_1s rows, which R3 forbids
-# for pricing. Until that entry moves to the book (paper_fill + quote_trigger, see the follow-up fix PR),
-# every FILL/PARTIAL_FILL CONSERVATIVE cell is R17_UNPROVEN (reason R17_UNPROVEN_ENTRY): never countable,
-# its PnL kept only as ``unproven_net_pnl_usd``.
+# RK R3/R4 (fix PR r3-research-book-pricer-1023, follow-up to HM #847 (a)): the CONSERVATIVE entry is decided
+# and priced on bfx_book_10l by book_limit_entry (quote_trigger + paper_fill).  A fill whose send delay is not
+# verified (research has no live-ack pool: default 1.5 s, UNVERIFIED_DELAY) is R17_UNPROVEN (reason
+# R17_UNPROVEN_ENTRY): never countable, its PnL kept only as ``unproven_net_pnl_usd``.
 _ENTRY_UNPROVEN_PREFIX = R17_UNPROVEN_ENTRY + ":"
 _NAN = float("nan")
 
@@ -1477,7 +1480,11 @@ class _ProtectionCellStore:
         kind = self.c_kind[cell]
         if kind == _KIND_NO_FILL:
             return {"outcome_state": "NO_FILL", "net_pnl_usd": None,
-                    "entry_price_source": ENTRY_PRICE_SOURCE_1S}
+                    "entry_price_source": ENTRY_PRICE_SOURCE_BOOK}
+        if kind == _KIND_NO_FILL_UNPROVEN:
+            return {"outcome_state": R17_UNPROVEN, "r17_unproven_reason": R17_UNPROVEN_ENTRY,
+                    "entry_fill_state": "NO_FILL", "entry_price_source": ENTRY_PRICE_SOURCE_BOOK,
+                    "net_pnl_usd": None, "exit_reason": None}
         if kind != _KIND_REPLAYED:
             return {"outcome_state": "UNSUPPORTED", "reason": _UNSUPPORTED_REASON_BY_KIND[kind]}
         pnl, retention, giveback, underwater = (_maybe(v) for v in self.c_values[4 * cell: 4 * cell + 4])
@@ -1487,7 +1494,7 @@ class _ProtectionCellStore:
             return {
                 "outcome_state": R17_UNPROVEN,
                 "r17_unproven_reason": R17_UNPROVEN_ENTRY,
-                "entry_price_source": ENTRY_PRICE_SOURCE_1S,
+                "entry_price_source": ENTRY_PRICE_SOURCE_BOOK,
                 "entry_fill_state": state[len(_ENTRY_UNPROVEN_PREFIX):],
                 "net_pnl_usd": None,
                 "unproven_net_pnl_usd": pnl,
@@ -1500,7 +1507,7 @@ class _ProtectionCellStore:
                 "outcome_state": R17_UNPROVEN,
                 "r17_unproven_reason": STOP_UNOBSERVABLE_REASON,
                 "c2_clauses": _gd.clause_names(self.names[self.c_exit[cell]]),
-                "entry_price_source": ENTRY_PRICE_SOURCE_1S,
+                "entry_price_source": ENTRY_PRICE_SOURCE_BOOK,
                 "net_pnl_usd": None,
                 "unproven_net_pnl_usd": pnl,
                 "exit_reason": None,
@@ -1508,7 +1515,7 @@ class _ProtectionCellStore:
             }
         outcome = {
             "outcome_state": state,
-            "entry_price_source": ENTRY_PRICE_SOURCE_1S,
+            "entry_price_source": ENTRY_PRICE_SOURCE_BOOK,
             "net_pnl_usd": pnl,
             "exit_reason": self.names[self.c_exit[cell]],
             "profit_retention_ratio": retention,
@@ -1895,8 +1902,10 @@ def _event_price_path(source: Mapping[str, Any], book_walk: Any) -> dict[str, An
     times = [signal_ts] if signal_ts is not None else []
     for child in source.get("entry_children") or []:
         times.append(_number(child.get("fill_ts")))
-        times.extend(_number(row.get("active_until_ts")) for row in (child.get("chase_schedule") or [])
-                     if isinstance(row, Mapping))
+        for row in child.get("chase_schedule") or []:
+            if isinstance(row, Mapping):
+                # HM #848 nit: the window must start at the first order's active_from_ts, not only cover its end.
+                times.extend((_number(row.get("active_from_ts")), _number(row.get("active_until_ts"))))
     times = [value for value in times if value is not None]
     if direction not in ("LONG", "SHORT"):
         return {"basis": R17_UNPROVEN, "reason": "DIRECTION_UNKNOWN", "walk": None, "coverage": None}
@@ -1972,13 +1981,8 @@ class _EpisodeReplayer:
         atr = source.get("atr14_pct")
         has_prices = path["basis"] == BASIS_BOOK_WALK and path.get("walk") is not None
         margin_full = float(source.get("margin_usd") or 0.25)
-        microstructure_by_ts = {}
-        for row in source.get("ordered_1s_prices") or []:
-            try:
-                bucket_ts = int(float(row.get("bucket_ts")))
-            except (TypeError, ValueError):
-                continue
-            microstructure_by_ts[bucket_ts] = row
+        # RK R3: the CONSERVATIVE entry reads the event's book window only (never ordered_1s_prices).
+        entry_book_at = path["walk"].book_at if has_prices else None
         # Children of one event share its price path, so a replay is fully
         # determined by these per-event keys; equal keys replay identically.
         prepared_paths: dict[tuple[float, float], Any] = {}
@@ -2048,9 +2052,8 @@ class _EpisodeReplayer:
             signature = self.signatures.get(signature_key)
             if signature is None:
                 signature = self.signatures[signature_key] = canonical_hash("v3-policy", specs[0])
-            conservative_receipt = _conservative_child_receipt(
-                source, child, microstructure_by_ts=microstructure_by_ts,
-            )
+            conservative_receipt = _conservative_child_receipt(source, child, book_at=entry_book_at,
+                                                               window=path["walk"] if has_prices else None)
             identity_for, bind_receipt = _candidate_receipt_binder(conservative_receipt, source)
             policy_receipt = bind_receipt(signature)
             projected = _validation_receipt_identity(dict(policy_receipt))
@@ -2058,6 +2061,8 @@ class _EpisodeReplayer:
             conservative_outcome = str(policy_receipt.get("outcome") or "UNSUPPORTED")
             conservative_fill_ts = policy_receipt.get("trigger_bucket_ts")
             conservative_fill_price = policy_receipt.get("fill_price")
+            # Book-priced with a verified send delay -> countable; otherwise R17_UNPROVEN_ENTRY (non-countable).
+            entry_unproven = policy_receipt.get("r17_entry_status") == R17_UNPROVEN_ENTRY
             requested_qty = _number(policy_receipt.get("requested_qty"))
             filled_qty = _number(policy_receipt.get("filled_qty"))
             fill_fraction = (
@@ -2067,7 +2072,8 @@ class _EpisodeReplayer:
             cells = []
             for protection_index, spec in enumerate(specs):
                 if conservative_outcome == "NO_FILL":
-                    conservative = (_KIND_NO_FILL, None, None, _NAN, _NAN, _NAN, _NAN)
+                    conservative = (_KIND_NO_FILL_UNPROVEN if entry_unproven else _KIND_NO_FILL,
+                                    None, None, _NAN, _NAN, _NAN, _NAN)
                 elif conservative_outcome == "UNSUPPORTED":
                     conservative = (1, None, None, _NAN, _NAN, _NAN, _NAN)
                 elif conservative_outcome not in {"FILL", "PARTIAL_FILL"}:
@@ -2077,7 +2083,7 @@ class _EpisodeReplayer:
                 else:
                     replay_key = (
                         "CONSERVATIVE", protection_index, float(conservative_fill_ts),
-                        float(conservative_fill_price or 0), fill_fraction,
+                        float(conservative_fill_price or 0), fill_fraction, entry_unproven,
                     )
                     conservative = replays.get(replay_key)
                     if conservative is None:
@@ -2087,10 +2093,11 @@ class _EpisodeReplayer:
                             float(source.get("margin_usd") or 0.25) * fill_fraction,
                         )
                         status = result.get("status")
+                        prefix = _ENTRY_UNPROVEN_PREFIX if entry_unproven else ""
                         state = (
-                            _ENTRY_UNPROVEN_PREFIX + "PARTIAL_FILL"
+                            prefix + "PARTIAL_FILL"
                             if status == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
-                            else _ENTRY_UNPROVEN_PREFIX + "FULL_FILL" if status == "COMPLETE"
+                            else prefix + "FULL_FILL" if status == "COMPLETE"
                             else str(status or "UNSUPPORTED")
                         )
                         # C2 R17_UNPROVEN cells have no exit; the exit slot carries the clause label
@@ -2245,6 +2252,8 @@ def evaluate_protection_screen(
                             c2_clauses[name] += 1
                     elif state_name.startswith(_ENTRY_UNPROVEN_PREFIX):
                         unproven_cells[R17_UNPROVEN_ENTRY] += 1
+                elif conservative[0] == _KIND_NO_FILL_UNPROVEN:
+                    unproven_cells[R17_UNPROVEN_ENTRY] += 1
                 store.append(entry * protection_count + protection_index, event, first_position,
                              identity, conservative, diagnostic)
 
