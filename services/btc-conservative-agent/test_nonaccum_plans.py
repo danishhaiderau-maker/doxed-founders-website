@@ -70,7 +70,10 @@ def test_plans_select_only_pre_epoch_unreferenced_and_never_touch_the_tree(tmp_p
     assert p["C3a"]["count"] == 1 and "transfer-" + "b" * 64 in p["C3a"]["sample"][0]
     assert p["C3a"]["kept_bundles_referenced_in_flight"] == 1 and p["C3a"]["kept_bundles_current_epoch"] == 1
     assert p["C3b"]["sample"] == ["tape_1s/old.jsonl.gz"]
-    assert p["C4"]["count"] == 3 and p["C4"]["lines_kept"] == 1
+    assert p["C4"]["count"] == 0 and p["C4"]["excluded"] is True and p["C4"]["observed_pre_epoch_lines"] == 3   # self-rebuilding
+    assert "SELF_REBUILDING" in p["C4"]["reason"] and np_.ITEMS["C4"] == []
+    legacy = np_.build_all(root, EPOCH, now, include_c4=True)["plans"]["C4"]
+    assert legacy["count"] == 3 and legacy["lines_kept"] == 1
     assert "relay_switch.json" not in json.dumps(doc)
     again = np_.build_all(root, EPOCH, now)
     assert again["plan_sha256"] == doc["plan_sha256"]       # deterministic
