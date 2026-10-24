@@ -58,6 +58,8 @@ research/*
 !research/scan_counterfactual_unavailable.py
 !research/reset_writer_barrier.py
 !research/mirror_generation_lease.py
+!research/r3_quarantine.py
+!research/lifecycle_bundle_inventory.py
 
 # R17 (23 Oct 2026): the pinned non-countable trade-id lists r17_exclusion.py loads at import (sha256-verified;
 # a missing or altered file makes every row non-countable, so they must ship with the image).
