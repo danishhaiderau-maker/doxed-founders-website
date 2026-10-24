@@ -449,7 +449,7 @@ def live_exchange_health():  # R6 (executor-side errors as reported)
     # RK (24 Oct): live_fences ok:false / unreadable / missing on any account -> non-GREEN verdict + gap
     import live_fences_health as _lfh
     web = ctx.get("website") or {}
-    lf = _lfh.summary(lcl.exchange_view(web), web.get("armed_accounts") or [])
+    lf = _lfh.summary(_lfh.attach_row_ctx(web, lcl.exchange_view(web)), web.get("armed_accounts") or [])
     return _ok({"route": "R6", "verdict": lf["verdict"], "live_fences": lf, "gaps": lf["gaps"], "errors_1h": len(errs),
                 "recent_errors": [{"type": r.get("type"), "account": r.get("account"),
                                    "error": r.get("error")} for r in errs[-20:]],

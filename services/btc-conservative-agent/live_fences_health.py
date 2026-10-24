@@ -25,6 +25,56 @@ CAUSE_NO_CREDENTIALS = "NO_CREDENTIALS_UNVERIFIED"
 # RK (24 Oct 16:42): an account with no exchange credentials is UNVERIFIED and blocked, never ok (relay mirror error text)
 _NO_CRED_MARKERS = ("credentials-missing", "no_credentials", "credentials unavailable")
 
+# RK PASS (24 Oct 19:36): acct-cmqdk8n9 fence EXCLUSION. Excluded from the all-accounts live_fences view ONLY while ALL
+# of hire expired, no credentials, PAUSED, cannot arm hold on THIS read (relay evidence fence_exclusion AND the
+# website row fields agree). Any criterion flips, or the evidence is missing/unreadable => back in as UNVERIFIED (blocks).
+# An excluded account shows EXCLUDED (unreadable): never ok, never flat, never GREEN.
+EXCLUDABLE_ACCOUNTS = frozenset({"acct-cmqdk8n9"})
+EXCLUSION_SCHEMA = "relay_live_fences_exclusion_v1"
+EXCLUDED_CAUSE = "EXCLUDED_UNREADABLE"
+EXCLUDED_STATUS = "EXCLUDED (unreadable)"
+EXCLUDED_ALERT = "LIVE_FENCES_EXCLUDED"
+EXCLUSION_CRITERIA = ("hire_expired", "no_credentials", "paused", "cannot_arm")
+ROW_CTX_KEY = "_fence_exclusion_row"
+
+
+def exclusion(account: Any, row: Any) -> dict:
+    """{excluded, failed:[criteria...], reason}. ``row`` is the website account row (or the mirror carrying
+    ROW_CTX_KEY). Fails closed: anything missing / unreadable => excluded False."""
+    acct = str(account)
+    if acct not in EXCLUDABLE_ACCOUNTS:
+        return {"excluded": False, "failed": ["NOT_EXCLUDABLE_ACCOUNT"], "reason": None}
+    if not isinstance(row, Mapping):
+        return {"excluded": False, "failed": ["ROW_UNREADABLE"], "reason": None}
+    mirror = row.get("exchange_mirror")
+    fe = mirror.get("fence_exclusion") if isinstance(mirror, Mapping) else None
+    if not isinstance(fe, Mapping) or fe.get("schema") != EXCLUSION_SCHEMA or fe.get("read_ok") is not True:
+        return {"excluded": False, "failed": ["EXCLUSION_READ_FAILED"], "reason": None}
+    crit = fe.get("criteria") if isinstance(fe.get("criteria"), Mapping) else {}
+    failed = [c for c in EXCLUSION_CRITERIA if crit.get(c) is not True]
+    # cross-check every criterion against the website row itself (both sources must agree)
+    if row.get("hire_active") is not False:
+        failed.append("hire_expired:row")
+    if live_fences_cause(mirror) != CAUSE_NO_CREDENTIALS:
+        failed.append("no_credentials:row")
+    if row.get("paused") is not True or row.get("status") != "PAUSED":
+        failed.append("paused:row")
+    if row.get("armed") is not False or row.get("armed_at"):
+        failed.append("cannot_arm:row")
+    if fe.get("excluded") is not True:
+        failed.append("relay_excluded_false")
+    ok = not failed
+    return {"excluded": ok, "failed": failed,
+            "reason": "HIRE_EXPIRED+NO_CREDENTIALS+PAUSED+CANNOT_ARM" if ok else None,
+            "values": fe.get("values") if ok and isinstance(fe.get("values"), Mapping) else None}
+
+
+def _mirror_exclusion(account: Any, mirror: Any) -> dict:
+    row = mirror.get(ROW_CTX_KEY) if isinstance(mirror, Mapping) else None
+    if isinstance(row, Mapping):
+        row = {**row, "exchange_mirror": mirror}
+    return exclusion(account, row)
+
 
 def live_fences_cause(mirror: Any) -> str | None:
     """None when the account's live_fences view is readable; else the failure cause."""
@@ -55,6 +105,8 @@ def account_problems(accounts: Iterable[Any] | None) -> list[dict]:
         if not isinstance(a, Mapping):
             continue
         m = a.get("exchange_mirror")
+        if exclusion(a.get("account"), a)["excluded"]:
+            continue  # RK 19:36: all 4 criteria hold on this read; shown EXCLUDED (unreadable), never flat
         cause = live_fences_cause(m)
         if cause is None:
             continue
@@ -82,6 +134,9 @@ def mirror_alerts(exchange: Mapping[str, Mapping[str, Any]] | None, armed_accoun
     armed = {str(x) for x in armed_accounts or ()}
     out = []
     for acct, m in (exchange or {}).items():
+        if _mirror_exclusion(acct, m)["excluded"]:
+            out.append({"code": EXCLUDED_ALERT, "severity": "AMBER", "account": str(acct), "cause": EXCLUDED_CAUSE})
+            continue
         cause = live_fences_cause(m)
         if cause is not None:
             out.append({"code": ALERT_CODE, "severity": "RED" if str(acct) in armed else "AMBER",
@@ -96,6 +151,26 @@ def summary(exchange: Mapping[str, Mapping[str, Any]] | None, armed_accounts: It
     if not exchange:
         verdict, al = "AMBER", [{"code": ALERT_CODE, "severity": "AMBER", "account": None, "cause": CAUSE_NO_MIRROR}]
     return {"verdict": verdict,
-            "accounts": {str(a): {"ok": live_fences_cause(m) is None, "cause": live_fences_cause(m)}
-                         for a, m in (exchange or {}).items()},
+            "accounts": {str(a): _summary_entry(a, m) for a, m in (exchange or {}).items()},
             "gaps": al}
+
+
+def _summary_entry(acct: Any, m: Any) -> dict:
+    ex = _mirror_exclusion(acct, m)
+    if ex["excluded"]:
+        return {"ok": False, "flat": False, "cause": EXCLUDED_CAUSE, "status": EXCLUDED_STATUS,
+                "exclusion_reason": ex["reason"], "exclusion_values": ex.get("values")}
+    cause = live_fences_cause(m)
+    return {"ok": cause is None, "cause": cause}
+
+
+def attach_row_ctx(website: Mapping[str, Any] | None, exchange: Mapping[str, Any]) -> dict:
+    """Copy of ``exchange`` ({acct: mirror}) where each excludable account's mirror carries its website row fields."""
+    rows = {str(a.get("account")): a for a in (website or {}).get("accounts") or [] if isinstance(a, Mapping)}
+    out = {}
+    for acct, m in (exchange or {}).items():
+        r = rows.get(str(acct))
+        if str(acct) in EXCLUDABLE_ACCOUNTS and isinstance(m, Mapping) and isinstance(r, Mapping):
+            m = {**m, ROW_CTX_KEY: {k: r.get(k) for k in ("hire_active", "paused", "status", "armed", "armed_at")}}
+        out[acct] = m
+    return out
