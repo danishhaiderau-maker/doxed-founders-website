@@ -16,7 +16,11 @@
         "ledgers",
         "red_streams",
         "retired_streams_allowlist",
-        "warnings"
+        "warnings",
+        "retired_since_ts",
+        "pre_retirement_rows",
+        "scan_complete",
+        "scan_elapsed_s"
       ],
       "per_ledger": [
         "status",
@@ -34,7 +38,10 @@
         "red_reason",
         "warnings",
         "last_write_ts",
-        "retirement_flags"
+        "retirement_flags",
+        "scan",
+        "pre_retirement_rows",
+        "retired_since_ts"
       ],
       "status_values": [
         "GREEN",

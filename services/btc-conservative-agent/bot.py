@@ -48279,6 +48279,13 @@ def runtime_uptime_loop():
     opened = tracker.boot(float(process_boot_time or time.time()), _runtime_git_rev())
     _RUNTIME_UPTIME["tracker"] = tracker
     logger.info("[UPTIME] boot recorded: %s", opened.get("text"))
+    try:  # HM 06:30: any restart not initiated by a deploy raises an [ALERT]
+        _rc = tracker.restart_cause()
+        if _rc.get("initiator_alert"):
+            logger.error("[ALERT] non-deploy restart: initiator=%s (%s)", _rc.get("initiator"),
+                         _rc.get("initiator_basis"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[UPTIME] initiator check failed: %s", type(exc).__name__)
     try:
         import memory_structures as _memstruct
         _mem_tracker = _memstruct.Tracker(_data_sync_volume_root() / "memory_structures.json")
@@ -48453,6 +48460,24 @@ def _offline_sim_epoch_check() -> dict:
             "threshold": "fresh-epoch floor readable"}
 
 
+def _restart_initiator_check(now: float) -> dict:
+    """HM 06:30: AMBER for INITIATOR_ALERT_WINDOW_SEC after a restart not initiated by a deploy."""
+    try:
+        rc = _runtime_restart_cause(now)
+    except Exception as exc:  # noqa: BLE001
+        return {"id": "fly.restart_initiator", "status": "AMBER", "observed": f"error {type(exc).__name__}",
+                "threshold": "deploy"}
+    if not rc.get("available"):
+        return {"id": "fly.restart_initiator", "status": "AMBER", "observed": "tracker not started",
+                "threshold": "deploy"}
+    boot_ts = runtime_uptime._parse(rc.get("boot_at"))
+    recent = boot_ts is None or now - boot_ts <= runtime_uptime.INITIATOR_ALERT_WINDOW_SEC
+    alert = bool(rc.get("initiator_alert")) and recent
+    return {"id": "fly.restart_initiator", "status": "AMBER" if alert else "GREEN",
+            "observed": f"{rc.get('initiator')}: {rc.get('initiator_basis')}",
+            "threshold": "deploy/first_boot (non-deploy restart AMBER for 6h)"}
+
+
 def _system_health_fly_self_checks(now: float | None = None) -> list:
     """Cheap Fly-side facts that stay truthful even when the laptop report is stale."""
     now = float(now or time.time())
@@ -48481,6 +48506,7 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
             "threshold": "disarmed",
         },
     ]
+    checks.append(_restart_initiator_check(now))
     try:
         import exit_latency_slo as _els
         slo = _els.evaluate(list(trades), since=now - 24 * 3600, forced=STATS_EXCLUDED_EXIT_REASONS)
@@ -51172,7 +51198,8 @@ def monitor_ledger_unstamped_route():
             raise monitor_tiles.BadRequest("since must be a unix ts")
         if since <= 0:
             raise monitor_tiles.BadRequest("since required (fresh epoch floor unreadable)")
-        return _lsm.check(str(_data_sync_runtime_root()), since)
+        # HM 06:30: incremental cached scan bounded to ~2 s per call; an unfinished fold is AMBER and resumes.
+        return _lsm.check(str(_data_sync_runtime_root()), since, time_budget_s=_lsm.DEFAULT_TIME_BUDGET_S)
     return _monitor_tiles_guard(build, 65536)
 
 
