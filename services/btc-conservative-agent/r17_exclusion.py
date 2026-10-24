@@ -209,6 +209,8 @@ def entry_proof_failures(row) -> list:
         out.append("ENTRY_PRICE_AGE_MISSING")
     if entry_priced_on_1s_tape(row):
         out.append(F.REASON_ENTRY_PRICED_ON_1S_TAPE)
+    # RK 24 Oct fail-open fix: the entry receipt must carry the measured receive proof (same helper as the row check).
+    out.extend(r for r in book_receive_failures(row) if r == "BOOK_RECEIVE_TS_MISSING")
     return out
 
 

@@ -8,6 +8,9 @@ import numpy as np
 from research_v3_contract import validate_policy_spec
 
 
+EXIT_FILL_UNPROVEN = "EXIT_FILL_UNPROVEN"  # RK 24 Oct M3: the exit fill could not be proven -> R17_UNPROVEN cell
+
+
 class ExitFillUnavailable(Exception):
     """A book-walk path could not price an exit on a complete book row (never priced any other way)."""
 
@@ -422,7 +425,9 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
             path, plan, atr_pct_at_fill, leverage)
         exit_margin = float((path.cur if getattr(path, "exit_cur", None) is None else path.exit_cur)[exit_index])
     except ExitFillUnavailable as exc:
+        # RK 24 Oct M3: keep the unproven reason so the cell is counted R17_UNPROVEN (never countable, never GREEN).
         return {"status": "DATA_ERROR", "reasons": [str(exc)], "exit_reason": None, "net_pnl_usd": None,
+                "r17_status": "R17_UNPROVEN", "r17_unproven_reason": EXIT_FILL_UNPROVEN,
                 "profit_retention_ratio": None, "profit_giveback_pct": None,
                 "underwater_observation_ratio": None}
     unobservable = _stop_unobservable_in_trade_gap(path, plan, atr_pct_at_fill, leverage, exit_index, exit_reason)

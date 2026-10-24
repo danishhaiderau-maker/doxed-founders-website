@@ -24,6 +24,7 @@ from __future__ import annotations
 
 MIN_POOL_N = 10  # paper_fill.MIN_POOL_N: below it the delay is UNVERIFIED_DELAY
 RESIDENT_DELAY_SOURCE = "EXCHANGE_RESIDENT_NO_DELAY"
+STOP_RULE_NO_POOL = "STOP_RULE_NO_POOL"  # RK 24 Oct: stop-rule exit (first row received at/after trigger), no pool
 RESIDENT_EXIT_BASIS = "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER"
 # RK A + HM #842 R3 nit (24 Oct 2026): only the pooled cross-lane live-ack labels count. The old per-lane
 # sampler labels (lane_max_n<N> / lane_q90_n<N>) are no longer accepted as measured delay (non-countable).

@@ -46,7 +46,9 @@ def test_delay_pool_default_max_then_q90():
     px, src = d.delay("L", "exit")
     assert src == "lane_q90_n20" and px == 1.1   # nearest-rank q0.90 of 20 = the 18th smallest
     st = pf.delay_stamp(src)
-    assert st["quantile_method"] == "Q90" and st["pool_n"] == 20 and not st["delay_unverified"]
+    # RK 24 Oct: the sampler's lane_* label is not in the r17 label set (POOLED_LIVE_ACK_CROSS_LANE only) ->
+    # UNVERIFIED; N and the quantile method stay as diagnostics.
+    assert st["quantile_method"] == "Q90" and st["pool_n"] == 20 and st["delay_unverified"]
     st = pf.delay_stamp("lane_max_n12")
     assert st["quantile_method"] == "MAX" and st["pool_n"] == 12
     st = pf.delay_stamp("default_until_n10")

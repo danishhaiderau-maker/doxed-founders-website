@@ -46,3 +46,11 @@
 - Evidence: `[EXECUTOR-DIAG]` logs lot_evidence for cycle cmv59vxr30043np01amp57b3t (participant + cycle status, createdAt, envelope trade/signal id, event list with times) and non-terminal lot counts by status (INTENT included).
 - CAUSE UNDER REVIEW: the 00:40 "stale lot from dsl-1791809159-10" attribution is challenged by HM (cmv59 prefix matches the 00:13 trade's own records). Corrected once the lot_evidence line is in.
 - Outbox note: the website reporter re-sent 432 already-delivered reports in one 151 s run after restart; delivered state is in memory only. The outbox must persist delivered/acked state.
+
+## 24 Oct 2026 — realism-v2/integration fix commit (RK PASS / HM AGREE), CI-only via draft #859
+- M1: book-walk tape carries per-row WS_FRAME receive_ts; fills price on the first row received at or after the trigger.
+- M2: one label set — paper_fill.delay_stamp and live_ack_pool both use r17_fields.MEASURED_DELAY_PATTERN (N>=10). Sampler lane_* labels are now DEFAULT/unverified (bot.py DEFAULT_DELAY path consequence).
+- M3: exit-fill DATA_ERROR now R17_UNPROVEN / EXIT_FILL_UNPROVEN; never green in candidates.
+- FAIL-OPEN: book_limit_entry FILL/NO_FILL receipt evidence COMPLETE only with measured receipt; r17 entry proofs include BOOK_RECEIVE_TS_MISSING.
+- Exit timing: exit_fill uses paper_fill RESIDENT_LEG with STOP_RULE_NO_POOL, stamps trigger_ts/book_row_ready_ts.
+- Lock v5: not located in repo/tracker/#859 — UNRESOLVED.

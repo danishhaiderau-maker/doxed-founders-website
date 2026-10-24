@@ -34,6 +34,7 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 import paper_fill as _pf
+import r17_fields as _r17f
 import r17_gap_detector as _gd
 
 BOOK_FILE = "bfx_book_10l_1s.jsonl"
@@ -56,7 +57,7 @@ STOP_UNOBSERVABLE_RULE_STATUS = _gd.RULE_STATUS
 C2_FLAGGED_KEY = "c2_stop_unobservable_trade_gap_cells"
 C2_CLAUSE_COUNTS_KEY = "c2_stop_unobservable_clause_counts"
 KIND_TRADE, KIND_BOOK = 0, 1
-EXIT_FILL_DELAY_SOURCE = "FIRST_BOOK_ROW_AT_OR_AFTER_TRIGGER"
+EXIT_FILL_DELAY_SOURCE = "FIRST_BOOK_ROW_RECEIVED_AT_OR_AFTER_TRIGGER"
 
 _S_RE = re.compile(r'"s"\s*:\s*(-?\d+(?:\.\d+)?)')
 
@@ -101,7 +102,8 @@ class BookWalkTape:
 
     def __init__(self, book_s: np.ndarray, levels: np.ndarray, trade_ts: np.ndarray, trade_px: np.ndarray,
                  trade_recv_s: np.ndarray, receipt: dict[str, Any], boot_log: "_gd.BootLog | None" = None,
-                 trade_amt: np.ndarray | None = None) -> None:
+                 trade_amt: np.ndarray | None = None, receive: np.ndarray | None = None) -> None:
+        self.receive = receive if receive is not None else np.full((len(book_s), 2), np.nan)
         self.book_s = book_s          # int64, sorted, unique (last row per second wins)
         self.levels = levels          # float64 [n, 2, LEVELS, 2]: side (0 bid, 1 ask), level, (px, sz)
         self.trade_ts = trade_ts      # float64 exchange print time, sorted
@@ -118,6 +120,7 @@ class BookWalkTape:
                   *, receipt: dict[str, Any] | None = None,
                   boot_log: "_gd.BootLog | None" = None) -> "BookWalkTape":
         by_s: dict[int, np.ndarray] = {}
+        rx_s: dict[int, tuple] = {}
         stats = {"book_rows_accepted": 0, "book_rows_rejected": 0, "trade_rows": 0, "trade_prints": 0}
         for row in book_rows:
             s = _num(row.get("s")) if isinstance(row, Mapping) else None
@@ -133,6 +136,8 @@ class BookWalkTape:
                         arr[side, i] = (px, sz)
             if ok and not (np.isnan(arr[0, 0, 0]) or np.isnan(arr[1, 0, 0]) or arr[1, 0, 0] < arr[0, 0, 0]):
                 by_s[int(s)] = arr
+                ok_rx = str(row.get("receive_ts_source") or "") == _pf.RECEIVE_TS_MEASURED
+                rx_s[int(s)] = (_num(row.get("receive_ts")) if ok_rx else None, _num(row.get("receive_mono")) if ok_rx else None)
                 stats["book_rows_accepted"] += 1
             else:
                 stats["book_rows_rejected"] += 1
@@ -173,7 +178,8 @@ class BookWalkTape:
                    np.asarray([p[0] for p in prints], dtype=np.float64),
                    np.asarray([p[1] for p in prints], dtype=np.float64),
                    np.asarray(sorted(recv), dtype=np.int64), details, boot_log,
-                   np.asarray([p[3] for p in prints], dtype=np.float64))
+                   np.asarray([p[3] for p in prints], dtype=np.float64),
+                   np.asarray([[np.nan if v is None else v for v in rx_s.get(s, (None, None))] for s in secs], dtype=np.float64).reshape(-1, 2))
 
     # ---------------------------------------------------------------- coverage
     def coverage(self, t0: float, t1: float) -> dict[str, Any]:
@@ -217,17 +223,18 @@ class BookWalkTape:
         return BookWalkWindow(self.book_s[lo:hi].copy(), self.levels[lo:hi].copy(),
                               self.trade_ts[tlo:thi].copy(), self.trade_px[tlo:thi].copy(),
                               tape_trade_ts=self.trade_ts, tape_book_s=self.book_s, boot_log=self.boot_log,
-                              trade_amt=self.trade_amt[tlo:thi].copy())
+                              trade_amt=self.trade_amt[tlo:thi].copy(), receive=self.receive[lo:hi].copy())
 
 
 class BookWalkWindow:
     """One event's book rows and prints (small, picklable for replay workers)."""
 
     __slots__ = ("book_s", "levels", "trade_ts", "trade_px", "tape_trade_ts", "tape_book_s", "boot_log",
-                 "trade_amt")
+                 "trade_amt", "receive")
 
     def __init__(self, book_s, levels, trade_ts, trade_px, *, tape_trade_ts=None, tape_book_s=None,
-                 boot_log=None, trade_amt=None) -> None:
+                 boot_log=None, trade_amt=None, receive=None) -> None:
+        self.receive = receive if receive is not None else np.full((len(book_s), 2), np.nan)
         self.book_s, self.levels, self.trade_ts, self.trade_px = book_s, levels, trade_ts, trade_px
         self.trade_amt = trade_amt if trade_amt is not None else np.full(len(trade_ts), np.nan)
         self.tape_trade_ts = trade_ts if tape_trade_ts is None else tape_trade_ts
@@ -238,7 +245,9 @@ class BookWalkWindow:
         lv = self.levels[index]
         return {"s": int(self.book_s[index]),
                 "b": [[float(p), float(z)] for p, z in lv[0] if p == p],
-                "a": [[float(p), float(z)] for p, z in lv[1] if p == p]}
+                "a": [[float(p), float(z)] for p, z in lv[1] if p == p],
+                **({"receive_ts": float(self.receive[index, 0]), "receive_mono": float(self.receive[index, 1]),
+                    "receive_ts_source": _pf.RECEIVE_TS_MEASURED} if self.receive[index, 0] == self.receive[index, 0] else {})}
 
     def trades_between(self, t0: float, t1: float) -> list[dict[str, Any]]:
         """Prints with ``t0 < ts <= t1`` as ``order_model.maker_rest_step`` / ``quote_trigger.trades_between`` rows
@@ -285,19 +294,29 @@ class BookWalkWindow:
         return ts[order], px[order], kind[order]
 
     def exit_fill(self, direction: str, qty: float, trigger_ts: float) -> dict[str, Any]:
-        """Shared pricer on the first complete book row at or after ``trigger_ts``."""
+        """Shared pricer, stop rule (RK 24 Oct): the FIRST book row RECEIVED (measured WS_FRAME receive_ts) at or
+        after ``trigger_ts``; fill_ts = that row's receive_ts, no pooled delay (STOP_RULE_NO_POOL). The row choice,
+        the receipt proof and the fail-closed rule are paper_fill's FIRST_AFTER branch (R4), not an s + 1 bucket."""
         index = self.first_row_ready_at_or_after(trigger_ts)
         if index is None or float(self.book_s[index]) + 1.0 - trigger_ts > MAX_BOOK_GAP_S:
             return {"status": "REJECT_NO_BOOK", "evidence_status": "NO_FILL", "price": None}
-        row = self.row(index)
-        # HM #847 N5: the delay is the actual wait until this row is complete (s + 1), floored at the shared
-        # pricer's MIN_DELAY_S, so fill_ts / delay_s stamp the row-ready time instead of a constant 0.3 s.
-        ready_ts = float(self.book_s[index]) + 1.0
-        delay_s = max(_pf.MIN_DELAY_S, ready_ts - float(trigger_ts))
-        out = _pf.paper_fill(direction, qty, trigger_ts, delay_s, lambda _t: row, leg="exit",
-                             delay_source=EXIT_FILL_DELAY_SOURCE)
+        cache: dict[int, dict[str, Any] | None] = {}
+        cap = float(trigger_ts) + MAX_BOOK_GAP_S + 2.0  # rows past the coverage gap are never the first-after row
+
+        def book_at(t: float) -> dict[str, Any] | None:
+            i = int(np.searchsorted(self.book_s + 1, min(float(t), cap), side="right")) - 1
+            if i < 0:
+                return None
+            if i not in cache:
+                cache[i] = self.row(i)
+            return cache[i]
+
+        out = _pf.paper_fill(direction, qty, trigger_ts, 0.0, book_at, leg=_pf.RESIDENT_LEG,
+                             delay_source=_r17f.STOP_RULE_NO_POOL)
         out["trigger_ts"] = float(trigger_ts)
-        out["book_row_ready_ts"] = ready_ts
+        out["exit_fill_rule"] = EXIT_FILL_DELAY_SOURCE
+        if out.get("book_s") is not None:
+            out["book_row_ready_ts"] = float(out["book_s"]) + 1.0
         return out
 
 

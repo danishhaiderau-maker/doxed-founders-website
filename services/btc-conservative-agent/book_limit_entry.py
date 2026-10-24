@@ -105,6 +105,22 @@ def _touch_ts(side: str, limit: float, t0: float, t1: float, rows: Iterable[Mapp
     return out
 
 
+def _receive_fields(fill: dict[str, Any] | None) -> dict[str, Any]:
+    """The walked row's measured receipt (paper_fill.book_receive_proof), copied onto the receipt as entry_book_*
+    so r17_exclusion.entry_proof_failures checks it (R4: the same book_receive_failures rule as every row)."""
+    f = fill or {}
+    return {f"entry_{k}": f.get(k) for k in ("book_receive_ts", "book_receive_mono", "book_receive_ts_source",
+                                             "book_receive_age_ms", "book_receive_unverified")}
+
+
+def _walk_evidence_ok(fill: dict[str, Any] | None) -> bool:
+    """FAIL-OPEN fix (RK 24 Oct): the receipt may be COMPLETE only when the walked fill's own evidence is not
+    UNVERIFIED (measured, no-look-ahead receipt; no unverified reason)."""
+    f = fill or {}
+    return (f.get("evidence_status") != "UNVERIFIED" and not f.get("book_receive_unverified")
+            and not f.get("unverified_reason"))
+
+
 def _countability(receipt: dict[str, Any], *extra: str) -> None:
     """Stamp r17_entry_status from the shared entry contract check (+ any receipt-level reasons)."""
     failures = list(_r17x.entry_proof_failures(receipt)) + [r for r in extra if r]
@@ -227,7 +243,10 @@ def book_limit_entry(direction: str, requested_qty: Any, chase_schedule: Sequenc
             "placement_walk_qty": walk_q, "placement_walk_px": walk_px, "rest_filled_qty": rest_q,
             "entry_fill": fill,
             # Contract evidence: COMPLETE only for the full size, book-observed; a PARTIAL is never COMPLETE (C3).
-            "evidence_status": _pf.EVIDENCE_COMPLETE if full else "INCOMPLETE",
+            # RK 24 Oct fail-open fix: and only when the walked fill's own evidence is not UNVERIFIED.
+            "evidence_status": (_pf.EVIDENCE_COMPLETE if _walk_evidence_ok(fill) else "UNVERIFIED") if full
+            else "INCOMPLETE",
+            **_receive_fields(fill),
             "rest_gap_clause": _gd.clause_label(rest_mask),
         })
         _countability(receipt, REASON_REST_TOUCH_IN_TRADE_GAP + ":" + _gd.clause_label(rest_mask) if rest_mask else "")
@@ -242,7 +261,9 @@ def book_limit_entry(direction: str, requested_qty: Any, chase_schedule: Sequenc
         "delay_s": (last_fill or {}).get("delay_s"), "delay_source": (last_fill or {}).get("delay_source"),
         "delay_source_kind": stamp.get("delay_source_kind"), "delay_unverified": stamp.get("delay_unverified"),
         "entry_book_age_ms": (last_fill or {}).get("book_age_ms"),
-        "evidence_status": _pf.EVIDENCE_COMPLETE, "rest_gap_clause": _gd.clause_label(rest_mask),
+        # RK 24 Oct fail-open fix: a NO_FILL is COMPLETE only when the last walked row's receipt is proven.
+        "evidence_status": _pf.EVIDENCE_COMPLETE if last_fill and _walk_evidence_ok(last_fill) else "UNVERIFIED",
+        "rest_gap_clause": _gd.clause_label(rest_mask), **_receive_fields(last_fill),
     })
     # HM #848 C2: whether the order filled depends on the delay; on an unmeasured delay the no-fill is unproven.
     _countability(receipt, REASON_REST_TOUCH_IN_TRADE_GAP + ":" + _gd.clause_label(rest_mask) if rest_mask else "")

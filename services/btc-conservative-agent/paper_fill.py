@@ -97,13 +97,26 @@ def delay_stamp(delay_source: Any, pool_ts: Any = None) -> dict:
     pool_ts and delay_unverified. A pool below MIN_POOL_N (or the 1.5 s default) is UNVERIFIED_DELAY, never
     realistic. The sampler's ``lane_max_n<N>`` / ``lane_q90_n<N>`` label carries N; the F1 live-ack pool supplies pool_ts."""
     import re as _re
+
+    import r17_fields as _r17f  # the ONE r17 label set (R4); local import keeps paper_fill's module body unchanged
     src = str(delay_source or "")
     if src == "EXCHANGE_RESIDENT_NO_DELAY":
         return {"delay_source_kind": "resident", "pool_n": None, "pool_ts": None, "quantile_method": None,
                 "delay_unverified": False}
-    m = _re.search(r"_n(\d+)$", src)
-    n = int(m.group(1)) if m and "default" not in src else 0
-    kind = "live_ack" if n > 0 else "default"
+    if src == _r17f.STOP_RULE_NO_POOL:
+        # RK 24 Oct: a stop-rule exit (first book row received at/after the trigger) has no pool delay at all.
+        return {"delay_source_kind": "stop_rule", "pool_n": None, "pool_ts": None, "quantile_method": None,
+                "delay_unverified": False, "delay_flag": None}
+    # ONE label set (R4), shared with r17_exclusion._delay_measured and live_ack_pool.CrossLanePool: only a
+    # POOLED_LIVE_ACK_CROSS_LANE:<KEY>_<max|q90>_n<N> label is live_ack; anything else (the retired sampler
+    # lane_max_n<N>, a pooled default) is "default" and UNVERIFIED_DELAY.
+    m = _re.fullmatch(_r17f.MEASURED_DELAY_PATTERN, src)
+    tail = _re.search(r"_n(\d+)$", src)
+    n = int(m.group(1)) if m else (int(tail.group(1)) if tail and "default" not in src else 0)  # N kept as diagnostic
+    kind = "live_ack" if m else "default"
+    if not m:
+        return {"delay_source_kind": kind, "pool_n": n, "pool_ts": pool_ts, "quantile_method": quantile_method_of(src),
+                "delay_unverified": True, "delay_flag": UNVERIFIED_DELAY}
     return {"delay_source_kind": kind, "pool_n": n, "pool_ts": pool_ts, "quantile_method": quantile_method_of(src),
             "delay_unverified": n < MIN_POOL_N, "delay_flag": UNVERIFIED_DELAY if n < MIN_POOL_N else None}
 

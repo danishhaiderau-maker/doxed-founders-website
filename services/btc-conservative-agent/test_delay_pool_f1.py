@@ -81,6 +81,10 @@ def _report(i, lane="GS-01", sig=1000.0, ack=1000.4, fill=1000.5, stop=1000.9, e
     return {"correlation_id": f"t{i}", "lane": lane, "timeline": tl}
 
 
+POOLED_E12 = "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12"
+POOLED_X25 = "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_q90_n25"
+
+
 def test_sampler_rule_and_pool_ts():
     s = pf.DelaySampler(maxlen=200)
     assert s.describe("GS-01")["delay_source"] == "default_until_n10"
@@ -89,7 +93,8 @@ def test_sampler_rule_and_pool_ts():
         s.add("gs-01", "entry", 0.1 * (i + 1), measured_ts=2000.0 + i, trade_id=f"t{i}")
     d = s.describe("GS-01", "entry")
     assert d["delay_source"] == "lane_max_n12" and abs(d["delay_s"] - 1.2) < 1e-9
-    assert d["pool_n"] == 12 and d["pool_ts"] == 2011.0 and d["quantile_method"] and d["delay_unverified"] is False
+    # RK 24 Oct: the sampler's lane_* label is not in the r17 label set -> UNVERIFIED (N kept as a diagnostic).
+    assert d["pool_n"] == 12 and d["pool_ts"] == 2011.0 and d["quantile_method"] and d["delay_unverified"] is True
     for i in range(12, 25):
         s.add("GS-01", "entry", 0.1 * (i + 1), measured_ts=2000.0 + i, trade_id=f"t{i}")
     assert s.describe("GS-01", "entry")["delay_source"] == "lane_q90_n25"
@@ -166,24 +171,28 @@ def _pos(entry_src, exit_src):
 
 def test_closed_row_carries_pool_stamps():
     ns = _row_ns()
-    f = ns["_entry_pricing_fields"](_pos("lane_max_n12", "lane_q90_n25"), {})
+    f = ns["_entry_pricing_fields"](_pos(POOLED_E12, POOLED_X25), {})
     assert f["pool_n"] == 12 and f["pool_ts"] == 123.0 and f["quantile_method"] and f["delay_unverified"] is False
     assert f["exit_pool_n"] == 25 and f["exit_pool_ts"] == 456.0 and f["exit_delay_unverified"] is False
+    g = ns["_entry_pricing_fields"](_pos("lane_max_n12", "lane_q90_n25"), {})  # retired sampler labels
+    assert g["delay_unverified"] is True and g["exit_delay_unverified"] is True
     assert "delay_flag" in f and "exit_delay_flag" in f
 
 
 def test_default_delay_rows_are_non_countable():
     ns = _row_ns()
     r = ns["_non_countable_reasons"]
-    assert r(_pos("lane_max_n12", "lane_q90_n25"), "TP") == []
-    assert r(_pos("default_until_n10", "lane_q90_n25"), "TP") == ["DEFAULT_DELAY_ENTRY"]
-    assert r(_pos("lane_max_n12", "default_until_n10"), "TIME") == ["DEFAULT_DELAY_EXIT"]
+    assert r(_pos(POOLED_E12, POOLED_X25), "TP") == []
+    assert r(_pos("default_until_n10", POOLED_X25), "TP") == ["DEFAULT_DELAY_ENTRY"]
+    assert r(_pos(POOLED_E12, "default_until_n10"), "TIME") == ["DEFAULT_DELAY_EXIT"]
+    # RK 24 Oct: the retired sampler lane_* labels are not r17-measured -> non-countable like the default.
+    assert r(_pos("lane_max_n12", "lane_q90_n25"), "TP") == ["DEFAULT_DELAY_ENTRY", "DEFAULT_DELAY_EXIT"]
     # an exchange-resident exit (stop/TP rests on the book) carries no delay and stays countable
-    assert r(_pos("lane_max_n12", "EXCHANGE_RESIDENT_NO_DELAY"), "SL") == []
-    assert r(_pos("lane_max_n12", None), "FORCE_FLATTENED") == ["FORCE_FLATTENED"]
+    assert r(_pos(POOLED_E12, "EXCHANGE_RESIDENT_NO_DELAY"), "SL") == []
+    assert r(_pos(POOLED_E12, None), "FORCE_FLATTENED") == ["FORCE_FLATTENED"]
     # RK/HM K1: liquidation not proven clear (shared r17_exclusion.liq_failure)
-    assert r({**_pos("lane_max_n12", "lane_q90_n25"), "liq_unverified": True}, "TP") == ["LIQ_UNVERIFIED"]
-    assert r({**_pos("lane_max_n12", "lane_q90_n25"), "liq_unverified": None}, "TP") == ["LIQ_CHECK_MISSING"]
+    assert r({**_pos(POOLED_E12, POOLED_X25), "liq_unverified": True}, "TP") == ["LIQ_UNVERIFIED"]
+    assert r({**_pos(POOLED_E12, POOLED_X25), "liq_unverified": None}, "TP") == ["LIQ_CHECK_MISSING"]
     # live rows (an exchange order id) are never re-judged on the paper delay pool
     live = {**_pos("default_until_n10", None), "bitfinex_order_id": 7}
     assert r(live, "TP") == []

@@ -839,12 +839,24 @@ class V3CandidateTests(unittest.TestCase):
     def test_book_priced_entry_with_verified_delay_is_countable(self):
         """A book-priced fill with a verified send delay (live-ack pool n >= 10) is a countable FULL_FILL."""
         row = conservative_source()
-        row.update({"entry_delay_s": 0.5, "entry_delay_source": "lane_max_n12"})
+        row.update({"entry_delay_s": 0.5, "entry_delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12"})
         report = evaluate_protection_screen([row], book_walk=entry_tape())
         first = report["candidates"][0]
         self.assertEqual(first["full_fills"], 1)
         self.assertEqual(first["unsupported_episodes"], 0)
         self.assertNotIn("R17_UNPROVEN_ENTRY", report["mark_source"].get("r17_unproven_cell_reasons") or {})
+
+    def test_unproven_exit_fill_keeps_its_reason_and_is_never_green(self):
+        """RK 24 Oct M3: entry proven (measured delay + receipts) but no measured receipt on the exit rows -> the
+        cell was a reason-less DATA_ERROR and the stamp read GREEN; now it is R17_UNPROVEN (EXIT_FILL_UNPROVEN)."""
+        row = conservative_source()
+        row.update({"entry_delay_s": 0.5, "entry_delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12"})
+        report = evaluate_protection_screen([row], book_walk=entry_tape(receive_until=1010))
+        first = report["candidates"][0]
+        self.assertEqual(first["full_fills"], 0)
+        mark = report["mark_source"]
+        self.assertIn("EXIT_FILL_UNPROVEN", mark["r17_unproven_cell_reasons"])
+        self.assertNotEqual(mark["alert_level"], "GREEN")
 
     def test_conservative_partial_fill_scales_execution_and_is_not_full(self):
         report = evaluate_protection_screen([conservative_source(visible_qty=0.25)],
@@ -857,7 +869,7 @@ class V3CandidateTests(unittest.TestCase):
         row = conservative_source(visible_qty=0.25)
         # HM #848 P2: even with a verified delay a PARTIAL (remainder rests with no print at the limit) is
         # evidence INCOMPLETE -> R17_UNPROVEN_ENTRY, never a countable partial.
-        row.update({"entry_delay_s": 1.5, "entry_delay_source": "lane_max_n12"})
+        row.update({"entry_delay_s": 1.5, "entry_delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12"})
         report = evaluate_protection_screen([row], book_walk=entry_tape(0.25))
         verified = report["candidates"][0]
         self.assertEqual(verified["full_fills"], 0)
@@ -968,7 +980,7 @@ class V3CandidateTests(unittest.TestCase):
 
     def test_conservative_no_fill_contributes_no_execution_pnl(self):
         row = conservative_source(crossed=False)
-        row.update({"entry_delay_s": 0.5, "entry_delay_source": "lane_max_n12"})
+        row.update({"entry_delay_s": 0.5, "entry_delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12"})
         report = evaluate_protection_screen([row], book_walk=entry_tape(crossed=False))
         first = report["candidates"][0]
         self.assertEqual(first["full_fills"], 0)

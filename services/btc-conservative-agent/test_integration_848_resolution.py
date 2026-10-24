@@ -77,10 +77,12 @@ def test_proof_failures_still_calls_liq_and_book_receive(monkeypatch):
     monkeypatch.setattr(r17, "liq_failure", lambda row: seen.append("liq") or None)
     monkeypatch.setattr(r17, "book_receive_failures", lambda row: seen.append("rx") or [])
     r17.proof_failures(good_row())
-    assert seen == ["liq", "rx"]
+    # RK 24 Oct fail-open fix: the entry subset (entry_proof_failures) runs the SAME book_receive_failures helper
+    # for the entry leg, so it is seen first; the full row check still calls liq then the full receive check.
+    assert seen == ["rx", "liq", "rx"]
     seen.clear()
     r17.non_countable_reason(good_row(), ids=set(), load_errors=[])
-    assert seen == ["liq", "rx"]
+    assert seen == ["rx", "liq", "rx"]
 
 
 def _calls(path, name):

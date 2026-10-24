@@ -40,6 +40,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import order_model as _om
 import paper_fill as _pf
+import r17_fields as _r17f
 
 DELAY_SOURCE = "POOLED_LIVE_ACK_CROSS_LANE"
 KEY_ENTRY_MKT = "ENTRY_MKT_GTC"
@@ -47,7 +48,7 @@ KEY_MAKER_REST = "MAKER_REST"
 KEY_EXIT_RO_MKT = "EXIT_RO_MKT"
 KEYS = (KEY_ENTRY_MKT, KEY_MAKER_REST, KEY_EXIT_RO_MKT)
 LABEL_RE = re.compile(rf"^{DELAY_SOURCE}:({'|'.join(KEYS)})_(max|q90|default\w*)_n(\d+)$")
-MEASURED_LABEL_PATTERN = rf"{DELAY_SOURCE}:(?:{'|'.join(KEYS)})_(?:max|q90)_n(\d+)"
+MEASURED_LABEL_PATTERN = _r17f.MEASURED_DELAY_PATTERN  # ONE label set (R4): r17_fields owns it
 EXCLUDED_REASON = re.compile(
     r"FORCE|ADMIN|DEPLOY|KILL|RECONCIL|MAINTENANCE|MANUAL|ALREADY_FLAT|EXCHANGE_STOP|USER_RELAY_STOP|CIRCUIT_BREAKER"
     r"|EMERGENCY|FLATTEN|SHOWCASE_MIRROR", re.I)

@@ -4,6 +4,7 @@ import json
 import pytest
 
 import paper_fill
+import r17_fields
 from book_walk_test_fixture import book_row, build_tape, quiet_boot_log, trade_row
 from research_v3_book_walk import (
     BASIS_BOOK_WALK,
@@ -55,7 +56,11 @@ def test_stop_triggers_on_first_trade_print_and_fills_on_first_book_row(directio
     assert len(fills) == 1 and fills[0]["price_source"] == "BFX_BOOK_10L"
     assert fills[0]["evidence_status"] == paper_fill.EVIDENCE_COMPLETE
     assert fills[0]["trigger_ts"] == pytest.approx(1050.4)
-    assert fills[0]["book_s"] == 1050
+    # RK 24 Oct stop rule: row 1050 was received at 1050.3 (< trigger 1050.4), so the FIRST row received at/after
+    # the trigger is 1051 (received 1051.3); fill_ts is that receipt, never the s + 1 bucket end.
+    assert fills[0]["book_s"] == 1051
+    assert fills[0]["fill_ts"] == pytest.approx(1051.3)
+    assert fills[0]["delay_source"] == r17_fields.STOP_RULE_NO_POOL
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
@@ -210,16 +215,33 @@ def test_stop_exit_cells_carry_the_last_trade_doc_inferred_label():
     assert (cell["r17_status"], cell["r17_unproven_reason"]) == ("PROVEN", None)
 
 
-def test_exit_fill_stamps_the_actual_row_ready_delay():
-    # HM #847 N5: trigger at 1100.2, next complete row is s=1102 (ready 1103) because 1100/1101 are missing.
+def test_exit_fill_uses_first_row_received_at_or_after_trigger_not_bucket_end():
+    # RK 24 Oct exit timing: rows 1100/1101 missing; trigger 1101.2 -> row 1102 (received 1102.3), fill_ts =
+    # receive_ts, delay 0, stamped STOP_RULE_NO_POOL (no pooled delay), receipt proven by the shared FIRST_AFTER check.
     tape = _tape([book_row(s, 100, 100.05) for s in range(990, 1700) if s not in (1100, 1101)],
                  [trade_row(s, 100.02) for s in range(990, 1700)])
     fill = tape.window(998, 1600).exit_fill("LONG", 0.001, 1101.2)
-    assert fill["book_row_ready_ts"] == 1103.0
-    assert fill["delay_s"] == pytest.approx(1.8)
-    assert fill["fill_ts"] == pytest.approx(1103.0)
-    near = tape.window(998, 1600).exit_fill("LONG", 0.001, 1102.9)  # row ready 0.1 s later: floored at 0.3 s
-    assert near["delay_s"] == pytest.approx(0.3) and near["book_row_ready_ts"] == 1103.0
+    assert fill["book_s"] == 1102 and fill["fill_ts"] == pytest.approx(1102.3)
+    assert fill["delay_s"] == 0.0 and fill["delay_source"] == r17_fields.STOP_RULE_NO_POOL
+    assert fill["book_row_rule"] == paper_fill.ROW_RULE_FIRST_AFTER
+    assert fill["evidence_status"] == paper_fill.EVIDENCE_COMPLETE
+    # Trigger inside a second, after that row's receipt: the row of the SAME second is not first-after.
+    near = tape.window(998, 1600).exit_fill("LONG", 0.001, 1102.9)
+    assert near["book_s"] == 1103 and near["fill_ts"] == pytest.approx(1103.3)
+    # Trigger before that second's receipt: that row is first-after, filled at its receipt (not at s + 1).
+    early = tape.window(998, 1600).exit_fill("LONG", 0.001, 1103.1)
+    assert early["book_s"] == 1103 and early["fill_ts"] == pytest.approx(1103.3)
+    assert paper_fill.delay_stamp(fill["delay_source"])["delay_source_kind"] == "stop_rule"
+
+
+def test_exit_fill_without_measured_receipt_fails_closed():
+    # No WS_FRAME receive_ts on the tape: the first-after row cannot be proven -> never COMPLETE, so the exit
+    # margin refuses to price it (ExitFillUnavailable) instead of counting a timing it cannot prove.
+    tape = _tape([book_row(s, 100, 100.05, receive_offset=None) for s in range(990, 1700)],
+                 [trade_row(s, 100.02) for s in range(990, 1700)])
+    fill = tape.window(998, 1600).exit_fill("LONG", 0.001, 1101.2)
+    assert fill["evidence_status"] != paper_fill.EVIDENCE_COMPLETE
+    assert fill.get("book_receive_unverified") or fill.get("unverified_reason")
 
 
 def test_every_coverage_stamp_carries_the_c2_flagged_count_even_when_zero():

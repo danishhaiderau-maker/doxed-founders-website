@@ -14,7 +14,7 @@ CONSTRAINTS = build_signed_quantity_constraints(
 )
 
 SCHEDULE = [{"bucket_id": "ev-1:chase:0", "start_ts": 1000.0, "end_ts": 1005.0, "limit_price": 100.0}]
-MEASURED = {"delay_s": 0.5, "delay_source": "lane_max_n12"}
+MEASURED = {"delay_s": 0.5, "delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12"}
 
 
 def _call(walk, qty=1.0, schedule=SCHEDULE, **kw):
@@ -58,7 +58,7 @@ def test_crossed_book_fills_at_placement_and_is_unproven_without_measured_delay(
 def test_measured_delay_full_fill_is_countable_with_contract_fields_at_top_level():
     r = _run(**MEASURED)
     assert r["outcome"] == "FILL" and r["evidence_status"] == "COMPLETE"
-    assert r["delay_source"] == "lane_max_n12" and r["delay_source_kind"] == "live_ack"
+    assert r["delay_source"] == "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12" and r["delay_source_kind"] == "live_ack"
     assert r["entry_book_age_ms"] is not None and r["entry_book_age_ms"] >= 0
     assert r["r17_entry_status"] is None and r["r17_entry_failures"] == []
 
@@ -92,7 +92,7 @@ def test_a_full_size_walks_the_row_at_signal_plus_delay_within_the_limit_only():
 
 def test_a_rows_before_signal_plus_delay_are_not_walked():
     walk = _tape(lambda s: _book_row(s, 99.85, 99.90, size=0.4) if s == 999 else _far(s))
-    r = _call(walk, delay_s=1.5, delay_source="lane_max_n12")
+    r = _call(walk, delay_s=1.5, delay_source="POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12")
     assert r["outcome"] == "NO_FILL" and r["attempts"][0]["walk_book_s"] == 1000
 
 
@@ -160,7 +160,7 @@ def test_arrival_after_interval_end_reads_no_later_row():
     book_at = lambda t: seen.append(t) or walk.book_at(t)  # noqa: E731
     sched = [{"bucket_id": "b0", "start_ts": 1000.0, "end_ts": 1001.0, "limit_price": 100.0}]
     r = book_limit_entry("LONG", 1.0, sched, book_at, trades_between=walk.trades_between,
-                         gap_clause_at=walk.gap_clause_at, delay_s=1.5, delay_source="lane_max_n12",
+                         gap_clause_at=walk.gap_clause_at, delay_s=1.5, delay_source="POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12",
                          quantity_constraints=CONSTRAINTS, symbol=SYMBOL)
     assert r["attempts"][0]["status"] == "ARRIVAL_AFTER_INTERVAL_END" and r["outcome"] == "NO_FILL"
     assert max(seen) <= 1001.0
@@ -192,3 +192,45 @@ def test_c_no_fee_term_in_the_entry_price_or_receipt():
     src = pathlib.Path(__file__).with_name("book_limit_entry.py").read_text()
     names = {t.string.lower() for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type == tokenize.NAME}
     assert not [n for n in names if "fee" in n]
+
+
+def test_fail_open_fill_and_no_fill_without_measured_receipt_are_never_complete():
+    # RK 24 Oct FAIL-OPEN: measured pooled delay but rows with no WS_FRAME receive_ts. Before the fix both the FILL
+    # and the NO_FILL receipt were forced COMPLETE and countable; now neither is.
+    def bare(row_for):
+        return lambda s: {**row_for(s), "receive_ts": None, "receive_mono": None, "receive_ts_source": "NONE"}
+    crossed = _tape(bare(lambda s: _book_row(s, 99.85, 99.90, size=2.0) if s == 999 else _far(s)))
+    f = _call(crossed, **MEASURED)
+    assert f["outcome"] == "FILL" and f["evidence_status"] != "COMPLETE"
+    assert f["entry_book_receive_ts_source"] != "WS_FRAME"
+    assert f["r17_entry_status"] == R17_UNPROVEN_ENTRY and "BOOK_RECEIVE_TS_MISSING" in f["r17_entry_failures"]
+    n = _call(_tape(bare(_far)), **MEASURED)
+    assert n["outcome"] == "NO_FILL" and n["evidence_status"] != "COMPLETE"
+    assert n["r17_entry_status"] == R17_UNPROVEN_ENTRY and "BOOK_RECEIVE_TS_MISSING" in n["r17_entry_failures"]
+    # The same tape WITH measured receipts stays countable (the fix does not over-reject).
+    ok = _call(_tape(_far), **MEASURED)
+    assert ok["evidence_status"] == "COMPLETE" and ok["entry_book_receive_ts_source"] == "WS_FRAME"
+    assert ok["r17_entry_status"] is None
+
+
+def test_delay_stamp_uses_the_one_r17_label_set():
+    # RK 24 Oct delay_stamp: the retired sampler label is never live_ack; one pattern shared with r17 + the pool.
+    import live_ack_pool
+    import paper_fill
+    import r17_exclusion
+    import r17_fields
+    assert live_ack_pool.MEASURED_LABEL_PATTERN == r17_fields.MEASURED_DELAY_PATTERN
+    retired = paper_fill.delay_stamp("lane_max_n12")
+    assert retired["delay_source_kind"] == "default" and retired["delay_unverified"] is True
+    pooled = paper_fill.delay_stamp("POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12")
+    assert pooled["delay_source_kind"] == "live_ack" and pooled["pool_n"] == 12 and pooled["delay_unverified"] is False
+    small = paper_fill.delay_stamp("POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_q90_n9")
+    assert small["delay_source_kind"] == "live_ack" and small["delay_unverified"] is True
+    dflt = paper_fill.delay_stamp("POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_default_n3")
+    assert dflt["delay_source_kind"] == "default" and dflt["delay_unverified"] is True
+    stop = paper_fill.delay_stamp(r17_fields.STOP_RULE_NO_POOL)
+    assert stop["delay_source_kind"] == "stop_rule" and stop["delay_unverified"] is False
+    for src in ("lane_max_n12", "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n12",
+                "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_q90_n9", "POOLED_LIVE_ACK_CROSS_LANE:MAKER_REST_default_n40"):
+        s = paper_fill.delay_stamp(src)
+        assert (not s["delay_unverified"]) == r17_exclusion._delay_measured(src), src

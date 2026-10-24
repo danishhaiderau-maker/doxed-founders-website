@@ -34,7 +34,7 @@ from research_v3_book_walk import (
     coverage_summary,
     load_book_walk,
 )
-from research_v3_policy_replay import ReplayPlan, replay_cell
+from research_v3_policy_replay import EXIT_FILL_UNPROVEN, ReplayPlan, replay_cell
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
 from book_limit_entry import (
@@ -1362,6 +1362,7 @@ _KIND_NO_FILL_UNPROVEN = 5
 # verified (research has no live-ack pool: default 1.5 s, UNVERIFIED_DELAY) is R17_UNPROVEN (reason
 # R17_UNPROVEN_ENTRY): never countable, its PnL kept only as ``unproven_net_pnl_usd``.
 _ENTRY_UNPROVEN_PREFIX = R17_UNPROVEN_ENTRY + ":"
+_EXIT_UNPROVEN_STATE = "R17_UNPROVEN_EXIT"  # RK 24 Oct M3: exit fill unproven (DATA_ERROR keeps its reason)
 _NAN = float("nan")
 
 
@@ -1501,6 +1502,11 @@ class _ProtectionCellStore:
                 "exit_reason": self.names[self.c_exit[cell]],
                 "replay_path_basis": basis,
             }
+        if state == _EXIT_UNPROVEN_STATE:
+            # RK 24 Oct M3: the exit fill could not be proven (e.g. no measured first-after receipt).
+            return {"outcome_state": R17_UNPROVEN, "r17_unproven_reason": EXIT_FILL_UNPROVEN,
+                    "entry_price_source": ENTRY_PRICE_SOURCE_BOOK, "net_pnl_usd": None,
+                    "exit_reason": None, "replay_path_basis": basis}
         if state == R17_UNPROVEN:
             # HM #847 C2 (binding rule): the book touched the stop inside a print gap the shared detector flags.
             return {
@@ -2098,6 +2104,9 @@ class _EpisodeReplayer:
                             prefix + "PARTIAL_FILL"
                             if status == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
                             else prefix + "FULL_FILL" if status == "COMPLETE"
+                            # RK 24 Oct M3: an unproven exit keeps its reason (and the entry prefix) instead of
+                            # collapsing into an uncounted DATA_ERROR.
+                            else prefix + _EXIT_UNPROVEN_STATE if result.get("r17_unproven_reason") == EXIT_FILL_UNPROVEN
                             else str(status or "UNSUPPORTED")
                         )
                         # C2 R17_UNPROVEN cells have no exit; the exit slot carries the clause label
@@ -2252,6 +2261,8 @@ def evaluate_protection_screen(
                             c2_clauses[name] += 1
                     elif state_name.startswith(_ENTRY_UNPROVEN_PREFIX):
                         unproven_cells[R17_UNPROVEN_ENTRY] += 1
+                    elif state_name == _EXIT_UNPROVEN_STATE:
+                        unproven_cells[EXIT_FILL_UNPROVEN] += 1
                 elif conservative[0] == _KIND_NO_FILL_UNPROVEN:
                     unproven_cells[R17_UNPROVEN_ENTRY] += 1
                 store.append(entry * protection_count + protection_index, event, first_position,
