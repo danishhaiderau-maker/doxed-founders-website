@@ -92,6 +92,8 @@ class EpochGuard:
         if self.floor_missing or self.floor_ts is None:
             return self._reject_no_floor(relpath)
         cls = nested_ts_class(row, self.floor_ts)
+        if cls == NESTED_OK and write_stamp_rejects(row):
+            cls = NESTED_NON_COUNTABLE
         if cls == NESTED_OK:
             self.admitted[relpath] = self.admitted.get(relpath, 0) + 1
             return True
@@ -236,6 +238,14 @@ NESTED_PRE_EPOCH = "PRE_EPOCH"
 NESTED_STRADDLE = "STRADDLE"
 NESTED_UNSTAMPED = "UNSTAMPED"
 NESTED_OK = "OK"
+NESTED_NON_COUNTABLE = "WRITE_STAMP_NON_COUNTABLE"
+
+
+def write_stamp_rejects(row: Any) -> bool:
+    """A row whose ledger write stamp exists but is not countable (fail-closed writer) is never admitted. Rows with
+    no write stamp keep the nested-ts rule (no nested ts = UNSTAMPED, always rejected)."""
+    import ledger_write_stamp as lws
+    return isinstance(row, dict) and isinstance(row.get(lws.STAMP_KEY), dict) and lws.row_non_countable_reason(row) is not None
 
 
 def _nested_ts(value: Any, out: list, depth: int = 0, key: str = "") -> None:
@@ -301,6 +311,8 @@ def file_epoch_row_counts(path: str | os.PathLike, relpath: str, manifest: dict 
                 except ValueError:
                     row = None
                 kind = nested_ts_class(row, floor) if isinstance(row, dict) else NESTED_UNSTAMPED
+                if kind == NESTED_OK and write_stamp_rejects(row):
+                    kind = NESTED_UNSTAMPED  # fail-closed stamp: cannot be placed as countable
                 if kind == NESTED_OK:
                     continue  # every nested window is at/after the floor: placed post-epoch (not admitted by classify)
                 counts[{NESTED_PRE_EPOCH: "pre_epoch", NESTED_STRADDLE: "straddle"}.get(kind, "unstamped")] += 1
@@ -343,6 +355,8 @@ def file_unplaced_rows(path: str | os.PathLike, relpath: str, manifest: dict | N
             except ValueError:
                 row = None
             kind = nested_ts_class(row, floor) if isinstance(row, dict) else NESTED_UNSTAMPED
+            if kind == NESTED_OK and write_stamp_rejects(row):
+                kind = NESTED_UNSTAMPED
             if kind not in (NESTED_STRADDLE, NESTED_UNSTAMPED):
                 continue
             row_id = None

@@ -19,6 +19,9 @@ from typing import Any, Iterable, Mapping
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 from data_epoch import STAMP_FIELD as DATA_EPOCH_STAMP_FIELD, active_epoch_id
+from ledger_write_stamp import stamp_ledger_row
+
+_write_stamp_cache: dict[tuple[str, str, str], dict] = {}
 from combo_pathway_config import active_tile_registry_signature
 from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
 from emergency_evidence_wal import EmergencyEvidenceWal
@@ -2338,9 +2341,15 @@ class V3EvidenceStore:
             "epoch_id": self.epoch_id,
             **_collection_provenance(),
         })
-        data_epoch_id = active_epoch_id()
-        if data_epoch_id:
-            material.setdefault(DATA_EPOCH_STAMP_FIELD, data_epoch_id)
+        # R4: the ONE write-time stamp (epoch + fresh floor + write ts + realism); fail closed = non-countable.
+        cache_key = (str(self.root), ledger, record_id)
+        cached_stamp = _write_stamp_cache.get(cache_key)
+        if cached_stamp is not None and "write_stamp" not in material:
+            material["write_stamp"] = cached_stamp  # an in-process retry must replay the exact same bytes
+        material = stamp_ledger_row(material, data_dir=self.root)
+        if len(_write_stamp_cache) > 4096:
+            _write_stamp_cache.clear()
+        _write_stamp_cache[cache_key] = material["write_stamp"]
         if ledger == "opportunity":
             # Every producer path converges here.  Stamp the complete available
             # causal identity once rather than relying on each bridge caller to
