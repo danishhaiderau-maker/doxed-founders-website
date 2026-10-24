@@ -23,17 +23,15 @@ BASE = "51d926f93"
 # #842 HM 01:43 blocker 1 / items 4-5 (24 Oct 2026): intentional pin move for bot.py:_paper_lane_exit, bot.py:_disloc_delay (paper exit own signal->send is not measured: None -> default_own_s2s_missing -> UNVERIFIED, no assumed 0.0 / pricing-lag own leg; pool = Fly intent -> ack).
 # #842 RK (3) FIRST_AFTER (24 Oct 2026, ff412bcfc): intentional pin move for paper_fill.py:_paper_fill_core (resident exchange-stop fill = the first trade print after the trigger; fill_ts = that row's rx).
 # #842 HM 02:55 N1 (24 Oct 2026): intentional pin move for bot.py:_disloc_delay (the per-lane B1 DelaySampler is stamps-only; every priced delay goes through the shared live_ack_pool definition; no pool key -> fail closed).
-# R22 PR-A (25 Oct 2026): _disloc_delay/_DISLOC_DELAYS renamed to _paper_delay/_PAPER_DELAYS (pure rename, no behaviour
-# change). Pins are NOT moved: _shas maps the new names back to the pinned names before hashing, so every pinned
-# function (including the callers _paper_lane_entry_result/_paper_lane_exit) is proven byte-identical modulo the rename.
 # #842 HM 02:55 / RK (2) (24 Oct 2026): intentional pin move for bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay (paper BOT_SENT exits: own trigger -> send code point measured per row via the shared _paper_own_s2s_exit + pooled EXIT_RO_MKT send->ack; resident stays 0; missing -> fail closed).
+# R22 PR-A (25 Oct 2026): intentional pin move for bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_paper_delay (pure rename _disloc_delay->_paper_delay, _DISLOC_DELAYS->_PAPER_DELAYS; no behaviour change: each new source == the old source with only those identifiers renamed).
 PINNED = {
     "bot.py": {
         "get_mark_price": "b03f13d6030996983221371bede76b67fd2f610c03922e9aa3f142ece840b9c6",
         "_paper_lane_entry_result": "a227911677f4b9c9f80b0bec463171fe9e06e4190d2ddac5e1d51005193ef05d",
-        "_tp1_gate": "5d929c321af8744db1dc1ceb64496cc8e02562359bd8d48d45199eedb9cb9d1d",
-        "_paper_lane_exit": "e2f76f44b78728ad91d1ce1aa6ba0b14d77e22af7a86f3b23646713bdb487dd4",
-        "_paper_delay": "6eb646e5e16589d44f6b11b635b6bd91a7fdcf23b55674a17b459d5e3852ce7a"
+        "_tp1_gate": "620841b04d0204973ece88513166af9c2439adc4ad81f43e51f4f22c2e52a42d",
+        "_paper_lane_exit": "53646f65a04f6136e5a833c01cd1e68dc62c5082f4b91fff7f711bf51920cb43",
+        "_paper_delay": "4cd4b08d3dedb3233d84bd7a167985841e338105937baa1af4a3b908b1de5254"
     },
     "paper_fill.py": {
         "_f": "c70d10da2af1181b4d56905d296e71c2b6da8603ab5d7e9a22c0ad0b0b6e303f",
@@ -54,21 +52,12 @@ PINNED = {
 }
 
 
-_RENAMES = ((r"\b_paper_delay\b", "_disloc_delay"), (r"\b_PAPER_DELAYS\b", "_DISLOC_DELAYS"))  # R22 PR-A rename
-
-
-def _pinned_form(segment: str) -> str:
-    for pat, old in _RENAMES:
-        segment = re.sub(pat, old, segment)
-    return segment
-
-
 def _shas(path: Path) -> dict:
     src = path.read_text(encoding="utf-8")
     out = {}
     for node in ast.parse(src).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out[node.name] = hashlib.sha256(_pinned_form(ast.get_source_segment(src, node)).encode()).hexdigest()
+            out[node.name] = hashlib.sha256(ast.get_source_segment(src, node).encode()).hexdigest()
     return out
 
 
