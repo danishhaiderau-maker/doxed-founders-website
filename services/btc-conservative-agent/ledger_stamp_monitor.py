@@ -67,7 +67,7 @@ def _reverse_lines(path: Path, max_bytes: int) -> Iterator[tuple[bytes, bool]]:
 # listed here AND every writer module's retirement flag is True. Any other stream with no write since the
 # cutoff is RED (NO_WRITE_SINCE_NOT_ALLOWLISTED); any write since the cutoff to a retired stream is RED
 # (WRITE_TO_RETIRED_STREAM), stamped or not.
-RETIRED_STREAMS: dict[str, str] = {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+RETIRED_STREAM_ALLOWLIST: dict[str, str] = {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
 RETIREMENT_FLAGS: dict[str, tuple[tuple[str, str], ...]] = {
     "market_segment": (
         ("research_v3_bridge", "MARKET_SEGMENT_WRITES_RETIRED"),
@@ -93,7 +93,7 @@ def retirement_flags(name: str) -> dict[str, bool | None]:
 
 def _retired_reason(name: str) -> str | None:
     """Allowlisted AND all writer flags True; anything else = not retired (fail closed)."""
-    reason = RETIRED_STREAMS.get(name)
+    reason = RETIRED_STREAM_ALLOWLIST.get(name)
     flags = retirement_flags(name)
     if reason is None or not flags or not all(v is True for v in flags.values()):
         return None
@@ -294,7 +294,7 @@ def check(data_dir: str | os.PathLike, since_ts: float, *, exclusions: set[str] 
     status = "RED" if count > 0 or red_streams else ("AMBER" if unverified else ("IDLE" if idle else "GREEN"))
     return {"check": CHECK_ID, "since_ts": float(since_ts), "status": status, "alert": status in ("RED", "AMBER"),
             "unstamped_rows_since": count, "unverified": unverified, "idle_ledgers": idle, "red_streams": red_streams,
-            "retired_streams_allowlist": dict(RETIRED_STREAMS),
+            "retired_streams_allowlist": dict(RETIRED_STREAM_ALLOWLIST),
             "warnings": [w for v in per.values() for w in v["warnings"]],
             "legacy_unstamped_before_first_stamp": sum(v["legacy_unstamped_before_first_stamp"] for v in per.values()),
             "boundary_key": "write_stamp.written_at_ts", "ledgers": per}

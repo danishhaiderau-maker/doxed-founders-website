@@ -27,7 +27,7 @@ def _write(tmp_path, rows):
     (d / "decision.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     # HM R2: every non-allowlisted stream must show a write since the cutoff, else it is RED.
     for name in mon.LEDGERS:
-        if name != "decision" and name not in mon.RETIRED_STREAMS:
+        if name != "decision" and name not in mon.RETIRED_STREAM_ALLOWLIST:
             (d / f"{name}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows if r.get("record_id") == "ok"))
 
 

@@ -36,7 +36,7 @@ def _led(tmp_path):
 def _others(tmp_path, *skip):
     """HM R2: non-allowlisted streams with no write since the cutoff are RED, so fill the rest."""
     for n in mon.LEDGERS:
-        if n not in skip and n not in mon.RETIRED_STREAMS:
+        if n not in skip and n not in mon.RETIRED_STREAM_ALLOWLIST:
             _write(_led(tmp_path) / f"{n}.jsonl", [{"record_id": n, "write_stamp": _st(SINCE + 5)}])
 
 

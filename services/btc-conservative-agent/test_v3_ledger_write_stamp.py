@@ -134,7 +134,7 @@ def test_monitor_alerts_on_unstamped_rows_since_ts(tmp_path):
 def _fill_other_streams(led, stamp, *skip):
     """HM R2: non-allowlisted streams with no write since the cutoff are RED."""
     for n in mon.LEDGERS:
-        if n not in skip and n not in mon.RETIRED_STREAMS:
+        if n not in skip and n not in mon.RETIRED_STREAM_ALLOWLIST:
             _write(led / f"{n}.jsonl", [{"record_id": "fill-" + n, "write_stamp": stamp}])
 
 

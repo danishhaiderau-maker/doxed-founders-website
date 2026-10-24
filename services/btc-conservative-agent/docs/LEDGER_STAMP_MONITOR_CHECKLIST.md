@@ -7,7 +7,7 @@ Route: `GET /api/monitor/ledger-unstamped?since=<unix_ts>`. Module: `ledger_stam
 - Unstamped rows newer than any stamped row: **RED** (fail closed, never skipped).
 - Rows below the oldest stamped row: reported in `legacy_unstamped_before_first_stamp`, not RED (M3).
 - Scan budget exhausted (`DEFAULT_MAX_BYTES` = 256 MiB per call): **AMBER** with `unclassified_at_cap`; never GREEN.
-- Retired streams are an explicit allowlist `RETIRED_STREAMS = {market_segment: MARKET_SEGMENTS_RETIRED_R17}`.
+- Retired streams are an explicit allowlist `RETIRED_STREAM_ALLOWLIST = {market_segment: MARKET_SEGMENTS_RETIRED_R17}`.
   IDLE needs the allowlist entry AND every writer flag True:
   `research_v3_bridge.MARKET_SEGMENT_WRITES_RETIRED`, `research_v3_future_paths.SEGMENT_WRITES_RETIRED_R17`,
   `recover_archived_future_paths.SEGMENT_WRITES_RETIRED_R17`, `qualification_horizon_index.SEGMENT_WRITES_RETIRED_R17`.
@@ -23,7 +23,7 @@ Route: `GET /api/monitor/ledger-unstamped?since=<unix_ts>`. Module: `ledger_stam
 2. Fly env `DATA_EPOCH_ID` must equal the pin; any other value makes `configured_epoch_id()` None and every
    stamp is refused (rows become UNSTAMPED -> RED). Change the pin and the env together, in one reviewed PR + deploy.
 3. After rollover, run the monitor with `since` = the new epoch's first write (deploy boot time); expect RED only
-   if rows were written unstamped. Update `RETIRED_STREAMS` only via a reviewed PR with all writer flags.
+   if rows were written unstamped. Update `RETIRED_STREAM_ALLOWLIST` only via a reviewed PR with all writer flags.
 4. Record the new epoch id, deploy release and boot `since` in SHARED-TRACKER.md (R1) before the switch.
 
 ## Reference: 25 Oct 2026 one-off scan (read-only, Fly)

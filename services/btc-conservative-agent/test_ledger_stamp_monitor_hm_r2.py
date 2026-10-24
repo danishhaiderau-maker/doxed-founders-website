@@ -9,7 +9,7 @@ import ledger_write_stamp as lws
 EPOCH = lws.EXPECTED_DATA_EPOCH_ID
 FLOOR = 1792263671.26
 SINCE = FLOOR + 1000
-ACTIVE = [n for n in mon.LEDGERS if n not in mon.RETIRED_STREAMS]
+ACTIVE = [n for n in mon.LEDGERS if n not in mon.RETIRED_STREAM_ALLOWLIST]
 
 
 def _st(now):
@@ -30,7 +30,7 @@ def _active(tmp_path, skip=()):
 
 
 def test_allowlist_is_explicit_and_market_segment_only():
-    assert mon.RETIRED_STREAMS == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+    assert mon.RETIRED_STREAM_ALLOWLIST == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
     flags = mon.retirement_flags("market_segment")
     assert set(flags) == {"research_v3_bridge.MARKET_SEGMENT_WRITES_RETIRED",
                           "research_v3_future_paths.SEGMENT_WRITES_RETIRED_R17",
