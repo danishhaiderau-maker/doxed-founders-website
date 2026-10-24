@@ -1,0 +1,56 @@
+{
+  "schema": "route_census_fields_v1",
+  "note": "HM R16 census: fields each monitored route must return (added 25 Oct for M1/M2/M3 + Q3). HM R2 (25 Oct): red_streams/allowlist/warnings + per-ledger red_reason/retirement_flags.",
+  "routes": {
+    "/api/monitor/ledger-unstamped": {
+      "top": [
+        "check",
+        "since_ts",
+        "status",
+        "alert",
+        "unstamped_rows_since",
+        "unverified",
+        "idle_ledgers",
+        "legacy_unstamped_before_first_stamp",
+        "boundary_key",
+        "ledgers",
+        "red_streams",
+        "retired_streams_allowlist",
+        "warnings"
+      ],
+      "per_ledger": [
+        "status",
+        "unstamped",
+        "excluded_listed",
+        "stamped",
+        "boundary_reached",
+        "boundary",
+        "legacy_unstamped_before_first_stamp",
+        "unclassified_at_cap",
+        "generations_scanned",
+        "idle_reason",
+        "reasons",
+        "sample_row_ids",
+        "red_reason",
+        "warnings",
+        "last_write_ts",
+        "retirement_flags"
+      ],
+      "status_values": [
+        "GREEN",
+        "RED",
+        "AMBER",
+        "IDLE"
+      ]
+    },
+    "/api/state": {
+      "analytics": [
+        "total_trades",
+        "total_trades_memory",
+        "total_trades_disk",
+        "total_trades_source",
+        "total_trades_mismatch"
+      ]
+    }
+  }
+}

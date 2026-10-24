@@ -47241,6 +47241,11 @@ def _api_state_cache_refresher_loop():
         try:
             if manual_admin_pause_active():
                 snap = _build_api_state_snapshot()
+                import api_state_analytics as _asa
+                with state_lock:
+                    _live_an = copy.deepcopy(state.get("analytics") or {})
+                    _live_an_ts = state.get("analytics_ts")
+                snap["analytics"], snap["analytics_ts"] = _asa.overlay(_live_an, _live_an_ts, CSV_TRADES)
             else:
                 # Full presentation snapshots perform analytics, scorecard,
                 # history, and formatting work. On the home runtime those
@@ -47414,6 +47419,13 @@ def _api_state_cache_refresher_loop():
                     snap["shared_ai_lane_counters"] = copy.deepcopy(
                         state.get("shared_ai_lane_counters") or {}
                     )
+                # HM 25 Oct Q3: analytics is not part of the boot snapshot; re-read the live
+                # analytics each refresh and report total_trades from the trade file on disk.
+                import api_state_analytics as _asa
+                with state_lock:
+                    _live_an = copy.deepcopy(state.get("analytics") or {})
+                    _live_an_ts = state.get("analytics_ts")
+                snap["analytics"], snap["analytics_ts"] = _asa.overlay(_live_an, _live_an_ts, CSV_TRADES)
                 snap["collector_version"] = COLLECTOR_V31_VERSION
                 snap["legacy_collector_version"] = COLLECTOR_V22_VERSION
                 # Rebuild the small server-side display projection after the

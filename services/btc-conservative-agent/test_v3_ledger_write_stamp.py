@@ -131,6 +131,13 @@ def test_monitor_alerts_on_unstamped_rows_since_ts(tmp_path):
     assert mon.main(["--data-dir", str(tmp_path), "--since", str(FLOOR + 20)]) == 2
 
 
+def _fill_other_streams(led, stamp, *skip):
+    """HM R2: non-allowlisted streams with no write since the cutoff are RED."""
+    for n in mon.LEDGERS:
+        if n not in skip and n not in mon.RETIRED_STREAM_ALLOWLIST:
+            _write(led / f"{n}.jsonl", [{"record_id": "fill-" + n, "write_stamp": stamp}])
+
+
 def test_monitor_green_and_exclusion_list(tmp_path):
     ok_old = lws.build_write_stamp(data_epoch_id=EPOCH, floor_ts=FLOOR, now=FLOOR + 10, realism={"fill_model": "X"})
     ok_new = lws.build_write_stamp(data_epoch_id=EPOCH, floor_ts=FLOOR, now=FLOOR + 30, realism={"fill_model": "X"})
@@ -139,8 +146,10 @@ def test_monitor_green_and_exclusion_list(tmp_path):
     _write(led / "decision.jsonl", [{"record_id": "o", "write_stamp": ok_old}, listed, {"record_id": "n", "write_stamp": ok_new}])
     import hashlib
     sha = hashlib.sha256(json.dumps(listed, sort_keys=True).encode()).hexdigest()
+    _fill_other_streams(led, ok_new, "decision")
     res = mon.check(tmp_path, FLOOR + 20, exclusions={sha})
-    assert res["status"] == "GREEN" and res["unstamped_rows_since"] == 0
+    # retired market_segment is IDLE with its reason, never GREEN
+    assert res["status"] == "IDLE" and res["unstamped_rows_since"] == 0 and not res["red_streams"]
     assert res["ledgers"]["decision"]["excluded_listed"] == 1
 
 
@@ -148,6 +157,8 @@ def test_monitor_never_green_when_boundary_not_reached(tmp_path):
     led = tmp_path / "v3" / "ledgers"
     _write(led / "decision.jsonl", [{"record_id": f"x{i}", "write_stamp": lws.build_write_stamp(
         data_epoch_id=EPOCH, floor_ts=FLOOR, now=FLOOR + 50, realism={"fill_model": "X"})} for i in range(50)])
+    _fill_other_streams(led, lws.build_write_stamp(data_epoch_id=EPOCH, floor_ts=FLOOR, now=FLOOR + 50,
+                                                   realism={"fill_model": "X"}), "decision")
     res = mon.check(tmp_path, FLOOR + 20, max_bytes=100)
     assert res["status"] == "AMBER" and res["alert"]
 
