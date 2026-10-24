@@ -725,3 +725,70 @@ def test_b2_tile_arm_exit_lag_block_refuses_before_request_on(bot, monkeypatch):
                                    environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
     assert r.status_code == 409 and r.get_json()["error"] == elr.ARM_BLOCK_GS01 and seen == ["TILE_ARM"]
     assert sw.on == []
+
+
+# ---- HM R4 B1 (#876): the REAL _live_total_loss_chains_strict fails closed (no stub of the chain source) ----
+def test_r4_real_total_loss_chain_source_fails_closed(bot, monkeypatch):
+    import live_copy_monitor as lcm
+    import live_copy_monitor_api as lcma
+    monkeypatch.setitem(bot._LIVE_GUARDIAN_STATE, "red_alert", None)
+
+    def boom():
+        raise RuntimeError("provider down")
+    monkeypatch.setitem(lcma._CTX, "provider", boom)
+    assert bot._live_guardian_arm_block() == "LIVE_TOTAL_LOSS_UNREADABLE"
+    monkeypatch.setitem(lcma._CTX, "provider", lambda: ["not", "a", "dict"])
+    assert bot._live_guardian_arm_block() == "LIVE_TOTAL_LOSS_UNREADABLE"
+    monkeypatch.setitem(lcma._CTX, "provider", lambda: {"approvals": [], "reports": []})
+
+    def bad_chains(*a, **k):
+        raise ValueError("corrupt journal")
+    monkeypatch.setattr(lcm, "build_chains", bad_chains)
+    assert bot._live_guardian_arm_block() == "LIVE_TOTAL_LOSS_UNREADABLE"
+
+
+# ---- HM R4 B2 (#876): LIVE_ORDER exit-lag / GS-01 $0.25 barrier, behavioural ----
+def _stamp_env(bot, monkeypatch, margin):
+    sw = _Sw()
+    appended = []
+    ns = _types.SimpleNamespace
+    for name, val in {
+        "_platform_relay_lane_for_event": lambda tid, rl=None: _GS01_LANE,
+        "_get_live_copy_eligibility": lambda: ns(is_eligible=lambda lane: True),
+        "_get_bfx_live_switch": lambda: _types.SimpleNamespace(snapshot=lambda lane: {}, evaluate=lambda *a, **k: {}),
+        "_get_live_copy_output": lambda: ns(snapshot=lambda: {}),
+        "_bitfinex_readiness_context": lambda: {"reduce_only_supported": True},
+        "_get_live_copy_protection": lambda: ns(flags=lambda lane: {"stop_coverage_verified": True}),
+        "_bitfinex_size_checks_for_lane": lambda *a, **k: {},
+        "_live_copy_paper_lock_active": lambda: False,
+        "_get_live_copy_decisions": lambda: None,
+        "_get_live_copy_approvals": lambda: ns(append=appended.append),
+    }.items():
+        monkeypatch.setattr(bot, name, val)
+    monkeypatch.setattr(bot._live_copy, "stamp_or_block", lambda **k: (
+        {"entry_allowed": True, "max_margin_usd": margin, "trade_id": k["trade_id"], "research_lane": k["lane"]}, []))
+    return appended
+
+
+def test_r4_live_order_site_withholds_gs01_over_cap(bot, monkeypatch):
+    import exit_lag_regression as elr
+    seen = []
+    real = bot._exit_lag_live_block
+    appended = _stamp_env(bot, monkeypatch, 0.5)
+    monkeypatch.setattr(bot, "_exit_lag_live_block",
+                        lambda lane, margin, where, **k: seen.append((where, margin)) or real(lane, margin, where=where, **k))
+    out = bot._live_copy_stamp_payload({"event": "ORDER_PLACED", "trade_id": "gs1-r4", "research_lane": _GS01_LANE})
+    assert "live_copy_approval" not in out and appended == []
+    assert seen == [("LIVE_ORDER", 0.5)]
+    xl = real(_GS01_LANE, 0.5, where="LIVE_ORDER", trade_id="gs1-r4")
+    assert xl and out["live_copy_denied"] == [xl]
+    # forced-blocked gate at a compliant margin
+    monkeypatch.setattr(bot, "_exit_lag_live_block", lambda *a, **k: elr.ARM_BLOCK_UNREADABLE)
+    _stamp_env(bot, monkeypatch, 0.25)
+    out = bot._live_copy_stamp_payload({"event": "ORDER_PLACED", "trade_id": "gs1-r4b", "research_lane": _GS01_LANE})
+    assert "live_copy_approval" not in out and out["live_copy_denied"] == [elr.ARM_BLOCK_UNREADABLE]
+    # control: gate open -> the approval is attached (so the barrier, not the stubs, withholds above)
+    monkeypatch.setattr(bot, "_exit_lag_live_block", lambda *a, **k: None)
+    appended = _stamp_env(bot, monkeypatch, 0.25)
+    out = bot._live_copy_stamp_payload({"event": "ORDER_PLACED", "trade_id": "gs1-r4c", "research_lane": _GS01_LANE})
+    assert out.get("live_copy_approval", {}).get("entry_allowed") is True and len(appended) == 1
