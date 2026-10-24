@@ -628,3 +628,4 @@ test_first_after_rk3.py
 test_rk1_live_exit_stamps.py
 test_r17_gap_detector.py
 test_shadow_exit_backfill_r3_blocked.py
+test_integration_848_resolution.py
