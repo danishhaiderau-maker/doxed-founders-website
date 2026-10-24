@@ -54,3 +54,9 @@
 - FAIL-OPEN: book_limit_entry FILL/NO_FILL receipt evidence COMPLETE only with measured receipt; r17 entry proofs include BOOK_RECEIVE_TS_MISSING.
 - Exit timing: exit_fill uses paper_fill RESIDENT_LEG with STOP_RULE_NO_POOL, stamps trigger_ts/book_row_ready_ts.
 - Lock v5: not located in repo/tracker/#859 — UNRESOLVED.
+
+## 24 Oct 2026 22:30 AEDT — R1 root cause: R17_STAMPED on all 23 REALISM_V2 rows; WS_TICK; watcher RED 5 (read-only, master 63b462ed)
+- Q1 CAUSE: bot.py:32986-32987 writes non_countable=bool(_non_countable_reasons()) + plural non_countable_reasons; bot.py:33173 stamp_on_write -> r17_exclusion.py:273-274 sees non_countable truthy, singular non_countable_reason absent -> label R17_STAMPED, and proof_failures is skipped. Underlying reason (Fly csv, 23/23): DEFAULT_DELAY_ENTRY (+DEFAULT_DELAY_EXIT 21, FORCE_FLATTENED 3); delay_source ..._default_until_n10_n0 (bot.py:8219-8234; live_ack_pool n<10 rule). LEGIT non-countable, MISLABELLED. Full proof_failures on the 23: DELAY_NOT_MEASURED 23, EXIT_DELAY_NOT_MEASURED 21, LEVEL_CROSS_UNKNOWN 8, ENTRY_NOT_BOOK_WALKED/ENTRY_PRICE_AGE_MISSING/BOOK_RECEIVE_TS_MISSING 4.
+- Can count only when pool key n>=10 of REAL current-epoch live acks (live_ack_pool.py docstring) -> unmeetable while live disarmed, except EXCHANGE_RESIDENT_NO_DELAY exit legs.
+- Q2: WS_TICK = wake-up source only (WS trade print, bot.py:29796 -> 30437 -> 30463); the tick price is discarded; mark = get_mark_price (bot.py:30479, 7466-7475) -> book_exit_mark -> quote_trigger.book_exit_price on bfx_book_10l rows (7450-7463); ticker fallback refused. Not an R3 ticker trigger.
+- Q3: /api/system-health 11:25Z: RED analyzer.generation/reports/cycle, laptop.chain_monitor (ANALYZER_NO_COMPLETION), ledger.reconciliation, fly.exit_latency; mostly stale analyzer stuck RUNNING 3h on rev 346ef2bf vs Fly 63b462ed (deploy 21:43 AEDT) + in-memory 1231 cache.

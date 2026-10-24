@@ -58,6 +58,7 @@ class WsTickLifecycleIsolationTest(unittest.TestCase):
             "time": time,
             "position_evaluation_lock": lock,
             "trade_lock": threading.RLock(),
+            "EXIT_SOURCE_WS_TRADE_WAKE": "WS_TRADE_WAKE_BOOK_MARK",
             "open_positions": [pos],
             # RK step 2: the exit mark is the order-book row (get_mark_price), never the tick price.
             "get_mark_price": lambda direction, fallback=None, now=None: 60000.0,

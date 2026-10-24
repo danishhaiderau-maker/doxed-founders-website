@@ -118,9 +118,9 @@ def test_claim_prevents_concurrent_evaluation(isolated, monkeypatch):
     monkeypatch.setattr(bot, "_apply_position_exits", lambda *a, **k: calls.append(1) or False)
     with bot._position_exit_claim(pos) as claimed:
         assert claimed
-        assert bot._evaluate_position_exit(pos, 60000.0, time.time(), exit_source="WS_TICK") is False
+        assert bot._evaluate_position_exit(pos, 60000.0, time.time(), exit_source="WS_TRADE_WAKE_BOOK_MARK") is False
     assert calls == []
-    bot._evaluate_position_exit(pos, 60000.0, time.time(), exit_source="WS_TICK")
+    bot._evaluate_position_exit(pos, 60000.0, time.time(), exit_source="WS_TRADE_WAKE_BOOK_MARK")
     assert calls == [1]
 
 

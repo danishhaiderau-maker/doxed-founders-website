@@ -189,7 +189,7 @@ def test_841_shaped_closed_row_with_contract_fields_counts():
 
 def test_loop_name_is_not_evidence_either_way():
     # #841 still names the loop (POSITION_MANAGER / PROTECTIVE_EXIT_WORKER / WS_TICK) on book-triggered rows
-    for src in (None, "", "POSITION_MANAGER", "PROTECTIVE_EXIT_WORKER", "WS_TICK", "ADMIN_MANUAL_CLOSE"):
+    for src in (None, "", "POSITION_MANAGER", "PROTECTIVE_EXIT_WORKER", "WS_TICK", "WS_TRADE_WAKE_BOOK_MARK", "ADMIN_MANUAL_CLOSE"):
         assert r17.non_countable_reason(good_row(exit_trigger_source=src)) is None, src
 
 

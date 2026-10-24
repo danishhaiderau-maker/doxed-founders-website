@@ -45,9 +45,14 @@ ALLOWED_SUFFIXES = frozenset((".html", ".txt", ".json", ".log"))
 MAX_MEMBER_BYTES = 50 * 1024 * 1024
 # R3 quarantine (mirrors services/btc-conservative-agent/research/r3_quarantine.py):
 # producers that price on ticker / 1s tape are never published to the Strategist.
+# Must equal research/r3_quarantine.QUARANTINED_FILES (pinned by test_r3_quarantine_lists_match_the_producer_module).
 R3_QUARANTINED_FILES = frozenset((
-    "genome_grid_report.json", "genome_grid_rows.jsonl.gz", "research_api_cache.sqlite3",
-    "research_api_summary.json", "exit_ladder_simulator_report.json",
+    "conservative-results.jsonl.gz", "conservative_fill_descriptive_report.json",
+    "entry_baseline_replay_episode_receipts.jsonl.gz", "entry_baseline_replay_report.json",
+    "exit_ladder_simulator_report.json", "fast_cut_survivor_report.json", "fast_cut_sweep_report.json",
+    "genome_grid_report.json", "genome_grid_rows.jsonl.gz", "qualified_exit_policy_grid_report.json",
+    "research_api_cache.sqlite3", "research_api_summary.json", "walk_forward_scores.json",
+    "walk_forward_scores.md", "walk_forward_trades.jsonl.gz",
 ))
 # Fly allows 150 MB expanded / 50 MB compressed; keep headroom for the manifests.
 EXPANDED_BUDGET_BYTES = 140 * 1024 * 1024

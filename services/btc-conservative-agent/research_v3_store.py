@@ -20,6 +20,9 @@ from typing import Any, Iterable, Mapping
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 from data_epoch import STAMP_FIELD as DATA_EPOCH_STAMP_FIELD, active_epoch_id
+from ledger_write_stamp import stamp_ledger_row
+
+_write_stamp_cache: dict[tuple[str, str, str], dict] = {}
 from combo_pathway_config import active_tile_registry_signature
 from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
 from emergency_evidence_wal import EmergencyEvidenceWal
@@ -460,7 +463,8 @@ class V3EvidenceStore:
             raise RuntimeError("EMERGENCY_WAL_ROW_JSON_INVALID") from exc
         if not isinstance(row, dict) or row.get("record_id") != record["record_id"]:
             raise RuntimeError("EMERGENCY_WAL_ROW_IDENTITY_MISMATCH")
-        result = self.append(record["ledger"], row)
+        # WAL bytes were stamped (or not) at their original write; replay them exactly.
+        result = self.append(record["ledger"], row, _replay_exact=True)
         if not (result.get("written") is True or result.get("duplicate") is True):
             raise RuntimeError("EMERGENCY_WAL_CANONICAL_REPLAY_BLOCKED")
         replay = wal.mark_replayed(
@@ -1424,6 +1428,24 @@ class V3EvidenceStore:
             raise ReceiptAuthorityError("RECORD_RECEIPT_BYTES_MISMATCH")
         return receipt
 
+    def _durable_write_stamp(self, ledger: str, record_id: str) -> tuple[bool, Any]:
+        """(found, write_stamp) of the durable row a receipt already binds for this id; (False, None) otherwise."""
+        try:
+            receipt = self._load_record_receipt(ledger, record_id)
+            if receipt is None:
+                return False, None
+            if receipt.get("state") == "DEFERRED":
+                payload = str(receipt.get("row_payload_utf8") or "").encode("utf-8")
+            else:
+                generation_path = self.resolve_receipt_ledger_generation(ledger, receipt)
+                payload = self._bounded_slice(generation_path, int(receipt["offset"]), int(receipt["length"]))
+            if not payload or hashlib.sha256(payload).hexdigest() != receipt.get("row_sha256"):
+                return False, None
+            row = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return False, None
+        return (True, row.get("write_stamp")) if isinstance(row, dict) else (False, None)
+
     def _completeness_path(self, ledger: str) -> Path:
         return self.receipt_dir / "emergency_record_idempotency_v1" / ledger / "complete.json"
 
@@ -2367,7 +2389,7 @@ class V3EvidenceStore:
         digest = hashlib.sha256(line.rstrip("\r\n").encode("utf-8")).hexdigest()
         return "DELETED_ROW_TOMBSTONED" if digest in cached[1] else ""
 
-    def append(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
+    def append(self, ledger: str, row: dict[str, Any], *, _replay_exact: bool = False) -> dict[str, Any]:
         path = self.ledger_path(ledger)
         record_id = str(row.get("record_id") or "")
         if not record_id:
@@ -2379,9 +2401,26 @@ class V3EvidenceStore:
             "epoch_id": self.epoch_id,
             **_collection_provenance(),
         })
-        data_epoch_id = active_epoch_id()
-        if data_epoch_id:
-            material.setdefault(DATA_EPOCH_STAMP_FIELD, data_epoch_id)
+        # R4: the ONE write-time stamp (epoch + fresh floor + write ts + realism); fail closed = non-countable.
+        cache_key = (str(self.root), ledger, record_id)
+        cached_stamp = _write_stamp_cache.get(cache_key)
+        durable_found, durable_stamp = (
+            (True, row.get("write_stamp")) if _replay_exact else self._durable_write_stamp(ledger, record_id))
+        if durable_found:
+            # A receipt already binds durable bytes for this id (crash-repair / replay): replay that row's stamp
+            # exactly (or its absence) so the repair verifies; the monitor still flags an unstamped durable row.
+            material.pop("write_stamp", None)
+            if durable_stamp is not None:
+                material["write_stamp"] = durable_stamp
+                material = stamp_ledger_row(material, data_dir=self.root)
+        else:
+            if cached_stamp is not None and "write_stamp" not in material:
+                material["write_stamp"] = cached_stamp  # an in-process retry must replay the exact same bytes
+            material = stamp_ledger_row(material, data_dir=self.root)
+        if "write_stamp" in material:
+            if len(_write_stamp_cache) > 4096:
+                _write_stamp_cache.clear()
+            _write_stamp_cache[cache_key] = material["write_stamp"]
         if ledger == "opportunity":
             # Every producer path converges here.  Stamp the complete available
             # causal identity once rather than relying on each bridge caller to

@@ -1627,8 +1627,14 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     gen = parse_ts(an.get("lastCompletedGenerationAt") or an.get("lastSuccessAt"))
     gen_age = (now - gen) if gen else None
     st = RED if gen_age is None or gen_age > t["analyzer_gen_red_sec"] else AMBER if gen_age > t["analyzer_gen_amber_sec"] else GREEN
+    # RK D (24 Oct): a run stuck in RUNNING past the RED bound has produced no generation, whatever stamp says.
+    _run_start = parse_ts(an.get("startedAt")) if str(an.get("state") or "").upper() == "RUNNING" else None
+    _run_age = (now - _run_start) if _run_start else None
+    if _run_age is not None and _run_age > t["analyzer_gen_red_sec"]:
+        st = RED
     add(check("analyzer.generation", "analyzer", st,
-              f"last completed generation {fmt_age(gen_age)} ago (state={an.get('state')} exit={an.get('exitCode')})",
+              f"last completed generation {fmt_age(gen_age)} ago (state={an.get('state')} exit={an.get('exitCode')}"
+              + (f", running {fmt_age(_run_age)}" if _run_age is not None else "") + ")",
               f"<= {fmt_age(t['analyzer_gen_amber_sec'])} AMBER / {fmt_age(t['analyzer_gen_red_sec'])} RED",
               "" if st == GREEN else "analyzer crash/stall or cycle blocked on promotion/migration",
               str(an.get("detail") or "")[:200]))
@@ -1736,10 +1742,18 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   fields={"required_reports_ok": sapi["required_reports_ok"], "ok": sapi.get("ok"),
                           "failing_reports": failures, "generated_at": generation or None}))
     started = parse_ts(cyc.get("startedAt"))
-    if in_cycle and started:
-        dur = now - started
+    # RK D (24 Oct): an analyzer stuck in RUNNING trips this check even when the cycle status still shows the
+    # previous finished cycle or has no start time (analyzer-run.status.json is the second witness).
+    an_running = str(an.get("state") or "").upper() == "RUNNING"
+    an_started = parse_ts(an.get("startedAt")) if an_running else None
+    runs = [now - x for x in ((started if in_cycle else None), an_started) if x]
+    if runs:
+        dur = max(runs)
         st = RED if dur > t["cycle_red_sec"] else AMBER if dur > t["cycle_amber_sec"] else GREEN
-        obs = f"cycle running {fmt_age(dur)} (phase={cyc.get('phase')})"
+        obs = (f"cycle running {fmt_age(dur)} (phase={cyc.get('phase')})" if in_cycle and started
+               and dur == now - started else f"analyzer RUNNING for {fmt_age(dur)} (cycle status not open)")
+    elif in_cycle or an_running:
+        st, obs = AMBER, "run in progress with no readable start time"
     else:
         fin = parse_ts(cyc.get("finishedAt"))
         dur = (fin - started) if (fin and started) else None

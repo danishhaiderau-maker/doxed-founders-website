@@ -645,3 +645,7 @@ test_trade_delete_by_id.py
 test_ledger_delete_by_sha.py
 test_ledger_delete_by_sha_route.py
 test_live_fences_exclusion.py
+test_r17_reason_always_full.py
+test_v3_ledger_write_stamp.py
+test_ws_trade_wake_book_mark.py
+test_ledger_unstamped_route.py
