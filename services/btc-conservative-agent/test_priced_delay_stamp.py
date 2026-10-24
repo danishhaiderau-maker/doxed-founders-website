@@ -27,3 +27,8 @@ def test_entry_pricing_fields_stamp_without_changing_delay(monkeypatch):
 def test_monitor_tiles_exposes_the_stamp():
     import monitor_tiles
     assert "priced_delay_model" in monitor_tiles.PRICING_KEYS and "priced_delay_s" in monitor_tiles.PRICING_KEYS
+
+
+def test_max_and_q90_pool_labels_are_measured(monkeypatch):
+    assert _label("lane_max_n12", monkeypatch) == "PAPER_MEASURED"
+    assert _label("lane_q90_n25", monkeypatch) == "PAPER_MEASURED"

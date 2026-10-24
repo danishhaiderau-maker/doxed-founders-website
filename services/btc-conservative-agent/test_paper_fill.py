@@ -67,7 +67,7 @@ def test_delay_floor_and_sampler():
     assert s.delay("L")[1] == "default_until_n10"
     for _ in range(10):
         s.add("L", "entry", 0.8)
-    assert s.delay("L") == (0.8, "lane_p50_n10")
+    assert s.delay("L") == (0.8, "lane_max_n10")  # MAX until n>=20, then q0.90
 
 
 BANNED = ("market_microstructure_1s", "book_tape_1s")
@@ -396,8 +396,10 @@ def test_disloc_removed_from_fill_sites_pure_deletion():
     # Tile 6/7 removed 23 Oct 2026 (R4 note in paper_fill): only the two DISLOC entries left the map.
     for lane in ("FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"):
         assert lane not in pf.PENDING_MIGRATION and lane not in pf.TILE_FILL_SITES
-    # REALISM_V2 #840 order model: the resident (maker) exit is its own registered tile_fill site.
-    tf = (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"), ("tile_fill.py", "price_exit_resident"))
+    # REALISM_V2 #840 order model: the resident (maker) exit is its own registered tile_fill site;
+    # #841 RK: the forced (flatten) exit too.
+    tf = (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"), ("tile_fill.py", "price_exit_resident"),
+          ("tile_fill.py", "price_exit_forced"))
     assert pf.TILE_FILL_SITES == {lane: tf for lane in (
         "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
         "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP")}

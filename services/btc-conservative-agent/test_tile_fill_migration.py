@@ -22,7 +22,8 @@ def test_roster_completeness_and_empty_pending():
     assert tf.MIGRATED_LANES <= registry
     for lane in tf.MIGRATED_LANES:
         assert pf.TILE_FILL_SITES[lane] == (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                            ("tile_fill.py", "price_exit_resident"))  # REALISM_V2 exchange stop
+                                            ("tile_fill.py", "price_exit_resident"),  # REALISM_V2 exchange stop
+                                            ("tile_fill.py", "price_exit_forced"))  # RK 17:18 (4) forced no-book
 
 
 def test_every_fill_site_in_roster_passes_checker_and_book_is_positional():
@@ -204,7 +205,7 @@ def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None
                     "_paper_lane_entry_result", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close",
-                    "_paper_entry_rest_drop", *extra_names],
+                    "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", *extra_names],
                    trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
                    ACTIVE_TILE_REGISTRY=cpc.ACTIVE_TILE_REGISTRY, _is_paper_book_lane=lambda p: True,
                    _exchange_stop_trigger=(xstop or (lambda pos, a, b: None)),
@@ -337,7 +338,7 @@ def test_realism_v2_exchange_stop_wins_race_against_in_flight_bot_exit(monkeypat
     assert marks["exit_order_class"] == "EXCHANGE_RESIDENT" and marks["exit_reason_fired"] == "EXCHANGE_STOP_35BP"
     assert marks["exit_race_lost_by"] == "PHYSICAL_HARD_STOP_10PCT"
     assert sim["fill_ts"] == 5000.7 and sim["delay_s"] == 0.0 and sim["delay_source"] == "EXCHANGE_RESIDENT_NO_DELAY"
-    assert marks["exit_pricing_basis"] == "EXCHANGE_RESIDENT_TRIGGER_INSTANT"
+    assert marks["exit_pricing_basis"] == "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER"
     # no resident trigger in flight -> the bot order fills at trigger + delay
     ns2 = _lane_ns(_Clock(5000.0))
     (_, sim2), marks2 = ns2["_paper_lane_exit"](dict(pos), "PHYSICAL_HARD_STOP_10PCT")
@@ -376,7 +377,9 @@ def test_nit_entry_waits_for_signal_plus_delay_and_force_does_not_cache_no_book(
     assert res["status"] == "FILLED" and order["paper_fill_result"] is res
     order2 = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "signal_dir": "BUY", "qty": 0.5, "signal_created_ts": 999.0}
     _use_book(monkeypatch, book=None)
-    assert ns["_paper_lane_entry_result"](order2, 1000.0, force=True)["status"] == "REJECT_NO_BOOK"
+    # RK 17:18: book is the only entry quote source - no book at the signal fails the 2 s gate (reason NO_BOOK)
+    forced = ns["_paper_lane_entry_result"](order2, 1000.0, force=True)
+    assert forced["status"] == "QUOTE_STALE" and forced["entry_quote_reason"] == "NO_BOOK"
     assert "paper_fill_result" not in order2
 
 
@@ -390,7 +393,7 @@ def test_b5_no_fill_shadow_row_fields(monkeypatch):
 
     def stepped(t):
         seq["n"] += 1
-        a = 200.0 if seq["n"] == 1 else 210.0
+        a = 200.0 if seq["n"] <= 2 else 210.0  # calls 1-2: entry quote gate + signal cap (both at the signal second)
         return {"s": int(t) - 1, "a": [[a, 1.0]], "b": [[199.0, 1.0]]}
     monkeypatch.setattr(pf, "book10l_at", stepped)
     import quote_trigger as qt

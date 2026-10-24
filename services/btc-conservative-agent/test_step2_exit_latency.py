@@ -21,6 +21,16 @@ def _pos(trade_id="t1", entry=60000.0, direction="LONG", age=10.0, now=None):
     }
 
 
+def _book_at(monkeypatch, px):
+    """RK step 2: exits are triggered on the 1 s order-book rows (shared pricer), never the WS ticker."""
+    import math
+
+    import paper_fill
+
+    monkeypatch.setattr(paper_fill, "book10l_at", lambda t: {
+        "s": float(math.floor(float(t)) - 1), "b": [[float(px), 5.0]], "a": [[float(px) + 1.0, 5.0]]})
+
+
 @pytest.fixture
 def isolated(monkeypatch):
     positions = []
@@ -55,6 +65,7 @@ def test_scan_fires_hard_stop_in_one_pass_and_books_the_trigger_tick(isolated, m
     isolated.append(pos)
     mark = 60000.0 * (1 - 41e-4)
     monkeypatch.setattr(bot, "get_mark_price", lambda *_a, **_k: mark)
+    _book_at(monkeypatch, mark)
     closed = []
     done = threading.Event()
 
@@ -80,6 +91,7 @@ def test_slow_close_does_not_delay_other_exits(isolated, monkeypatch):
     for i in range(5):
         isolated.append(_pos(trade_id=f"t{i}", now=now))
     monkeypatch.setattr(bot, "get_mark_price", lambda *_a, **_k: 60000.0 * (1 - 45e-4))
+    _book_at(monkeypatch, 60000.0 * (1 - 45e-4))
     started = {}
     release = threading.Event()
 

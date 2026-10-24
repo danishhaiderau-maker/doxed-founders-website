@@ -81,6 +81,45 @@ def taker_side_levels(side: str, leg: str, book: Mapping[str, Any]):
 
 
 RESIDENT_LEG = "exit_resident"  # REALISM_V2: exchange-resident stop leg (delay 0, exit side of the book)
+FORCED_LEG = "exit_forced"      # RK 17:18 (4): a BOT_SENT exit with no fresh book row: first available row, UNVERIFIED
+FIRST_ROW_LEGS = (RESIDENT_LEG, FORCED_LEG)
+FIRST_ROW_HORIZON_S = 120       # how far after the fill time the first-row search looks (rows are 1 s)
+ROW_RULE_LATEST = "LATEST_ROW_AT_OR_BEFORE_FILL_TS"
+ROW_RULE_FIRST_AFTER = "FIRST_ROW_AT_OR_AFTER_FILL_TS"
+
+
+MIN_POOL_N = 10  # RK 23 Oct: pre-declared minimum live-ack pool size before a delay counts as realistic
+UNVERIFIED_DELAY = "UNVERIFIED_DELAY"
+
+
+def delay_stamp(delay_source: Any, pool_ts: Any = None) -> dict:
+    """Per-row delay provenance (RK delay-pool conditions): delay_source_kind live_ack | default | resident, pool_n,
+    pool_ts and delay_unverified. A pool below MIN_POOL_N (or the 1.5 s default) is UNVERIFIED_DELAY, never
+    realistic. The sampler's ``lane_max_n<N>`` / ``lane_q90_n<N>`` label carries N; the F1 live-ack pool supplies pool_ts."""
+    import re as _re
+    src = str(delay_source or "")
+    if src == "EXCHANGE_RESIDENT_NO_DELAY":
+        return {"delay_source_kind": "resident", "pool_n": None, "pool_ts": None, "quantile_method": None,
+                "delay_unverified": False}
+    m = _re.search(r"_n(\d+)$", src)
+    n = int(m.group(1)) if m and "default" not in src else 0
+    kind = "live_ack" if n > 0 else "default"
+    return {"delay_source_kind": kind, "pool_n": n, "pool_ts": pool_ts, "quantile_method": quantile_method_of(src),
+            "delay_unverified": n < MIN_POOL_N, "delay_flag": UNVERIFIED_DELAY if n < MIN_POOL_N else None}
+
+
+def first_row_at_or_after(book_at, t: float, horizon_s: float = FIRST_ROW_HORIZON_S):
+    """The FIRST 1 s book row whose second contains or follows ``t`` (row s with t in [s, s + 1), or later; available
+    at s + 1), within ``horizon_s``; None if no such row exists yet. Never a row completed before the trigger
+    (HM M2 / RK 17:24). A trigger exactly on a second boundary t == s belongs to row s (its own second)."""
+    import math
+    t = float(t)
+    first_s = math.floor(t + 1e-9)
+    for k in range(int(horizon_s) + 1):
+        b = _safe(book_at, float(first_s + 1 + k))
+        if b and _f(b.get("s")) is not None and float(b["s"]) >= first_s:
+            return b
+    return None
 
 
 def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
@@ -99,6 +138,29 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
             "signal_ts": float(signal_ts), "side": str(side).upper()}
     sig_book = _safe(book_at, float(signal_ts))
     base["depth_snapshot_signal"] = _snap(sig_book)
+    if leg in FIRST_ROW_LEGS:
+        # RK 17:18 (2)/(4): the resident stop (and a forced no-book exit) walks the FIRST row completed at or after the
+        # fill time - never the pre-trigger row. Full size, price age recorded; no ticker / top fallback, no penalty.
+        book = first_row_at_or_after(book_at, t)
+        base["book_row_rule"] = ROW_RULE_FIRST_AFTER
+        if not book:
+            COUNTERS["reject_no_book"] += 1
+            return {**base, "status": "REJECT_NO_BOOK", "price": None, "filled_qty": 0.0, "price_source": None}
+        ready = float(book["s"]) + 1.0
+        price_age = round(ready - t, 3)
+        px, filled = _walk(taker_side_levels(side, leg, book), q)
+        out = {**base, "book_s": int(book["s"]), "price_age_s": price_age,
+               "price_stale": price_age > MAX_BOOK_AGE_S, "depth_snapshot_fill": _snap(book),
+               "book_age_ms": round((t - float(book["s"])) * 1000), "ask_age_ms": round((t - float(book["s"])) * 1000)}
+        if leg == FORCED_LEG:
+            out["unverified_reason"] = "FORCED_NO_BOOK"
+        elif out["price_stale"]:
+            out["unverified_reason"] = "STALE_BOOK"
+        if px is None:
+            return {**out, "status": "NO_FILL_NO_DEPTH", "price": None, "filled_qty": 0.0}
+        return {**out, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px,
+                "filled_qty": round(filled, 8), "price_source": "BFX_BOOK_10L"}
+    base["book_row_rule"] = ROW_RULE_LATEST
     book = _safe(book_at, t)
     if book and _f(book.get("s")) is not None and t - float(book["s"]) <= MAX_BOOK_AGE_S:
         levels = taker_side_levels(side, leg, book)
@@ -144,7 +206,10 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
     ``_paper_result_as_sim`` deliberately re-labels a PARTIAL *entry* COMPLETE (position sized to filled_qty)."""
     out = _paper_fill_core(side, qty, signal_ts, delay_s, book_at, leg=leg, delay_source=delay_source,
                            top_at=top_at, cap_px=cap_px)
-    if out.get("status") == "FILLED" and out.get("price_source") == "BFX_BOOK_10L" and out.get("price") is not None:
+    out.update(delay_stamp(out.get("delay_source")))
+    if out.get("unverified_reason") and out.get("price") is not None:
+        out["evidence_status"] = "UNVERIFIED"  # priced and kept, never counted as realistic (RK 17:18 (4))
+    elif out.get("status") == "FILLED" and out.get("price_source") == "BFX_BOOK_10L" and out.get("price") is not None:
         out["evidence_status"] = EVIDENCE_COMPLETE
     elif out.get("status") in ("PARTIAL", "PARTIAL_TOP_ONLY") or out.get("filled_qty"):
         out["evidence_status"] = "INCOMPLETE"
@@ -235,6 +300,26 @@ def book10l_missing_seconds(start: float, end: float):
 DELAYS = None  # set by the bot: DelaySampler of measured live delays (empty while live is OFF)
 
 
+QUANTILE_SWITCH_N = 20  # pre-declared (AMEND2 B1): MAX of the pool until n >= 20, then q0.90
+QM_DEFAULT, QM_MAX, QM_Q90 = "DEFAULT", "MAX", "Q90"
+
+
+def quantile_nearest_rank(sorted_xs, q: float) -> float:
+    """Nearest-rank quantile (no interpolation): the ceil(q * n)-th smallest value."""
+    import math
+    n = len(sorted_xs)
+    return float(sorted_xs[max(0, min(n - 1, int(math.ceil(q * n)) - 1))])
+
+
+def quantile_method_of(delay_source: Any) -> str:
+    s = str(delay_source or "").lower()
+    if "_q90_" in s:
+        return QM_Q90
+    if "_max_" in s:
+        return QM_MAX
+    return QM_DEFAULT
+
+
 class DelaySampler:
     """Rolling measured live delay per lane and leg (entry: signal->exchange_ack; exit: trigger->exit ack)."""
 
@@ -251,11 +336,15 @@ class DelaySampler:
             self._d.setdefault((lane, leg), deque(maxlen=self.maxlen)).append(v)
 
     def delay(self, lane: str, leg: str = "entry") -> tuple:
+        """RK 17:24 / AMEND2 B1: n < 10 -> default (UNVERIFIED_DELAY); 10 <= n < 20 -> MAX of the pool; n >= 20 ->
+        q0.90 (nearest-rank). The source string carries the method + n (quantile_method_of() parses it)."""
         with self._lock:
-            xs = list(self._d.get((lane, leg)) or ())
+            xs = sorted(self._d.get((lane, leg)) or ())
         if len(xs) < MIN_SAMPLES:
             return DEFAULT_DELAY_S, "default_until_n10"
-        return max(MIN_DELAY_S, statistics.median(xs)), f"lane_p50_n{len(xs)}"
+        if len(xs) < QUANTILE_SWITCH_N:
+            return max(MIN_DELAY_S, xs[-1]), f"lane_max_n{len(xs)}"
+        return max(MIN_DELAY_S, quantile_nearest_rank(xs, 0.90)), f"lane_q90_n{len(xs)}"
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -356,15 +445,15 @@ def aggregate_legs(legs) -> dict:
 # site must call paper_fill.paper_fill and must not read state price/ask/bid or tape streams.
 TILE_FILL_SITES = {
     "FAMILY_RANDOM_CONTROL_TAKER_90": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident")),
+                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GS01_XV_PREMIUM_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident")),
+                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GSB1_CVD_DIV_REGIME": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident")),
+                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident")),
+                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident")),
+                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
 }
 # R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
 # (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five
