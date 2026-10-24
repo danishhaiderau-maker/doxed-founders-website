@@ -206,9 +206,14 @@ def e8_real_parity_passed(env: Optional[Mapping[str, str]] = None) -> bool:
 
 def rest_fill_count(rows: Iterable[Mapping[str, Any]]) -> int:
     """A5 rest trades = ledger entry rows whose rest leg actually FILLED/PARTIAL (NO_FILL_REST_TTL attempts excluded);
-    derived from the ledger so it survives a restart."""
-    return sum(1 for r in rows if r.get("event") in ("OPEN", "ENTRY_NO_FILL")
-               and str((r.get("rest_fill") or {}).get("status") or "") in REST_COUNTED_STATUSES)
+    derived from the ledger so it survives a restart. One count per entry (cid, else signal_ts): a duplicated row
+    (e.g. a retried append) is not double-counted."""
+    seen = set()
+    for r in rows:
+        if r.get("event") in ("OPEN", "ENTRY_NO_FILL") and \
+                str((r.get("rest_fill") or {}).get("status") or "") in REST_COUNTED_STATUSES:
+            seen.add(r.get("cid") or ("signal_ts", r.get("signal_ts")))
+    return len(seen)
 
 
 def a5_verified(n_rest_trades: int, env: Optional[Mapping[str, str]] = None) -> bool:

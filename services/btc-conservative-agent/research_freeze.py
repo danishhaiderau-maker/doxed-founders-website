@@ -129,9 +129,10 @@ MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # 2026-10-11 (owner): H-C/B3/FADE-POOL/V07 retired and DISLOC/DISLOC-FOI added; pin moved.
 # 2026-10-12 10:57 (owner): H-A and GS-07 retired (roster 1..7); pin moved.
 # 2026-10-23 (owner): Tile 6 DISLOC and Tile 7 DISLOC-FOI retired (roster 1..5); score_led and hypothesis pins moved.
+# 2026-10-25 (owner, #877): gf3 GS-FADE3-TP30 PAPER tile joined the registry (slot 6); score_led and hypothesis pins moved.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "19cfc36571f5523d2d403035764103f98fcdf5a6f9a83b666b2a5edab7522247",
-    "hypothesis": "16804a01413da19fd7527d70e33b7718507b225ea606775cdd62cb5d89ce9a2d",
+    "score_led": "b7da543be509a0b4b51ee5481ab06023c2cf560b23ee3ccc30242fe858d13cc3",
+    "hypothesis": "563c0a6f3567a446d734f6f633ccc40c0fcc61a082e9f0c8f2553ebf95a4dc69",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"

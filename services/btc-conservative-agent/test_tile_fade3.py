@@ -426,7 +426,8 @@ def test_gf3_route_is_census_fixtured_and_monitored():
 
 # ------------------------------------------------------------------ HM #877 R2 pins
 def test_b1_e8_real_parity_unproven_blocks_every_row():
-    for env in ({}, {tf.E8_REAL_PARITY_ENV: ""}, {tf.E8_REAL_PARITY_ENV: "PASS:"}, {tf.E8_REAL_PARITY_ENV: "FAIL:x"}):
+    for env in ({}, {tf.E8_REAL_PARITY_ENV: ""}, {tf.E8_REAL_PARITY_ENV: "PASS:"}, {tf.E8_REAL_PARITY_ENV: "FAIL:x"},
+                {tf.E8_REAL_PARITY_ENV: "pass:x"}):
         c = tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False, env=env)
         assert not c["countable"] and c["non_countable_reasons"] == ["E8_REAL_PARITY_UNPROVEN"]
     assert all("E8_REAL_PARITY_UNPROVEN" in r["non_countable_reasons"]
@@ -455,7 +456,8 @@ def test_b3_rest_trades_count_only_filled_and_survive_restart():
     h2.eng.step(1000.0)
     h2.eng.step(1000.0 + 1.5 + paper_fill.REST_TTL_S + 1.0)
     assert h2.eng.rest_trades_n == 1 == tf.rest_fill_count(h2.rows)
-    ledger = h.rows + h2.rows + [{"event": "OPEN", "rest_fill": {"status": "PARTIAL"}}]
+    ledger = h.rows + h2.rows + h2.rows + [{"event": "OPEN", "signal_ts": 7.0, "rest_fill": {"status": "PARTIAL"}}]
+    assert tf.rest_fill_count(h2.rows + h2.rows) == 1  # a duplicated row (retried append) counts once
     eng = tf.Fade3PaperEngine(features_fn=lambda now: (None, None, None), delay_fn=lambda leg: (1.5, "x"),
                               write_fn=lambda r: None, ledger_rows=ledger)
     assert eng.rest_trades_n == 2 and eng.status(env={})["a5_rest_trades_n"] == 2

@@ -96,7 +96,8 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
     )
     assert result.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        "19cfc36571f5523d2d403035764103f98fcdf5a6f9a83b666b2a5edab7522247",
+        # 25 Oct 2026: pin moved deliberately because gf3 (GS-FADE3-TP30, PAPER ONLY, slot 6) joined the score-led registry (#877).
+        "b7da543be509a0b4b51ee5481ab06023c2cf560b23ee3ccc30242fe858d13cc3",
     ]
 
 

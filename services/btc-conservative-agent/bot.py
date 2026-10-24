@@ -34283,9 +34283,9 @@ def gf3_paper_thread():
         try:
             engine = _gf3_get_engine()
             if is_research_lane_enabled(_tile_fade3.LANE) or engine.pos is not None or engine.pending is not None:
-                t_cpu = time.process_time()
+                t_cpu = time.thread_time()  # this thread only (process_time counts every thread)
                 engine.step(time.time())
-                cpu = time.process_time() - t_cpu
+                cpu = time.thread_time() - t_cpu
                 if cpu > _tile_fade3.STEP_CPU_BUDGET_S:
                     logger.warning(f"[GF3 PAPER] step CPU {cpu:.3f}s > budget {_tile_fade3.STEP_CPU_BUDGET_S}s")
         except Exception as exc:  # noqa: BLE001 - one bad second never kills the tile

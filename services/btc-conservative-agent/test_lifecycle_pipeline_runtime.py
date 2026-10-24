@@ -521,7 +521,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert score_child.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        "19cfc36571f5523d2d403035764103f98fcdf5a6f9a83b666b2a5edab7522247",
+        # 25 Oct 2026: pin moved deliberately because gf3 (GS-FADE3-TP30, PAPER ONLY, slot 6) joined the score-led registry (#877).
+        "b7da543be509a0b4b51ee5481ab06023c2cf560b23ee3ccc30242fe858d13cc3",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -536,7 +537,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert hypothesis_child.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        "16804a01413da19fd7527d70e33b7718507b225ea606775cdd62cb5d89ce9a2d",
+        # 25 Oct 2026: hypothesis-mode pin moved deliberately too: gf3 joined the registry (#877).
+        "563c0a6f3567a446d734f6f633ccc40c0fcc61a082e9f0c8f2553ebf95a4dc69",
     ]
 
 

@@ -596,3 +596,23 @@ def test_exit_lag_arm_gate_route(bot, monkeypatch):
     assert body["threshold_s"] == 0.062 and body["recomputed_p95"]["n"] == 0
     assert MONITOR not in r.get_data(as_text=True) and ADMIN not in r.get_data(as_text=True)
     assert _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required="x").status_code == 400
+
+
+def test_gf3_route_a5_count_is_ledger_derived_not_engine(bot, monkeypatch, tmp_path):
+    import tile_fade3 as tf
+    ledger = tmp_path / tf.LEDGER_FILE
+    rows = [{"event": "OPEN", "signal_ts": float(i), "rest_fill": {"status": "FILLED"}}
+            for i in range(tf.A5_VERIFIED_MIN_TRADES)]
+    rows += [{"event": "ENTRY_NO_FILL", "signal_ts": 99.0, "rest_fill": {"status": "NO_FILL_REST_TTL"}},
+             {"event": "CLOSE", "pool_ready_at_write": True, "evidence_status": "COMPLETE"}]
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    eng = tf.Fade3PaperEngine(features_fn=lambda now: (None, None, {}), delay_fn=lambda leg: (0.0, "x"),
+                              write_fn=lambda row: None)  # unseeded engine: rest_trades_n == 0
+    monkeypatch.setattr(bot, "_gf3_ledger_path", lambda: str(ledger))
+    monkeypatch.setattr(bot, "_gf3_engine", eng)
+    monkeypatch.setenv(tf.A5_VERIFIED_ENV, "PASS:test")
+    r = _get(bot, "/api/monitor/tiles/gf3", {"Authorization": f"Bearer {MONITOR}"})
+    assert r.status_code == 200, r.data[:300]
+    closed = r.get_json()["closed"]
+    assert len(closed) == 1 and "A5_NOT_VERIFIED" not in closed[0]["non_countable_reasons"]
+    assert "E8_REAL_PARITY_UNPROVEN" in closed[0]["non_countable_reasons"]
