@@ -14,7 +14,7 @@ STOP_TYPE_MARKERS = ("BREAKEVEN", "STOP", "CUT", "PATH_END", "TIME", "TRAIL", "G
 EXIT_TRUTH_RED_BP = 5.0
 LATENCY_RED_SEC = 5.0
 LATENCY_AMBER_SEC = 2.0
-# Live exit paper_trigger->fill (DISLOC showcase-mirror): audit §7 thresholds.
+# Live exit paper_trigger->fill (live-copy mirror): audit §7 thresholds.
 LIVE_EXIT_AMBER_SEC = 3.0
 LIVE_EXIT_RED_SEC = 8.0
 TAPE_RETENTION_REQUIRED_SEC = 7 * 86400

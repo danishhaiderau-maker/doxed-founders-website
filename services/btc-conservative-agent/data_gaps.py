@@ -69,7 +69,7 @@ def field_completeness(by_lane: Mapping[str, Iterable[Mapping[str, Any]]]) -> di
     n = tot["closed"]
     return {"fields": list(FIELDS), "lanes": lanes,
             "total": {"closed": n, "coverage": {f: (round(tot[f] / n, 4) if n else None) for f in FIELDS}},
-            "notes": {"signal_to_fill_ms": "timing.signal_to_fill_ms (falls back to *_sec / DISLOC *_s x1000)",
+            "notes": {"signal_to_fill_ms": "timing.signal_to_fill_ms (falls back to *_sec / legacy *_s x1000, e.g. retired DISLOC history)",
                       "exit_bid": "exit.exit_bid (touch at close); main-trade rows from 12 Oct ~13:00 AEDT (#587/#599)",
                       "regime_at_signal": "trigger.regime_at_signal; stamped at order time from 12 Oct data-gaps deploy"}}
 
@@ -88,5 +88,5 @@ def signal_to_fill_ms_by_lane(by_lane: Mapping[str, Iterable[Mapping[str, Any]]]
                 vals.append(ms)
         out[lane] = {"n": len(vals), "p50_ms": _pct(vals, 0.5), "p95_ms": _pct(vals, 0.95),
                      "max_ms": round(max(vals), 1) if vals else None, "window_h": 24,
-                     "basis": "persisted closed rows (event_timestamps / DISLOC ledger)"}
+                     "basis": "persisted closed rows (event_timestamps)"}
     return out

@@ -4,7 +4,7 @@
  *
  * The executor is the only real-money process and runs as ONE replica, so a
  * deploy is a container swap. A close that lands during the swap used to be
- * lost (dsl-1791785201-4, 12 Oct 17:07 AEDT). This gate runs after the build
+ * lost (a Tile 6 copy, 12 Oct 17:07 AEDT). This gate runs after the build
  * and before the new container goes live: it waits until no Bitfinex live copy
  * participant is OPEN or PENDING_ENTRY, then lets the swap proceed.
  *

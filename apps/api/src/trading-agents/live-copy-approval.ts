@@ -34,9 +34,21 @@ export const LIVE_COPY_TILE_PREFIXES: Readonly<Record<string, string>> = Object.
   FAMILY_GSB1_CVD_DIV_REGIME: 'gb1',
   FAMILY_GSB2_REGIME_SWITCHER: 'gb2',
   FAMILY_GS06_COMMITTED_FADE_ATR_TP: 'gs6',
-  FAMILY_DISLOC_BFX_DISLOCATION_1M: 'dsl',
-  FAMILY_DISLOC_FOI_LONG_1M: 'dsf',
 });
+
+/**
+ * Retired tile trade-id prefixes (Tiles 6/7 DISLOC / DISLOC-FOI removed 23 Oct 2026).
+ * Not in LIVE_COPY_TILE_PREFIXES, so routing already fails closed; the explicit
+ * check makes the rejection independent of the map (ingest AND placement).
+ */
+export const RETIRED_LIVE_COPY_TILE_PREFIXES: ReadonlySet<string> = new Set(['dsl', 'dsf']);
+
+/** True when the trade id (adopt:/relink: wrappers ignored) carries a retired tile prefix. */
+export function isRetiredLiveCopyTileTradeId(tradeId: string | null | undefined): boolean {
+  const tid = String(tradeId ?? '').trim().toLowerCase().replace(/^(?:adopt|relink):/, '');
+  const head = tid.split('-')[0];
+  return Boolean(head) && RETIRED_LIVE_COPY_TILE_PREFIXES.has(head);
+}
 
 /**
  * LIVE-FIX-1480: true when the trade id belongs to an active dashboard tile
@@ -45,6 +57,7 @@ export const LIVE_COPY_TILE_PREFIXES: Readonly<Record<string, string>> = Object.
  * placement, and terminal wakes act only on an already-open owned lot.
  */
 export function isActiveLiveCopyTileTradeId(tradeId: string | null | undefined): boolean {
+  if (isRetiredLiveCopyTileTradeId(tradeId)) return false;
   const tid = String(tradeId ?? '').trim().toLowerCase();
   const [head, ...rest] = tid.split('-');
   if (!head || rest.length === 0 || !rest.join('-')) return false;
@@ -160,7 +173,7 @@ export function approvalTileMatchesTrade(a: FlyLiveCopyApproval, tradeId: string
   const lane = String(a?.research_lane ?? '').trim().toUpperCase();
   const prefix = LIVE_COPY_TILE_PREFIXES[lane];
   const tid = String(tradeId ?? '').trim().toLowerCase();
-  if (!prefix || !tid) return false;
+  if (!prefix || !tid || isRetiredLiveCopyTileTradeId(tid)) return false;
   const [head, ...rest] = tid.split('-');
   return head === prefix && rest.length > 0 && String(a.trade_id).toLowerCase() === tid;
 }
@@ -181,6 +194,7 @@ export function approvalPermitsRelayCopy(
   tradeId: string | null | undefined,
   secret: string | undefined | null,
 ): { ok: true; approval: FlyLiveCopyApproval } | { ok: false; reason: string } {
+  if (isRetiredLiveCopyTileTradeId(tradeId)) return { ok: false, reason: 'TILE_RETIRED' };
   const a = approvalRaw as Record<string, unknown> | null;
   const event = typeof a?.signed_body === 'string'
     ? (() => { try { return String((JSON.parse(a.signed_body as string) as { event?: unknown }).event ?? ''); } catch { return ''; } })()
@@ -204,6 +218,7 @@ export function approvalPermitsIngest(
   secret: string | undefined | null,
   nowMs: number = Date.now(),
 ): boolean {
+  if (isRetiredLiveCopyTileTradeId(tradeId)) return false;
   const v = verifyFlyLiveCopyApproval(approvalRaw, secret, { tradeId, event, nowMs });
   return v.ok && approvalTileMatchesTrade(v.approval, tradeId);
 }
@@ -260,7 +275,7 @@ export function evaluateLiveCopyPlacement(input: {
   if (a.eligibility_source !== 'REGISTRY' && a.eligibility_source !== 'OPERATOR') {
     return { ok: false, reason: 'APPROVAL_ELIGIBILITY_SOURCE_INVALID' };
   }
-  // Tiles whose edge decays in seconds (DISLOC) carry a hard signal-age bound.
+  // Tiles whose edge decays in seconds carry a hard signal-age bound (max_signal_age_sec).
   const maxSig = Number(a.max_signal_age_sec);
   if (a.max_signal_age_sec != null && Number.isFinite(maxSig) && maxSig > 0) {
     const sig = Number(a.signal_at_ts);

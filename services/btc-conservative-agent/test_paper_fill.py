@@ -285,23 +285,19 @@ def test_session_pnl_and_wallet_filters_ignore_fresh_eligibility(monkeypatch):
 
 
 def test_fresh_data_wired_into_research_study(tmp_path, monkeypatch):
-    import json
+    # Tile 6/7 removal (23 Oct 2026): the DISLOC store fold is gone, so the fresh filter is exercised on the
+    # current trades file; a pending lane's row is excluded and counted, a migrated lane's strict row is kept.
+    import pandas as pd
     monkeypatch.setattr(pf, "PENDING_MIGRATION", frozenset({LEGACY_LANE}))
     import analysis_hygiene as ah
-    pending = LEGACY_LANE
-    (tmp_path / "disloc_trades.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (
-        {"event": "DISLOC_CLOSED", "pnl_bp_vs_touch": 1.0, "exit_ts": 5, "lane": pending},
-        {"event": "DISLOC_CLOSED", "pnl_bp_vs_touch": 2.0, "exit_ts": 6, "lane": "MIGRATED_LANE"})))
+    base = {"exit_reason": "X", "net_pnl_usd": 0.01, "notional_usd": 25, "fill_model_version": 1,
+            "exit_status": "PAPER_FILL", "fill_model": pf.FILL_MODEL}
+    pd.DataFrame([{**base, "trade_id": "p", "research_lane": LEGACY_LANE, "close_ts": 3600.0},
+                  {**base, "trade_id": "m", "research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "close_ts": 7200.0}]
+                 ).to_csv(tmp_path / "trades_3factor.csv", index=False)
     out = ah.all_epochs_bp_study(str(tmp_path))
-    assert out["excluded_pending_paper_fill_migration"] == 1 and out["disloc_closes"] == 1
-    assert set(out["by_tile"]) == {"MIGRATED_LANE"}
-
-
-def test_disloc_tile_rows_not_zeroed_by_fresh_filter():
-    # HM 14:00: closed_rows feeds _disloc_lane_metrics / _monitor_lane_rows (operational cards)
-    import disloc_engine as de
-    rows = [{"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 1, "lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M"}]
-    assert len(de.closed_rows(rows)) == 1
+    assert out["excluded_pending_paper_fill_migration"] == 1 and "disloc_closes" not in out
+    assert set(out["by_tile"]) == {"FAMILY_GS01_XV_PREMIUM_ATR_TP"}
 
 
 # HM 13:27: six more offenders
@@ -386,9 +382,14 @@ def test_no_statement_before_return():
     assert pf.fill_site_violations(doc, "fill") == []
 
 
-def test_disloc_migrated():
-    assert "FAMILY_DISLOC_BFX_DISLOCATION_1M" not in pf.PENDING_MIGRATION
-    assert "FAMILY_DISLOC_FOI_LONG_1M" not in pf.PENDING_MIGRATION
+def test_disloc_removed_from_fill_sites_pure_deletion():
+    # Tile 6/7 removed 23 Oct 2026 (R4 note in paper_fill): only the two DISLOC entries left the map.
+    for lane in ("FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"):
+        assert lane not in pf.PENDING_MIGRATION and lane not in pf.TILE_FILL_SITES
+    tf = (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"))
+    assert pf.TILE_FILL_SITES == {lane: tf for lane in (
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
+        "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP")}
 
 
 def test_book_tail_no_look_ahead(tmp_path):

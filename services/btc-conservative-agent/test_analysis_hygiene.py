@@ -21,7 +21,7 @@ def test_forced_and_late_window_excluded_and_bp_added():
     assert len(h.apply(df, include_forced=True, include_late=True)) == 5
 
 
-def test_all_epochs_study_reads_archive_and_disloc(tmp_path):
+def test_all_epochs_study_reads_archive_ignores_retired_disloc_store(tmp_path):
     import json
     cur = pd.DataFrame([{"trade_id": "a", "research_lane": "CTRL", "exit_reason": "X", "net_pnl_usd": 0.01,
                          "notional_usd": 25, "close_ts": 3600.0,
@@ -37,6 +37,7 @@ def test_all_epochs_study_reads_archive_and_disloc(tmp_path):
     (tmp_path / "disloc_trades.jsonl").write_text(json.dumps(
         {"event": "DISLOC_CLOSED", "pnl_bp_vs_touch": 2.0, "exit_ts": 100.0, "lane": "DISLOC"}) + "\n")
     out = h.all_epochs_bp_study(str(tmp_path))
-    assert out["by_tile"]["CTRL"]["n"] == 2 and out["by_tile"]["DISLOC"]["n"] == 1
-    assert set(out["by_epoch"]) == {"current_file", "ce-old", "disloc_store"}
+    # Tiles 6/7 removed 23 Oct 2026: a left-over DISLOC ledger is retired history, never folded in.
+    assert out["by_tile"]["CTRL"]["n"] == 2 and "DISLOC" not in out["by_tile"]
+    assert set(out["by_epoch"]) == {"current_file", "ce-old"} and "disloc_closes" not in out
     assert out["hygiene"]["forced_excluded"] == 1

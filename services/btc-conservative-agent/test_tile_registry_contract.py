@@ -111,7 +111,10 @@ RETIRED_20261011_LANES = ("FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED
                           "FAMILY_DANISH_REGIME_ROUTER",  # + 12 Oct ROUTER
                           "FAMILY_COMMITTED_FADE_TAKER_90",
                           "FAMILY_GS07_FAST_PREMIUM_FADE")  # + 12 Oct 10:57 H-A, GS-07
-EXPECTED_ORDER = tuple(lane for lane in EXPECTED_ORDER_ALL if lane not in RETIRED_20261011_LANES)
+# Tiles 6/7 (DISLOC, DISLOC-FOI) retired 23 Oct 2026; renumbering is display-only.
+RETIRED_TILE67_LANES = ("FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M")
+EXPECTED_ORDER = tuple(lane for lane in EXPECTED_ORDER_ALL
+                       if lane not in RETIRED_20261011_LANES and lane not in RETIRED_TILE67_LANES)
 ACTIVE_GS_B_ORDER = tuple(lane for lane in GS_B_ORDER if lane not in RETIRED_20261011_LANES)
 # PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
 RETIRED_PHASE02_LANES = (
@@ -511,15 +514,17 @@ def test_retired_tiles_cannot_be_switched_live():
     assert '"error": "TILE_RETIRED"' in src
 
 
-def test_ha_and_gs07_retired_and_roster_renumbered_1_to_7():
+def test_ha_gs07_and_tiles67_retired_and_roster_renumbered_1_to_5():
     import combo_pathway_config as registry
 
     for lane in ("FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GS07_FAST_PREMIUM_FADE"):
         assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_REGISTRY
         assert lane in registry.COMBO_LANE_SPECS  # spec + data kept
-    assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 8))
+    for lane in RETIRED_TILE67_LANES:
+        assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_REGISTRY
+        assert lane not in registry.COMBO_LANE_SPECS  # code spec deleted with disloc_engine; ledgers stay on disk (R5)
+    assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 6))
     assert ACTIVE_TILE_ORDER == (
         "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
         "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
-        "FAMILY_DISLOC_FOI_LONG_1M")
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP")

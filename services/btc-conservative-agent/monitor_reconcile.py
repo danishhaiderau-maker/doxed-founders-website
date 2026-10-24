@@ -1,8 +1,7 @@
 """Read-only /api/monitor/reconcile payload (Strategist dashboard spec S1), Fly side only.
 
-fly_n is what the Fly process holds: the epoch's closed rows per tile, tiles 1-5 from the bot's in-memory trades list
-and tiles 6/7 (DISLOC) from their on-disk paper ledgers (read through the 10 s ledger cache). Tiles 6/7 are counted, but
-their fly_fresh_n is 0 by design (no paper_fill-priced rows yet). Fly can count its own closed rows per tile and read the archive restore-test receipt. The mirror and the
+fly_n is what the Fly process holds: the epoch's closed rows per tile 1-5 from the bot's in-memory trades list
+(Tiles 6/7 DISLOC / DISLOC-FOI were removed 23 Oct 2026, R9). Fly can count its own closed rows per tile and read the archive restore-test receipt. The mirror and the
 analyzer live on other machines, so their counts are reported as null with an explicit reason: this route
 never invents parity and never reaches out to another host. ok is None (unknown) until a source reports.
 """
@@ -40,5 +39,5 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
             "sources": {"fly": "OK", "mirror": unavailable, "analyzer": unavailable},
             "per_tile": per_tile, "tolerance": dict(TOLERANCE),
             "stream_gaps": None,
-            "fly_n_basis": "FLY_PROCESS_CLOSED_ROWS (tiles 1-5: in-memory trades list; tiles 6/7: on-disk DISLOC ledgers via the 10 s cache; fly_fresh_n is 0 for 6/7 by design)",
+            "fly_n_basis": "FLY_PROCESS_CLOSED_ROWS (tiles 1-5: in-memory trades list)",
             "note": "Fly-side counts only; mirror/analyzer parity needs those hosts to report (ok stays null, never assumed)."}

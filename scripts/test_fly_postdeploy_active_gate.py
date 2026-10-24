@@ -314,8 +314,9 @@ def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     lanes, retired = gate.checkout_registry()
     assert lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
                      "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
-                     "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
-                     "FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"]
+                     "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
+    # Retired 2026-10-23 (owner): Tiles 6/7 DISLOC and DISLOC-FOI.
+    assert {"FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"} <= retired
     # Retired 2026-10-11 (owner): H-C, B3, FADE-POOL, V07.
     assert {"FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
             "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DANISH_REGIME_ROUTER",

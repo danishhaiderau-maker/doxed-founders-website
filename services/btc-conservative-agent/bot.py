@@ -7344,7 +7344,7 @@ _SLIPPAGE_ROW_KEYS = (
 def _slippage_row_fields(pos: dict, exit_sim, final_qty: float) -> dict:
     """Closed-row slippage and drift, measured from the recorded fills and their depth snapshots
     (paper_fill.leg_slippage). Every field is None, never 0.0, for legacy rows (not priced by paper_fill,
-    version < 1), for DISLOC/non-paper lanes and for any leg without a snapshot; a multi-leg close is
+    version < 1), for non-paper lanes and for any leg without a snapshot; a multi-leg close is
     measured per leg and one unmeasured leg makes the exit aggregate None."""
     import paper_fill as _pf
     out = {k: None for k in _SLIPPAGE_ROW_KEYS}
@@ -27232,30 +27232,8 @@ def protective_exit_scan(now: float = None) -> int:
     return fired
 
 
-def _disloc_protective_rows() -> list:
-    """DISLOC tiles run their own ledger; their stop lives in the engine (API-GAP-SWEEP R3)."""
-    rows = []
-    try:
-        with _XVL_LOCK:
-            last_tick = float(_xvl_status.get("last_tick_ts") or 0.0)
-        tick_fresh = bool(last_tick) and time.time() - last_tick <= max(5.0, float(XVL_STALE_AFTER_SEC))
-    except Exception:
-        tick_fresh = False
-    for lane, evaluator in list(_XVL_EVALUATORS.items()):
-        if "DISLOC" not in str(lane).upper():
-            continue
-        pos = getattr(evaluator, "position", None)
-        if not pos:
-            continue
-        has_stop = bool(pos.get("stop_px"))
-        reason = None if has_stop and tick_fresh else ("NO_STOP_PRICE" if not has_stop else "EVALUATOR_STALE")
-        rows.append({"trade_id": pos.get("trade_id") or pos.get("id"), "lane": lane,
-                     "covered": has_stop and tick_fresh, "source": "DISLOC_ENGINE", "reason": reason})
-    return rows
-
-
 def protective_coverage_snapshot() -> dict:
-    rows = list(_PROTECTIVE_COVERAGE.get("rows") or []) + _disloc_protective_rows()
+    rows = list(_PROTECTIVE_COVERAGE.get("rows") or [])
     out = _monitor_gaps.protective_coverage(rows, _protective_policy_errors["count"])
     out["last_policy_error"] = _protective_policy_errors["last_error"]
     out["scan_ts"] = _PROTECTIVE_COVERAGE.get("ts")
@@ -31167,9 +31145,8 @@ import trade_research_tags as _trade_research_tags
 def _research_tags_tick(price) -> None:
     """Record-only 10 s price path + entry tags; never blocks or alters a trade."""
     try:
-        fn = globals().get("_disloc_last_signal")
         with trade_lock:  # mutate pos dicts only under the lock (serializers iterate them)
-            _trade_research_tags.tick(price, list(open_positions), fn if callable(fn) else None)
+            _trade_research_tags.tick(price, list(open_positions))
     except Exception:  # noqa: BLE001
         pass
 
@@ -32907,66 +32884,6 @@ def _xvl_wait_anchor_ready(deadline: float):
     return time.time(), None, False
 
 
-DISLOC_TOUCH_SOURCE = os.getenv("DISLOC_TOUCH_SOURCE", "book").strip().lower()  # LIVE-FIX-1510: book|ticker
-DISLOC_BOOK_MAX_AGE_SEC = float(os.getenv("DISLOC_BOOK_MAX_AGE_SEC", "2.0"))
-_disloc_touch_last_meta = {"source": None, "ask_age_ms": None}
-
-
-def _disloc_ticker_touch():
-    with state_lock:
-        return (_buf_float(state.get("bid"), 0.0), _buf_float(state.get("ask"), 0.0),
-                _buf_float(state.get("bbo_ts"), 0.0) or None)
-
-
-def _disloc_touch():
-    """LIVE-FIX-1510 (HM 09:05): DISLOC prices from the WS order-book top (P0/F0), not the
-    throttled ticker. Falls back to the ticker when the book is not ready or older than
-    DISLOC_BOOK_MAX_AGE_SEC. _disloc_touch_meta() reports which source was used."""
-    now = time.time()
-    if DISLOC_TOUCH_SOURCE == "book":
-        try:
-            import bfx_book_top as _bbt
-            _bbt.ensure_started()
-            bid, ask, ts = _bbt.top()
-            if bid and ask and ts and now - ts <= DISLOC_BOOK_MAX_AGE_SEC:
-                _disloc_touch_last_meta.update(source="BOOK", ask_age_ms=int((now - ts) * 1000))
-                return bid, ask, ts
-        except Exception as exc:  # noqa: BLE001 - fall back to ticker
-            logger.debug(f"[DISLOC] book top unavailable: {exc}")
-    bid, ask, ts = _disloc_ticker_touch()
-    _disloc_touch_last_meta.update(source="TICKER", ask_age_ms=int((now - ts) * 1000) if ts else None)
-    return bid, ask, ts
-
-
-def _disloc_touch_meta():
-    return dict(_disloc_touch_last_meta)
-
-
-def _disloc_recent_trades():
-    with venue_fill_trade_tape_lock:
-        return list(venue_fill_trade_tape)[-600:]
-
-
-_PROCESS_START_TS_FOR_PAUSED = time.time()
-
-
-def _disloc_paused_path() -> str:
-    """HM 13:20: the working directory (/app/data/runtime on Fly), like the other DISLOC ledgers,
-    so the streams catalog (os.getcwd()), the wipe and the R2 archive all see it."""
-    import disloc_engine as _dsl  # not imported at module level: a bare _dsl here was a NameError (500 on /api/monitor/tiles/disloc)
-    return os.path.join(os.getcwd(), _dsl.PAUSED_SKIPS_FILE)
-
-
-def _disloc_entry_pause_owner():
-    """LIVE-FIX-1512 (HM 11:16): NEW DISLOC/DISLOC-FOI paper entries are blocked only by the
-    guarded deploy's DEPLOY_MAINTENANCE pause or a deliberate OPERATOR pause. SAFETY/relay pauses
-    do not block paper collection. Returns the blocking owner or None. Exits are never gated."""
-    if not state.get("manual_admin_pause"):
-        return None
-    owner = state.get("pause_intent")
-    return owner if owner in (PAUSE_OWNER_DEPLOY_MAINTENANCE, PAUSE_OWNER_OPERATOR) else None
-
-
 _DISLOC_DELAYS = None
 
 
@@ -32980,151 +32897,6 @@ def _disloc_delay(lane: str, leg: str):
     return _DISLOC_DELAYS.delay(lane, leg)
 
 
-def _disloc_bind_runtime(lane: str, evaluator) -> None:
-    """Tile 6 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
-    if not hasattr(evaluator, "bind_runtime"):
-        return
-    import disloc_engine as _dsl
-    evaluator.bind_runtime(
-        enabled_fn=lambda: is_research_data_collection() and is_research_lane_enabled(lane),
-        trades_fn=_disloc_recent_trades,
-        touch_fn=_disloc_touch,
-        touch_meta_fn=_disloc_touch_meta,
-        entries_allowed_fn=_disloc_entry_pause_owner,
-        delay_fn=_disloc_delay,
-        paused_append_fn=lambda row: _dsl.append_paused_skip(
-            _disloc_paused_path(), {**row, "fresh_start_ts": state.get("fresh_collection_start_time")}),
-        append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
-                                  else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
-        regime_fn=lambda: _current_regime_tag(),
-        oi_seed_fn=(evaluator.make_tape_oi_seed(_cvt.FILE_NAME)
-                    if getattr(getattr(evaluator, "rule", None), "uses_derivatives", False)
-                    and hasattr(evaluator, "make_tape_oi_seed") else None),
-    )
-
-
-# Danish 12 Oct 09:19: every dashboard tile is live-copyable through the same
-# signed copy path. DISLOC / DISLOC-FOI self-simulate their paper orders, so
-# their engine rows are bridged into the same _live_copy_publish lifecycle
-# GS-01 uses (ORDER_PLACED -> POSITION_OPENED -> POSITION_CLOSED / cancel).
-# Entry = marketable limit through the touch (taker, IOC-like), only while the
-# signal is < DISLOC_LIVE_MAX_SIGNAL_AGE_SEC old; exit mirrors the paper exit.
-def _disloc_append_and_copy(path, row) -> None:
-    _safe_append_jsonl(path, row, label="DISLOC_PAPER", fallback_on_error=False)
-    try:
-        _disloc_live_copy_bridge(row)
-    except Exception as exc:  # noqa: BLE001 - live copy never breaks paper
-        logger.warning(f"[DISLOC LIVE COPY] bridge failed: {exc}")
-
-
-# LIVE-FIX-1054: DISLOC self-simulates paper, so it never appears in the
-# bitfinex paper trade rows / recent_trades / outcome journal that
-# _live_copy_paper_twins reads. Record its twin from the same bridge events
-# (before publish, so the twin exists before the live fill) -> entry drift,
-# exit trigger_ts, and no false LIVE_POSITION_WITHOUT_PAPER_TWIN.
-_DISLOC_PAPER_TWINS: dict = {}
-_DISLOC_PAPER_TWINS_LOCK = threading.Lock()
-
-
-def _disloc_note_paper_twin(event, tid, extra, row) -> None:
-    if not tid:
-        return
-    row = row if isinstance(row, dict) else {}
-    with _DISLOC_PAPER_TWINS_LOCK:
-        twin = _DISLOC_PAPER_TWINS.setdefault(str(tid), {"side": extra.get("direction"), "source": "disloc_engine",
-                                                         "lane": extra.get("research_lane")})
-        if event == "ORDER_PLACED":  # LIVE-FIX-1511: decline diagnostics
-            twin["limit_price"] = extra.get("limit_price")
-            twin["signal_mid"] = row.get("signal_mid")
-            twin["signal_ts"] = row.get("signal_ts") or extra.get("signal_ts")
-        if event == "POSITION_OPENED":
-            twin["entry_price"] = extra.get("fill_price")
-            twin["qty"] = extra.get("qty")
-            twin["entry_ts"] = row.get("fill_ts") or row.get("ts")
-            twin["signal_ts"] = row.get("signal_ts") or extra.get("signal_ts")
-            twin["signal_price"] = row.get("signal_ask") if extra.get("direction") == "LONG" else row.get("signal_bid")
-            twin["fill_model"] = row.get("fill_model")
-            twin["signal_touch_source"] = row.get("signal_touch_source")
-            twin["signal_ask_age_ms"] = row.get("signal_ask_age_ms")
-            twin["fill_ask_age_ms"] = row.get("fill_ask_age_ms")
-        elif event == "POSITION_CLOSED":
-            twin["exit_price"] = extra.get("exit_price")
-            twin["exit_reason"] = extra.get("exit_reason")
-            twin["exit_ts"] = row.get("exit_ts") or row.get("ts") or time.time()
-        elif event == "ORDER_CANCELLED":
-            twin["exit_reason"] = extra.get("reason")
-        while len(_DISLOC_PAPER_TWINS) > 500:
-            _DISLOC_PAPER_TWINS.pop(next(iter(_DISLOC_PAPER_TWINS)))
-
-
-def _disloc_execution_rows(now_ts: float) -> tuple:
-    """Open DISLOC paper positions + closes from the last 30 min, executor shape."""
-    with _DISLOC_PAPER_TWINS_LOCK:
-        twins = {k: dict(v) for k, v in _DISLOC_PAPER_TWINS.items()}
-    positions, closed = [], []
-    for tid, t in twins.items():
-        entry = t.get("entry_price")
-        side = str(t.get("side") or "").upper()
-        if not entry or side not in ("LONG", "SHORT"):
-            continue
-        if t.get("exit_price") is None:
-            positions.append({"trade_id": tid, "status": "OPEN", "dir": side, "side": side,
-                              "entry": entry, "qty": t.get("qty"), "research_lane": t.get("lane"),
-                              "source": "disloc_engine"})
-        else:
-            try:
-                ts = float(t.get("exit_ts") or 0.0)
-            except (TypeError, ValueError):
-                ts = 0.0
-            if now_ts - ts <= 1800:
-                closed.append({"ts": ts, "trade_id": tid, "dir": side, "final_direction": side,
-                               "entry": entry, "exit": t.get("exit_price"),
-                               "exit_reason": t.get("exit_reason"), "research_lane": t.get("lane")})
-    return positions, closed
-
-
-def _disloc_paper_twins() -> dict:
-    with _DISLOC_PAPER_TWINS_LOCK:
-        out = {k: dict(v) for k, v in _DISLOC_PAPER_TWINS.items()}
-    # Durable fallback after a restart: the DISLOC paper ledgers.
-    try:
-        import disloc_engine as _dsl
-        for lane in _dsl.LANE_FILES:
-            ledger_twins: dict = {}
-            for r in _disloc_lane_raw_rows(lane)[-300:]:
-                tid = str((r or {}).get("trade_id") or "")
-                if not tid or tid in out:
-                    continue
-                t = ledger_twins.setdefault(tid, {"side": r.get("side"), "qty": None, "source": "disloc_ledger"})
-                # LIVE-FIX-1200: merge FILLED + CLOSED rows (first-row-wins left exit null).
-                if r.get("fill_price") and not t.get("entry_price"):
-                    t["entry_price"] = r.get("fill_price")
-                    t["entry_ts"] = r.get("fill_ts")
-                    t["signal_ts"] = r.get("signal_ts")
-                    t["signal_price"] = r.get("signal_ask") if str(r.get("side") or "").upper() == "LONG" else r.get("signal_bid")
-                if r.get("exit_price") is not None:
-                    t.update(exit_price=r.get("exit_price"), exit_reason=r.get("exit_reason"),
-                             exit_ts=r.get("exit_ts"))
-            for tid, t in ledger_twins.items():
-                if t.get("entry_price"):
-                    out[tid] = t
-    except Exception:  # noqa: BLE001 - best effort
-        pass
-    return out
-
-
-def _disloc_live_copy_bridge(row) -> None:
-    touch = None
-    if isinstance(row, dict) and row.get("event") == "DISLOC_ABANDONED":
-        touch = _disloc_touch()
-    import disloc_live_copy as _dlc
-    for event, tid, extra in _dlc.disloc_live_copy_events(row, touch=touch, bot_version=EXECUTION_FIX_VERSION):
-        _disloc_note_paper_twin(event, tid, extra, row)
-        if event == "ORDER_PLACED":
-            _live_copy_note_signal_ts(tid, extra.get("signal_ts"))
-        _live_copy_publish(event, tid, extra)
-
-
 def xvl_evaluator_loop():
     lanes = evaluator_loop_lanes()
     if not XVL_EVALUATOR_ENABLED or not lanes:
@@ -33133,7 +32905,6 @@ def xvl_evaluator_loop():
     _xvl_lower_thread_priority()
     for lane in lanes:
         _XVL_EVALUATORS[lane] = _patient_chase_policy(lane).make_evaluator()
-        _disloc_bind_runtime(lane, _XVL_EVALUATORS[lane])
     _xvl_status["started_ts"] = time.time()
     second = math.floor(time.time()) + 1
     while not shutdown_event.is_set():
@@ -33277,7 +33048,7 @@ def _signal_to_fill_trades_ms(hours: float = 24.0) -> dict:
     """DATA-GAPS-20261012 (d): per lane signal->fill (ms) from recorded trade stamps, last 24 h.
 
     The in-memory xvl latency ring restarts at every boot (n=0 after each deploy); this
-    block comes from the persisted closed rows (event_timestamps / DISLOC ledger), cached 30 s.
+    block comes from the persisted closed rows (event_timestamps), cached 30 s.
     """
     now = time.time()
     hit = _S2F_TRADES_CACHE.get("v")
@@ -33925,7 +33696,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
     "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
-    "/api/monitor/tiles/disloc", "/api/monitor/tiles/field-completeness",
+    "/api/monitor/tiles/field-completeness",
     # API-GAP-SWEEP-20261012
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
@@ -36789,10 +36560,6 @@ def _scope_pathway_specs_to_signed_epoch(
     counters = lane_opportunity_counters or {}
     approvals_known = _lane_counters_cover_epoch(epoch_cutoff_utc, counters_since_ts)
     try:
-        disloc_metrics = _disloc_lane_metrics(_disloc_epoch_since())
-    except Exception:  # noqa: BLE001 - card stats only
-        disloc_metrics = {}
-    try:
         forced_breakdown = _lane_forced_close_breakdown()
     except Exception:  # noqa: BLE001 - card breakdown only
         forced_breakdown = {}
@@ -36818,28 +36585,14 @@ def _scope_pathway_specs_to_signed_epoch(
             ),
             "verdict": "current signed clean epoch",
         }
-        dsl = disloc_metrics.get(lane)
-        if dsl is not None:
-            # Tiles 9/10 book into their own paper ledger (not ``trades``).
-            closes = int(dsl.get("closes") or 0)
-            pnl = round(float(dsl.get("net_pnl_usd") or 0.0), 2)
-            metrics.update({
-                "approves": None, "approvals_known": False, "approve_to_fill_pct": None,
-                "real_fills": closes, "net_pnl_real": pnl, "per_approve_ev": None,
-                "wins": int(dsl.get("wins") or 0), "losses": int(dsl.get("losses") or 0),
-                "win_rate_pct": round(100.0 * int(dsl.get("wins") or 0) / closes, 1) if closes else 0.0,
-            })
         stats = _session_stats_from_lane_metrics(metrics)
         stats["scope"] = "SIGNED_FRESH_EPOCH"
         stats["epoch_cutoff_utc"] = epoch_cutoff_utc
         stats["epoch_id"] = _current_epoch_id_for_display()
         stats["closes_source"] = "epoch_trade_ledger_excl_forced_closes"
-        if dsl is not None:
-            stats["closes_source"] = "disloc_paper_ledger"
-            stats["disloc"] = dsl
         fb = forced_breakdown.get(lane) or {}
         stats["pnl_breakdown"] = {
-            "strategy_net_usd": pnl if dsl is None else round(float(dsl.get("net_pnl_usd") or 0.0), 2),
+            "strategy_net_usd": pnl,
             "strategy_closes": closes,
             "forced_closes": int(fb.get("forced_closes") or 0),
             "forced_net_usd": float(fb.get("forced_net_usd") or 0.0),
@@ -37004,69 +36757,8 @@ def write_static_pathway_lane_specs(cwd: str = None) -> dict:
     return merged
 
 
-# --- DISLOC ledger folding + forced-close breakdown for tile cards (LIVE-FIX-0806) ---
-_DISLOC_ROWS_CACHE: dict = {}
-_DISLOC_ROWS_CACHE_SEC = 10.0
+# --- forced-close breakdown for tile cards (LIVE-FIX-0806) ---
 _FORCED_BREAKDOWN_CACHE: dict = {}
-
-
-def _disloc_lane_raw_rows(lane: str) -> list:
-    """DISLOC paper ledger rows for one lane (read-only, cached 10 s)."""
-    import disloc_engine as _dsl
-    path = _dsl.LANE_FILES.get(lane)
-    if not path:
-        return []
-    now = time.time()
-    hit = _DISLOC_ROWS_CACHE.get(lane)
-    if hit and 0.0 <= now - hit[0] < _DISLOC_ROWS_CACHE_SEC:
-        return hit[1]
-    rows = _dsl.load_rows(path)
-    _DISLOC_ROWS_CACHE[lane] = (now, rows)
-    return rows
-
-
-def _disloc_lane_size(lane: str) -> tuple:
-    import disloc_engine as _dsl
-    spec = COMBO_LANE_SPECS.get(lane) or {}
-    try:
-        margin = float(spec.get("requested_margin_usd") or _dsl.DEFAULT_MARGIN_USD)
-    except (TypeError, ValueError):
-        margin = _dsl.DEFAULT_MARGIN_USD
-    try:
-        lev = float(spec.get("leverage") or _dsl.DEFAULT_LEVERAGE)
-    except (TypeError, ValueError):
-        lev = _dsl.DEFAULT_LEVERAGE
-    return margin, lev
-
-
-def _disloc_epoch_rows(lane: str, since_ts: float | None = None) -> list:
-    rows = _disloc_lane_raw_rows(lane)
-    if since_ts:
-        rows = [r for r in rows if float((r or {}).get("exit_ts") or (r or {}).get("ts") or 0.0) >= since_ts]
-    return rows
-
-
-def _disloc_lane_metrics(since_ts: float | None = None) -> dict:
-    """Per DISLOC lane card metrics from its own paper ledger (never the bot trades list)."""
-    import disloc_engine as _dsl
-    out = {}
-    for lane in _dsl.LANE_FILES:
-        try:
-            margin, lev = _disloc_lane_size(lane)
-            out[lane] = _dsl.lane_metrics(_disloc_epoch_rows(lane, since_ts), margin_usd=margin, leverage=lev)
-        except Exception:  # noqa: BLE001 - card stats only
-            continue
-    return out
-
-
-def _disloc_tile_trade_rows(lane: str, epoch_id=None, short_name=None, be_band_bp: float = 0.0,
-                            since_ts: float | None = None) -> list:
-    import disloc_engine as _dsl
-    if lane not in _dsl.LANE_FILES:
-        return []
-    margin, lev = _disloc_lane_size(lane)
-    return _dsl.tile_trade_rows(_disloc_epoch_rows(lane, since_ts), lane, epoch_id=epoch_id, margin_usd=margin,
-                                leverage=lev, short_name=short_name, be_band_bp=be_band_bp)
 
 
 def _lane_forced_close_breakdown() -> dict:
@@ -37113,14 +36805,6 @@ def _lane_forced_close_breakdown() -> dict:
         b["deploy_flatten_net_usd"] = round(b["deploy_flatten_net_usd"], 2)
     _FORCED_BREAKDOWN_CACHE["v"] = (now, out)
     return out
-
-
-def _disloc_epoch_since() -> float | None:
-    try:
-        start = _showcase_trade_session_start()
-        return float(start) if start else None
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: dict = None) -> dict:
@@ -39861,15 +39545,7 @@ DASHBOARD_JS = """(function () {
               + (pb.deploy_flatten_closes > 0 ? ' (deploy flatten ' + Number(pb.deploy_flatten_closes) + ' · $' + Number(pb.deploy_flatten_net_usd || 0).toFixed(2) + ')' : '')
               + '</div>'
             : '';
-          const dslStats = stats.disloc || null;
-          const dslSide = (dslStats && dslStats.by_side) || {};
-          const dslDelay = (dslStats && dslStats.by_delay_bucket) || {};
-          const dslNote = dslStats
-            ? '<div style="margin-top:4px;color:#8b949e;font-size:0.74em;">DISLOC paper ledger · mean ' + (dslStats.mean_net_bp == null ? '—' : Number(dslStats.mean_net_bp).toFixed(2) + ' bp')
-              + ' · ' + Object.keys(dslSide).map(function (k) { return k + ' ' + dslSide[k].closes; }).join(' / ')
-              + ' · delay ' + Object.keys(dslDelay).map(function (k) { return k + ' ' + dslDelay[k].closes; }).join(' / ') + '</div>'
-            : '';
-          const statsScopeNote = forcedNote + dslNote + '<div style="margin-top:4px;color:#6e7681;font-size:0.72em;">Headline scope: ' + statsScope
+          const statsScopeNote = forcedNote + '<div style="margin-top:4px;color:#6e7681;font-size:0.72em;">Headline scope: ' + statsScope
             + (stats.epoch_cutoff_utc ? ' since ' + stats.epoch_cutoff_utc : '')
             + (stats.approvals_known === false ? ' · EV/appr n/a (approvals not counted for the whole epoch)' : '')
             + '</div>';
@@ -44055,17 +43731,6 @@ def _build_relay_execution_state_snapshot() -> dict:
         for row in recent_trades
         if isinstance(row, dict)
     ]
-    # LIVE-FIX-1144: DISLOC/DISLOC-FOI self-simulate paper, so their open
-    # positions and closes never reached the executor's snapshot. The executor
-    # then logged "Showcase position absent", re-adopted the closed lot as an
-    # orphan, double-counted it (ledger 0.00058 vs exchange 0.00029) and
-    # SAFETY_PAUSED the account on POSITION_MISMATCH (12 Oct 11:42).
-    try:
-        _dsl_pos, _dsl_closed = _disloc_execution_rows(now_ts)
-        snapshot["positions"].extend(_dsl_pos)
-        snapshot["trades"].extend(_dsl_closed)
-    except Exception as exc:  # noqa: BLE001 - never break the money snapshot
-        logger.warning(f"[DISLOC LIVE COPY] execution snapshot rows failed: {exc}")
     snapshot["fidelity_trades"] = fidelity_trades
     snapshot["expired_orders"] = _dashboard_expired_order_rows(recent_expired)
     snapshot["expired_orders_total"] = expired_orders_total
@@ -45440,15 +45105,6 @@ def _apply_ledger_closed_counts(tile_route_counts: dict, lane_ledger) -> None:
         except (TypeError, ValueError):
             counts["closed"] = 0
         counts["closed_source"] = "epoch_lane_ledger_excl_forced"
-    try:
-        disloc_metrics = _disloc_lane_metrics(_disloc_epoch_since())
-    except Exception:  # noqa: BLE001
-        disloc_metrics = {}
-    for lane, dm in disloc_metrics.items():
-        counts = tile_route_counts.get(lane) if isinstance(tile_route_counts, dict) else None
-        if isinstance(counts, dict):
-            counts["closed"] = int(dm.get("closes") or 0)
-            counts["closed_source"] = "disloc_paper_ledger"
     _floor_selected_calls(tile_route_counts)
 
 
@@ -47129,19 +46785,6 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                                  "pnl_margin_pct": pnl_margin_pct, "leverage": leverage,
                                  # W/L source: price-based net bp (same rule as the lane ledgers).
                                  "net_pnl_bp": net_bp})
-    for lane in list(shaped):
-        try:
-            dsl_rows = _disloc_tile_trade_rows(lane, since_ts=session_start or None)
-        except Exception:  # noqa: BLE001
-            dsl_rows = []
-        for r in dsl_rows:
-            shaped[lane].append({"close_ts": (r.get("exit") or {}).get("close_ts"),
-                                 "net_pnl_usd": (r.get("pnl") or {}).get("net_usd"),
-                                 "notional_usd": r.get("notional_usd"), "direction": r.get("side"),
-                                 "book_slippage_usd": None, "pnl_margin_pct": None,
-                                 "leverage": r.get("leverage"), "net_pnl_bp": (r.get("pnl") or {}).get("bp"),
-                                 "side_tag": (r.get("disloc") or {}).get("side_tag"),
-                                 "delay_bucket": (r.get("disloc") or {}).get("delay_bucket")})
     _MONITOR_LANE_FORCED_EXCLUDED.clear()
     _MONITOR_LANE_FORCED_EXCLUDED.update(forced)
     _MONITOR_LANE_DEPLOY_FLATTENED.clear()
@@ -47501,18 +47144,6 @@ def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "exp
             if scope.get("fresh_only") and not monitor_tiles.row_is_fresh(row):
                 continue
             out[lane].append(row)
-    if "closed" in statuses:
-        for lane in out:
-            try:
-                for row in _disloc_tile_trade_rows(lane, epoch_id=scope["epoch"], short_name=short.get(lane),
-                                                   be_band_bp=scope["be_band_bp"], since_ts=_disloc_epoch_since()):
-                    if not monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
-                        continue
-                    if scope.get("fresh_only") and not monitor_tiles.row_is_fresh(row):
-                        continue  # tile 6/7 rows with fresh_eligible false are not fresh data
-                    out[lane].append(row)
-            except Exception:  # noqa: BLE001 - DISLOC fold is additive only
-                continue
     return out
 
 
@@ -47651,49 +47282,11 @@ def monitor_tiles_field_completeness():
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES)
 
 
-@app.route('/api/monitor/tiles/disloc', methods=["GET"])
-def monitor_tiles_disloc():
-    """Tile 6 DISLOC / Tile 7 DISLOC-FOI (?variant=foi) paper readout: fill rate, unfilled-order rate, delays, mean bp, verdict. ?rows=20 (max 200)."""
-    import disloc_engine as _dsl
-
-    def build(now):
-        try:
-            nrows = min(200, max(0, int(request.args.get("rows") or 20)))
-        except ValueError:
-            raise monitor_tiles.BadRequest("BAD_ARGS")
-        variant = str(request.args.get("variant") or "base").lower()
-        if variant not in ("base", "foi"):
-            raise monitor_tiles.BadRequest("BAD_VARIANT")
-        rows = _dsl.load_rows(_dsl.FOI_TRADES_FILE if variant == "foi" else _dsl.TRADES_FILE)
-        lane = "FAMILY_DISLOC_FOI_LONG_1M" if variant == "foi" else "FAMILY_DISLOC_BFX_DISLOCATION_1M"
-        from combo_pathway_config import tile_number  # not imported at module level (NameError -> 500)
-        spec = COMBO_LANE_SPECS.get(lane) or {}
-        evaluator = _XVL_EVALUATORS.get(lane)
-        terminal = [r for r in rows if r.get("event") in ("DISLOC_CLOSED", "DISLOC_CANCELLED", "DISLOC_ABANDONED")]
-        return {
-            "schema": "monitor_tiles_disloc_v1", "variant": variant, "lane": lane, "tile_number": tile_number(lane),
-            "enabled": bool(is_research_lane_enabled(lane)), "paper_only": True,
-            "policy_id": spec.get("raw_policy_id"), "policy_signature": spec.get("policy_signature"),
-            "rule": (spec.get("entry_policy") or {}).get("disloc"),
-            "summary": _dsl.summarize(rows, spec.get("pre_registration")),
-            "engine": evaluator.snapshot() if hasattr(evaluator, "snapshot") else None,
-            # LIVE-FIX-1512: signals skipped because a deploy/operator pause blocked new entries.
-            "paused_skips": (evaluator.paused_skip_summary() if hasattr(evaluator, "paused_skip_summary") else None),
-            "paused_skips_durable": _dsl.paused_skip_history(
-                _disloc_paused_path(), lane=lane, boot_ts=_PROCESS_START_TS_FOR_PAUSED,
-                epoch_ts=state.get("fresh_collection_start_time")),
-            "entry_pause_owner": _disloc_entry_pause_owner(),
-            "recent": terminal[-nrows:] if nrows else [],
-        }
-
-    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES + 4096)
-
-
-
 def _exit_follow_view(since):
-    """DISLOC live-vs-paper exit lag; lock-free, DISLOC paper ledger only."""
+    """Live-vs-paper exit lag. It only ever covered the self-simulated DISLOC/DISLOC-FOI tiles, both
+    removed 23 Oct 2026 (R9), so no lane is followed; the live_exit_follow_v1 shape is kept (NO_DATA)."""
     import exit_latency_slo as _els
-    return _els.live_follow(_get_live_copy_journal().by_correlation(), _disloc_paper_twins(), since=since)
+    return _els.live_follow({}, {}, since=since)
 
 
 def _exit_latency_live_on_lanes() -> list:
@@ -47715,11 +47308,10 @@ def _exit_latency_live_on_lanes() -> list:
 
 
 def _exit_latency_closed_trade_rows(since: float) -> list:
-    """Active-tile closed trades for exit-latency, including DISLOC paper ledgers.
+    """Active-tile closed trades for exit-latency.
 
-    Main ``trades`` never holds DISLOC/DISLOC-FOI (self-simulated). Retired lanes
-    (ROUTER, FADE_POOL, GS07, H-A, …) are excluded so the SLO view matches the
-    dashboard roster.
+    Retired lanes (ROUTER, FADE_POOL, GS07, H-A, DISLOC, …) are excluded so the SLO
+    view matches the dashboard roster.
     """
     import exit_latency_slo as _els
     active = {str(x).upper() for x in ACTIVE_TILE_ORDER}
@@ -47731,15 +47323,6 @@ def _exit_latency_closed_trade_rows(since: float) -> list:
         if lane not in active:
             continue
         closed.append(r)
-    try:
-        import disloc_engine as _dsl
-        for lane in _dsl.LANE_FILES:
-            if lane not in active:
-                continue
-            closed.extend(_els.paper_rows_from_disloc_ledger(
-                _disloc_lane_raw_rows(lane), lane=lane, since=since))
-    except Exception:  # noqa: BLE001 - DISLOC fold is additive only
-        pass
     return closed
 
 
@@ -47756,11 +47339,6 @@ def _exit_latency_per_tile(closed: list, since: float, live_follow: dict | None 
         if lane not in active:
             continue
         buckets.setdefault(lane, []).append(r)
-    # Ensure every active DISLOC lane appears even with zero samples in-window
-    # when it is (or recently was) on the roster — empty evaluate -> NO_DATA.
-    for lane in _els.DISLOC_EXIT_LANES:
-        if lane in active:
-            buckets.setdefault(lane, [])
     tiles = {}
     for lane, rows in buckets.items():
         s2f = [float(e["signal_to_fill_sec"]) for e in (r.get("event_timestamps") or {} for r in rows)
@@ -47771,9 +47349,6 @@ def _exit_latency_per_tile(closed: list, since: float, live_follow: dict | None 
         tiles[lane]["exit"].pop("breaches_over_5s", None)
     for lane, live in ((live_follow or {}).get("lanes") or {}).items():
         key = _normalize_lane_key(lane) or str(lane).upper()
-        if key not in active and key not in _els.DISLOC_EXIT_LANES:
-            # live_follow already normalises DISLOC short codes; keep unknown out.
-            key = _els._normalize_disloc_lane(key)
         if key not in active:
             continue
         slot = tiles.setdefault(key, {"exit": _els.evaluate([], since=since, forced=STATS_EXCLUDED_EXIT_REASONS),
@@ -47940,14 +47515,9 @@ def _tile_integrity_v1_since():
 
 
 def _tile_integrity_rows(now):
-    import disloc_engine as _dsl
-    rows = []
-    for path in (_dsl.TRADES_FILE, _dsl.FOI_TRADES_FILE):
-        try:
-            rows.extend(r for r in _dsl.load_rows(path)[-2000:] if r.get("event") in ("DISLOC_FILLED", "DISLOC_CLOSED"))
-        except Exception:  # noqa: BLE001
-            pass
-    return rows
+    """Fill-recompute input. It was fed only by the DISLOC/DISLOC-FOI paper ledgers (removed 23 Oct
+    2026, R9); tiles 1-5 price through tile_fill -> paper_fill, audited by paper_fill gap_facts."""
+    return []
 
 
 def _tile_integrity_book(now, rows):
@@ -48002,6 +47572,10 @@ def _tile_integrity_run_once(now=None):
         _TILE_INTEGRITY_FEED = _ti.FeedWatch()
     try:
         import bfx_book_top as _bbt
+        # R4 note (HM 23 Oct): behaviour change, not a removal. ensure_started() starts the
+        # bfx_book_top WS thread (idempotent) for FeedWatch. Monitor-only: it feeds no pricer,
+        # trigger or fill path, so the shared pricer/trigger helpers are unchanged.
+        _bbt.ensure_started()  # sole remaining user after DISLOC removal (HM amendment 3 FeedWatch)
         st = _bbt.status()
         feed = _TILE_INTEGRITY_FEED.observe(st.get("msgs"), st.get("ts"), now)
     except Exception as exc:  # noqa: BLE001
@@ -48865,7 +48439,7 @@ def monitor_fill_sim():
 
 @app.route('/api/monitor/protective-exit', methods=["GET"])
 def monitor_protective_exit():
-    """R3: open positions vs stop coverage (incl. DISLOC), uncovered list, policy errors."""
+    """R3: open positions vs stop coverage, uncovered list, policy errors."""
     return _monitor_tiles_guard(lambda now: {**protective_coverage_snapshot(),
                                              "worker": {k: v for k, v in protective_exit_snapshot().items()
                                                         if k != "coverage"}}, _MONITOR_GAP_MAX_BYTES)
@@ -48961,11 +48535,6 @@ def _integrity_gap_facts(now: float) -> dict:
         import paper_fill as _pf
         return _pf.gap_facts() if hasattr(_pf, "gap_facts") else None
     part("paper_fill", paper_fill_facts)
-
-    def paused():
-        import disloc_engine as _de
-        return _de.paused_gap_facts() if hasattr(_de, "paused_gap_facts") else None
-    part("paused", paused)
 
     def lifecycle_retention():
         import live_copy_monitor as _lcm
@@ -61402,11 +60971,6 @@ def _live_copy_paper_twins() -> dict:
                             "funding_usd_raw": row.get("funding_usd_raw"), "funding_fees_usd": row.get("funding_fees_usd"),
                             "source": "trade_outcome_journal"}
     except Exception:  # noqa: BLE001 - twin lookup is best-effort, fail closed
-        pass
-    try:
-        for tid, twin in _disloc_paper_twins().items():
-            out.setdefault(tid, twin)
-    except Exception:  # noqa: BLE001
         pass
     return out
 

@@ -102,6 +102,8 @@ MID_EPOCH_ADDITIONS = (
      "approved_by": "Danish (owner), 2026-10-10 backlog batch: build Tile 14 GS-07 V07, then paper ON",
      "spec": "audit/TILE14-TILE15-DESIGN-20261008.md §2 (V07)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # Historical registrations (R5 custody): Tile 13 · DISLOC and Tile 14 · DISLOC-FOI were retired and their
+    # code removed 23 Oct 2026 (owner R9); the entries stay as the record of what this epoch registered.
     # Tile 13 · DISLOC (owner 2026-10-11; default OFF, paper only, relay-ineligible, self-simulated).
     {"lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M", "tile_number": 13, "hypothesis_id": "GS-20261011-DISLOC",
      "approved_by": "Danish (owner), 2026-10-11: build the 5 s-cancel dislocation tile as a paper tile",
@@ -121,9 +123,10 @@ MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # The frozen roster's signature is unchanged.
 # 2026-10-11 (owner): H-C/B3/FADE-POOL/V07 retired and DISLOC/DISLOC-FOI added; pin moved.
 # 2026-10-12 10:57 (owner): H-A and GS-07 retired (roster 1..7); pin moved.
+# 2026-10-23 (owner): Tile 6 DISLOC and Tile 7 DISLOC-FOI retired (roster 1..5); score_led and hypothesis pins moved.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "0eaa123377fa49b149f5f96c61dd6d22b3808ce5bf8f334e3a0790b280028331",
-    "hypothesis": "4022e371fe5aeafe26b2621955286b2919d56ae6cad8e91658688768716a90cf",
+    "score_led": "19cfc36571f5523d2d403035764103f98fcdf5a6f9a83b666b2a5edab7522247",
+    "hypothesis": "16804a01413da19fd7527d70e33b7718507b225ea606775cdd62cb5d89ce9a2d",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
@@ -170,15 +173,13 @@ def window(manifest: Optional[Mapping[str, Any]]) -> tuple[Optional[float], Opti
 
 
 def _current_roster() -> dict:
-    """Live tile roster from combo_pathway_config: ON by default (5) and the Tiles 6/7 DISLOC paper lanes (default OFF)."""
+    """Live tile roster from combo_pathway_config: the active tiles (5 since DISLOC/DISLOC-FOI were removed 23 Oct 2026)."""
     try:
         import combo_pathway_config as cfg
         order = list(cfg.ACTIVE_TILE_ORDER)
     except Exception:  # noqa: BLE001 - status must never raise
         return {"error": "ROSTER_UNAVAILABLE"}
-    off = [lane for lane in order if "DISLOC" in lane]
-    on = [lane for lane in order if lane not in off]
-    return {"on_by_default": on, "default_off_tiles_6_7": off, "count": len(order),
+    return {"on_by_default": order, "count": len(order),
             "retired_not_listed": sorted(set(FREEZE_ROSTER) - set(order))}
 
 

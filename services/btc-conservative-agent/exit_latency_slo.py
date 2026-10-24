@@ -122,12 +122,9 @@ LIVE_FOLLOW_AMBER_SEC = 3.0
 LIVE_FOLLOW_RED_SEC = 8.0
 # Back-compat alias used by older callers/tests.
 LIVE_FOLLOW_ALERT_SEC = LIVE_FOLLOW_AMBER_SEC
-LIVE_FOLLOW_LANE_PREFIXES = ("DISLOC", "FAMILY_DISLOC")
-# Canonical full-lane tokens for the live DISLOC tiles (Tile 6 / Tile 7).
-DISLOC_EXIT_LANES = (
-    "FAMILY_DISLOC_BFX_DISLOCATION_1M",
-    "FAMILY_DISLOC_FOI_LONG_1M",
-)
+# Live-follow covered only the self-simulated DISLOC / DISLOC-FOI tiles (Tile 6/7), removed
+# 23 Oct 2026 (R9). No default lane filter remains; callers pass explicit prefixes.
+LIVE_FOLLOW_LANE_PREFIXES: tuple = ()
 
 
 def _lane_matches_prefixes(lane: str, prefixes: Iterable[str]) -> bool:
@@ -137,23 +134,9 @@ def _lane_matches_prefixes(lane: str, prefixes: Iterable[str]) -> bool:
         return True
     if any(lane_u.startswith(p) or p in lane_u for p in prefs):
         return True
-    # Short codes from the executor journal ("DISLOC", "DISLOC-FOI").
+    # Short codes from the executor journal ("GS-01" vs "GS_01").
     short = lane_u.replace("_", "-")
     return any(short == p or short.startswith(p + "-") or short.startswith(p + "_") for p in prefs)
-
-
-def _normalize_disloc_lane(lane: str) -> str:
-    """Map short DISLOC / DISLOC-FOI journal labels onto full research_lane tokens."""
-    u = str(lane or "").upper().replace("-", "_")
-    if u in DISLOC_EXIT_LANES:
-        return u
-    if u in ("DISLOC", "DISLOC_BFX", "DISLOC_BFX_DISLOCATION_1M"):
-        return DISLOC_EXIT_LANES[0]
-    if "FOI" in u and "DISLOC" in u:
-        return DISLOC_EXIT_LANES[1]
-    if u.startswith("FAMILY_DISLOC"):
-        return str(lane or "").upper()
-    return str(lane or "").upper()
 
 
 def _top_hop(lags: Mapping | None) -> str | None:
@@ -168,56 +151,6 @@ def _top_hop(lags: Mapping | None) -> str | None:
         if best_v is None or v > best_v:
             best_name, best_v = str(name), v
     return best_name
-
-
-def paper_rows_from_disloc_ledger(rows: Iterable[Mapping], *, lane: str,
-                                  since: float = 0.0) -> list[dict]:
-    """Project DISLOC_CLOSED ledger rows into trade-shaped rows with event_timestamps.
-
-    DISLOC self-simulates outside the main ``trades`` list; without this fold
-    /api/monitor/exit-latency has no Tile 6/7 lanes at all.
-    """
-    out = []
-    lane_u = str(lane or "").upper()
-    for r in rows or []:
-        if not isinstance(r, Mapping):
-            continue
-        if str(r.get("event") or "") != "DISLOC_CLOSED":
-            continue
-        try:
-            exit_ts = float(r.get("exit_ts") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if exit_ts < since:
-            continue
-        try:
-            signal_ts = float(r["signal_ts"]) if r.get("signal_ts") is not None else None
-        except (TypeError, ValueError):
-            signal_ts = None
-        try:
-            fill_ts = float(r["fill_ts"]) if r.get("fill_ts") is not None else None
-        except (TypeError, ValueError):
-            fill_ts = None
-        # Paper exit is booked on the same tick as the trigger for TIME_60S /
-        # stop / gap-close; trigger_to_fill is ~0 on paper (live lag is separate).
-        trigger_ts = exit_ts
-        s2f = round(fill_ts - signal_ts, 3) if fill_ts and signal_ts else None
-        out.append({
-            "trade_id": r.get("trade_id"),
-            "research_lane": lane_u or str(r.get("research_lane") or "").upper(),
-            "exit_reason": r.get("exit_reason"),
-            "event_timestamps": {
-                "schema": "trade_event_timestamps_v1",
-                "signal_ts": signal_ts,
-                "fill_ts": fill_ts,
-                "exit_trigger_ts": trigger_ts,
-                "exit_fill_ts": exit_ts,
-                "exit_trigger_to_fill_sec": 0.0,
-                "signal_to_fill_sec": s2f,
-                "source": "disloc_paper_ledger",
-            },
-        })
-    return out
 
 
 def live_follow(by_corr: Mapping, twins: Mapping, *, since: float,
@@ -238,7 +171,7 @@ def live_follow(by_corr: Mapping, twins: Mapping, *, since: float,
         raw_lane = str(closes[0].get("lane") or closes[0].get("research_lane") or "?").upper()
         if pref and not _lane_matches_prefixes(raw_lane, pref):
             continue
-        lane = _normalize_disloc_lane(raw_lane)
+        lane = raw_lane
         twin = (twins or {}).get(str(cid)) or {}
         try:
             paper = float(twin.get("exit_ts"))
