@@ -63777,10 +63777,12 @@ def api_bitfinex_tile_live_orders(lane: str):
             op_elig = _get_live_copy_eligibility().is_eligible(lane)
     if enabled and _live_guardian_heartbeat_stale():
         return jsonify({"ok": False, "error": "LIVE_GUARDIAN_HEARTBEAT_STALE", "lane": lane, "bitfinex_live_orders": False}), 409
-    if enabled and _live_guardian_arm_block():
-        return jsonify({"ok": False, "error": _live_guardian_arm_block(), "lane": lane, "bitfinex_live_orders": False}), 409
-    if enabled and _live_guardian_tile_arm_block(lane):
-        return jsonify({"ok": False, "error": _live_guardian_tile_arm_block(lane), "lane": lane, "bitfinex_live_orders": False,
+    _arm_blk = _live_guardian_arm_block() if enabled else None   # HM R4 nit: evaluated once
+    if _arm_blk:
+        return jsonify({"ok": False, "error": _arm_blk, "lane": lane, "bitfinex_live_orders": False}), 409
+    _tile_blk = _live_guardian_tile_arm_block(lane) if enabled else None
+    if _tile_blk:
+        return jsonify({"ok": False, "error": _tile_blk, "lane": lane, "bitfinex_live_orders": False,
                         "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval"),
                         "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l")}), 409
     if enabled:
