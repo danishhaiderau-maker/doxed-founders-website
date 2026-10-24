@@ -1,6 +1,7 @@
 # RK 24 Oct 18:07: reviewed baseline of optional (function-level / ImportError-guarded) local imports reachable
 # from bot.py / the analyzer that are NOT in the Fly image at 423b5ade. Any miss NOT listed here fails CI.
 # Re-including one in .dockerignore (and deleting its line here) ships new code paths to prod: needs RK review.
+# found by the real docker build (CI job 120810328457); the local emulator differs for strategy_lab/
 research.ai_challenger_report
 research.analyzer_integrity_reconciliation
 research.canonical_data_store
@@ -32,13 +33,13 @@ research.policy_evidence_library
 research.policy_evidence_schema
 research.report_history
 research.research_trade_accumulator
+research.retention
 research.runtime_identity_incidents
 research.shadow_exit_report
 research.shadow_model_input
 research.shadow_result_stream
 research.tile_evidence_points
-research.retention
-# found by the real docker build (CI job 120810328457); the local emulator differs for strategy_lab/
+research.tile_realism_table
 strategy_lab.engine
 strategy_lab.export
 strategy_lab.rankings
