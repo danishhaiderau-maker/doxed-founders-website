@@ -14010,6 +14010,14 @@ def _replay_csv_write_fallback_locked(targets) -> dict:
     (trade_id, ts) is already in the CSV is not written twice.
     """
     targets = {t for t in targets if t in CSV_FALLBACK_REPLAY_TARGETS}
+    _tomb = globals().get("_DELETED_TRADE_TOMBSTONE") or {}
+    _trades_csv = globals().get("CSV_TRADES")
+    if _trades_csv in targets and _tomb.get("status") == "CORRUPT":
+        # HM #869 R2b A1: fail closed - keep CSV_TRADES rows pending, never replay them without a valid tombstone
+        targets.discard(_trades_csv)
+        _csv_fallback_pending_targets.add(_trades_csv)
+        logger.error(f"[ALERT] [CSV REPLAY] {_trades_csv} replay refused: deleted-trade tombstone CORRUPT "
+                     f"[PIPELINE ENFORCEMENT]")
     if not targets or not os.path.exists(CSV_FALLBACK_JSONL):
         return {}
     try:
@@ -14106,47 +14114,145 @@ def _note_deleted_resave_refused(trade_id, where: str) -> None:
                    f"refused_total={_DELETED_TRADE_RESAVE_REFUSED['count']} [PIPELINE ENFORCEMENT]")
 
 
-def _persist_deleted_trade_ids(list_sha256=None) -> None:
-    """Durably write the tombstone (tmp + fsync + replace). Caller holds the trade-file lock."""
+_DELETED_TRADE_TOMBSTONE = {"status": "OK", "error": None, "quarantined_to": None, "alerted_at": None}
+
+
+class TombstoneUnavailable(RuntimeError):
+    """The persisted deleted-trade tombstone is corrupt, quarantined or could not be written (fail closed)."""
+
+
+def _tombstone_alert(status: str, error: str, quarantined_to=None) -> None:
+    _DELETED_TRADE_TOMBSTONE.update(status=status, error=str(error)[:300], alerted_at=utc_iso())
+    if quarantined_to:
+        _DELETED_TRADE_TOMBSTONE["quarantined_to"] = quarantined_to
+    logger.error(f"[ALERT] [TRADE-DELETE-BY-ID] tombstone {status}: {str(error)[:200]} quarantined_to={quarantined_to} "
+                 f"- CSV_TRADES fallback replay and delete-by-id refused until fixed [PIPELINE ENFORCEMENT]")
+
+
+def _fsync_dir(path: str) -> None:
+    fd = os.open(os.path.dirname(os.path.abspath(path)) or ".", os.O_RDONLY)
     try:
-        with open(DELETED_TRADE_IDS_FILE, encoding="utf-8") as handle:
-            prior = json.load(handle)
-    except (OSError, ValueError):
-        prior = {}
-    shas = [s for s in (prior.get("list_sha256s") or []) if isinstance(s, str)]
-    if list_sha256 and str(list_sha256) not in shas:
-        shas.append(str(list_sha256))
-    doc = {"schema": "deleted_trade_ids_v1", "updated_at": utc_iso(),
-           "ids": sorted(_DELETED_TRADE_IDS), "list_sha256s": shas}
-    candidate = f"{DELETED_TRADE_IDS_FILE}.{os.getpid()}.tmp"
-    with open(candidate, "w", encoding="utf-8") as handle:
-        json.dump(doc, handle)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(candidate, DELETED_TRADE_IDS_FILE)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
-def load_deleted_trade_ids() -> int:
-    """Boot: load the persisted tombstone. Must run before replay_csv_write_fallback()."""
+def _quarantine_tombstone(reason: str) -> str:
+    """Rename (never delete, never overwrite) a corrupt tombstone aside with a timestamp suffix."""
+    dest = f"{DELETED_TRADE_IDS_FILE}.corrupt.{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}.{os.getpid()}"
+    n = 0
+    while os.path.exists(dest + (f".{n}" if n else "")):
+        n += 1
+    dest = dest + (f".{n}" if n else "")
+    try:
+        os.rename(DELETED_TRADE_IDS_FILE, dest)
+        _fsync_dir(dest)
+    except OSError as exc:
+        dest = f"RENAME_FAILED:{type(exc).__name__}"
+    _tombstone_alert("CORRUPT", reason, dest)
+    return dest
+
+
+def _read_tombstone_doc():
+    """None when absent; the parsed doc when valid; quarantines and raises TombstoneUnavailable when corrupt."""
     try:
         with open(DELETED_TRADE_IDS_FILE, encoding="utf-8") as handle:
             doc = json.load(handle)
     except FileNotFoundError:
-        return 0
+        if glob.glob(f"{glob.escape(DELETED_TRADE_IDS_FILE)}.corrupt.*"):
+            # a quarantined tombstone with no valid replacement: its ids are unknown, stay closed
+            _tombstone_alert("CORRUPT", "tombstone quarantined earlier and not restored")
+            raise TombstoneUnavailable("TOMBSTONE_QUARANTINED")
+        return None
     except (OSError, ValueError) as exc:
-        logger.error(f"[TRADE-DELETE-BY-ID] tombstone unreadable: {exc} [PIPELINE ENFORCEMENT]")
+        _quarantine_tombstone(f"unreadable: {type(exc).__name__}: {exc}")
+        raise TombstoneUnavailable("TOMBSTONE_CORRUPT") from exc
+    if (not isinstance(doc, dict) or doc.get("schema") != "deleted_trade_ids_v1"
+            or not isinstance(doc.get("ids"), list) or not isinstance(doc.get("list_sha256s", []), list)):
+        _quarantine_tombstone("bad schema")
+        raise TombstoneUnavailable("TOMBSTONE_CORRUPT")
+    return doc
+
+
+def _persist_deleted_trade_ids(list_sha256=None) -> None:
+    """Durably write the tombstone: tmp + fsync + os.replace + directory fsync. Caller holds the trade-file lock.
+    Fails closed: never overwrites (or rebuilds from memory over) a corrupt or quarantined tombstone."""
+    if _DELETED_TRADE_TOMBSTONE["status"] == "CORRUPT":
+        raise TombstoneUnavailable("TOMBSTONE_CORRUPT")
+    prior = _read_tombstone_doc() or {}
+    shas = [s for s in (prior.get("list_sha256s") or []) if isinstance(s, str)]
+    if list_sha256 and str(list_sha256) not in shas:
+        shas.append(str(list_sha256))
+    ids = set(_DELETED_TRADE_IDS) | {str(i) for i in prior.get("ids") or [] if i and str(i) not in _UNTOMBSTONED}
+    doc = {"schema": "deleted_trade_ids_v1", "updated_at": utc_iso(), "ids": sorted(ids), "list_sha256s": shas}
+    candidate = f"{DELETED_TRADE_IDS_FILE}.{os.getpid()}.tmp"
+    try:
+        with open(candidate, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, DELETED_TRADE_IDS_FILE)
+        _fsync_dir(DELETED_TRADE_IDS_FILE)
+    except OSError as exc:
+        _tombstone_alert("PERSIST_FAILED", f"{type(exc).__name__}: {exc}")
+        raise TombstoneUnavailable("TOMBSTONE_PERSIST_FAILED") from exc
+    _UNTOMBSTONED.clear()
+    if _DELETED_TRADE_TOMBSTONE["status"] == "PERSIST_FAILED":
+        _DELETED_TRADE_TOMBSTONE.update(status="OK", error=None)
+
+
+_UNTOMBSTONED: set = set()  # ids removed from the tombstone by a rollback, pending the next persist
+
+
+def load_deleted_trade_ids() -> int:
+    """Boot: load the persisted tombstone. Must run before replay_csv_write_fallback(). A corrupt file is
+    quarantined, an [ALERT] raised and status CORRUPT set, which keeps the CSV_TRADES replay refused."""
+    try:
+        doc = _read_tombstone_doc()
+    except TombstoneUnavailable:
         return 0
-    ids = {str(i) for i in (doc.get("ids") or []) if i}
+    ids = {str(i) for i in ((doc or {}).get("ids") or []) if i}
     _DELETED_TRADE_IDS.update(ids)
     return len(ids)
+
+
+def _tombstone_ids_before_delete(deleted_ids, list_sha256=None) -> set:
+    """HM R2b nit: persist the tombstone BEFORE the CSV delete (closes the crash window). Returns the newly added
+    ids so a refused/rolled-back delete can remove them again (_untombstone)."""
+    ids = {str(i) for i in (deleted_ids or ()) if i}
+    added = ids - _DELETED_TRADE_IDS
+    _DELETED_TRADE_IDS.update(ids)
+    try:
+        _persist_deleted_trade_ids(list_sha256)
+    except Exception:
+        _DELETED_TRADE_IDS.difference_update(added)
+        raise
+    return added
+
+
+def _deleted_trade_health() -> dict:
+    return {**_DELETED_TRADE_RESAVE_REFUSED, "tombstoned_ids": len(_DELETED_TRADE_IDS),
+            "tombstone_status": _DELETED_TRADE_TOMBSTONE["status"],
+            "tombstone_quarantined_to": _DELETED_TRADE_TOMBSTONE["quarantined_to"]}
+
+
+def _untombstone(ids) -> None:
+    """Rollback: the delete did not happen (refused, or restored from its snapshot), so drop the ids it added."""
+    ids = {str(i) for i in (ids or ())}
+    if not ids:
+        return
+    _DELETED_TRADE_IDS.difference_update(ids)
+    _UNTOMBSTONED.update(ids)
+    _persist_deleted_trade_ids()
 
 
 def _reload_trades_after_delete(deleted_ids, list_sha256=None) -> int:
     """Call with the trade-file lock held, after a real (non-dry) delete-by-id. Tombstone the ids (persisted),
     drop them from the in-memory trade list, then reload it from CSV_TRADES. Returns in-memory rows dropped."""
     ids = {str(i) for i in (deleted_ids or ()) if i}
-    _DELETED_TRADE_IDS.update(ids)
-    _persist_deleted_trade_ids(list_sha256)
+    if not ids <= _DELETED_TRADE_IDS:  # normally already persisted by _tombstone_ids_before_delete
+        _DELETED_TRADE_IDS.update(ids)
+        _persist_deleted_trade_ids(list_sha256)
     with trade_lock:
         before = len(trades)
         trades[:] = [t for t in trades if str(t.get("trade_id") or "") not in _DELETED_TRADE_IDS]
@@ -48234,6 +48340,11 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
         })
     checks.append(_memory_oom_check(now))
     checks.append(_offline_sim_epoch_check())
+    _tomb = _DELETED_TRADE_TOMBSTONE
+    checks.append({"id": "fly.trade_delete_tombstone", "status": "GREEN" if _tomb["status"] == "OK" else "RED",
+                   "observed": f"{_tomb['status']}" + (f" ({_tomb['error']})" if _tomb["error"] else "")
+                   + f", refused re-saves {_DELETED_TRADE_RESAVE_REFUSED['count']}",
+                   "threshold": "tombstone readable and persisted"})
     try:
         checks.append(_live_guardian_force_flat_check())
     except Exception as exc:  # noqa: BLE001
@@ -51197,7 +51308,7 @@ def status():
         "bitfinex_live_enabled": bitfinex_live_enabled,
         "force_paper_mode": force_paper_mode,
         "relay_configured": relay_configured,
-        "deleted_trade_resave_refused": {**_DELETED_TRADE_RESAVE_REFUSED, "tombstoned_ids": len(_DELETED_TRADE_IDS)},
+        "deleted_trade_resave_refused": _deleted_trade_health(),
         # Section 1: explicit running source revision + policy identifiers.
         # The running bot must not lie about which commit produced it.
         "bot_version": bot_version,
@@ -51470,6 +51581,7 @@ def health():
         "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
         "tile_registry_signature": active_tile_registry_signature(),
+        "deleted_trade_resave_refused": _deleted_trade_health(),
         "collection_epoch_id": _collection_epoch_id_cached(),
         "execution_paused": bool(state.get("execution_paused", False)),
         "execution_reason": state.get("execution_reason", ""),
@@ -52189,10 +52301,31 @@ def api_admin_trades_delete_by_id():
     try:
         # Both locks are RLocks: hold them across the delete AND the in-memory reload so no save can interleave.
         with _TradeFileLock():
-            out = _tdi.delete_trades_by_id(os.path.abspath(CSV_TRADES), body.get("ids"), body.get("list_sha256"),
-                                           dry_run=dry_run, lock=_TradeFileLock())
+            added = set()
+            if not dry_run:
+                if _DELETED_TRADE_TOMBSTONE["status"] == "CORRUPT":
+                    return jsonify({"ok": False, "refused": "TOMBSTONE_CORRUPT"}), 409
+                try:  # HM R2b: tombstone persisted BEFORE the CSV rewrite
+                    added = _tombstone_ids_before_delete(body.get("ids"), body.get("list_sha256"))
+                except TombstoneUnavailable as e:
+                    return jsonify({"ok": False, "error": str(e), "deleted": False}), 500
+            try:
+                out = _tdi.delete_trades_by_id(os.path.abspath(CSV_TRADES), body.get("ids"), body.get("list_sha256"),
+                                               dry_run=dry_run, lock=_TradeFileLock())
+            except BaseException:
+                if added:  # refused or restored from the snapshot: nothing was deleted, untombstone
+                    try:
+                        _untombstone(added)
+                    except TombstoneUnavailable as ue:
+                        logger.error(f"[ALERT] [TRADE-DELETE-BY-ID] untombstone after rollback failed: {ue} "
+                                     f"[PIPELINE ENFORCEMENT]")
+                raise
+            if added and not out.get("removed_count"):
+                _untombstone(added)
             if not out.get("dry_run") and out.get("removed_count"):
                 out["in_memory_dropped"] = _reload_trades_after_delete(body.get("ids"), out.get("list_sha256"))
+    except TombstoneUnavailable as e:
+        return jsonify({"ok": False, "error": str(e), "detail": "delete state uncertain; see [ALERT]"}), 500
     except _tdi.DeleteRefused as e:
         logger.warning(f"[TRADE-DELETE-BY-ID] refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
         return jsonify({"ok": False, "refused": e.code, "detail": e.detail}), 409
