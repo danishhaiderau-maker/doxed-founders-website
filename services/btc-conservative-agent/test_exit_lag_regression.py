@@ -48,7 +48,8 @@ def test_missing_receive_ts_is_unmeasured_noncountable():
     r = _row("u", dec=D + 50, fill=D + 51)
     assert elr.UNMEASURED in r17.proof_failures(r)
     r.update(non_countable=True, non_countable_reason="X")
-    assert r17.non_countable_reason(r, ids=set(), load_errors=[]) == "X|" + elr.UNMEASURED
+    reason = r17.non_countable_reason(r, ids=set(), load_errors=[])
+    assert reason.startswith("X;") and reason.endswith("|" + elr.UNMEASURED)  # full-reason format (#870)
     # pre-deploy rows untouched
     assert elr.reasons(_row("p", dec=D - 50, fill=D - 49)) == []
 
@@ -61,7 +62,8 @@ def test_the_16_stay_regression_whatever_they_measure():
         r = _row(tid, dec=d, fill=f, rx=d - 0.001)  # even a fast measured lag
         assert elr.classify(r) == elr.REGRESSION
         r.update(non_countable=True, non_countable_reason="DEFAULT_DELAY_EXIT")
-        assert r17.non_countable_reason(r, ids=set(), load_errors=[]) == "DEFAULT_DELAY_EXIT|" + elr.REASON
+        reason = r17.non_countable_reason(r, ids=set(), load_errors=[])
+        assert reason.startswith("DEFAULT_DELAY_EXIT;") and reason.endswith("|" + elr.REASON)  # full-reason format (#870)
 
 
 def test_arm_gate_counts_consecutive_ok_only():
