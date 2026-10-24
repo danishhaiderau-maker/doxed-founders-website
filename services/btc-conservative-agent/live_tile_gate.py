@@ -355,7 +355,10 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
             return False, [DENY_TILE_KEY_UNKNOWN], info
         reasons: list = []
         rows = list(decisions or [])
-        chains = list(chains or [])
+        if chains is None:   # HM R5 nit: None is an unreadable chain source, never "no live loss" (fail closed)
+            import live_guardian as _lg0
+            return False, [_lg0.total_loss_arm_block(None)], info
+        chains = list(chains)
         # 1. mutex: one live position account-wide
         others = live_exposures(chains, rows, now, exclude_trade_id=trade_id)
         info["exposures"] = others[:5]

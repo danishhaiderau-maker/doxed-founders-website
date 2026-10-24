@@ -388,3 +388,9 @@ def test_d3_one_helper_no_funding_term_in_gate_or_guardian_source():
     assert gate.count("pnl = trade_realised_pnl_usd(c)") == 1                   # G6 / admit_entry
     assert "_ltg.trade_realised_pnl_usd(c)" in guardian                          # guardian rolling ledger cap
     assert '_f(c.get("pnl_usd")) is not None' not in gate
+
+
+def test_r5_admit_entry_none_chains_fails_closed():
+    """HM R5 nit: chains=None is an unreadable source, refused (no inert `chains or []`)."""
+    ok, reasons, _ = admit(chains=None)
+    assert not ok and reasons == ["LIVE_TOTAL_LOSS_UNREADABLE"]
