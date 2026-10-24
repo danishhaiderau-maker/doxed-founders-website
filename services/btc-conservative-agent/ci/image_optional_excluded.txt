@@ -38,3 +38,8 @@ research.shadow_model_input
 research.shadow_result_stream
 research.tile_evidence_points
 research.retention
+# found by the real docker build (CI job 120810328457); the local emulator differs for strategy_lab/
+strategy_lab.engine
+strategy_lab.export
+strategy_lab.rankings
+strategy_lab.stream_studies
