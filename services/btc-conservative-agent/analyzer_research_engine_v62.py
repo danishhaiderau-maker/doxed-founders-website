@@ -1353,12 +1353,82 @@ def _epoch_receipt_block():
         "unstamped_rows_unguarded_by_stream": reads.get("unstamped_rows_unguarded_by_stream") or {},
         # On disk until clean-epoch-wipe, but every analyzer reader of these streams rejects them.
         "pre_epoch_rows_read_guarded": sum(guarded.values()),
+        "unplaced_rows_list_file": UNPLACED_ROWS_FILE,
         "pre_epoch_rows_read_guarded_by_stream": dict(sorted(guarded.items())),
         "non_evidence_streams": sorted(de.NON_EVIDENCE_BASES),
         "unstamped_rule": "rows without data_epoch_id are admitted only when timestamped at or after "
                           "started_at_utc (labelled CURRENT_UNSTAMPED / UNSTAMPED_POST_EPOCH)",
     })
+    _write_unplaced_rows_artifact(guard, data_root, block)
     return block
+
+
+UNPLACED_ROWS_FILE = "analyzer_epoch_unplaced_rows.json"
+TILE_REALISM_FILE = "tile_realism_table.json"
+
+
+def _write_unplaced_rows_artifact(guard, data_root, block):
+    """Item 5: the exact straddle/unstamped rows (EXCLUDED, never admitted, never deleted) of THIS generation,
+    with list_sha256, so the receipt count and the reviewed list always come from the same snapshot."""
+    from analyzer_epoch_guard import unplaced_rows_document
+    try:
+        doc = unplaced_rows_document(data_root, guard.manifest, guard.floor_ts)
+        with open(analyzer_report_path(UNPLACED_ROWS_FILE), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=None, default=str)
+        block["unplaced_rows_list"] = {"count": doc["count"], "list_sha256": doc["list_sha256"],
+                                       "by_stream": doc["by_stream"], "file": UNPLACED_ROWS_FILE}
+    except Exception as exc:
+        block["unplaced_rows_list"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+
+
+def _write_tile_realism_artifact(manifest):
+    """Strategist (a)-(e): realism-stamped per-tile table over countable current-epoch rows only."""
+    from research.tile_realism_table import build_tile_table
+    import csv as _csv
+    import r17_exclusion as _r17
+    try:
+        import monitor_tiles as _mt
+        restore = lambda r: {**r, **{k: _mt._restore_pricing_value(k, r.get(k)) for k in _mt.PRICING_KEYS}}
+    except Exception:
+        restore = dict
+    try:
+        rows = []
+        if os.path.exists(TRADES_FILE):
+            with open(TRADES_FILE, encoding="utf-8", newline="") as fh:
+                rows = [restore(dict(r)) for r in _csv.DictReader(fh)]
+        table = build_tile_table(rows, ids=_r17.R17_IDS, load_errors=_r17.LOAD_ERRORS)
+        with open(analyzer_report_path(TILE_REALISM_FILE), "w", encoding="utf-8") as fh:
+            json.dump(table, fh, indent=1, default=str)
+        manifest["tile_realism_table"] = {"file": TILE_REALISM_FILE, "tiles": len(table.get("tiles") or {}),
+                                          "r17_excluded_rows": table.get("r17_excluded_rows")}
+    except Exception as exc:
+        manifest["tile_realism_table"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+    artifacts = manifest.setdefault("text_artifacts", [])
+    for name in (TILE_REALISM_FILE, UNPLACED_ROWS_FILE):
+        if name not in artifacts:
+            artifacts.append(name)
+
+
+def _mirror_publish_freshness():
+    """Freshness of the last verified analyzer-mirror publish (receipt written by publish_analyzer_mirror.py)."""
+    path = os.getenv("ANALYZER_MIRROR_PUBLISH_RECEIPT")
+    if not path:
+        return None
+    try:
+        import importlib.util
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                              "scripts", "publish_analyzer_mirror.py")
+        spec = importlib.util.spec_from_file_location("publish_analyzer_mirror", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                current = json.load(fh)
+        except (OSError, ValueError):
+            current = {}
+        return mod.publish_staleness(current)
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"[:300], "publish_stale": None}
 
 
 def _v2_data_start_ts():
@@ -22025,6 +22095,15 @@ def _attach_generation_receipt(manifest, *, optional_errors):
         data_epoch=data_epoch,
         source_revision=_receipt_source_revision(manifest),
     )
+    _write_tile_realism_artifact(manifest)
+    freshness = _mirror_publish_freshness()
+    if freshness is not None:
+        receipt["mirror_publish_freshness"] = freshness
+        if freshness.get("publish_stale"):
+            receipt["alerts"] = list(receipt.get("alerts") or []) + ["ANALYZER_MIRROR_PUBLISH_STALE"]
+            receipt["reasons"] = list(receipt.get("reasons") or []) + [
+                f"mirror publish stale: last verified publish {freshness.get('last_published_at')} "
+                f"age_sec={freshness.get('last_published_age_sec')}"]
     recon = _write_ledger_reconciliation(manifest)
     if recon:
         rank = {"GREEN": 0, "AMBER": 1, "RED": 2}
@@ -22044,6 +22123,9 @@ def _attach_generation_receipt(manifest, *, optional_errors):
             "protection_replay_excluded_by_reason",
         )
     }
+    for key in ("mirror_publish_freshness", "alerts"):
+        if key in receipt:
+            manifest["generation_receipt"][key] = receipt[key]
     if "data_epoch" in receipt:
         manifest["generation_receipt"]["data_epoch"] = receipt["data_epoch"]
     try:
