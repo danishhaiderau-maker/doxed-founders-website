@@ -10,6 +10,14 @@ from research_v3_store import V3EvidenceStore
 from transactional_receipt_store import legacy_receipt_path, read_legacy_receipt
 
 
+@pytest.fixture(autouse=True)
+def _reset_alert_ratelimit():
+    import research_v3_store
+    research_v3_store._tombstone_alert_last.clear()
+    yield
+    research_v3_store._tombstone_alert_last.clear()
+
+
 def _store(tmp_path, n=6, ledgers=("decision", "lifecycle")):
     s = V3EvidenceStore(tmp_path, epoch_id="epoch-test")
     for led in ledgers:
@@ -438,3 +446,32 @@ def test_real_r17_list_d0dcf920_refused_as_multi_stream(tmp_path):
             lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=dry)
         assert e.value.code == "MULTI_STREAM_LIST_REFUSED"
         assert e.value.detail == {"streams": ["decision", "lifecycle", "market_segment", "order_intent"]}
+
+
+@pytest.mark.parametrize("how", ["unlink", "drop_pin"])
+def test_complete_json_lost_with_tombstones_fails_closed(tmp_path, how):
+    s = _deleted_store(tmp_path)
+    comp = s._completeness_path("decision")
+    if how == "unlink":
+        comp.unlink()
+        expect = {"DELETED_ROW_TOMBSTONES_INDEX_MISSING", "DELETED_ROW_TOMBSTONES_PIN_MISSING"}
+        assert lds.tombstone_state(s.root, "decision")[2] == "DELETED_ROW_TOMBSTONES_INDEX_MISSING"
+    else:
+        row = json.loads(comp.read_text()); row.pop(lds.TOMBSTONE_PIN_KEY)
+        comp.write_text(json.dumps(row))
+        expect = {"DELETED_ROW_TOMBSTONES_PIN_MISSING"}
+    res = s.append("decision", {"record_id": "decision-q", "i": 11})
+    assert res["blocked"] and res["reason"] in expect
+
+
+def test_tombstone_alert_rate_limited(tmp_path, caplog, monkeypatch):
+    import research_v3_store
+    s = _deleted_store(tmp_path)
+    lds._tombstone_path(s, "decision").unlink()
+    for i in range(5):
+        assert s.append("decision", {"record_id": f"decision-r{i}", "i": i})["blocked"]
+    assert caplog.text.count("[ALERT] [LEDGER-TOMBSTONES]") == 1
+    clock = [research_v3_store.time.monotonic() + research_v3_store.TOMBSTONE_ALERT_INTERVAL_SEC + 1]
+    monkeypatch.setattr(research_v3_store.time, "monotonic", lambda: clock[0])
+    assert s.append("decision", {"record_id": "decision-r9", "i": 9})["blocked"]
+    assert caplog.text.count("[ALERT] [LEDGER-TOMBSTONES]") == 2

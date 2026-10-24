@@ -35,6 +35,9 @@ _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, set[str]]] = {}
 _tombstone_cache: dict[str, tuple[tuple[Any, Any], frozenset[str]]] = {}
+# HM R2b: rate-limit the fail-closed [ALERT] to once per (stream, reason) per interval per process.
+TOMBSTONE_ALERT_INTERVAL_SEC = 900
+_tombstone_alert_last: dict[tuple[str, str], float] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _provenance_cache: dict[str, str] | None = None
 _config_signature_provider = None
@@ -2349,9 +2352,13 @@ class V3EvidenceStore:
             from ledger_delete_by_sha import tombstone_state
             ok, shas, reason = tombstone_state(self.root, ledger)
             if not ok:
-                logging.getLogger(__name__).error(
-                    f"[ALERT] [LEDGER-TOMBSTONES] {ledger} {reason}: appends to this stream refused "
-                    "(fail closed) [PIPELINE ENFORCEMENT]")
+                now = time.monotonic()
+                last = _tombstone_alert_last.get((ledger, reason))
+                if last is None or now - last >= TOMBSTONE_ALERT_INTERVAL_SEC:
+                    _tombstone_alert_last[(ledger, reason)] = now
+                    logging.getLogger(__name__).error(
+                        f"[ALERT] [LEDGER-TOMBSTONES] {ledger} {reason}: appends to this stream refused "
+                        f"(fail closed; repeats suppressed {TOMBSTONE_ALERT_INTERVAL_SEC}s) [PIPELINE ENFORCEMENT]")
                 return reason
             cached = (key[1:], shas)
             _tombstone_cache[key[0]] = cached
