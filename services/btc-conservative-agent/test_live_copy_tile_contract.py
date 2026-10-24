@@ -98,7 +98,12 @@ def test_no_retired_tile_on_any_live_copy_path():
         assert elig.set(lane, True)[0] is False
         assert not COMBO_LANE_SPECS.get(lane, {}).get("platform_relay_eligible"), lane
     route = BOT.read_text(encoding="utf-8").split("def api_bitfinex_tile_live_orders", 1)[1][:2500]
-    assert "TILE_RETIRED" in route and "RETIRED_TILE_LANES" in route
+    # RK 06:35 (3): the route refuses via the arm allowlist, not a per-name retired denylist.
+    assert "LANE_NOT_ARM_ALLOWLISTED" in route and "operator_eligibility_refusal(lane)" in route
+    assert "RETIRED_TILE_LANES" not in route
+    import live_tile_gate as _ltg
+    for lane in RETIRED_TILE_LANES:
+        assert _ltg.operator_eligibility_refusal(lane) is not None, lane
 
 
 def test_disloc_tiles_retired_and_bridge_removed():
