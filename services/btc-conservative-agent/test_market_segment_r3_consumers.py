@@ -254,6 +254,8 @@ NON_INPUT_SITES = {
     ('research_reset_recovery_audit.py', 'if path.name not in {n + ".json" for n in LEDGER_NAMES}:'): (1, frozenset()),
     ('research_v3_store.py', "for name in LEDGER_NAMES:"): (1, frozenset()),
     ('research_v3_store.py', "for ledger in LEDGER_NAMES:"): (1, frozenset()),
+    # Bundle 25 Oct (#874 x #873): verify()'s ledger_status comprehension labels RETIRED/RED/GREEN; no read.
+    ('research_v3_store.py', "for ledger in LEDGER_NAMES"): (1, frozenset()),
     ('transactional_receipt_store.py', "for ledger in LEDGER_NAMES:"): (2, frozenset({'os.scandir(receipt_dir)'})),
 }
 

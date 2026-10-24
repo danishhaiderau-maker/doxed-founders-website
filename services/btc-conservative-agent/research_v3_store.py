@@ -2752,8 +2752,11 @@ class V3EvidenceStore:
             "defects": defects,
             "passed": not defects,
             # RETIRED streams are reported as RETIRED, never GREEN (RK PASS 25 Oct).
-            "ledger_status": {ledger: ("RETIRED" if ledger in retired else ("RED" if any(
-                d.get("ledger") == ledger for d in defects) else "GREEN")) for ledger in LEDGER_NAMES},
+            "ledger_status": {
+                ledger: ("RETIRED" if ledger in retired else ("RED" if any(
+                    d.get("ledger") == ledger for d in defects) else "GREEN"))
+                for ledger in LEDGER_NAMES  # R3-NON-INPUT: status labels from counts/defects only, no ledger read
+            },
             "retired_streams": {k: {"status": "RETIRED", "reason": v} for k, v in retired.items()},
         }
 
