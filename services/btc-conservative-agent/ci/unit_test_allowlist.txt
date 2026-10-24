@@ -656,3 +656,5 @@ test_booktail_incremental.py
 test_exit_lag_regression.py
 test_exit_scan_stamps.py
 test_trigger_receive_stamp.py
+test_ledger_scan_incremental_retired.py
+test_restart_initiator.py

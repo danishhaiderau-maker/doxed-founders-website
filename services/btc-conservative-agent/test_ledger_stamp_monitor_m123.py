@@ -88,8 +88,15 @@ def test_m3_cap_never_green_and_never_hides(tmp_path):
            + [{"record_id": "n", "write_stamp": _st(SINCE + 5)}])
     _others(tmp_path, "order_intent")
     res = mon.check(tmp_path, FLOOR, max_bytes=2000)
-    assert res["status"] == "AMBER" and res["alert"] and "order_intent:SCAN_BUDGET_EXHAUSTED" in res["unverified"]
+    assert res["status"] == "AMBER" and res["alert"] and "order_intent:SCAN_INCOMPLETE_RESUMING" in res["unverified"]
     assert res["ledgers"]["order_intent"]["unclassified_at_cap"] > 0
+    # HM 06:30: the cap no longer strands the stream; the cached offset resumes and the scan completes.
+    for _ in range(20):
+        res = mon.check(tmp_path, FLOOR, max_bytes=2000)
+        if res["scan_complete"]:
+            break
+    o = res["ledgers"]["order_intent"]
+    assert res["scan_complete"] and o["status"] == "GREEN" and o["legacy_unstamped_before_first_stamp"] == 50
 
 
 def test_unstamped_only_stream_written_since_is_red_fail_closed(tmp_path):

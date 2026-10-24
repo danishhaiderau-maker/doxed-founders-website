@@ -116,6 +116,48 @@ def problem_from(*, paused: bool, pause_owner=None, pause_reason=None, tiles_on:
     return None
 
 
+# HM 25 Oct 06:30: who initiated a restart. Fly exposes non-secret release identity in the machine env; a
+# `fly secrets set` / config update creates a new release/machine version with the SAME image and git rev.
+RELEASE_ENV_KEYS = ("FLY_RELEASE_VERSION", "FLY_RELEASE", "FLY_MACHINE_VERSION", "FLY_IMAGE_REF")
+INITIATOR_ALERT_WINDOW_SEC = 6 * 3600
+
+
+def release_identity(env=None) -> dict:
+    """Non-secret Fly release identifiers present at boot (missing keys omitted)."""
+    env = os.environ if env is None else env
+    return {k: str(env[k])[:200] for k in RELEASE_ENV_KEYS if env.get(k)}
+
+
+def classify_initiator(prev: dict | None, revision: str, release: dict, prev_shutdown: dict | None) -> dict:
+    """deploy | config_change | manual | crash | first_boot. Anything but deploy/first_boot alerts."""
+    if not prev:
+        return {"initiator": "first_boot", "basis": "no persisted boot record", "alert": False}
+    prev_rev = prev.get("revision")
+    prev_rel = prev.get("release") if isinstance(prev.get("release"), dict) else {}
+    if prev_rev and prev_rev != revision:
+        return {"initiator": "deploy", "basis": f"git rev {_short_rev(prev_rev)} -> {_short_rev(revision)}",
+                "alert": False}
+    img_a, img_b = prev_rel.get("FLY_IMAGE_REF"), release.get("FLY_IMAGE_REF")
+    if img_a and img_b and img_a != img_b:
+        return {"initiator": "deploy", "basis": "same git rev, new image ref", "alert": False}
+    for key in ("FLY_RELEASE_VERSION", "FLY_RELEASE", "FLY_MACHINE_VERSION"):
+        a, b = prev_rel.get(key), release.get(key)
+        if a and b and a != b:
+            return {"initiator": "config_change",
+                    "basis": f"same git rev and image, {key} {a} -> {b} (secret/config change)", "alert": True}
+    kind = (prev_shutdown or {}).get("kind")
+    if kind == "clean_shutdown" or (kind == "signal" and (prev_shutdown or {}).get("signal")):
+        return {"initiator": "manual", "basis": f"same release; previous process ended {kind}"
+                + (f":{prev_shutdown.get('signal')}" if (prev_shutdown or {}).get("signal") else ""), "alert": True}
+    basis = "same release; previous process ended without a clean-shutdown marker"
+    if kind == "crash":
+        basis = f"same release; previous process crashed (exit={(prev_shutdown or {}).get('exit_code')})"
+    if not release:
+        basis += " (release identity env unavailable)"
+    return {"initiator": "crash", "basis": basis, "alert": True}
+
+
+
 class UptimeTracker:
     """Thread-safe, durable uninterrupted-runtime state machine."""
 
@@ -174,7 +216,7 @@ class UptimeTracker:
         self.state["blocker"] = dict(problem)
 
     # ------------------------------------------------------------ transitions
-    def boot(self, now: float, revision: str) -> dict:
+    def boot(self, now: float, revision: str, release: dict | None = None) -> dict:
         """Record this process start; returns the interruption it opened or continued."""
         with self.lock:
             prev = self._load()
@@ -191,8 +233,11 @@ class UptimeTracker:
             down = None if last_seen is None else max(0.0, now - last_seen)
             open_prev = (prev.get("current") if prev else None) or None
             prev_shutdown = self._prev_shutdown(prev, last_seen, now)
+            release = dict(release) if isinstance(release, dict) else release_identity()
+            initiator = classify_initiator(prev, revision, release, prev_shutdown)
             self.state.update(schema=SCHEMA, revision=revision, boot_at=now, heartbeat_at=now, run_started_at=None,
-                              boot_kind=kind, prev_shutdown=prev_shutdown)
+                              boot_kind=kind, prev_shutdown=prev_shutdown, release=release,
+                              prev_release=(prev.get("release") if prev else None), initiator=initiator)
             if (open_prev and last_seen is not None and down is not None
                     and down <= CONTINUE_OPEN_INTERRUPTION_SEC):
                 started = clock(open_prev.get("at"), now)["melbourne"]
@@ -328,6 +373,9 @@ class UptimeTracker:
         boot_kind = st.get("boot_kind")
         if boot_kind:
             parts.append(f"boot={boot_kind}")
+        init = st.get("initiator") if isinstance(st.get("initiator"), dict) else None
+        if init:
+            parts.append(f"initiator={init.get('initiator')}")
         if prev:
             if prev.get("kind") == "signal":
                 parts.append("prev_end=signal" + (f":{prev.get('signal')}" if prev.get("signal") else ""))
@@ -351,6 +399,11 @@ class UptimeTracker:
                 "kind": current.get("kind"), "owner": current.get("owner"),
                 "at": _iso(current.get("at")), "text": current.get("text")},
             "restart_cause": " | ".join(parts) if parts else "unknown",
+            "initiator": (init or {}).get("initiator", "unknown"),
+            "initiator_basis": (init or {}).get("basis"),
+            "initiator_alert": bool((init or {}).get("alert", False)),
+            "release": st.get("release") or {},
+            "prev_release": st.get("prev_release"),
         }
 
     # ------------------------------------------------------------ read model
