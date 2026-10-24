@@ -53,3 +53,28 @@ def test_route_auth_default_dry_run_refusal_and_real_run(tmp_path, monkeypatch):
 def test_boot_recover_noop_without_snapshots(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "_data_sync_runtime_root", lambda: str(tmp_path))
     bot._ledger_delete_boot_recover()
+
+
+def test_boot_recover_runs_before_any_thread_or_writer_in_main():
+    """HM R2 blocker: recovery must finish before Flask, heartbeat, live-guardian, lifecycle runtime, collectors."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(bot.main)))
+    calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            calls.append((node.lineno, name))
+    recover = [ln for ln, n in calls if n == "_ledger_delete_boot_recover"]
+    assert len(recover) == 1
+    must_follow = {"Thread", "run_flask", "_create_dashboard_server", "_start_lifecycle_pipeline_runtime",
+                   "_start_collector_worker", "_tile_integrity_ensure_started", "spawn"}
+    later = [(ln, n) for ln, n in calls if n in must_follow]
+    assert later, "expected thread starts in main()"
+    assert all(ln > recover[0] for ln, _n in later), [x for x in later if x[0] <= recover[0]]
+    # and it only follows singleton acquisition + crash-journal repair
+    first_singleton = min(ln for ln, n in calls if n == "acquire_process_singleton")
+    assert first_singleton < recover[0]

@@ -61026,6 +61026,9 @@ def main():
     from crash_journal_repair import repair_known_incident_at_startup
     journal_repair_status = repair_known_incident_at_startup(Path.cwd())
     logger.info("[STARTUP] crash journal repair: %s", journal_repair_status)
+    # HM R2 blocker: restore any ledger left half-applied by ledgers/delete-by-sha BEFORE any thread
+    # (Flask, heartbeat, live-guardian, lifecycle pipeline, collectors) can read or append to it.
+    _ledger_delete_boot_recover()
     BOT_INSTANCE_ID = (
         f"dashboard-{DASHBOARD_PORT}-pid-{os.getpid()}-{uuid.uuid4().hex[:12]}"
     )
@@ -61403,7 +61406,6 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
-    _ledger_delete_boot_recover()  # before any ledger writer thread starts
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "
