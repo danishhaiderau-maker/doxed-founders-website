@@ -9,6 +9,8 @@ the context builder itself has no filesystem side effects.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from dataclasses import dataclass, field
 import hashlib
@@ -498,6 +500,7 @@ def verified_segment_rows(evidence, bindings, pins, parent_identity, symbol):
     links=bindings if isinstance(bindings,list) else [bindings]
     if not 0<len(objects)<=256 or len(objects)!=len(links):
         raise ValueError('DECLARED_SEGMENT_COUNT_INVALID')
+    if not _msr3.INPUT_ALLOWED: _msr3.require_envelope('declared_baseline_coverage')  # R3 fail closed
     rows={}; hashes=[]
     for envelope,link in zip(objects,links):
         segment,digest=_verified(envelope,pins)
@@ -843,6 +846,8 @@ def build_baseline_execution_context(
                 or _decimal(atr.get("available_at_ts"), positive=True) > fill_ts):
             raise ValueError("BASELINE_CONTEXT_ATR_NOT_EXACT_CAUSAL_FILL")
         atr_pct = _decimal(atr.get("atr_pct"), positive=True)
+        if not _msr3.INPUT_ALLOWED:  # R3 fail closed
+            _msr3.require_envelope("baseline_context_coverage")
         segment, source_hash = _verified(coverage_evidence, pinned_sources)
         evidence_hashes.add(source_hash)
         if segment.get("schema") != "market_segment_v3":

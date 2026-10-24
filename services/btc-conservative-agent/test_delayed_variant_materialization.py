@@ -26,8 +26,9 @@ def test_actual_pinned_declarations_both_directions(tmp_path,monkeypatch):
     for episode in report['episode_receipts']:
         assert len(episode['delayed_variants'])==2
         assert len({v['timing_model_sha256'] for v in episode['delayed_variants']})==2
-        assert any(r.get('model_context_status')=='SUPPORTED'
-                   for v in episode['delayed_variants'] for r in v['results'])
+        # R3 rewrite: delayed contexts rest on market_segment rows -> never SUPPORTED.
+        assert not any(r.get('model_context_status')=='SUPPORTED'
+                       for v in episode['delayed_variants'] for r in v['results'])
         original_ids={r['baseline_id'] for r in episode['results']}
         assert all({r['baseline_id'] for r in v['results']}==original_ids for v in episode['delayed_variants'])
     cohorts=delayed_variant_cohorts(report)
@@ -49,10 +50,13 @@ def test_plural_pinned_segments_deduplicate_and_reject_conflicts():
         return segment,link
     a,ab=pair('a',[{'bucket_ts':100},{'bucket_ts':101}])
     b,bb=pair('b',[{'bucket_ts':101},{'bucket_ts':102}])
-    rows,hashes=verified_segment_rows([a,b],[ab,bb],pins,parent,'BTC')
-    assert len(rows)==3 and len(hashes)==4
+    from market_segment_r3 import MarketSegmentInputInvalid
+    # R3 rewrite: market_segment rows are L1 copies; plural, deduplicated or conflicting
+    # segments must all fail closed rather than yield verified rows.
+    with pytest.raises(MarketSegmentInputInvalid,match='INVALID_R3_MARKET_SEGMENT_INPUT'):
+        verified_segment_rows([a,b],[ab,bb],pins,parent,'BTC')
     bad,link=pair('bad',[{'bucket_ts':101,'conflict':True}])
-    with pytest.raises(ValueError,match='TIMESTAMP_CONFLICT'):
+    with pytest.raises(MarketSegmentInputInvalid,match='INVALID_R3_MARKET_SEGMENT_INPUT'):
         verified_segment_rows([a,bad],[ab,link],pins,parent,'BTC')
 
 

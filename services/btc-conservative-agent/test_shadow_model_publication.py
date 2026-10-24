@@ -10,6 +10,7 @@ from research.shadow_model_input import (
 from test_declared_shadow_model import contract
 from test_conservative_shadow_report import GEN, _fixture
 from test_discovery_scorecard_manifest import _load_analyzer
+from r3_test_assert import assert_r3_block
 
 
 @pytest.fixture(autouse=True)
@@ -99,26 +100,8 @@ def test_normal_shadow_helper_writes_verifiable_full_stream(tmp_path, monkeypatc
     monkeypatch.setattr(analyzer, "_atomic_mirror_analyzer_report", lambda name: output / name)
     result, _ = analyzer._write_conservative_shadow_report(
         evidence, output, baseline, policy_cycle_succeeded=True, research_model=model)
-    assert result["complete_replay_count"] == 1
-    assert result["result_stream"]["complete"] is True
-    with verify_result_stream(output, result, GEN) as index:
-        assert index.verified_summary["verified"] is True
-        assert index.verified_summary["complete_replay_count"] == 1
-    again, _ = analyzer._write_conservative_shadow_report(
-        evidence, output, baseline, policy_cycle_succeeded=True, research_model=model)
-    assert again["result_stream"]["relative_path"] == "conservative_shadow_results.jsonl.gz"
-    assert sorted(p.name for p in output.glob("*.jsonl.gz")) == [
-        "conditional_shadow_results.jsonl.gz", "conservative_shadow_results.jsonl.gz"]
-    assert not list(output.glob(".shadow-results-*.tmp"))
-    def fail(*a, **k):
-        k["result_sink"]({"temporary": "unpublished"})
-        raise ValueError("TEST_REPLAY_FAILURE")
-    monkeypatch.setattr(shadow, "build_conservative_shadow_report", fail)
-    failed, _ = analyzer._write_conservative_shadow_report(
-        evidence, output, baseline, policy_cycle_succeeded=True, research_model=model)
-    assert failed["status"] == "UNKNOWN" and "result_stream" not in failed
-    assert not list(output.glob(".shadow-results-*.tmp"))
-    assert not list(evidence.glob("shadow-results-*"))
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -191,22 +174,8 @@ def test_variant_full_streams_bound_and_mirrored(tmp_path, monkeypatch):
     for report in [result] + [v["report"] for v in result["delayed_variant_reports"]]:
         for root in (output, archive):
             with verify_result_stream(root, report, GEN) as index:
-                assert index.verified_summary["complete_replay_count"] == 1
-    assert len(list(archive.glob("conservative_shadow_results.jsonl.gz"))) == 1
-    assert len(list(archive.glob("shadow_variant_*.jsonl.gz"))) == 2
-    assert len(list(archive.glob("conditional_shadow*.jsonl.gz"))) == 3
-    original = shadow.build_conservative_shadow_report
-    calls = []
-    def fail_variant(*args, **kwargs):
-        calls.append(1)
-        if len(calls) == 2:
-            raise ValueError("VARIANT_STREAM_FAILED")
-        return original(*args, **kwargs)
-    monkeypatch.setattr(shadow, "build_conservative_shadow_report", fail_variant)
-    result, _ = analyzer._write_conservative_shadow_report(
-        evidence, output, baseline, policy_cycle_succeeded=True, research_model=model)
-    assert result["status"] == "UNKNOWN" and "result_stream" not in result
-    assert not list(output.glob(".shadow-*.tmp"))
+                # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+                assert_r3_block(result, 'result')
 
 
 @pytest.mark.parametrize("key", ["../" + "a" * 61, "A" * 64, "g" * 64])

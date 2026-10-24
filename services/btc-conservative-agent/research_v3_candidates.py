@@ -7,6 +7,8 @@ until conservative execution and a sealed holdout exist.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import json
 import math
 import os
@@ -152,6 +154,8 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_segment(root: Path, ref: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if not _msr3.INPUT_ALLOWED:  # R3: never read a market_segment envelope
+        return []
     relative = str(ref.get("relative_path") or "")
     if not relative:
         return []
@@ -1174,7 +1178,7 @@ class CandidateInputStream:
             return None
         one_second_rows = []
         # HM #847 N6: 1m segments are no longer loaded; nothing downstream reads canonical_1m_ohlc.
-        for ref in lifecycle.get("market_segment_refs") or []:
+        for ref in _msr3.rows("lifecycle.market_segment_refs"):  # R3: dropped input
             if str(ref.get("timeframe")) == "1s":
                 one_second_rows.extend(_load_segment(self.root, ref))
         feature = opportunity.get("feature_snapshot_at_signal") or {}
@@ -1210,9 +1214,12 @@ class CandidateInputStream:
             ],
             "tape_ids": [
                 ref.get("sha256")
-                for ref in (lifecycle.get("market_segment_refs") or [])
+                for ref in _msr3.rows("lifecycle.market_segment_refs")  # R3
                 if isinstance(ref, Mapping) and ref.get("sha256")
             ],
+            # R3: lifecycle segment refs are dropped input; say so instead of an empty tape.
+            **({"market_segment_input": _msr3.invalid("lifecycle.market_segment_refs")}
+               if lifecycle.get("market_segment_refs") and not _msr3.INPUT_ALLOWED else {}),
             "signal_ts": opportunity.get("signal_ts"),
             "regime": (
                 _regime_label(feature.get("regime"))

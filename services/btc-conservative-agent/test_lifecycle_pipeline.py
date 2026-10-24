@@ -35,7 +35,7 @@ def _row(ledger, record_id, **extra):
     }
 
 
-def _ready_rows():
+def _ready_rows(post_observation=True):
     return [
         _row(
             "order_intent",
@@ -46,13 +46,11 @@ def _ready_rows():
             schedule_sha256="a" * 64,
             chase_schedule={"terminal_ts": 10_000.0, "terminal_reason": "TTL_EXPIRED"},
         ),
-        _row("lifecycle", "terminal", terminal=True, terminal_no_fill=True),
-        _row(
-            "market_segment",
-            "post",
-            context_role="POST_EXIT_PATH",
-            coverage={"complete": True, "gaps_absent": True, "complete_through_ts": 18_000.0},
-        ),
+        # R3: post-exit observation is an explicit gap-free proof on the lifecycle row;
+        # market_segment coverage is never evidence (see test_segment_post_path_fails_closed_r3).
+        _row("lifecycle", "terminal", terminal=True, terminal_no_fill=True,
+             **({"post_observation": {"complete": True, "gaps_absent": True,
+                                      "complete_through_ts": 18_000.0}} if post_observation else {})),
     ]
 
 
@@ -136,7 +134,7 @@ def test_incomplete_is_retired_r17_and_late_evidence_cannot_resurrect_completion
     it, but it lands on the same stage and never appends a completion."""
     _patch_provenance(monkeypatch)
     counter_before = lifecycle_pipeline.lifecycle_qualification_retired_r17_count()
-    for row in _ready_rows()[:-1]:
+    for row in _ready_rows(post_observation=False):
         _append(tmp_path, row)
     first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
     assert first["results"][0]["stage"] == lifecycle_pipeline.QUALIFICATION_RETIRED_R17_STAGE
@@ -162,7 +160,7 @@ def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path
     promoted lifecycle stops at the R17 stage instead of queueing retries."""
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(lifecycle_pipeline, "QUALIFICATION_HORIZON_SEC", 100.0)
-    rows = _ready_rows()[:-1]
+    rows = _ready_rows(post_observation=False)
     rows[0]["chase_schedule"]["terminal_ts"] = 19_950.0
     for row in rows:
         _append(tmp_path, row)
@@ -543,3 +541,18 @@ def test_worker_rejects_sensitive_fields_without_result(tmp_path):
     }))
     assert lifecycle_pipeline_worker.run(request, result, nonce) == 1
     assert not result.exists()
+
+
+def test_segment_post_path_fails_closed_r3(tmp_path, monkeypatch):
+    """R3: a market_segment POST_EXIT_PATH row is dropped input; it never completes a lifecycle."""
+    _patch_provenance(monkeypatch)
+    for row in _ready_rows(post_observation=False) + [_row(
+        "market_segment", "post", context_role="POST_EXIT_PATH",
+        coverage={"complete": True, "gaps_absent": True, "complete_through_ts": 18_000.0},
+    )]:
+        _append(tmp_path, row)
+    for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
+        report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+        assert report["completion_appended_count"] == 0
+        assert report["bundle_count"] == 0
+    assert _completion_rows(tmp_path) == []

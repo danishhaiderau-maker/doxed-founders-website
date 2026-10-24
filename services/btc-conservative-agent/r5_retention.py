@@ -52,7 +52,7 @@ def _receipt(root: Path, row: Mapping[str, Any]) -> bool:
 
 
 def _iter_segments(root: Path) -> Iterable[tuple[float, int, Path]]:
-    base = root / "v3" / "market_segments"
+    base = root / "v3" / "market_segments"  # R3-NON-INPUT: R5 byte cap/reset count via stat() metadata only, never content
     if not base.is_dir():
         return
     with os.scandir(base) as buckets:

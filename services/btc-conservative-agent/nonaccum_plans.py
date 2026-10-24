@@ -98,7 +98,7 @@ def plan_c1(v3: str, epoch_ts: float) -> dict:
     current_ids: set = set()
     pre: list = []
     skipped = {"protected_or_non_hex_name": 0, "unreadable": 0}
-    for led in LEDGERS:
+    for led in LEDGERS:  # R3-NON-INPUT: reads idempotency receipt epoch ids for retention planning only, never evidence
         d = os.path.join(base, led)
         try:
             names = os.listdir(d)

@@ -47,7 +47,7 @@ def test_goal_shaped_totals_are_deterministic_and_checksum_verifiable():
     assert first["totals"] == {
         "opportunities": 2, "episodes": 2, "decisions": 2,
         "order_intents": 5, "executions": 1, "lifecycles": 8,
-        "market_segments": 7, "complete_schedules": 2, "market_paths": 1,
+        "market_segments": "INVALID_R3_MARKET_SEGMENT_INPUT", "complete_schedules": 2, "market_paths": 1,
         "terminal_outcomes": 2, "exact_episodes": 2,
         "reconstructed_episodes": 0, "unknown_episodes": 0,
     }
@@ -115,7 +115,7 @@ def test_ledger_inputs_supply_authoritative_counts(tmp_path):
     counts = ledger_source_counts(tmp_path / "v3")
     assert counts == {
         "opportunities": 2, "decisions": 1, "order_intents": "UNKNOWN",
-        "executions": "UNKNOWN", "lifecycles": "UNKNOWN", "market_segments": "UNKNOWN",
+        "executions": "UNKNOWN", "lifecycles": "UNKNOWN", "market_segments": "INVALID_R3_MARKET_SEGMENT_INPUT",
     }
 
     (ledgers / "order_intent.jsonl").write_text("", encoding="utf-8")

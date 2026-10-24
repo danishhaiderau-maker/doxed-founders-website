@@ -69,7 +69,7 @@ def test_evidence_coverage_api_is_bounded_and_reads_declared_atomic_generation(m
     assert payload["qualification_allowed"] is False
     assert payload["authoritative_source_record_counts"] == {
         "opportunities": 6, "decisions": 7, "order_intents": 8,
-        "executions": 9, "lifecycles": 10, "market_segments": 11,
+        "executions": 9, "lifecycles": 10, "market_segments": "INVALID_R3_MARKET_SEGMENT_INPUT",
     }
     assert payload["episode_coverage"] == {
         "exact": 1, "reconstructed": 0, "unknown": 0, "total": 1,

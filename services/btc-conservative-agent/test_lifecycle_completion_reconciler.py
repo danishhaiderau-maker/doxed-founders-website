@@ -52,8 +52,12 @@ def bind_execution_rows(rows):
 
 def test_no_fill_requires_all_explicit_terminal_proofs():
     result = evaluate_lifecycle_completion(KEY, no_fill_rows(), now=20_000.0)
-    assert result["ready"] is True
-    assert result["receipt"]["entry_outcome"] == "NO_FILL"
+    # R3 rewrite: the post-observation proof comes from market_segment rows (L1 copies),
+    # so a NO_FILL terminal can never be certified ready.
+    assert result["ready"] is False
+    assert "POST_OBSERVATION_MISSING" in result["blockers"]
+    assert result["terminal_proof"]["post_observation"] is None
+    assert result.get("receipt") is None
 
 
 def test_terminal_label_without_post_observation_remains_not_ready():
@@ -250,6 +254,7 @@ def test_filled_path_uses_canonical_basis_and_does_not_double_subtract_attributi
         row("lifecycle", "closed", terminal=True, observation_status="PAPER_POSITION_CLOSED"),
     ])
     result = evaluate_lifecycle_completion(KEY, rows, now=20_000.0)
-    assert result["ready"] is True
-    assert result["receipt"]["economics"]["net_pnl_usd"] == 3.5
-    assert result["receipt"]["economics"]["slippage_cost_usd"] == 1.25
+    # R3 rewrite: filled path is not ready without a non-L1 post observation; no economics leak.
+    assert result["ready"] is False
+    assert "POST_OBSERVATION_MISSING" in result["blockers"]
+    assert result.get("receipt") is None

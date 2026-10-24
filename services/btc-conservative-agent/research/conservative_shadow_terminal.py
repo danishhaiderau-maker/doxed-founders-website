@@ -1,6 +1,8 @@
 """Fail-closed terminal replay for a conservatively filled shadow position."""
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import hashlib
 import json
 import math
@@ -262,6 +264,8 @@ def _evaluate_shadow_terminal(*, generation, entry_receipt, entry_receipt_sha256
         blockers.append("COVERAGE_POLICY_FIELDS_INVALID")
         sampling_interval = None
         first_sample_offset = None
+    if not _msr3.INPUT_ALLOWED:  # R3 fail closed: segment-derived paths are INVALID
+        blockers.append(_msr3.REASON)
     segment_hashes = []
     for receipt in source_segment_receipts or []:
         digest = str(receipt.get("sha256") or "").lower() if isinstance(receipt, Mapping) else ""

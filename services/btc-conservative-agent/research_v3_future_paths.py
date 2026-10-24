@@ -7,6 +7,8 @@ content-addressed segment after the declared horizon has matured.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 from collections import defaultdict
 from datetime import datetime
 import hashlib
@@ -362,7 +364,7 @@ def _candidates(root: Path, epoch_id: str) -> list[dict[str, Any]]:
     for row in _read_jsonl(ledgers / "decision.jsonl"):
         if str(row.get("epoch_id") or "") == str(epoch_id):
             decisions_by_episode[str(row.get("episode_id") or "")].append(row)
-    market_rows = _read_jsonl(ledgers / "market_segment.jsonl")
+    market_rows = _msr3.rows("v3/ledgers/market_segment.jsonl")  # R3: dropped input
     def terminal_or_already_retried(row: Mapping[str, Any]) -> bool:
         status = row.get("future_path_status")
         if status == "COMPLETE":

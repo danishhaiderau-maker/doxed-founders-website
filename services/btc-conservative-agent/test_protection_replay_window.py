@@ -76,7 +76,7 @@ class ProtectionReplayWindowTest(unittest.TestCase):
                     os.environ["ANALYZER_PROTECTION_REPLAY_MAX_EVENTS"] = raw
                 self.assertEqual(protection_replay_max_events(), expected, raw)
 
-    def test_loader_skips_market_segments_of_events_outside_the_window(self):
+    def test_loader_windows_events_and_never_loads_market_segments_r3(self):
         with tempfile.TemporaryDirectory() as tmp:
             _seed_events(tmp, [100, 300, 200, 400])
             loaded_refs = []
@@ -93,7 +93,10 @@ class ProtectionReplayWindowTest(unittest.TestCase):
             self.assertEqual(window["events_eligible"], 4)
             self.assertEqual(window["events_selected"], 2)
             self.assertTrue(window["truncated"])
-            self.assertEqual(sorted(ref["start_ts"] for ref in loaded_refs), [300, 400])
+            # R3 rewrite (HM #873 a1): no segment envelope is ever loaded, in or out of the window.
+            self.assertEqual(loaded_refs, [])
+            self.assertTrue(all(row["market_segment_input"]["reason"] == "INVALID_R3_MARKET_SEGMENT_INPUT"
+                                for row in rows))
 
             full = load_candidate_inputs(tmp, epoch_id="epoch-w")
             self.assertEqual(len(full), 4)

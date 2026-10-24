@@ -6,6 +6,8 @@ receipt and refuses to expose a candidate when either side is incomplete.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -225,7 +227,8 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
                 "qualified_oos_episodes": int(evidence.get("qualified_oos_episodes") or 0),
                 "terminal_lifecycles": int(evidence.get("terminal_lifecycles") or 0),
                 "provisional_lifecycles": int(evidence.get("provisional_lifecycles") or 0),
-                "market_segments": int(evidence.get("market_segments") or 0),
+                "market_segments": 0,  # R3: market_segment input dropped
+                "market_segment_input": _msr3.invalid("evidence.market_segments"),
                 "order_intents": int(evidence.get("order_intents") or 0),
             },
             "blockers": blockers,

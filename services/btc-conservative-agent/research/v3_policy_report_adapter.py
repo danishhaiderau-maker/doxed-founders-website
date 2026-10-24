@@ -6,6 +6,8 @@ cohort, never fall back to an empty retired V2.2 event file.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -99,7 +101,8 @@ def has_v3_evidence(data_dir=".") -> bool:
 def load_v3_cycle_snapshot(data_dir=".") -> dict:
     root = Path(data_dir)
     ledger_root = root / "v3" / "ledgers"
-    names = ("opportunity", "decision", "order_intent", "execution", "lifecycle", "market_segment")
+    # R3: market_segment is not read; its count is reported as 0 with an INVALID marker.
+    names = ("opportunity", "decision", "order_intent", "execution", "lifecycle")
     digest = hashlib.sha256()
     counts: dict[str, int] = {}
     latest: dict = {}
@@ -150,7 +153,8 @@ def load_v3_cycle_snapshot(data_dir=".") -> dict:
         "source_read_mode": "STREAMED_JSONL_V1",
         "collector_version": "collector_v3.1",
         "row_count": counts["opportunity"],
-        "ledger_counts": counts,
+        "ledger_counts": {**counts, "market_segment": 0},
+        "market_segment_input": _msr3.invalid("v3/ledgers/market_segment.jsonl"),
         "last_event_id": latest.get("episode_id"),
         "last_signal_ts": latest.get("signal_ts"),
         "epoch_id": epoch_id,
@@ -198,7 +202,7 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
     validation = (winner or {}).get("validation") or {}
     episode_count = int(collection.get("independent_opportunities") or 0)
     execution_count = int(collection.get("execution_rows") or 0)
-    segment_count = int(collection.get("market_segments") or 0)
+    segment_count = 0  # R3: market_segment input dropped; never satisfies a gate
     integrity_passed = bool((genome.get("integrity") or {}).get("passed"))
     microstructure = microstructure_evidence if isinstance(microstructure_evidence, dict) else {}
     evaluator = microstructure.get("conservative_evaluator") or {}
@@ -285,6 +289,7 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
         blockers.append("V3_EXECUTION_PATHS_NOT_MATURED")
     if segment_count == 0:
         blockers.append("V3_MARKET_SEGMENTS_NOT_MATURED")
+        blockers.append(_msr3.REASON)
     if episode_count < 100:
         blockers.append("V3_MINIMUM_INDEPENDENT_EPISODES_NOT_MET")
     blockers.extend(f"QUALIFICATION_GATE_FAILED:{name}" for name, passed in gates.items() if not passed)
@@ -307,7 +312,8 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
         "qualified_oos_episodes": int((winner or {}).get("oos_episodes") or 0),
         "terminal_lifecycles": int(collection.get("terminal_lifecycles") or 0),
         "provisional_lifecycles": int(collection.get("provisional_lifecycles") or 0),
-        "market_segments": int(collection.get("market_segments") or 0),
+        "market_segments": 0,  # R3
+        "market_segment_input": _msr3.invalid("collection.market_segments"),
         "order_intents": int((collection.get("ledger_counts") or {}).get("order_intent") or 0),
     }
     return {

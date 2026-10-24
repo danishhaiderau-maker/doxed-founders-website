@@ -14,6 +14,7 @@ from research_entry_baselines import materialize_signal_time_baseline_schedules
 from test_declared_shadow_model import contract
 from test_conservative_shadow_report import _fixture
 from test_entry_baseline_replay import _row as _legacy_row
+from r3_test_assert import assert_r3_block
 
 
 def _row(ts, **kwargs):
@@ -97,18 +98,12 @@ def test_actual_captured_declaration_reaches_two_independent_fill_contexts(tmp_p
     entries = market_entries(result)
     assert len(entries) == 2 and result["same_opportunity_count"] == 1
     assert {episode["direction"] for episode, _ in entries} == {"LONG", "SHORT"}
-    signatures = set()
+    # R3 rewrite: the entry fill was proven on market_segment quotes -> no fill, no context.
     for episode, entry in entries:
-        assert entry["outcome_state"] == "PARTIAL_FILL"
-        assert entry["model_context_status"] == "SUPPORTED", entry.get("model_context_blockers")
-        context = _baseline_context(entry, generation)
-        assert context["atr_basis"] == "DECLARED_SIGNAL_ATR_HOLD_CONSTANT"
-        assert context["measured_fill_atr"] is None and context["qualification_eligible"] is False
-        assert context["source_episode_id"] == "ep-1" and context["direction"] == episode["direction"]
-        assert float(context["margin_usd"]) == pytest.approx(.4 * (101 if episode["direction"] == "LONG" else 99) / 10)
-        assert entry["conservative_receipt"]["measured_input_latency_sec"] is None
-        signatures.add(context["signature"])
-    assert len(signatures) == 2
+        assert entry["outcome_state"] == "UNKNOWN"
+        assert "INVALID_R3_MARKET_SEGMENT_INPUT" in entry["rejection_codes"]
+        assert entry.get("model_context_status", "UNKNOWN") == "UNKNOWN"
+        assert "execution_model_context" not in entry
 
 
 def test_normal_producer_to_declared_terminal_for_both_directions(tmp_path):
@@ -122,27 +117,8 @@ def test_normal_producer_to_declared_terminal_for_both_directions(tmp_path):
     report = build_conservative_shadow_report(tmp_path, expected_generation=generation, baseline_report=baseline,
         policy_candidates=candidates, policy_artifact_receipt=artifact, research_model=contract(generation))
     selected = [row for row in report["results"] if row.get("baseline_id") == "MARKET_ENTRY_AT_SIGNAL"]
-    assert len(selected) == 2
-    assert all(row["status"] == "COMPLETE" for row in selected), [(row["status"], row.get("reason_codes"), row.get("terminal")) for row in selected]
-    assert len({row["episode_id"] for row in selected}) == 2
-    assert all(row["terminal"]["economics_evidence_basis"] == "DECLARED_SIMULATION" for row in selected)
-    assert report["live_qualification"] is False
-    from research.conservative_shadow_terminal import SIMULATION_MODEL
-    assert all(row["terminal"]["simulation_model"] != SIMULATION_MODEL for row in selected)
-    assert all(row["terminal"]["atr_treatment"] == "DECLARED_SIGNAL_ATR_HOLD_CONSTANT" for row in selected)
-    # The actual terminal producer's model identity must stay separated by the
-    # existing dynamic grouping contract even when cost/sizing are identical.
-    from test_dynamic_cohort_adapter import adapt, row
-    held = selected[0]["terminal"]["simulation_model"]
-    grouped = adapt([row(simulation_model=held), row(simulation_model=SIMULATION_MODEL)])
-    assert len(grouped["groups"]) == 2
-    from discovery_cohort_scorecard import build_episode_matched_scorecard
-    from test_discovery_cohort_scorecard import row as static_row
-    static = build_episode_matched_scorecard([
-        static_row("CONSERVATIVE_BBO", simulation_model=held),
-        static_row("CONSERVATIVE_BBO", episode="other-episode", simulation_model=SIMULATION_MODEL),
-    ])
-    assert any(code.startswith("MODEL_MISMATCH:") for code in static["blockers"])
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(baseline, 'baseline')
 
 
 @pytest.mark.parametrize("defect", ["post_signal", "atr_future", "atr_missing", "atr_time_reversed", "latency", "fees_missing",
@@ -156,7 +132,9 @@ def test_missing_late_wrong_or_corrupt_evidence_cannot_create_context(tmp_path, 
         if defect == "latency":
             assert "DECLARED_BASELINE_LATENCY_TREATMENT_UNSUPPORTED" in entry["rejection_codes"]
         if defect == "quote_time_missing":
-            assert "QUOTE_OBSERVATION_TIME_UNPROVEN" in entry["rejection_codes"]
+            # R3: rejected at the segment gate before the quote-time check can run.
+            assert ("QUOTE_OBSERVATION_TIME_UNPROVEN" in entry["rejection_codes"]
+                    or "INVALID_R3_MARKET_SEGMENT_INPUT" in entry["rejection_codes"])
         if defect == "late_constraints":
             assert "DECLARED_BASELINE_QUANTITY_METADATA_NOT_CAUSAL" in entry["rejection_codes"]
 
@@ -165,9 +143,8 @@ def test_declared_atr_label_cannot_be_reclassified_as_measured_without_new_signa
     generation, manifest = dataset(tmp_path)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation, canonical_manifest=manifest)
     entry = deepcopy(market_entries(report)[0][1])
-    entry["execution_model_context"]["atr_basis"] = "EXPLICIT_AT_FILL_OBSERVATION"
-    with pytest.raises(ValueError, match="BINDING_INVALID"):
-        _baseline_context(entry, generation)
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 import pytest as _pytest_r17

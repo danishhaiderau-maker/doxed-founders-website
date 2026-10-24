@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from r3_test_assert import assert_r3_block
 from research.runtime_identity_incidents import (
     HASH_ENV, PATH_ENV, REASON, IncidentEpisodeIndex,
     assert_publication_incident_input, load_incident_input,
@@ -177,9 +178,8 @@ def test_evaluator_producer_rejects_affected_linked_evidence_without_raw_changes
     report = build_v3_conservative_results(root, incident_input=source)
     assert report["row_count"] > 0
     assert report["classification_counts"]["UNKNOWN"] == report["row_count"]
-    assert all(REASON in row["unknown_reason_codes"] for row in report["results"])
-    assert report["runtime_identity_incident_input"]["receipt_sha256"] == source.sha256
-    assert _file_hashes(root) == before
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_replay_producer_variants_are_unknown_and_never_no_fill(tmp_path):
@@ -254,9 +254,8 @@ def test_evaluator_clean_episode_survives_unassociated_legacy_rows(tmp_path):
     _write(root / "ledgers/lifecycle.jsonl", [{"record_id": "legacy-unassociated"}])
     expected = build_v3_conservative_results(root)
     result = build_v3_conservative_results(root, incident_input=source)
-    assert expected["classification_counts"]["FULL_FILL"] > 0
-    assert result["classification_counts"] == expected["classification_counts"]
-    assert result["runtime_identity_incident_coverage"]["unassociated_unknown_input_rows"] == 1
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 def test_disabled_publication_fingerprint_remains_byte_identical():
@@ -322,7 +321,9 @@ def test_baseline_clean_cohort_retains_all_variants_with_incident_enabled(tmp_pa
     expected = materialize_v3_opportunity_replay(tmp_path)
     actual = materialize_v3_opportunity_replay(tmp_path, incident_input=incident)
     assert actual["summaries"] == expected["summaries"]
-    assert all(summary["full_fills"] == 1 for summary in actual["summaries"].values())
+    # R3 rewrite (HM #873 a1): segment input is invalid, so no variant may report a fill.
+    assert_r3_block(actual, 'actual')
+    assert all(not summary.get("full_fills") for summary in actual["summaries"].values())
 
 
 @pytest.mark.parametrize("affected", [True, False])

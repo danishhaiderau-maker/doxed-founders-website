@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import market_segment_r3 as _msr3
 import os as _os, sys as _sys
 _AD_ = _os.path.abspath(_os.path.dirname(__file__))
 _PARENT_ = _os.path.dirname(_AD_)
@@ -762,6 +764,14 @@ def _scope_priority(payload: dict, *, fresh_collection: bool) -> int:
 
 
 def _iter_data_payloads(name: str):
+    """Yield candidates in the fixed ``_data_file_candidates`` order.
+
+    Tie-break (HM #873): every caller keeps the first candidate on an equal
+    (scope_priority, mtime) key because it only replaces on a strictly greater
+    key, so equal timestamps resolve deterministically to the earlier candidate
+    (DATA_ROOT/name before DATA_ROOT/reports/name before ROOT copies), never to
+    filesystem or timestamp-granularity order.
+    """
     for path in _data_file_candidates(name):
         if not path.is_file():
             continue
@@ -3919,7 +3929,7 @@ function standaloneGenomeCountCards(d) {
     ['Independent episodes', count(c.independent_opportunities)],
     ['Decision branches', count(c.decision_branches)],
     ['Terminal lifecycles', count(c.terminal_lifecycles)],
-    ['Market segments', count(c.market_segments)],
+    ['Market segments', 'INVALID R3 (L1 copies, not evidence)'],
     ['Complete policies evaluated', count(cs.unique_policies_evaluated ?? s.unique_policies_evaluated)],
     ['Nominal search space', count(s.nominal_full_cartesian)],
   ];
@@ -4510,7 +4520,7 @@ function maturityCountCards(d) {
     ['Execution rows', count(c.execution_rows)],
     ['Provisional lifecycles', count(c.provisional_lifecycles)],
     ['Terminal lifecycles', count(c.terminal_lifecycles)],
-    ['Market segments', count(c.market_segments)],
+    ['Market segments', 'INVALID R3 (L1 copies, not evidence)'],
     ['Policies evaluated', count(d.unique_policies_evaluated)],
     ['Qualified policies', count(d.qualified_policies)],
   ];
@@ -5391,8 +5401,8 @@ def api_evidence_coverage():
         "qualification_allowed": False,
         "authoritative_source_record_counts": {
             key: source_counts.get(key, "UNKNOWN")
-            for key in ("opportunities", "decisions", "order_intents", "executions", "lifecycles", "market_segments")
-        },
+            for key in ("opportunities", "decisions", "order_intents", "executions", "lifecycles")
+        } | {"market_segments": _msr3.REASON},
         "episode_coverage": {
             "exact": totals.get("exact_episodes", "UNKNOWN"),
             "reconstructed": totals.get("reconstructed_episodes", "UNKNOWN"),
@@ -6073,7 +6083,7 @@ def download_everything():
     v3_ledgers = (
         "decision.jsonl",
         "lifecycle.jsonl",
-        "market_segment.jsonl",
+        # R3: market_segment.jsonl and v3/market_segments are not exported (dropped input).
         "opportunity.jsonl",
         "order_intent.jsonl",
     )
@@ -6090,11 +6100,6 @@ def download_everything():
                 path,
                 f"raw/current_fly_mirror/v3/ledgers/{name}",
             ))
-    add_tree(
-        DATA_ROOT / "v3" / "market_segments",
-        "raw/current_fly_mirror/v3/market_segments",
-        patterns=("*.json", "*.jsonl"),
-    )
 
     # Exactly one scope-aware copy of each current report. Historical/all-data
     # reports remain available under an explicitly named directory.
@@ -6373,10 +6378,9 @@ def download_everything():
                 "canonical_v3_execution_ledger": conditional_v3_status[
                     "execution.jsonl"
                 ],
-                "canonical_v3_market_segments": any(
-                    name.startswith("raw/current_fly_mirror/v3/market_segments/")
-                    for name in member_names
-                ),
+                # R3: segments are never exported as evidence.
+                "canonical_v3_market_segments": False,
+                "canonical_v3_market_segments_status": _msr3.invalid("v3/market_segments"),
                 "signed_compressed_shadow_schedule": {
                     "present": "raw/current_fly_mirror/chase_offset_touch_grid.jsonl" in member_names,
                     "absence_status": (
@@ -9384,7 +9388,7 @@ async function loadEvidenceCoverage() {
   document.getElementById('evidence-coverage-source-kpis').innerHTML = cards([
     ['Opportunities', counts.opportunities], ['Decisions', counts.decisions],
     ['Order intents', counts.order_intents], ['Executions', counts.executions],
-    ['Lifecycles', counts.lifecycles], ['Market segments', counts.market_segments],
+    ['Lifecycles', counts.lifecycles], ['Market segments', 'INVALID R3 (L1 copies, not evidence)'],
   ]);
   const episodes = d.episode_coverage || {};
   const outcomes = d.terminal_outcome_counts || {};
@@ -9446,7 +9450,7 @@ async function loadGenome() {
       ['Independent opportunities', c.independent_opportunities ?? 'NO DATA'],
       ['Decision branches', c.decision_branches ?? 'NO DATA'],
       ['Terminal lifecycles', c.terminal_lifecycles ?? 'NO DATA'],
-      ['Market segments', c.market_segments ?? 'NO DATA'],
+      ['Market segments', 'INVALID R3 (L1 copies, not evidence)'],
       ['Policies evaluated', cs.unique_policies_evaluated ?? s.unique_policies_evaluated ?? 'NO DATA'],
       ['Qualification', d.qualification || 'NO SAFE QUALIFIED POLICY'],
     ].map(([l,v]) => {
@@ -9463,7 +9467,7 @@ async function loadGenome() {
       independent_opportunities: c.independent_opportunities ?? 'NO DATA',
       decision_branches: c.decision_branches ?? 'NO DATA',
       terminal_lifecycles: c.terminal_lifecycles ?? 'NO DATA',
-      market_segments: c.market_segments ?? 'NO DATA',
+      market_segments: 'INVALID R3',
       decision_dispositions: c.decision_dispositions || {},
       decision_outcomes: c.decision_outcomes || {},
       effective_paper_execution_identity_count: Array.isArray(c.effective_paper_execution_identities)

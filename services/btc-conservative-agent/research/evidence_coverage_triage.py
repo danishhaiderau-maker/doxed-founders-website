@@ -6,6 +6,8 @@ absence, timestamps, or archive presence: missing proof always remains UNKNOWN.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import argparse
 import gzip
 import hashlib
@@ -231,7 +233,8 @@ def build_evidence_coverage_triage_report(
     for name in SOURCE_COUNT_NAMES:
         value = (source_counts or {}).get(name)
         normalized_source_counts[name] = (
-            int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            _msr3.REASON if name == "market_segments"  # R3: never a usable count
+            else int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0
             else "UNKNOWN"
         )
     unique_complete_schedules = {
@@ -321,9 +324,10 @@ def ledger_source_counts(v3_root: str | Path) -> dict[str, int | str]:
     singular = {
         "opportunities": "opportunity", "decisions": "decision",
         "order_intents": "order_intent", "executions": "execution",
-        "lifecycles": "lifecycle", "market_segments": "market_segment",
+        "lifecycles": "lifecycle",
     }
-    counts: dict[str, int | str] = {}
+    # R3: the market_segment ledger is never read; its count is the INVALID reason, not a number.
+    counts: dict[str, int | str] = {"market_segments": _msr3.REASON}
     for plural, name in singular.items():
         path = root / "ledgers" / f"{name}.jsonl"
         counts[plural] = _count_jsonl_records(path) if path.is_file() else "UNKNOWN"

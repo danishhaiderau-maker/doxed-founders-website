@@ -1,0 +1,6 @@
+# R3 legacy market_segment xfail list (RK ruling on #873). HM #873 R2: EMPTY.
+# Every former entry was rewritten to assert the R3 BLOCK (assert_r3_block / the
+# _msr3.invalid marker) or fixed to use declared non-segment inputs. The list is
+# shrink-only and pinned at 0 entries by test_r3_legacy_xfail_scope.py (CEILING).
+# A test may only be xfailed here if it raises MarketSegmentInputInvalid or its
+# failure text carries INVALID_R3_MARKET_SEGMENT_INPUT.

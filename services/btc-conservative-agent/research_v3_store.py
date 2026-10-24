@@ -2019,7 +2019,7 @@ class V3EvidenceStore:
 
     def _bootstrap_empty_ledgers(self) -> None:
         """Fence absent/empty ledgers cheaply before an emergency transition."""
-        for name in LEDGER_NAMES:
+        for name in LEDGER_NAMES:  # R3-NON-INPUT: store bootstrap stats empty ledgers only, never evidence
             signature = _path_signature(self.ledger_path(name))
             if signature is None or signature[2] == 0:
                 self.advance_emergency_idempotency_bootstrap(name, max_bytes=1)
@@ -2636,7 +2636,7 @@ class V3EvidenceStore:
         """
         counts: dict[str, int] = {}
         defects: list[dict[str, str]] = []
-        for ledger in LEDGER_NAMES:
+        for ledger in LEDGER_NAMES:  # R3-NON-INPUT: store verify counts record ids only, never evidence
             path = self.ledger_path(ledger)
             try:
                 with self._exclusive(path):

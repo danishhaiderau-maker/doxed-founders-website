@@ -1,6 +1,8 @@
 """Pure current-generation fanout for conservative full-lifecycle shadow research."""
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import hashlib
 import gzip
 import io
@@ -264,6 +266,9 @@ def _load_paths(root: Path, receipt: Mapping[str, Any], generation: Mapping[str,
             candidate.relative_to(authority)
         except ValueError:
             blockers.append("SOURCE_SEGMENT_PATH_OUTSIDE_CANONICAL_ROOT")
+            continue
+        if not _msr3.INPUT_ALLOWED:  # R3 fail closed: never read a segment payload
+            blockers.append(_msr3.REASON)
             continue
         try:
             payload = candidate.read_bytes()
