@@ -1,4 +1,5 @@
 import { assertBotReadToken } from './ops-read-auth';
+import { withFenceExclusion as withFenceExclusionRaw } from './live-fences-exclusion';
 import {
   Injectable,
   Logger,
@@ -1494,7 +1495,7 @@ export class TradingAgentsService implements OnModuleInit {
         last_transition: flyViewTransition(r.relayLastTransition),
         last_error: r.lastError ? String(r.lastError).slice(0, 200) : null,
         updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : null,
-        exchange_mirror: flyViewMirror(r.relayExchangeMirror, nowMs),
+        exchange_mirror: withFenceExclusionRaw(this.logger, `acct-${r.id.slice(0, 8)}`, r, flyViewMirror(r.relayExchangeMirror, nowMs), nowMs),
         // LIVE-FIX-1486: entitlement (hire expiry) is separate from pause.
         hire_active: !r.expiresAt || new Date(r.expiresAt).getTime() > nowMs,
         hire_expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,

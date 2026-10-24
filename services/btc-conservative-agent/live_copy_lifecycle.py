@@ -714,6 +714,8 @@ def build_with_classifier(ctx: Mapping[str, Any], *, now: float) -> tuple[dict, 
     intents = build_intents(ctx.get("approvals") or [], ctx.get("reports") or [], ctx.get("deliveries") or {},
                             ctx.get("paper_twins") or {}, now=now)
     exchange = exchange_view(web)
+    import live_fences_health as _lfh_x
+    exchange = _lfh_x.attach_row_ctx(web, exchange)  # RK 19:36 acct-cmqdk8n9 exclusion cross-check
     clock = clock_view(web, now)
     classifier = MissedCopyClassifier(
         intents=intents, exchange=exchange,

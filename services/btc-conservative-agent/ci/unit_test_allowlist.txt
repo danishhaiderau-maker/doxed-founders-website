@@ -639,3 +639,4 @@ test_r17_retired_sources.py
 test_hm_r4_b2_guardian.py
 test_live_fences_health.py
 test_trade_delete_by_id.py
+test_live_fences_exclusion.py
