@@ -232,25 +232,29 @@ import warnings  # noqa: E402
 _SEG_PATH = re.compile(r"(?:^|/)(?:recovery_)?ledgers/market_segment\.jsonl$|(?:^|/)market_segments/|/market_segments$|^market_segment\.jsonl$")
 _SEG_WORDS = {"market_segments", "market_segment", "market_segment.jsonl"}
 _READ_CALL = re.compile(r"\b(?:open|read_text|read_bytes|_read_jsonl|read_jsonl|glob|rglob|iterdir|load|loads|scandir|listdir)\s*\(")
-_GATE_CALLS = {"_msr3.rows", "_msr3.require_envelope", "_msr3.invalid"}
+_GATE_CALLS = {"_msr3.rows", "_msr3.require_envelope"}
+_READ_FUNCS = {"open", "read", "read_text", "read_bytes", "_read_jsonl", "read_jsonl", "glob", "rglob",
+               "iterdir", "load", "loads", "scandir", "listdir", "reader", "DictReader", "read_csv"}
+# (file, code) -> (exact occurrence count, exact read calls allowed in the pinned
+# loop body / statement).  A duplicated pinned line or a new read in a pinned body fails.
 NON_INPUT_SITES = {
-    ("data_epoch.py", 'EPOCH_AUDIT_SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bundle_index",'),
-    ("epoch_boundary_rotation.py", "for ledger in V3_LEDGERS:"),
-    ("ledger_stamp_monitor.py", "for name in LEDGERS:"),
-    ("nonaccum_plans.py", "for led in LEDGERS:"),
-    ("r5_retention.py", 'base = root / "v3" / "market_segments"'),
-    ("research_reset_inventory.py", 'if (len(parts) == 4 and parts[:2] == ("v3", "market_segments")'),
-    ("recover_archived_future_paths.py", 'RECOVERY_LEDGER_RELATIVE = Path("v3/recovery_ledgers/market_segment.jsonl")'),
+    ('data_epoch.py', 'EPOCH_AUDIT_SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bundle_index",'): (1, frozenset()),
+    ('epoch_boundary_rotation.py', "for ledger in V3_LEDGERS:"): (1, frozenset()),
+    ('ledger_stamp_monitor.py', "for name in LEDGERS:"): (1, frozenset()),
+    ('nonaccum_plans.py', "for led in LEDGERS:"): (1, frozenset({'fh.read()', 'os.listdir(d)', 'json.loads(fh.read())', "open(p, 'rb')"})),
+    ('r5_retention.py', 'base = root / "v3" / "market_segments"'): (1, frozenset()),
+    ('research_reset_inventory.py', 'if (len(parts) == 4 and parts[:2] == ("v3", "market_segments")'): (1, frozenset()),
+    ('recover_archived_future_paths.py', 'RECOVERY_LEDGER_RELATIVE = Path("v3/recovery_ledgers/market_segment.jsonl")'): (1, frozenset()),
     # HM R3 B1: imported ledger lists (LEDGER_NAMES / V3_LEDGERS) now resolved; these
     # loops are store integrity / rotation / reset housekeeping, never evidence.
-    ("bot.py", "for ledger in LEDGER_NAMES:"),
-    ("clean_epoch_reset_plan.py", "for ledger in V3_LEDGERS:"),
-    ("production_rotation_orchestrator.py", "for ledger in LEDGER_NAMES:"),
-    ("research_reset_inventory.py", 'if any(re.fullmatch(re.escape(n) + r"\\.jsonl(?:\\.\\d+)?", parts[-1]) for n in LEDGER_NAMES):'),
-    ("research_reset_recovery_audit.py", 'if path.name not in {n + ".json" for n in LEDGER_NAMES}:'),
-    ("research_v3_store.py", "for name in LEDGER_NAMES:"),
-    ("research_v3_store.py", "for ledger in LEDGER_NAMES:"),
-    ("transactional_receipt_store.py", "for ledger in LEDGER_NAMES:"),
+    ('bot.py', "for ledger in LEDGER_NAMES:"): (1, frozenset({'pointer.read_bytes()'})),
+    ('clean_epoch_reset_plan.py', "for ledger in V3_LEDGERS:"): (1, frozenset({"(root / 'v3' / 'ledgers').glob(f'{ledger}.jsonl.*')"})),
+    ('production_rotation_orchestrator.py', "for ledger in LEDGER_NAMES:"): (1, frozenset()),
+    ('research_reset_inventory.py', 'if any(re.fullmatch(re.escape(n) + r"\\.jsonl(?:\\.\\d+)?", parts[-1]) for n in LEDGER_NAMES):'): (1, frozenset()),
+    ('research_reset_recovery_audit.py', 'if path.name not in {n + ".json" for n in LEDGER_NAMES}:'): (1, frozenset()),
+    ('research_v3_store.py', "for name in LEDGER_NAMES:"): (1, frozenset()),
+    ('research_v3_store.py', "for ledger in LEDGER_NAMES:"): (1, frozenset()),
+    ('transactional_receipt_store.py', "for ledger in LEDGER_NAMES:"): (2, frozenset({'os.scandir(receipt_dir)'})),
 }
 
 
@@ -400,20 +404,45 @@ def _is_closed_assign(stmt):
             and ast.unparse(stmt.value.orelse) in {"[]", "()", "None", "{}", "set()"})
 
 
+def _binds_gate_module(tree):
+    """``_msr3`` must be ``import market_segment_r3 as _msr3`` (not a local stand-in)."""
+    imported = any(isinstance(n, ast.Import) and any(a.name == "market_segment_r3" and a.asname == "_msr3"
+                                                     for a in n.names) for n in tree.body)
+    shadowed = any(isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_msr3"
+                   or isinstance(n, ast.Name) and n.id == "_msr3" and isinstance(n.ctx, ast.Store)
+                   or isinstance(n, ast.ImportFrom) and any((a.asname or a.name) == "_msr3" for a in n.names)
+                   or isinstance(n, ast.Import) and any((a.asname or a.name) == "_msr3" and a.name != "market_segment_r3"
+                                                        for a in n.names)
+                   for n in ast.walk(tree))
+    return imported and not shadowed
+
+
 def _real_gate_before(func, lineno, node, parent):
+    """A closed guard dominates the site: it is an earlier sibling statement in the site's
+    own block or an enclosing block, up to the innermost enclosing def.  Guards nested in
+    an unrelated ``if``, an earlier loop or an inner def do not count."""
     if func is None:
         return False
-    for stmt in ast.walk(func):
-        if getattr(stmt, "lineno", lineno) >= lineno:
-            continue
-        if _is_closed_guard(stmt) or _is_closed_assign(stmt):
-            return True
-    cur, child = parent.get(node), node
-    while cur is not None and cur is not func:
+    child, cur = node, parent.get(node)
+    while cur is not None:
         if isinstance(cur, (ast.IfExp, ast.If)) and _is_allowed_flag(cur.test) and (
-                child is cur.body or child in (cur.body if isinstance(cur.body, list) else [cur.body])):
+                child is cur.body or (isinstance(cur.body, list) and child in cur.body)):
             return True
-        cur, child = parent.get(cur), cur
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            block = getattr(cur, field, None)
+            if isinstance(block, list) and child in block:
+                for stmt in block[:block.index(child)]:
+                    if _is_closed_guard(stmt) or _is_closed_assign(stmt):
+                        # ``continue`` only dominates inside the same loop body
+                        if (isinstance(stmt, ast.If) and isinstance(stmt.body[0], ast.Continue)
+                                and not isinstance(cur, (ast.For, ast.While))):
+                            continue
+                        return True
+        if cur is func:
+            return False
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return False
+        child, cur = cur, parent.get(cur)
     return False
 
 
@@ -453,25 +482,55 @@ def _loop_over_gated_slot(loop, func):
     return writes > 0 and writes == gated
 
 
+def _read_calls(nodes):
+    out = set()
+    for root in nodes:
+        for c in ast.walk(root):
+            if isinstance(c, ast.Call) and ast.unparse(c.func).split(".")[-1] in _READ_FUNCS:
+                out.add(ast.unparse(c))
+    return out
+
+
+def _pinned_ok(rel, line, node, parent):
+    """Pinned NON_INPUT site: exact (file, code) and its body/statement reads only the
+    pinned read calls (occurrence count is asserted separately)."""
+    if not re.search(r"# R3-NON-INPUT: (.{10,})", line):
+        return False
+    pin = NON_INPUT_SITES.get((rel, line.split("#", 1)[0].strip()))
+    if pin is None:
+        return False
+    if isinstance(node, ast.For):
+        scope = node.body + node.orelse + [node.iter]
+    else:
+        stmt = node
+        while stmt is not None and not isinstance(stmt, ast.stmt):
+            stmt = parent.get(stmt)
+        scope = [stmt] if stmt is not None else []
+    return _read_calls(scope) <= pin[1]
+
+
 def _accepted(rel, tree, lines, lineno, node, parent):
     line = lines[lineno - 1]
+    gate = _binds_gate_module(tree)
     up = parent.get(node)
-    while up is not None and not isinstance(up, ast.stmt):
+    while gate and up is not None and not isinstance(up, ast.stmt):
         if isinstance(up, ast.Call) and ast.unparse(up.func) in _GATE_CALLS:
+            return True
+        # ``_msr3.invalid("<constant source label>")`` names the dropped input; never a read
+        if (isinstance(up, ast.Call) and ast.unparse(up.func) == "_msr3.invalid" and not up.keywords
+                and all(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in up.args)):
             return True
         up = parent.get(up)
     func = _enclosing(tree, lineno)
     if isinstance(node, (ast.For, ast.comprehension)):
-        if _loop_skips_segment(node, parent) or _loop_over_gated_slot(node, func):
+        if _loop_skips_segment(node, parent) or (gate and _loop_over_gated_slot(node, func)):
             return True
-    if _real_gate_before(func, lineno, node, parent):
+    if gate and _real_gate_before(func, lineno, node, parent):
         return True
     if rel == "research_v3_store.py" and re.fullmatch(
             r"(?:self|instance)\.segment_dir = (?:self\.root|resolved) / \"v3\" / \"market_segments\"", line.strip()):
         return True
-    if re.search(r"# R3-NON-INPUT: (.{10,})", line) and not _READ_CALL.search(line.split("#", 1)[0]):
-        return (rel, line.split("#", 1)[0].strip()) in NON_INPUT_SITES
-    return False
+    return _pinned_ok(rel, line, node, parent)
 
 
 def _scan_source(src, rel="x.py", modules=None):
@@ -500,12 +559,21 @@ def test_zero_live_market_segment_reads():
 
 
 def test_non_input_sites_are_pinned_and_present():
-    present = set()
+    counts = {}
     for rel, code in NON_INPUT_SITES:
-        lines = (HERE / rel).read_text().splitlines()
-        if any(l.split("#", 1)[0].strip() == code and "# R3-NON-INPUT:" in l for l in lines):
-            present.add((rel, code))
-    assert present == NON_INPUT_SITES, sorted(NON_INPUT_SITES - present)
+        lines = _src(rel).splitlines()
+        counts[(rel, code)] = sum(l.split("#", 1)[0].strip() == code and "# R3-NON-INPUT:" in l for l in lines)
+    assert counts == {k: v[0] for k, v in NON_INPUT_SITES.items()}
+
+
+def test_every_non_input_annotation_is_pinned():
+    for path in sorted(HERE.rglob("*.py")):
+        rel = path.relative_to(HERE).as_posix()
+        if path.name.startswith("test_") or rel.startswith("tests/"):
+            continue
+        for l in _REAL_READ_TEXT(path, errors="ignore").splitlines():
+            if "# R3-NON-INPUT:" in l and "R3-NON-INPUT: <" not in l:
+                assert (rel, l.split("#", 1)[0].strip()) in NON_INPUT_SITES, (rel, l)
 
 
 _LEDGER_MOD = {"fake_contract": 'LEDGER_NAMES = ("decision", "market_segment", "lifecycle")\n'}
@@ -533,6 +601,15 @@ _GATE = "import market_segment_r3 as _msr3\n"
     'SEG = "market_segment"\ndef f(d):\n    return open(d / f"{SEG}.jsonl")\n',
     'SEG = "market_segments"\ndef f(root):\n    return list((root / SEG).glob("*"))\n',
     'SEG = "market_segment"\ndef f(d):\n    return open(f"{d}/v3/ledgers/{SEG}.jsonl")\n',
+    # HM R4 N2c/N2d/N2e: a guard must dominate the site
+    _GATE + 'def f(root, z):\n    if z:\n        if not _msr3.INPUT_ALLOWED:\n            return []\n    return open(root / "market_segments" / "a")\n',
+    _GATE + 'def f(root, xs):\n    for x in xs:\n        if not _msr3.INPUT_ALLOWED:\n            continue\n    return open(root / "market_segments" / "a")\n',
+    _GATE + 'def f(root):\n    def g():\n        if not _msr3.INPUT_ALLOWED:\n            return []\n    return open(root / "market_segments" / "a")\n',
+    _GATE + 'def f(root):\n    if not _msr3.INPUT_ALLOWED:\n        continue_ = 1\n    return open(root / "market_segments" / "a")\n',
+    _GATE + 'def f(root):\n    return open(root / "market_segments" / "a")\n    if not _msr3.INPUT_ALLOWED:\n        return []\n',
+    # HM R4 N4b/N5: local stand-in for _msr3; read inside an invalid() argument
+    'class _msr3:\n    INPUT_ALLOWED = True\ndef f(root):\n    if not _msr3.INPUT_ALLOWED:\n        return []\n    return open(root / "market_segments" / "a")\n',
+    _GATE + 'def f(root):\n    return _msr3.invalid(open(root / "market_segments" / "a").read())\n',
 ])
 def test_scan_catches_live_read_forms(snippet):
     assert _scan_source(snippet, modules=_LEDGER_MOD), snippet
@@ -605,3 +682,31 @@ def test_candidates_load_segment_ignores_valid_envelope_with_rows(tmp_path, no_s
     target.parent.mkdir(parents=True)
     target.write_bytes(b'{"schema":"market_segment_v3","rows":[{"ts":1,"mid":100.0},{"ts":2,"mid":101.0}]}')
     assert _load_segment(tmp_path, {"relative_path": rel, "sha256": "ab" * 32}) == []
+
+
+# --- HM R4 N3/N3b: pinned sites are exact by count and by body reads ----------
+
+def _pinned_mutant(rel, code, extra_line):
+    src = _src(rel).splitlines()
+    idx = next(i for i, l in enumerate(src) if l.split("#", 1)[0].strip() == code and "# R3-NON-INPUT:" in l)
+    indent = len(src[idx]) - len(src[idx].lstrip()) + 4
+    return src, idx, " " * indent + extra_line
+
+
+def test_pinned_loop_with_added_read_is_caught():  # N3
+    rel, code = "transactional_receipt_store.py", "for ledger in LEDGER_NAMES:"
+    src, idx, extra = _pinned_mutant(rel, code, 'open(root / "v3" / "ledgers" / f"{ledger}.jsonl").read()')
+    mutated = "\n".join(src[:idx + 1] + [extra] + src[idx + 1:])
+    assert not _scan_source("\n".join(src), rel)
+    assert _scan_source(mutated, rel)
+
+
+def test_duplicated_pinned_loop_is_caught():  # N3b
+    rel, code = "bot.py", "for ledger in LEDGER_NAMES:"
+    src = _src(rel)
+    line = next(l for l in src.splitlines() if l.split("#", 1)[0].strip() == code and "# R3-NON-INPUT:" in l)
+    dup = src + "\n\ndef _copied_probe(d):\n" + "    " + line.strip() + "\n        (d / f\"{ledger}.jsonl\").read_text()\n"
+    assert _scan_source(dup, rel)  # new read call not in the pin
+    dup_quiet = src + "\n\ndef _copied_probe(d):\n" + "    " + line.strip() + "\n        pass\n"
+    count = sum(l.split("#", 1)[0].strip() == code and "# R3-NON-INPUT:" in l for l in dup_quiet.splitlines())
+    assert count != NON_INPUT_SITES[(rel, code)][0]  # present-count test would fail
