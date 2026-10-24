@@ -37,7 +37,7 @@ from transactional_receipt_store import (
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, set[str]]] = {}
-_tombstone_cache: dict[str, tuple[tuple[Any, Any], frozenset[str]]] = {}
+_tombstone_cache: dict[str, tuple[tuple[Any, Any], Any, str]] = {}
 # HM R2b: rate-limit the fail-closed [ALERT] to once per (stream, reason) per interval per process.
 TOMBSTONE_ALERT_INTERVAL_SEC = 900
 _tombstone_alert_last: dict[tuple[str, str], float] = {}
@@ -2373,17 +2373,20 @@ class V3EvidenceStore:
         if cached is None or cached[0] != key[1:]:
             from ledger_delete_by_sha import tombstone_state
             ok, shas, reason = tombstone_state(self.root, ledger)
-            if not ok:
-                now = time.monotonic()
-                last = _tombstone_alert_last.get((ledger, reason))
-                if last is None or now - last >= TOMBSTONE_ALERT_INTERVAL_SEC:
-                    _tombstone_alert_last[(ledger, reason)] = now
-                    logging.getLogger(__name__).error(
-                        f"[ALERT] [LEDGER-TOMBSTONES] {ledger} {reason}: appends to this stream refused "
-                        f"(fail closed; repeats suppressed {TOMBSTONE_ALERT_INTERVAL_SEC}s) [PIPELINE ENFORCEMENT]")
-                return reason
-            cached = (key[1:], shas)
+            # HM nit: cache the outcome (incl. fail-closed) keyed on tombstone + complete.json
+            # signatures, so a failing stream doesn't re-read both files on every append.
+            cached = (key[1:], shas, "" if ok else reason)
             _tombstone_cache[key[0]] = cached
+        if cached[2]:
+            reason = cached[2]
+            now = time.monotonic()
+            last = _tombstone_alert_last.get((ledger, reason))
+            if last is None or now - last >= TOMBSTONE_ALERT_INTERVAL_SEC:
+                _tombstone_alert_last[(ledger, reason)] = now
+                logging.getLogger(__name__).error(
+                    f"[ALERT] [LEDGER-TOMBSTONES] {ledger} {reason}: appends to this stream refused "
+                    f"(fail closed; repeats suppressed {TOMBSTONE_ALERT_INTERVAL_SEC}s) [PIPELINE ENFORCEMENT]")
+            return reason
         if not cached[1]:
             return ""
         digest = hashlib.sha256(line.rstrip("\r\n").encode("utf-8")).hexdigest()

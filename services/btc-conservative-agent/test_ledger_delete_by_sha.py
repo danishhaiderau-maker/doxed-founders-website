@@ -475,3 +475,15 @@ def test_tombstone_alert_rate_limited(tmp_path, caplog, monkeypatch):
     monkeypatch.setattr(research_v3_store.time, "monotonic", lambda: clock[0])
     assert s.append("decision", {"record_id": "decision-r9", "i": 9})["blocked"]
     assert caplog.text.count("[ALERT] [LEDGER-TOMBSTONES]") == 2
+
+
+def test_fail_closed_state_cached_until_files_change(tmp_path, monkeypatch):
+    import ledger_delete_by_sha as mod
+    s = _deleted_store(tmp_path)
+    lds._tombstone_path(s, "decision").unlink()
+    calls = []
+    real = mod.tombstone_state
+    monkeypatch.setattr(mod, "tombstone_state", lambda *a, **k: calls.append(1) or real(*a, **k))
+    for i in range(4):
+        assert s.append("decision", {"record_id": f"decision-c{i}", "i": i})["blocked"]
+    assert len(calls) == 1
