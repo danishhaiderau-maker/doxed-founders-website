@@ -7603,7 +7603,7 @@ def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
         return cached
     lane = str(order.get("research_lane") or "").upper()
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or now)
-    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+    delay_s, delay_source = _paper_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
                                           own_signal_to_send_s=_paper_own_s2s_entry(order))
     if not force and now < signal_ts + float(delay_s):
         return None
@@ -7777,7 +7777,7 @@ def _paper_entry_rest_drop(order: dict, why: str) -> bool:
     if not st.get("fills"):
         return False
     lane = str(order.get("research_lane") or "").upper()
-    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+    delay_s, delay_source = _paper_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
                                           own_signal_to_send_s=_paper_own_s2s_entry(order))
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or 0)
@@ -7871,7 +7871,7 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     pend = source_pos.get("_tp1_pending")
     if not (isinstance(pend, dict) and pend.get("key") == key):
         # RK (2): the gate is this leg's send code point; own trigger -> send measured per row, pooled EXIT_RO_MKT
-        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+        delay_s, delay_source = _paper_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
                                               own_signal_to_send_s=_paper_own_s2s_exit(now, time.time()))
         marker = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s), "delay_s": float(delay_s),
                   "delay_source": delay_source, "close_fraction": float(close_fraction), "attempts": 0}
@@ -7961,7 +7961,7 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
     # RK (2): own trigger -> send code point (exit_sent_ts), never now - t0 (pricing lag); missing -> fail closed
-    delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+    delay_s, delay_source = _paper_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
                                           own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
     _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
@@ -8066,7 +8066,7 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
     else:
         # RK (2): own trigger -> send code point (exit_sent_ts, stamped by close_position before pricing); never
         # now - t0 (pricing lag: the thread waits for the book row). Pooled send->ack by order type (EXIT_RO_MKT).
-        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
+        delay_s, delay_source = _paper_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
                                               own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
         _paper_note_exit_trigger(pos, t0)
         price_fn = lambda: _paper_stamp_pool(  # noqa: E731
@@ -34517,7 +34517,7 @@ def _xvl_wait_anchor_ready(deadline: float):
     return time.time(), None, False
 
 
-_DISLOC_DELAYS = None
+_PAPER_DELAYS = None
 PAPER_DELAY_POOL_FILE = "paper_delay_pool.json"  # F1 live-ack pool, persisted per DATA_EPOCH_ID (capped per lane/leg)
 _PAPER_DELAY_POOL_LOCK = threading.Lock()
 
@@ -34529,9 +34529,9 @@ def _paper_delay_pool_path():
 def _paper_delay_sampler():
     """The process-wide F1 DelaySampler, restored from the per-epoch pool file on first use (a file from another
     DATA epoch is ignored, so a new epoch starts with an empty pool)."""
-    global _DISLOC_DELAYS
+    global _PAPER_DELAYS
     import paper_fill as _pf
-    if _DISLOC_DELAYS is None:
+    if _PAPER_DELAYS is None:
         sampler = _pf.DELAYS or _pf.DelaySampler()
         try:
             path = _paper_delay_pool_path()
@@ -34542,9 +34542,9 @@ def _paper_delay_sampler():
                     _cross_lane_pool().load(payload.get(_live_ack_pool.POOL_KEY), globals().get("DATA_EPOCH_ID"))
         except Exception as exc:  # noqa: BLE001 - an unreadable pool is an empty pool (default delay, UNVERIFIED)
             logger.warning(f"[F1 DELAY POOL] load failed: {type(exc).__name__}")
-        _DISLOC_DELAYS = sampler
-        _pf.DELAYS = _DISLOC_DELAYS
-    return _DISLOC_DELAYS
+        _PAPER_DELAYS = sampler
+        _pf.DELAYS = _PAPER_DELAYS
+    return _PAPER_DELAYS
 
 
 def _paper_delay_pool_persist() -> bool:
@@ -34582,7 +34582,7 @@ def _cross_lane_pool():
     return _CROSS_LANE_POOL
 
 
-def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
+def _paper_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
     """The paper delay for one lane/leg: the row's own signal->send + the pooled send->ack/fill of the shared
     live_ack_pool (one definition: per order-type key, skew/boot/leg checks, n<10 fail closed, MAX at 10-19, q0.90 at
     n>=20).  HM 02:55 N1: the old per-lane B1 DelaySampler is stamps-only and never prices a row (it is not split by

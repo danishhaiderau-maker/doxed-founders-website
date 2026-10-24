@@ -2,13 +2,14 @@
 
 HM review 20261023-tile67-removal C3: removing disloc_engine must not change how tiles 1-5 are priced.
 Pinned at base master 51d926f93 (sha256 of each top-level function's exact source segment):
-_disloc_delay (shared delay helper, kept), its callers, get_mark_price and the paper_fill pricing core.
+_paper_delay (shared delay helper, kept; was _disloc_delay), its callers, get_mark_price and the paper_fill pricing core.
 If one of these functions changes on purpose later, update its sha here in the same PR, with the reason.
 """
 from __future__ import annotations
 
 import ast
 import hashlib
+import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -22,6 +23,9 @@ BASE = "51d926f93"
 # #842 HM 01:43 blocker 1 / items 4-5 (24 Oct 2026): intentional pin move for bot.py:_paper_lane_exit, bot.py:_disloc_delay (paper exit own signal->send is not measured: None -> default_own_s2s_missing -> UNVERIFIED, no assumed 0.0 / pricing-lag own leg; pool = Fly intent -> ack).
 # #842 RK (3) FIRST_AFTER (24 Oct 2026, ff412bcfc): intentional pin move for paper_fill.py:_paper_fill_core (resident exchange-stop fill = the first trade print after the trigger; fill_ts = that row's rx).
 # #842 HM 02:55 N1 (24 Oct 2026): intentional pin move for bot.py:_disloc_delay (the per-lane B1 DelaySampler is stamps-only; every priced delay goes through the shared live_ack_pool definition; no pool key -> fail closed).
+# R22 PR-A (25 Oct 2026): _disloc_delay/_DISLOC_DELAYS renamed to _paper_delay/_PAPER_DELAYS (pure rename, no behaviour
+# change). Pins are NOT moved: _shas maps the new names back to the pinned names before hashing, so every pinned
+# function (including the callers _paper_lane_entry_result/_paper_lane_exit) is proven byte-identical modulo the rename.
 # #842 HM 02:55 / RK (2) (24 Oct 2026): intentional pin move for bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay (paper BOT_SENT exits: own trigger -> send code point measured per row via the shared _paper_own_s2s_exit + pooled EXIT_RO_MKT send->ack; resident stays 0; missing -> fail closed).
 PINNED = {
     "bot.py": {
@@ -29,7 +33,7 @@ PINNED = {
         "_paper_lane_entry_result": "a227911677f4b9c9f80b0bec463171fe9e06e4190d2ddac5e1d51005193ef05d",
         "_tp1_gate": "5d929c321af8744db1dc1ceb64496cc8e02562359bd8d48d45199eedb9cb9d1d",
         "_paper_lane_exit": "e2f76f44b78728ad91d1ce1aa6ba0b14d77e22af7a86f3b23646713bdb487dd4",
-        "_disloc_delay": "6eb646e5e16589d44f6b11b635b6bd91a7fdcf23b55674a17b459d5e3852ce7a"
+        "_paper_delay": "6eb646e5e16589d44f6b11b635b6bd91a7fdcf23b55674a17b459d5e3852ce7a"
     },
     "paper_fill.py": {
         "_f": "c70d10da2af1181b4d56905d296e71c2b6da8603ab5d7e9a22c0ad0b0b6e303f",
@@ -50,12 +54,21 @@ PINNED = {
 }
 
 
+_RENAMES = ((r"\b_paper_delay\b", "_disloc_delay"), (r"\b_PAPER_DELAYS\b", "_DISLOC_DELAYS"))  # R22 PR-A rename
+
+
+def _pinned_form(segment: str) -> str:
+    for pat, old in _RENAMES:
+        segment = re.sub(pat, old, segment)
+    return segment
+
+
 def _shas(path: Path) -> dict:
     src = path.read_text(encoding="utf-8")
     out = {}
     for node in ast.parse(src).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out[node.name] = hashlib.sha256(ast.get_source_segment(src, node).encode()).hexdigest()
+            out[node.name] = hashlib.sha256(_pinned_form(ast.get_source_segment(src, node)).encode()).hexdigest()
     return out
 
 
@@ -67,6 +80,8 @@ def test_shared_pricing_functions_byte_identical_to_base():
             assert now[fn] == sha, f"{fname}:{fn} changed vs {BASE}; R4 requires it byte-identical"
 
 
-def test_disloc_delay_kept_and_engine_gone():
-    assert "_disloc_delay" in PINNED["bot.py"]
+def test_shared_paper_delay_kept_and_old_name_gone():
+    src = (HERE / "bot.py").read_text(encoding="utf-8")
+    assert "_paper_delay" in PINNED["bot.py"]
+    assert "_disloc_delay" not in src and "_DISLOC_DELAYS" not in src
     assert not (HERE / "disloc_engine.py").exists()
