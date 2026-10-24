@@ -220,7 +220,9 @@ def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_co
     ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100, exit_fill_at_ts=n - 100,
                                              exit_at_ts=n - 100)], _mir(), None)
     ns["_live_guardian_tick"](now)
-    assert calls == [] and "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])
+    # ...the daily code stays AMBER; the disarm (+force-flat) here comes ONLY from the R20 total cap ($1.20 >= $0.10)
+    assert "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])
+    assert calls == ["AUTO_DISARM:LIVE_TOTAL_LOSS_CAP"], calls
     ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 99, stop_confirmed=True)], {"ok": False, "error": "stale"})
     ns["_LIVE_GUARDIAN_STATE"]["calc"]["blind_since"] = now - 40
     v = ns["_live_guardian_tick"](now)

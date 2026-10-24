@@ -35,7 +35,46 @@ LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only l
 # flatten (disarm ALL + force-flat, as every disarming violation) AND RED.
 STOP_ORDER_ID_NOT_RESIDENT = "STOP_ORDER_ID_NOT_RESIDENT"
 STOP_UNPROTECTED_RED_CODES = frozenset({"STOP_MISSING_GT_5S", "STOP_PLACEMENT_FAILED", STOP_ORDER_ID_NOT_RESIDENT})
-RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN, _ltg_caps.LIQ_CHECK_FLATTEN}) | STOP_UNPROTECTED_RED_CODES
+# R20 (Danish 25 Oct 06:21): a hard TOTAL (cumulative, all-time, all live tiles) live realised-loss limit. Hitting it (or
+# failing to evaluate it) disarms ALL live tiles + force-flats (RED, latched: arming is refused until FLAT_NO_STOPS read-back
+# and a human clears it). FROZEN constant: no env override, no bot/admin route reads or writes it; Danish sets the amount
+# in code review. Pending Danish it equals the D3 daily total cap (live_tile_gate.DAILY_LOSS_CAP_TOTAL_USD = $0.10).
+LIVE_TOTAL_LOSS_CAP_USD = 0.10
+LIVE_TOTAL_LOSS_CAP_SOURCE = "R20 (Danish 25 Oct 06:21 AEDT); amount = D3 daily total cap pending Danish"
+VIOL_LIVE_TOTAL_LOSS_CAP = "LIVE_TOTAL_LOSS_CAP"
+VIOL_LIVE_TOTAL_LOSS_CAP_ERROR = "LIVE_TOTAL_LOSS_CAP_ERROR"
+VIOL_LIVE_TOTAL_LOSS_UNREADABLE = "LIVE_TOTAL_LOSS_UNREADABLE"
+LIVE_TOTAL_LOSS_RED_CODES = frozenset({VIOL_LIVE_TOTAL_LOSS_CAP, VIOL_LIVE_TOTAL_LOSS_CAP_ERROR})
+RED_CODES = (frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN, _ltg_caps.LIQ_CHECK_FLATTEN})
+             | STOP_UNPROTECTED_RED_CODES | LIVE_TOTAL_LOSS_RED_CODES)
+
+
+def total_live_loss_violations(chains: Iterable[Mapping[str, Any]]) -> list:
+    """R20: cumulative realised live loss over EVERY closed live chain (no epoch, no day window) vs LIVE_TOTAL_LOSS_CAP_USD.
+    Breach or any error => RED disarm ALL + force-flat. A closed chain whose realised pnl is unreadable => entry block
+    (it cannot be summed; refusing new entries is the fail-closed side without force-flatting on a reporting gap)."""
+    try:
+        import live_tile_gate as _ltg
+        loss, n, bad = 0.0, 0, []
+        for c in chains or []:
+            if not (c or {}).get("closed"):
+                continue
+            pnl = _ltg.trade_realised_pnl_usd(c)
+            if pnl is None:
+                bad.append(str(c.get("correlation_id") or c.get("trade_id") or "?"))
+                continue
+            loss -= float(pnl)
+            n += 1
+        out = []
+        if bad:
+            out.append({"code": VIOL_LIVE_TOTAL_LOSS_UNREADABLE, "tile": None,
+                        "detail": f"total live loss unreadable: {len(bad)} closed row(s) without real pnl ({','.join(bad[:4])})"})
+        if loss >= LIVE_TOTAL_LOSS_CAP_USD - 1e-9:
+            out.append({"code": VIOL_LIVE_TOTAL_LOSS_CAP, "tile": None, "loss_usd": round(loss, 6),
+                        "detail": f"cumulative live realised loss ${loss:.4f} >= ${LIVE_TOTAL_LOSS_CAP_USD:.2f} ({n} rows; R20)"})
+        return out
+    except Exception as exc:  # noqa: BLE001 - fail closed: RED
+        return [{"code": VIOL_LIVE_TOTAL_LOSS_CAP_ERROR, "tile": None, "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}]
 # HM5 (24 Oct, #852): REDs that fresh exchange evidence FLAT_NO_STOPS does NOT clear. They clear only through the stamped
 # operator ack route (bot POST /api/live-copy/guardian/red-ack), and no later RED replaces their code (latch_red).
 ACK_ONLY_RED_CODES = frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
@@ -100,7 +139,7 @@ POSITION_FLATTEN_CODES = frozenset({_ltg_caps.LIQ_CLAMP_FLATTEN})
 # AMEND4 E1 (L12): the daily loss caps (and an unreadable realised pnl / open mark, a book > 2 s) are an
 # ENTRY BLOCK ONLY (AMBER): reported, enforced in live_tile_gate.admit_entry, never a disarm and never a close. The response
 # is the one switchable live_tile_gate.cap_breach_response().
-ENTRY_BLOCK_CODES = frozenset({"DAILY_LOSS_CAP", _ltg_caps.VIOL_TILE_LOSS_CAP, _ltg_caps.VIOL_TOTAL_LOSS_CAP,
+ENTRY_BLOCK_CODES = frozenset({"DAILY_LOSS_CAP", VIOL_LIVE_TOTAL_LOSS_UNREADABLE, _ltg_caps.VIOL_TILE_LOSS_CAP, _ltg_caps.VIOL_TOTAL_LOSS_CAP,
                                _ltg_caps.VIOL_TOTAL_LOSS_CAP + "_ERROR", _ltg_caps.VIOL_PNL_UNREADABLE, "OPEN_MARK_UNREADABLE",
                                _ltg_caps.AMBER_BOOK_STALE})
 
@@ -176,6 +215,7 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     Only FRESH-EPOCH live ledger rows count (``epoch_ts``: chains whose first stage is before it are ignored), so a pre-epoch
     row can never trip the loss cap or the drift check."""
     out: list = []
+    chains = list(chains or [])
     live = [c for c in chains if (lane_needle in str(c.get("lane") or c.get("correlation_id") or "").upper() or not lane_needle)
             and (epoch_ts is None or (_f(c.get("fill_at_ts") or c.get("order_sent_at_ts") or c.get("fly_signal_at_ts")) or 0.0) >= float(epoch_ts))]
     open_filled = [c for c in live if c.get("fill_at_ts") and not c.get("closed")]
@@ -217,6 +257,10 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} in the last 24 h ({len(ledger_today)} fresh-epoch rows)"})
     # 4b. HM G6 per-tile / account-wide daily (UTC) realised loss caps from the prereg (live_tile_gate), fresh-epoch rows only
     out.extend(_ltg.daily_loss_violations(live, now))
+    # 4c. R20 total (all-time) live loss cap over every live chain of the lane filter, NOT epoch-filtered (an epoch reset can
+    #     never reset it). Not in ENTRY_BLOCK_CODES => disarm ALL + force-flat; RED-latched.
+    out.extend(total_live_loss_violations([c for c in chains if (lane_needle in str(c.get("lane") or c.get("correlation_id") or "").upper()
+                                                                or not lane_needle)]))
     # AMEND5 G4(b) (L23): LIQ_CLAMP_FLATTEN > 5 % of live trades at n >= 20 per tile => disarm ALL
     out.extend(_ltg.liq_clamp_rate_violations(live, liq_events or ()))
     m = mirror if isinstance(mirror, Mapping) else None
