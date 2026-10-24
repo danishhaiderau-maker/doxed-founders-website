@@ -177,7 +177,7 @@ def _attempt_env(monkeypatch, order):
     monkeypatch.setattr(bot, "is_research_lane_enabled", lambda lane: True)
     monkeypatch.setattr(bot, "invert_signal_active", lambda: False)
     monkeypatch.setattr(bot, "ensure_lane_signal_capacity", lambda lane: True)
-    monkeypatch.setattr(bot, "_record_adaptive_entry_decision", lambda lane, d: None)
+    monkeypatch.setattr(bot, "_record_adaptive_entry_decision", lambda lane, d, **k: None)
 
     def spawn(ctx, ai, edge, features, lane, reason):
         order.append("SUBMIT")
