@@ -1,7 +1,8 @@
-"""Tiles 6/7 removal (23 Oct 2026) R4 guard: the shared pricing code is byte-identical to base 51d926f93.
+"""Tiles 6/7 removal (23 Oct 2026) R4 guard: the shared pricing code is byte-identical to the reviewed pins below.
 
 HM review 20261023-tile67-removal C3: removing disloc_engine must not change how tiles 1-5 are priced.
-Pinned at base master 51d926f93 (sha256 of each top-level function's exact source segment):
+First pinned at base master 51d926f93; every later move is deliberate and listed in the comments (latest: R22 PR-A).
+Pins are the sha256 of each top-level function's exact source segment:
 _paper_delay (shared delay helper, kept; was _disloc_delay), its callers, get_mark_price and the paper_fill pricing core.
 If one of these functions changes on purpose later, update its sha here in the same PR, with the reason.
 """
@@ -9,11 +10,10 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-BASE = "51d926f93"
+BASE = "the reviewed pins (first set at 51d926f93, last moved by R22 PR-A)"
 # #839 F2/F3 (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result (realism-v2 shared trigger helper / entry quote stamping; R4 pricing intent unchanged for tiles 1-5 except the reviewed realism changes).
 # #840 order model (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core (live order-type model: resident stop, BOT_SENT market exits, model-time exits).
 # #841 RK fixes (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core, paper_fill.py:paper_fill (trades-only stops, first-row-at-or-after resident fill, BFX truncation, liquidation stamp).
