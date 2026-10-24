@@ -14046,7 +14046,11 @@ def _replay_csv_write_fallback_locked(targets) -> dict:
         for digest, row in items:
             key = (str(row.get("trade_id") or ""), str(row.get("ts") or ""))
             try:
-                if key == ("", "") or key not in present:
+                if target == CSV_TRADES and key[0] and key[0] in _DELETED_TRADE_IDS:
+                    # HM #869 R2 blocker 1: a pending fallback row for a deleted id must not be re-appended.
+                    _note_deleted_resave_refused(key[0], "replay")
+                    already += 1
+                elif key == ("", "") or key not in present:
                     _dynamic_csv_writer_once(target, row)
                     present.add(key)
                     replayed += 1
@@ -14084,16 +14088,64 @@ def replay_csv_write_fallback(targets=CSV_FALLBACK_REPLAY_TARGETS) -> dict:
         return _replay_csv_write_fallback_locked(targets)
 
 
-# RK PASS 24 Oct: ids removed by a real delete-by-id. A later save must not bring them back (in-memory tombstone;
-# a restart reloads from the CSV, which no longer holds them).
+# RK PASS 24 Oct: ids removed by a real delete-by-id. A later save or a fallback replay must not bring them back.
+# HM #869 R2: the tombstone is persisted (DELETED_TRADE_IDS_FILE) and loaded at boot before any CSV fallback replay.
 _DELETED_TRADE_IDS: set = set()
+DELETED_TRADE_IDS_FILE = "deleted_trade_ids.json"
+_DELETED_TRADE_RESAVE_REFUSED = {"count": 0, "replay_count": 0, "last_trade_id": None, "last_ts": None}
 
 
-def _reload_trades_after_delete(deleted_ids) -> int:
-    """Call with the trade-file lock held, after a real (non-dry) delete-by-id. Tombstone the ids, drop them from
-    the in-memory trade list, then reload it from CSV_TRADES. Returns how many in-memory rows were dropped."""
+def _note_deleted_resave_refused(trade_id, where: str) -> None:
+    _DELETED_TRADE_RESAVE_REFUSED["count"] += 1
+    if where == "replay":
+        _DELETED_TRADE_RESAVE_REFUSED["replay_count"] += 1
+    _DELETED_TRADE_RESAVE_REFUSED["last_trade_id"] = str(trade_id)
+    _DELETED_TRADE_RESAVE_REFUSED["last_ts"] = utc_iso()
+    logger.warning(f"[TRADE-DELETE-BY-ID] refused re-save ({where}) of deleted trade_id={trade_id} "
+                   f"refused_total={_DELETED_TRADE_RESAVE_REFUSED['count']} [PIPELINE ENFORCEMENT]")
+
+
+def _persist_deleted_trade_ids(list_sha256=None) -> None:
+    """Durably write the tombstone (tmp + fsync + replace). Caller holds the trade-file lock."""
+    try:
+        with open(DELETED_TRADE_IDS_FILE, encoding="utf-8") as handle:
+            prior = json.load(handle)
+    except (OSError, ValueError):
+        prior = {}
+    shas = [s for s in (prior.get("list_sha256s") or []) if isinstance(s, str)]
+    if list_sha256 and str(list_sha256) not in shas:
+        shas.append(str(list_sha256))
+    doc = {"schema": "deleted_trade_ids_v1", "updated_at": utc_iso(),
+           "ids": sorted(_DELETED_TRADE_IDS), "list_sha256s": shas}
+    candidate = f"{DELETED_TRADE_IDS_FILE}.{os.getpid()}.tmp"
+    with open(candidate, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(candidate, DELETED_TRADE_IDS_FILE)
+
+
+def load_deleted_trade_ids() -> int:
+    """Boot: load the persisted tombstone. Must run before replay_csv_write_fallback()."""
+    try:
+        with open(DELETED_TRADE_IDS_FILE, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError) as exc:
+        logger.error(f"[TRADE-DELETE-BY-ID] tombstone unreadable: {exc} [PIPELINE ENFORCEMENT]")
+        return 0
+    ids = {str(i) for i in (doc.get("ids") or []) if i}
+    _DELETED_TRADE_IDS.update(ids)
+    return len(ids)
+
+
+def _reload_trades_after_delete(deleted_ids, list_sha256=None) -> int:
+    """Call with the trade-file lock held, after a real (non-dry) delete-by-id. Tombstone the ids (persisted),
+    drop them from the in-memory trade list, then reload it from CSV_TRADES. Returns in-memory rows dropped."""
     ids = {str(i) for i in (deleted_ids or ()) if i}
     _DELETED_TRADE_IDS.update(ids)
+    _persist_deleted_trade_ids(list_sha256)
     with trade_lock:
         before = len(trades)
         trades[:] = [t for t in trades if str(t.get("trade_id") or "") not in _DELETED_TRADE_IDS]
@@ -14107,8 +14159,7 @@ def dynamic_csv_writer(filename, row):
     research_gate = globals().get("_research_write_gate") or threading.RLock()
     with research_gate, csv_lock:
         if filename == CSV_TRADES and str((row or {}).get("trade_id") or "") in _DELETED_TRADE_IDS:
-            logger.warning(f"[TRADE-DELETE-BY-ID] refused re-save of deleted trade_id={row.get('trade_id')} "
-                           f"[PIPELINE ENFORCEMENT]")
+            _note_deleted_resave_refused(row.get("trade_id"), "write")
             return
         for attempt in range(CSV_WRITE_RETRIES):
             try:
@@ -51145,6 +51196,7 @@ def status():
         "bitfinex_live_enabled": bitfinex_live_enabled,
         "force_paper_mode": force_paper_mode,
         "relay_configured": relay_configured,
+        "deleted_trade_resave_refused": {**_DELETED_TRADE_RESAVE_REFUSED, "tombstoned_ids": len(_DELETED_TRADE_IDS)},
         # Section 1: explicit running source revision + policy identifiers.
         # The running bot must not lie about which commit produced it.
         "bot_version": bot_version,
@@ -52139,7 +52191,7 @@ def api_admin_trades_delete_by_id():
             out = _tdi.delete_trades_by_id(os.path.abspath(CSV_TRADES), body.get("ids"), body.get("list_sha256"),
                                            dry_run=dry_run, lock=_TradeFileLock())
             if not out.get("dry_run") and out.get("removed_count"):
-                out["in_memory_dropped"] = _reload_trades_after_delete(body.get("ids"))
+                out["in_memory_dropped"] = _reload_trades_after_delete(body.get("ids"), out.get("list_sha256"))
     except _tdi.DeleteRefused as e:
         logger.warning(f"[TRADE-DELETE-BY-ID] refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
         return jsonify({"ok": False, "refused": e.code, "detail": e.detail}), 409
@@ -61245,6 +61297,11 @@ def main():
     )
     _record_execution_settings_epoch("TRACKING_STARTED")
     _prepare_research_timing_at_startup()
+    try:
+        _n_tomb = load_deleted_trade_ids()  # HM #869 R2 blocker 2: tombstone before any replay
+        logger.info(f"[STARTUP] deleted-trade tombstone loaded ids={_n_tomb} [PIPELINE ENFORCEMENT]")
+    except Exception as exc:
+        logger.error(f"[STARTUP] deleted-trade tombstone load failed: {exc} [PIPELINE ENFORCEMENT]")
     try:
         replay_csv_write_fallback()
     except Exception as exc:
