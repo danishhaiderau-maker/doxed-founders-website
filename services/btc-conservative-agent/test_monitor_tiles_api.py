@@ -312,7 +312,7 @@ def test_counters_route_and_specs_route(bot):
     assert gs1["epoch"]["fills"] == 2 and gs1["epoch"]["expiries"] == 1 and gs1["epoch"]["open"] == 1
     assert len(json.dumps(counters).encode()) <= mt.MAX_TILE_COUNTERS_BYTES
     specs = _get(bot, "/api/monitor/tiles/specs", {"X-Bot-Admin-Token": ADMIN}).get_json()
-    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 5  # Tiles 6/7 removed 23 Oct 2026
+    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 6  # Tiles 6/7 removed 23 Oct; Tile 6 gf3 added 25 Oct
     assert not specs.get("truncated")
     reg = bot.ACTIVE_TILE_REGISTRY
     for tile in specs["tiles"]:

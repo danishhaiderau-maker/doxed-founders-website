@@ -146,7 +146,12 @@ CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
 # Tiles on this clock are triggered at a closed 3-minute Bitfinex bar by the
 # CVD-divergence evaluator (regime_bars_3m.py), never by the shared AI call.
 BAR_CLOSE_SIGNAL_CLOCK = "BAR_CLOSE_3M_CVD_EVALUATOR"
-EVALUATOR_SIGNAL_CLOCKS = frozenset({CROSS_VENUE_SIGNAL_CLOCK, BAR_CLOSE_SIGNAL_CLOCK})
+# Tile 6 · GS-FADE3-TP30 (gf3) runs its own 1 s paper engine (tile_fade3.Fade3PaperEngine, bot._gf3_thread);
+# it is never routed through the shared AI call nor the XVL evaluator loop.
+RESEARCH_LANE_FAMILY_GS_FADE3_TP30 = "FAMILY_GS_FADE3_TP30"
+GF3_ADMISSION_POLICY_ID = "GS_FADE3_E8_FADE_ALL_W3_NO_AI_V1"
+SELF_SIMULATED_SIGNAL_CLOCK = "GF3_SELF_SIMULATED_1S_ENGINE"
+EVALUATOR_SIGNAL_CLOCKS = frozenset({CROSS_VENUE_SIGNAL_CLOCK, BAR_CLOSE_SIGNAL_CLOCK, SELF_SIMULATED_SIGNAL_CLOCK})
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
 PARTIAL_EXIT_RELAY_CAPABILITY = "BLOCKED_PARTIAL_REDUCTION_UNPROVEN"
 TILE_ARCHITECTURE_VERSION = 3
@@ -184,6 +189,7 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
     RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
+    RESEARCH_LANE_FAMILY_GS_FADE3_TP30,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -447,6 +453,8 @@ LIVE_EXIT_RULES = frozenset({
     # GS-20261004 regime stacks (gs_regime_exit_stack.py).
     "THESIS_CUT", "VOL_SHOCK", "MFE_GIVEBACK", "INDICATOR_FLIP", "ATR_TAKE_PROFIT", "LADDER_TP1",
     "LADDER_LOCK", "TIME_BACKSTOP",
+    # Tile 6 · GS-FADE3-TP30 (tile_fade3): fixed bp take-profit and the exchange-resident stop.
+    "TAKE_PROFIT", "EXCHANGE_STOP",
 })
 RISK_EXIT_RULES = frozenset({"HARD_STOP", "EARLY_CUT", "EARLY_FAIL", "STOP_LOSS", "THESIS_FAST_CUT", "THESIS_CUT"})
 
@@ -464,6 +472,10 @@ def registry_live_exit_order(exit_policy: dict) -> tuple[str, ...]:
         order.append("ATR_TRAIL")
     if exit_policy.get("early_cut"):
         order.append("EARLY_CUT")
+    if exit_policy.get("exchange_stop_bps") is not None:
+        order.append("EXCHANGE_STOP")
+    if exit_policy.get("take_profit_bps") is not None:
+        order.append("TAKE_PROFIT")
     order.append("TIME_EXIT")
     return tuple(order)
 
@@ -1562,6 +1574,54 @@ COMBO_LANE_SPECS.update({
 
 
 
+# Tile 6 · GS-FADE3-TP30 (key gf3, cid 8; RK PASS 25 Oct 06:24 AEDT). Sim E8 FADE / ALL regimes / W=3: SHORT when
+# z3 >= 2.5, mom5 >= 2*ATR30, imb5 <= -0.2, BZ > -2 (LONG mirrored), spread <= 2 bp. Marketable limit capped at
+# touch +-5 bp, remainder priced by the shared A5 rest helper; TP +30 bp, hard stop -25 bp, exchange stop -35 bp,
+# 20 min time exit, 60 s cooldown, one open, $25 notional. Self-simulated by tile_fade3 (bot._gf3_thread); PAPER
+# ONLY and refused on every live arm path (live_tile_gate.PAPER_ONLY_TILE_KEYS).
+_GF3_ENTRY = {
+    "mode": "MARKETABLE_LIMIT_CAP_5BP_THEN_A5_REST_SELF_SIMULATED", "offset_pct": 0.0, "chase_windows": (),
+    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "direction_source": "E8_FADE_Z3_MOMENTUM_IMBALANCE",
+    "max_spread_bps": 2.0, "entry_cap_bps": 5.0, "cooldown_sec": 60, "notional_usd": 25.0,
+    "e8": {"z_entry": 2.5, "mom_atr_mult": 2.0, "imb_min": 0.2, "bz_limit": 2.0, "flow_window_min": 3},
+    "ai_decision_role": "NONE",
+    "fill_model": "TILE_FILL_IOC_CAP_THEN_A5_REST",
+}
+_GF3_EXIT = _composite_exit(max_duration_sec=1200, max_open_positions=1,
+                            volatility_scaling="NONE - fixed bp TP / stops and a 20 min time exit")
+_GF3_EXIT.update({"hard_stop_bps": 25.0, "hard_stop_margin_pct": 25.0, "take_profit_bps": 30.0,
+                  "exchange_stop_bps": 35.0})
+_GF3_EXIT["exit_order"] = registry_live_exit_order(_GF3_EXIT)
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_GS_FADE3_TP30: _tile(
+        lane=RESEARCH_LANE_FAMILY_GS_FADE3_TP30,
+        label="GS-FADE3-TP30 · fade 3-min z-score spikes, cap 5 bp then A5 rest, TP 30 bp, stop 25 bp, 20 min exit",
+        raw_policy_id="GS_FADE3_E8_FADE_ALL_W3_Z2P5_MOM2ATR_IMB0P2_BZ2|TP30_HARD25_XSTOP35_TIME1200_CAP1",
+        id_prefix="gf3",
+        module="tile_fade3.py",
+        test_module="test_tile_fade3.py",
+        entry=_GF3_ENTRY, exit_policy=_GF3_EXIT,
+        hypothesis_result={"status": "SIM_E8_RK_PASS_20261025", "hypothesis_id": "GS-20261025-FADE3-TP30"},
+        pre_registration=_phase3_pre(
+            "GS-20261025-FADE3-TP30",
+            spec_source="sim E8 (fixtures/fade3_sim feat.py / family.py, sha-pinned) + RK PASS 25 Oct 06:24 AEDT",
+            decisions=("E8 FADE ALL W=3; cap touch +-5 bp then A5 rest; TP 30 / hard 25 / exchange 35 bp; "
+                       "20 min time exit; 60 s cooldown; one open; $25 notional",),
+        ),
+        admission_treatment=GF3_ADMISSION_POLICY_ID,
+        max_active_signals=1, entry_ttl_sec=1, default_enabled=True,
+        signal_clock=SELF_SIMULATED_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="GS-FADE3-TP30 — 3-min spike fade — PAPER ONLY — LIVE REFUSED",
+        signal_summary=("price spikes 2.5 sd on the 3-minute z-score with momentum >= 2 ATR and the book leaning "
+                        "the other way: fade it with a capped marketable limit"),
+        live_exit_order=registry_live_exit_order(_GF3_EXIT),
+        shadow_exits=(),
+        early_cut_shadow_reason="GS-FADE3-TP30 spec: TP, stops and time exit only",
+    ),
+})
+COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_GS_FADE3_TP30]["self_simulated_paper"] = True
+
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
 ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
@@ -1589,6 +1649,7 @@ TILE_SHORT_CODES = {
     "FAMILY_PREMIUM_REVERSION_60M": "H-C", "FAMILY_GSB3_COMMITTED_FADE_REGIME": "B3",
     "FAMILY_FADE_POOL": "FADE-POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M": "V07",
     "FAMILY_DISLOC_BFX_DISLOCATION_1M": "DISLOC", "FAMILY_DISLOC_FOI_LONG_1M": "DISLOC-FOI",
+    "FAMILY_GS_FADE3_TP30": "GS-FADE3",
 }
 
 
@@ -2040,9 +2101,10 @@ def evaluator_loop_lanes() -> tuple[str, ...]:
     ``premium_clock_trigger`` (PHASE03 Danish router / fade pool: cross-venue premium events)."""
     return tuple(
         lane for lane in ACTIVE_TILE_ORDER
-        if is_evaluator_clock_lane(lane)
+        if not ACTIVE_TILE_REGISTRY[lane].get("self_simulated_paper")
+        and (is_evaluator_clock_lane(lane)
         or ((ACTIVE_TILE_REGISTRY[lane].get("entry_policy") or {}).get("bar_clock_trigger"))
-        or ((ACTIVE_TILE_REGISTRY[lane].get("entry_policy") or {}).get("premium_clock_trigger"))
+        or ((ACTIVE_TILE_REGISTRY[lane].get("entry_policy") or {}).get("premium_clock_trigger")))
     )
 
 
