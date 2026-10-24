@@ -25,6 +25,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import exit_lag_regression as _elr  # RK PASS (7)
 import r17_fields as F  # the ONE closed-row field contract (HM C4)
 
 LIST_DIR = Path(__file__).resolve().parent / "r17"
@@ -245,6 +246,8 @@ def proof_failures(row) -> list:
     if lf:
         out.append(lf)
     out.extend(book_receive_failures(row))
+    if _elr.is_regression(row):
+        out.append(_elr.REASON)  # RK PASS (7): trigger->decision lag above the pre-346ef2bf p95
     if entry_priced_on_1s_tape(row) or F.REASON_ENTRY_PRICED_ON_1S_TAPE in entry:
         out.append(F.REASON_ENTRY_PRICED_ON_1S_TAPE)
     return out

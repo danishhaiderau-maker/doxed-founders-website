@@ -65,8 +65,8 @@ def test_book_refresh_counted_in_scan(tmp_path, monkeypatch):
 
 
 def test_stamps_wired_into_trigger_sites_event_and_event_timestamps():
-    assert SOURCE.count("pos.update(_exit_scan_stamp(") >= 3
-    assert "**{k: pos.get(k) for k in EXIT_SCAN_STAMP_KEYS}" in SOURCE
+    assert SOURCE.count("pos.update(_ess(") >= 3
+    assert 'for k in globals().get("EXIT_SCAN_STAMP_KEYS", ())}' in SOURCE
     i = SOURCE.index('_emit_genome_execution_event("EXIT_TRIGGERED"')
     assert "EXIT_SCAN_STAMP_KEYS" in SOURCE[i:i + 800]
 

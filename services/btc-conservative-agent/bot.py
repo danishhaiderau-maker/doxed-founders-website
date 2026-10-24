@@ -5334,7 +5334,8 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         pos["exit_trigger_real_mark"] = _real_mark_at(now)
         pos["exit_trigger_source"] = str(exit_source)
         pos["exit_mark_source"] = EXIT_MARK_SOURCE_BOOK  # RK C: the evaluated price is the book-side mark
-        pos.update(_exit_scan_stamp(exit_source))
+        _ess = globals().get("_exit_scan_stamp")
+        if _ess: pos.update(_ess(exit_source))
         _stamp_trigger_basis(pos, direction, now, price, _tmeta)
         with trade_lock:
             source_pos.clear()
@@ -5723,7 +5724,8 @@ def _realism_level_stops(pos: dict, price: float, now: float, src: str = None, *
     pos["exit_trigger_mark_price"] = float(pos["exchange_stop_px"])  # DEPRECATED alias of exit_trigger_price
     pos["exit_trigger_real_mark"] = _real_mark_at(float(hit["trigger_ts"]))
     pos["exit_trigger_source"] = str(exit_source)
-    pos.update(_exit_scan_stamp(exit_source))
+    _ess = globals().get("_exit_scan_stamp")
+    if _ess: pos.update(_ess(exit_source))
     pos["exit_order_class"] = _om.EXCHANGE_RESIDENT
     pos["exit_policy_id"] = getattr(_patient_chase_policy(str(pos.get("research_lane") or "").upper()), "POLICY_ID", None)
     opts = _om.tile_options(ACTIVE_TILE_REGISTRY.get(str(pos.get("research_lane") or "").upper()))
@@ -8235,6 +8237,9 @@ def _non_countable_reasons(pos: dict, exit_reason) -> list:
         lf = _r17.liq_failure(pos)  # RK/HM K1: the shared r17 liquidation proof (liq stamped before this call)
         if lf:
             out.append(lf)
+    import exit_lag_regression as _elr
+    if _elr.is_regression(pos):  # RK PASS (7): trigger->decision lag above the pre-346ef2bf p95 (all lanes)
+        out.append(_elr.REASON)
     return out
 
 
@@ -32748,7 +32753,7 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
         "signal_to_fill_sec": round(fill_ts - signal_ts, 3) if fill_ts and signal_ts else None,
         "venue": "PAPER" if not pos.get("bitfinex_live_entry") else "BITFINEX",
         # RK PASS (6): current-epoch per-exit scan stamps (None when not stamped, e.g. pre-fix rows)
-        **{k: pos.get(k) for k in EXIT_SCAN_STAMP_KEYS},
+        **{k: pos.get(k) for k in globals().get("EXIT_SCAN_STAMP_KEYS", ())},
     }
     for key in ("signal_ts", "decision_ts", "order_queued_ts", "order_sent_ts", "relay_received_ts",
                 "exchange_ack_ts", "first_fill_ts", "final_fill_ts", "bot_saw_fill_ts", "fill_ts",
@@ -32767,7 +32772,8 @@ def _stamp_admin_close_trigger(pos: dict, close_reason: str, now: float) -> bool
         return False
     pos["exit_trigger_ts"] = float(now)
     pos["exit_trigger_source"] = str(close_reason)
-    pos.update(_exit_scan_stamp(close_reason))
+    _ess = globals().get("_exit_scan_stamp")
+    if _ess: pos.update(_ess(close_reason))
     return True
 
 
@@ -32863,7 +32869,7 @@ def close_position(pos: dict, exit_reason: str):
             "mae_pct": pos.get("max_drawdown"),
             "exit_trigger_ts": pos.get("exit_trigger_ts"),
             "exit_decision_ts": pos.get("exit_trigger_eval_ts"),
-            **{k: pos.get(k) for k in EXIT_SCAN_STAMP_KEYS},
+            **{k: pos.get(k) for k in globals().get("EXIT_SCAN_STAMP_KEYS", ())},
         })
         entry = pos.get("entry", 0)
         qty = pos.get("qty", 0)
