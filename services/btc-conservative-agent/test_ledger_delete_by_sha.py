@@ -487,3 +487,28 @@ def test_fail_closed_state_cached_until_files_change(tmp_path, monkeypatch):
     for i in range(4):
         assert s.append("decision", {"record_id": f"decision-c{i}", "i": i})["blocked"]
     assert len(calls) == 1
+
+
+def test_restore_clears_cached_fail_closed_state(tmp_path):
+    """HM nit: once the tombstone file is restored, the cached fail-closed outcome is dropped."""
+    s = _deleted_store(tmp_path)
+    p = lds._tombstone_path(s, "decision")
+    good = p.read_bytes()
+    p.unlink()
+    for i in range(2):  # second append is served from the cached fail-closed state
+        assert s.append("decision", {"record_id": f"decision-f{i}", "i": i})["blocked"]
+    p.write_bytes(good)
+    res = s.append("decision", {"record_id": "decision-ok", "i": 50})
+    assert res["written"], res
+
+
+def test_cached_ok_flips_to_blocked_after_delete(tmp_path):
+    """HM nit: a cached OK (no tombstones) state is invalidated by a later delete."""
+    s = _store(tmp_path, n=3, ledgers=("decision",))
+    assert s.append("decision", {"record_id": "decision-warm", "i": 9})["written"]  # warms OK cache
+    deleted = _lines(s, "decision")[1]
+    text, sha = _list(_entries(s, "decision", [1]))
+    lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=False)
+    res = s.append("decision", {"record_id": "decision-1", "i": 1})
+    assert res["written"] is False and res["reason"] == "DELETED_ROW_TOMBSTONED"
+    assert deleted not in _lines(s, "decision")
