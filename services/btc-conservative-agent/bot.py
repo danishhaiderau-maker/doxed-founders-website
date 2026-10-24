@@ -5333,6 +5333,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         pos["exit_trigger_leg_fill_price"] = float(fill_px)
         pos["exit_trigger_real_mark"] = _real_mark_at(now)
         pos["exit_trigger_source"] = str(exit_source)
+        pos["exit_mark_source"] = EXIT_MARK_SOURCE_BOOK  # RK C: the evaluated price is the book-side mark
         _stamp_trigger_basis(pos, direction, now, price, _tmeta)
         with trade_lock:
             source_pos.clear()
@@ -30460,6 +30461,10 @@ def _enqueue_ws_tick_lifecycle(price: float, received_ts: float = None) -> bool:
             return False
 
 
+EXIT_SOURCE_WS_TRADE_WAKE = "WS_TRADE_WAKE_BOOK_MARK"  # RK C (24 Oct): was "WS_TICK"
+EXIT_MARK_SOURCE_BOOK = "BOOK10L"
+
+
 def _tick_driven_position_exits(price: float):
     """WS tick path — immediate ladder/thesis on side-correct BBO, not last-trade wicks."""
     if price is None or price <= 0:
@@ -30477,7 +30482,8 @@ def _tick_driven_position_exits(price: float):
             ]
         for pos in positions:
             mark = get_mark_price(pos.get("dir"))  # book rows at wall now (RK step 2), never the ticker
-            _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK", close_async=True)
+            # RK C: a WS trade print only WAKES this pass; the mark/trigger/fill are the book (BOOK10L), never the print.
+            _evaluate_position_exit(pos, mark, now, exit_source=EXIT_SOURCE_WS_TRADE_WAKE, close_async=True)
         return True
     finally:
         position_evaluation_lock.release()
@@ -32639,6 +32645,7 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
         "exit_trigger_ts": trigger_ts,
         "exit_trigger_eval_ts": _ts_or_none(pos.get("exit_trigger_eval_ts")),
         "exit_trigger_source": pos.get("exit_trigger_source"),
+        "exit_mark_source": pos.get("exit_mark_source"),
         "exit_trigger_price": pos.get("exit_trigger_price"),
         "exit_trigger_bbo_ts": _ts_or_none(pos.get("exit_trigger_bbo_ts")),
         "exit_fill_ts": exit_fill,
