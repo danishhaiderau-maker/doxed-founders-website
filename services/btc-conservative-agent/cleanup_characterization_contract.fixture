@@ -8,6 +8,7 @@
     ["GET", "/api/monitor/live-guardian", "monitor_live_guardian_route"],
     ["GET", "/api/monitor/live/exchange-stops", "monitor_exchange_stops_route"],
     ["GET", "/api/monitor/nonaccum-plans", "monitor_nonaccum_plans_route"],
+    ["GET", "/api/monitor/ledger-unstamped", "monitor_ledger_unstamped_route"],
     ["GET", "/api/monitor/exit-truth", "monitor_check_exit_truth"],
     ["GET", "/api/monitor/pnl/reconcile", "monitor_check_pnl_reconcile"],
     ["GET", "/api/monitor/rules/conformance", "monitor_check_rules"],

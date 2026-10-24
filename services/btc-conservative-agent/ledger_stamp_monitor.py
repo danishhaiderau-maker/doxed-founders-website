@@ -58,6 +58,17 @@ def _reverse_lines(path: Path, max_bytes: int) -> Iterator[tuple[bytes, bool]]:
             yield buf, False
 
 
+_FALLBACK_TS_KEYS = ("ts", "timestamp", "created_ts", "recorded_ts", "decision_ts", "event_ts")
+
+
+def _row_fallback_ts(row: dict):
+    for k in _FALLBACK_TS_KEYS:
+        v = row.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 1e9:
+            return float(v / 1000.0 if v > 1e12 else v)
+    return None
+
+
 def load_exclusions(path: str | os.PathLike | None) -> set[str]:
     out: set[str] = set()
     if not path:
@@ -97,6 +108,8 @@ def check(data_dir: str | os.PathLike, since_ts: float, *, exclusions: set[str] 
                     row = None
                 stamp = row.get(lws.STAMP_KEY) if isinstance(row, dict) else None
                 written = stamp.get("written_at_ts") if isinstance(stamp, dict) else None
+                if not isinstance(written, (int, float)) and isinstance(row, dict):
+                    written = _row_fallback_ts(row)  # legacy unstamped rows: stop at the boundary too
                 if isinstance(written, (int, float)) and written < since_ts:
                     info["boundary_reached"] = True
                     break

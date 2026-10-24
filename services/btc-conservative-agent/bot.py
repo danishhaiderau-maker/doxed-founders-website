@@ -35103,6 +35103,8 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
     "/api/monitor/reconcile", "/api/monitor/tile-integrity", "/api/monitor/fill-provenance",
     "/api/monitor/nonaccum-plans",
+    # R16 (RK 24 Oct): V3 ledger rows written without a countable stamp since ?since=TS
+    "/api/monitor/ledger-unstamped",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -50623,6 +50625,25 @@ def monitor_nonaccum_plans_route():
     cur["epoch_floor_now"] = _offline_sim_epoch_floor()
     cur["unacked_check"] = "NOT EVALUATED by this route (executor must check no unacked/pending current-epoch relay intents before C4)"
     return _monitor_response(cur, _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/ledger-unstamped', methods=["GET"])
+def monitor_ledger_unstamped_route():
+    """R16 check v3_ledger_unstamped_since: count V3 ledger rows (decision/lifecycle/order_intent/market_segment)
+    written since ?since=TS (default: fresh-start epoch floor) without a countable write stamp. RED (alert) when the
+    count is above 0, AMBER when the scan is incomplete. Read-only; admin/monitor auth; never writes or deletes."""
+    import ledger_stamp_monitor as _lsm
+
+    def build(now):
+        raw = request.args.get("since")
+        try:
+            since = float(raw) if raw not in (None, "") else float(_offline_sim_epoch_floor() or 0)
+        except (TypeError, ValueError):
+            raise monitor_tiles.BadRequest("since must be a unix ts")
+        if since <= 0:
+            raise monitor_tiles.BadRequest("since required (fresh epoch floor unreadable)")
+        return _lsm.check(str(_data_sync_runtime_root()), since)
+    return _monitor_tiles_guard(build, 65536)
 
 
 @app.route('/api/monitor/integrity-gaps', methods=["GET"])
