@@ -30,7 +30,8 @@ RK ruling 25 Oct (EXIT_LAG gate, + option (a)) - supersedes the 0.062 s threshol
   * Threshold: never 0.062 and never a percentile of our own lag. It is REAL_EXCHANGE_THRESHOLD_S, set from the real
     Bitfinex trigger->fill time of >= 10 live exchange-resting stops (current epoch, real exchange timestamps), computed
     by HM and reviewed by RK, and recorded here with its source ids. Until then: gate = UNPROVEN, arm_eligible = False.
-  * Option (a) (ruling: SHARED-TRACKER 2026-10-25 03:50 AEDT "EXIT_LAG arm gate per RK ruling" (RK verbatim text pasted there)): UNPROVEN does NOT block arming GS-01
+  * Option (a) (ruling: SHARED-TRACKER 2026-10-25 05:22 AEDT "RK EXIT_LAG option (a) ruling, VERBATIM"
+    (RK addendum 05:22: flag + $0.25 cap enforced in the arm path, fail closed)): UNPROVEN does NOT block arming GS-01
     at $0.25 margin (GS-01 only; enforced by arm_block_reason / gs01_size_block_reason on the tile-ON and live-entry
     paths, fail closed). Instead every in-scope
     exit (GS-01 live and paper, all lanes - fail closed) is non-countable EXIT_LAG_UNPROVEN until the threshold is set.
@@ -72,7 +73,9 @@ MIN_EXCHANGE_STOPS = 10
 REAL_EXCHANGE_THRESHOLD_S: Optional[float] = None
 REAL_EXCHANGE_THRESHOLD_SOURCE_IDS: tuple = ()
 UNPROVEN_REASON = "EXIT_LAG_UNPROVEN"
-# Option (a), ruling: SHARED-TRACKER 2026-10-25 03:50 AEDT "EXIT_LAG arm gate per RK ruling" (RK verbatim text pasted there).
+# Option (a), ruling: SHARED-TRACKER 2026-10-25 05:22 AEDT "RK EXIT_LAG option (a) ruling, VERBATIM":
+#   RK: "Option (a): PASS (R9, R0, R14, R18) ... 2. GS-01 only, at $0.25. FADE3 waits for its own gate."
+#   RK addendum 05:22: enforcing the flag and the $0.25 cap in the arm path, with tests: PASS (R1, R9); both fail closed.
 GS01_UNPROVEN_ARM_ALLOWED = True     # UNPROVEN does not block GS-01 at $0.25 (GS-01 only)
 GS01_MAX_NOTIONAL_USD = 0.25         # GS-01 per-order MARGIN cap (isolated, 100x), enforced on arm + live entry
 GS01_TILE_KEY = "gs1"
@@ -368,7 +371,7 @@ def rk_gate(rows: Iterable[dict], chains: Iterable[dict] = (), epoch_ts: Optiona
             "gs01_arm_blocked_by_exit_lag": False if (gate == GATE_UNPROVEN and GS01_UNPROVEN_ARM_ALLOWED) else gate != GATE_PASS,
             "gs01_unproven_policy": {"allowed": GS01_UNPROVEN_ARM_ALLOWED, "tile": "GS01", "max_notional_usd": GS01_MAX_NOTIONAL_USD,
                                      "non_countable_reason": UNPROVEN_REASON,
-                                     "ruling": "SHARED-TRACKER 2026-10-25 03:50 AEDT 'EXIT_LAG arm gate per RK ruling' (RK verbatim text pasted there)"},
+                                     "ruling": "SHARED-TRACKER 2026-10-25 05:22 AEDT RK EXIT_LAG option (a) ruling, VERBATIM (+ addendum 05:22)"},
             "consecutive_measured_within_threshold": run if thr is not None else 0,
             "consecutive_measured_unjudged": run if thr is None else None, "required": int(required),
             "threshold_s": thr, "threshold_source_ids": list(REAL_EXCHANGE_THRESHOLD_SOURCE_IDS),

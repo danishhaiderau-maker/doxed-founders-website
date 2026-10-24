@@ -48992,7 +48992,7 @@ def monitor_exit_lag():
     deploy (exit_lag_regression.GATE_SCOPE_START_TS); admin / force-flat closes and exchange-stop fills are excluded from
     the run (ids listed); any other exit without a WS_FRAME receive_ts breaks it. The threshold is the real Bitfinex
     trigger->fill time of >= 10 live exchange-resting stops (HM sets, RK reviews); until then gate = UNPROVEN, which does
-    NOT block GS-01 at $0.25 (option (a), ruling: SHARED-TRACKER 2026-10-25 03:50 AEDT "EXIT_LAG arm gate per RK ruling")
+    NOT block GS-01 at $0.25 (option (a), ruling: SHARED-TRACKER 2026-10-25 05:22 AEDT "RK EXIT_LAG option (a) ruling, VERBATIM")
     but makes every in-scope exit non-countable (EXIT_LAG_UNPROVEN). Enforced on the arm / live-entry paths by
     _exit_lag_live_block (not here; this view is read-only).
     Also: per-exit stop-fill book-row check (R0) and the bot-driven live exit stamp check. The legacy 24 Oct view
