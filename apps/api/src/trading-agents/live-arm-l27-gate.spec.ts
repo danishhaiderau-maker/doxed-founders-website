@@ -7,6 +7,7 @@ import { ConflictException } from '@nestjs/common';
 import {
   DENY_L27_GATE_UNREADABLE,
   DENY_L27_LATEST_L,
+  DENY_LIVE_FENCES_UNREADABLE,
   FLY_ARM_GATE_PATH,
   FLY_ARM_GATE_SCHEMA,
   fetchL27ArmBlock,
@@ -15,7 +16,7 @@ import {
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsController } from './trading-agents.controller';
 
-const ok = { schema: FLY_ARM_GATE_SCHEMA, l27_block: null };
+const ok = { schema: FLY_ARM_GATE_SCHEMA, l27_block: null, live_fences_block: null };
 const blocked = { schema: FLY_ARM_GATE_SCHEMA, l27_block: DENY_L27_LATEST_L };
 
 test('L27 gate: same code as the shared Python helper; verdict is pure and fails closed', () => {
@@ -30,6 +31,20 @@ test('L27 gate: same code as the shared Python helper; verdict is pure and fails
     { schema: FLY_ARM_GATE_SCHEMA, l27_block: '' }, { schema: FLY_ARM_GATE_SCHEMA, l27_block: 5 }]) {
     assert.equal(l27ArmGateVerdict(bad), DENY_L27_GATE_UNREADABLE);
   }
+});
+
+test('RK 24 Oct: live_fences ok:false / unreadable / missing on any account => arm gate BLOCKs (fails closed)', () => {
+  const py = readFileSync(join(__dirname, '../../../../services/btc-conservative-agent/live_fences_health.py'), 'utf8');
+  assert.match(py, new RegExp(`ARM_BLOCK_PREFIX = "${DENY_LIVE_FENCES_UNREADABLE}"`));
+  const both = 'LIVE_FENCES_UNREADABLE:acctA=LIVE_FENCES_OK_FALSE,acctB=LIVE_FENCES_MISSING';
+  assert.equal(l27ArmGateVerdict({ ...ok, live_fences_block: both }), both);
+  assert.equal(l27ArmGateVerdict({ ...ok, live_fences_block: 'LIVE_FENCES_UNREADABLE:acctB=LIVE_FENCES_UNREADABLE' }),
+    'LIVE_FENCES_UNREADABLE:acctB=LIVE_FENCES_UNREADABLE');
+  assert.equal(l27ArmGateVerdict({ schema: FLY_ARM_GATE_SCHEMA, l27_block: null }), DENY_LIVE_FENCES_UNREADABLE);  // older Fly
+  for (const bad of ['', 5, {}, false]) {
+    assert.equal(l27ArmGateVerdict({ ...ok, live_fences_block: bad }), DENY_LIVE_FENCES_UNREADABLE);
+  }
+  assert.equal(l27ArmGateVerdict({ ...blocked, live_fences_block: null }), DENY_L27_LATEST_L);   // L27 still wins
 });
 
 test('L27 gate: fetch reads Fly /api/live-copy/arm-gate with the admin header; any failure => UNREADABLE', async () => {

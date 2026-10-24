@@ -4005,6 +4005,7 @@ export function liveFenceView(
   }));
   return {
     schema: 'relay_live_fences_v1',
+    ok: true, // HM 24 Oct: a successful read says so explicitly; Fly passes only on ok === true
     blocked: fences.length > 0 || writeFailures.length > 0,
     exit_fill: fences.filter((f) => f.kind === 'exit_fill'),
     exit_fill_cycle: fences.filter((f) => f.kind === 'exit_fill_cycle'),

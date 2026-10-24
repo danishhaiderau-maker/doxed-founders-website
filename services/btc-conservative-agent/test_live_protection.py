@@ -434,6 +434,7 @@ def test_rk1_restart_reconciles_to_the_exchange_before_any_state_change(tmp_path
     ns2["_LIVE_GUARDIAN_FORCE_FLAT_LOG"] = collections.deque(maxlen=50)
     for fn in ("_live_guardian_arm_block", "_live_flatten_entry_fence"):
         exec(_fn_src(fn), ns2)
+    ns2["_live_fences_arm_block"] = lambda: None   # live_fences health: test_live_fences_health.py
     ns2["_live_guardian_restore"](NOW + 30)
     st = ns2["_LIVE_GUARDIAN_STATE"]
     # before the reconcile: arming AND live entries are refused, the latch stays
@@ -1018,7 +1019,8 @@ def _route_ns(route, state, extra=None, body=None, amendment=None):
           "request": types.SimpleNamespace(get_json=lambda silent=True: dict(body or {"enabled": True})),
           "jsonify": lambda *a, **k: dict(*a, **k), "_admin_authed_strict": lambda: True,
           "_strict_json_boolean": lambda d, k: d.get(k) if isinstance(d.get(k), bool) else None,
-          "_live_guardian_heartbeat_stale": lambda: False, "_live_guardian_arm_block": lambda: None, "CALLS": calls}
+          "_live_guardian_heartbeat_stale": lambda: False, "_live_guardian_arm_block": lambda: None,
+          "_live_fences_arm_block": lambda: None, "CALLS": calls}
     ns.update(extra or {})
     sa = _SRC.index("LIVE_ARM_GATE_SCHEMA = ")
     exec(_SRC[sa:_SRC.index("\n", sa)], ns)
@@ -1098,6 +1100,9 @@ def test_852_l27_fly_arm_gate_endpoint_serves_the_shared_helper_verdict_for_the_
     ns, _ = _route_ns("/api/live-copy/arm-gate", {})
     assert ns["api_live_copy_arm_gate"]()["l27_block"] is None
     assert "LIVE_ARM_GATE_SCHEMA = \"fly_live_arm_gate_v1\"" in _SRC
+    assert ns["api_live_copy_arm_gate"]()["live_fences_block"] is None
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {}, {"_live_fences_arm_block": lambda: "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE"})
+    assert ns["api_live_copy_arm_gate"]()["live_fences_block"] == "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE"
 
 
 def test_852_l27_every_fly_arm_path_uses_the_one_helper():

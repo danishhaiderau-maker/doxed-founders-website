@@ -446,7 +446,11 @@ def live_exchange_health():  # R6 (executor-side errors as reported)
     now = time.time()
     errs = [r for r in ctx.get("reports") or [] if r.get("type") in ("ERROR", "ORDER_REJECTED", "STOP_FAILED")
             and float(r.get("fly_received_at_ts") or 0) >= now - 3600]
-    return _ok({"route": "R6", "errors_1h": len(errs),
+    # RK (24 Oct): live_fences ok:false / unreadable / missing on any account -> non-GREEN verdict + gap
+    import live_fences_health as _lfh
+    web = ctx.get("website") or {}
+    lf = _lfh.summary(lcl.exchange_view(web), web.get("armed_accounts") or [])
+    return _ok({"route": "R6", "verdict": lf["verdict"], "live_fences": lf, "gaps": lf["gaps"], "errors_1h": len(errs),
                 "recent_errors": [{"type": r.get("type"), "account": r.get("account"),
                                    "error": r.get("error")} for r in errs[-20:]],
                 "website": ctx.get("website"),

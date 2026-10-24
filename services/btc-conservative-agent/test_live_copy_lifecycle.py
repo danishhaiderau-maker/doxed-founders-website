@@ -3,7 +3,14 @@ import live_copy_lifecycle as lcl
 NOW = 1_800_000_000.0
 
 
+# RK (24 Oct): a healthy relay mirror carries a readable live_fences view (test_live_fences_health.py covers the bad cases)
+LIVE_FENCES_OK = {"schema": "relay_live_fences_v1", "ok": True, "blocked": False, "exit_fill": [], "exit_fill_cycle": [], "other": [],
+                  "exit_fill_fence_write_failures": [], "boot_reconcile": None}
+
+
 def _web(status="ACTIVE", armed=True, action="STARTED", mirror=None):
+    if isinstance(mirror, dict) and "live_fences" not in mirror:
+        mirror = {**mirror, "live_fences": LIVE_FENCES_OK}
     return {"reachable": True, "armed_accounts": ["acct-a"] if armed else [], "server_ts": NOW + 0.2,
             "fetched_at_ts": NOW,
             "accounts": [{"account": "acct-a", "armed": armed, "status": status, "relay_mode": "LIVE" if armed else "PAUSED",
@@ -46,7 +53,8 @@ def test_paused_but_started_during_deploy_is_expected_not_money_risk():
     # LIVE-FIX-1928: intentional pause/deploy race (USER_REQUEST_START) must not
     # paint ARMING_SOURCES_MISMATCH / money_risk RED. ACCOUNT_PAUSED_WHILE_OUTPUT_ON
     # still fires when output+tiles are ON (capability truth).
-    web = _web(status="PAUSED", armed=False, action="STARTED")
+    # healthy flat relay mirror (with live_fences): a MISSING mirror is non-GREEN by RK 24 Oct (test_live_fences_health.py)
+    web = _web(status="PAUSED", armed=False, action="STARTED", mirror={"ok": True, "flat": True, "read_age_s": 1.0})
     web["accounts"][0]["last_transition"]["reason"] = "USER_REQUEST_START"
     web["accounts"][0]["last_transition"]["actor"] = "USER"
     out = lcl.build(_ctx(website=web), now=NOW)

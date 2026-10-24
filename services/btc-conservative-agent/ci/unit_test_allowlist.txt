@@ -637,3 +637,4 @@ test_shadow_exit_backfill_r3_blocked.py
 test_integration_848_resolution.py
 test_r17_retired_sources.py
 test_hm_r4_b2_guardian.py
+test_live_fences_health.py

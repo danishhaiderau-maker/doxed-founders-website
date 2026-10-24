@@ -626,6 +626,10 @@ def alerts(*, arming: Mapping[str, Any], intents: list[dict], exchange: Mapping[
                 add("DUPLICATE_STOPS", RED, account=acct, stops=int(p.get("stops")))
             if int(p.get("stops") or 0) == 0:
                 add("POSITION_WITHOUT_EXCHANGE_STOP", RED, account=acct)
+    # RK (24 Oct, .dockerignore fix PR): live_fences ok:false / unreadable / missing on any account -> alert (RED if armed)
+    import live_fences_health as _lfh
+    for _a in _lfh.mirror_alerts(exchange, armed_accounts):
+        add(_a.pop("code"), _a.pop("severity"), **_a)
     off = clock.get("fly_to_website_offset_ms")
     if off is not None and abs(off) > CLOCK_OFFSET_AMBER_MS:
         add("CLOCK_OFFSET_HIGH", AMBER, offset_ms=off)

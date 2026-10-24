@@ -550,6 +550,7 @@ def _ff_ns():
           "_BOT_ADMIN_TOKEN": "x", "LIVE_COPY_OPS_BASE": "http://relay", "LIVE_COPY_OPS_USER_ID": "u", "requests": None,
           "_live_guardian_persist": lambda: True, "_disarm_live_control": lambda reason: None}
     exec(src, ns)
+    ns["_live_fences_arm_block"] = lambda: None   # live_fences health: test_live_fences_health.py
     return ns
 
 

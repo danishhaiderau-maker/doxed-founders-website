@@ -62415,7 +62415,17 @@ def _live_guardian_arm_block() -> str | None:
         return "LIVE_GUARDIAN_BOOT_RECONCILE_PENDING"
     if any(r.get("requested") and not r.get("done_ts") for r in list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)):
         return "LIVE_GUARDIAN_FORCE_FLAT_IN_PROGRESS"
-    return None
+    return _live_fences_arm_block()
+
+
+def _live_fences_arm_block() -> str | None:
+    """RK (24 Oct): exchange_mirror.live_fences ok:false / unreadable / missing on ANY account => arm BLOCK (fail closed,
+    including an unreadable helper)."""
+    try:
+        import live_fences_health as _lfh
+        return _lfh.arm_block(_live_copy_website_cached_view())
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        return f"LIVE_FENCES_UNREADABLE:CHECK_ERROR:{type(exc).__name__}"
 
 
 def _live_guardian_force_flat_check() -> dict:
@@ -62951,6 +62961,7 @@ def api_live_copy_arm_gate():
     import live_tile_gate as _ltg
     return jsonify({"schema": LIVE_ARM_GATE_SCHEMA, "ts": time.time(), "l27_block": _live_l27_arm_block(),
                     "guardian_arm_block": _live_guardian_arm_block(),
+                    "live_fences_block": _live_fences_arm_block(),   # RK (24 Oct): relay arm paths refuse on non-null
                     "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
                     "stop_amendment": str(os.environ.get(_ltg.STOP_AMENDMENT_ENV) or "") or None,
                     "l27_amendment_pass": _LIVE_GUARDIAN_STATE.get("l27_amendment_pass"),

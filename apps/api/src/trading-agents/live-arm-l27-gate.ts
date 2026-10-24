@@ -9,6 +9,8 @@ export const FLY_ARM_GATE_SCHEMA = 'fly_live_arm_gate_v1';
 /** Same code as live_tile_gate.DENY_L27_LATEST_L. */
 export const DENY_L27_LATEST_L = 'LIVE_L27_LATEST_REAL_L_LE_15BP';
 export const DENY_L27_GATE_UNREADABLE = 'LIVE_L27_ARM_GATE_UNREADABLE';
+/** Same prefix as live_fences_health.ARM_BLOCK_PREFIX. */
+export const DENY_LIVE_FENCES_UNREADABLE = 'LIVE_FENCES_UNREADABLE';
 export const FLY_ARM_GATE_TIMEOUT_MS = 4_000;
 
 export type LiveArmPath = 'instance/resume' | 'ops/rearm' | 'hire';
@@ -18,8 +20,16 @@ export function l27ArmGateVerdict(body: unknown): string | null {
   if (!body || typeof body !== 'object') return DENY_L27_GATE_UNREADABLE;
   const b = body as Record<string, unknown>;
   if (b.schema !== FLY_ARM_GATE_SCHEMA || !('l27_block' in b)) return DENY_L27_GATE_UNREADABLE;
-  if (b.l27_block === null) return null;
-  return typeof b.l27_block === 'string' && b.l27_block.trim() ? b.l27_block.trim() : DENY_L27_GATE_UNREADABLE;
+  if (b.l27_block !== null) {
+    return typeof b.l27_block === 'string' && b.l27_block.trim() ? b.l27_block.trim() : DENY_L27_GATE_UNREADABLE;
+  }
+  // RK (24 Oct): exchange_mirror.live_fences ok:false / unreadable / missing on any account => BLOCK (field missing = unreadable)
+  if (!('live_fences_block' in b)) return DENY_LIVE_FENCES_UNREADABLE;
+  if (b.live_fences_block !== null) {
+    return typeof b.live_fences_block === 'string' && b.live_fences_block.trim()
+      ? b.live_fences_block.trim() : DENY_LIVE_FENCES_UNREADABLE;
+  }
+  return null;
 }
 
 export function flyBotBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
