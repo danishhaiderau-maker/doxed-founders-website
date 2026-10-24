@@ -43,8 +43,11 @@ def test_undeclared_epoch_is_inert(data_root):
     assert engine._epoch_filter_frame(engine.TRADES_FILE, frame) is frame
     assert engine._epoch_admit("trade_outcome.jsonl", {"ts": PRE}) is True
     assert engine._epoch_receipt_block() is None
-    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"}, data_epoch=None)
-    assert "data_epoch" not in receipt and receipt["level"] == "GREEN"
+    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"}, data_epoch=None,
+                                       source_revision="test")
+    # R17 item 6: a receipt with no declared data epoch is hard-rejected (strict gate), never GREEN.
+    assert "data_epoch" not in receipt and receipt["level"] == "RED"
+    assert any("epoch hard-rejected" in r for r in receipt["reasons"])
 
 
 def test_declared_epoch_filters_loaders_and_reports_pre_epoch_rows(data_root):
@@ -77,7 +80,8 @@ def test_clean_epoch_data_root_is_pure(data_root):
 
     block = engine._epoch_receipt_block()
     assert block["pre_epoch_rows_admitted"] == 0 and block["pre_epoch_rows_admitted_by_stream"] == {}
-    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"}, data_epoch=block)
+    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"}, data_epoch=block,
+                                       source_revision="test", expected_epoch_id=EPOCH)
     assert receipt["level"] == "GREEN"
 
 
@@ -118,7 +122,8 @@ def test_ops_ledgers_are_not_evidence_and_read_guarded_rows_are_not_admitted(dat
         "adaptive_entry_decisions.jsonl": 1, "expired_orders_3factor.csv": 1, "taker_signal_counterfactuals.jsonl": 1}
     assert block["pre_epoch_rows_read_guarded"] == 3
     assert "relay_outbox_quarantine.jsonl" in block["non_evidence_streams"]
-    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"}, data_epoch=block)
+    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"}, data_epoch=block,
+                                       source_revision="test", expected_epoch_id=EPOCH)
     assert receipt["level"] == "GREEN"
 
 
