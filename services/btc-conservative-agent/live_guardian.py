@@ -31,7 +31,11 @@ LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only l
 # RK 02:25: these violations also latch RED (bot._live_guardian_tick), on top of the disarm ALL + force-flat every disarming
 # violation gets. AMEND4 (sha 7073ed25) E2'/E5/E6/E7: STOP_FAILURE_FLATTEN is RED too (non-countable, counted).
 # AMEND5 G3 (sha 4407d5a2, L18): LIQ_CHECK_FLATTEN (real L <= 15 bp past the stop, or unreadable) is RED as well.
-RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN, _ltg_caps.LIQ_CHECK_FLATTEN})
+# RK option (a) 25 Oct (3): an entry whose exchange-resting stop is not placed AND read back by order id is unprotected ->
+# flatten (disarm ALL + force-flat, as every disarming violation) AND RED.
+STOP_ORDER_ID_NOT_RESIDENT = "STOP_ORDER_ID_NOT_RESIDENT"
+STOP_UNPROTECTED_RED_CODES = frozenset({"STOP_MISSING_GT_5S", "STOP_PLACEMENT_FAILED", STOP_ORDER_ID_NOT_RESIDENT})
+RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN, _ltg_caps.LIQ_CHECK_FLATTEN}) | STOP_UNPROTECTED_RED_CODES
 # HM5 (24 Oct, #852): REDs that fresh exchange evidence FLAT_NO_STOPS does NOT clear. They clear only through the stamped
 # operator ack route (bot POST /api/live-copy/guardian/red-ack), and no later RED replaces their code (latch_red).
 ACK_ONLY_RED_CODES = frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
@@ -261,6 +265,13 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         out.extend(v for v in d3v if (v.get("code"), v.get("tile")) not in have)
         state["d3"] = d3i
     positions, orders = list(m.get("positions") or []), list(m.get("open_orders") or [])
+    # 1b. RK option (a) (3): the confirmed stop's own order id must be read back resting on the exchange (reduce-only STOP).
+    resident_ids = {str(o.get("id")) for o in _ltg.resident_stops(orders) if o.get("id") is not None}
+    for c in open_filled:
+        sid = c.get("stop_order_id")
+        if c.get("stop_confirmed") and sid and now - float(c["fill_at_ts"]) > STOP_MISSING_SEC and str(sid) not in resident_ids:
+            out.append({"code": STOP_ORDER_ID_NOT_RESIDENT, "tile": tile_of(c),
+                        "detail": f"{c.get('correlation_id')} stop order {sid} not read back resting on the exchange"})
     orphans = list(m.get("orphans") or [])
     # 2. orphan (persisting)
     if orphans:

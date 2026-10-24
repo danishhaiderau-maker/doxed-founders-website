@@ -48976,9 +48976,13 @@ def monitor_exit_latency():
 
 @app.route('/api/monitor/exit-lag', methods=["GET"])
 def monitor_exit_lag():
-    """RK ruling 22:32 AEDT arm gate (read-only, admin or MONITOR_READ_TOKEN): CONSECUTIVE post-346ef2bf exits with
-    decision - trigger-row WS_FRAME receive_ts <= the old p95 (0.062 s). REGRESSION / UNMEASURED exits end the run.
-    ?required=N adds armable = run >= N."""
+    """RK ruling 25 Oct EXIT_LAG arm gate (+ option (a)), read-only, admin or MONITOR_READ_TOKEN. Scope from the #868
+    deploy (exit_lag_regression.GATE_SCOPE_START_TS); admin / force-flat closes and exchange-stop fills are excluded from
+    the run (ids listed); any other exit without a WS_FRAME receive_ts breaks it. The threshold is the real Bitfinex
+    trigger->fill time of >= 10 live exchange-resting stops (HM sets, RK reviews); until then gate = UNPROVEN, which does
+    NOT block GS-01 at $0.25 (option (a)) but makes every in-scope exit non-countable (EXIT_LAG_UNPROVEN).
+    Also: per-exit stop-fill book-row check (R0) and the bot-driven live exit stamp check. The legacy 24 Oct view
+    (0.062 s on post-346ef2bf rows) stays under "legacy_v1". ?required=N only feeds legacy_v1."""
     import exit_lag_regression as _elr
 
     def build(now):
@@ -48988,8 +48992,29 @@ def monitor_exit_lag():
         except ValueError:
             raise monitor_tiles.BadRequest("BAD_ARGS")
         closed = _exit_latency_closed_trade_rows(_elr.DEPLOY_TS - 3600)
-        return {**_elr.arm_gate(closed, required=req), **_monitor_tiles_common(now),
-                "scope": {"since_ts": _elr.DEPLOY_TS, "required": req}, "recomputed_p95": dict(_elr.RECOMPUTED_P95)}
+        chains = _tile_integrity_chains(now)
+        try:
+            epoch = _offline_sim_epoch_floor()
+        except Exception:  # noqa: BLE001 - read-only view; an unreadable epoch scopes nothing out (fail closed: n may only shrink)
+            epoch = None
+        epoch = max(float(epoch or 0.0), _elr.GATE_SCOPE_START_TS)
+        gate = _elr.rk_gate(closed, chains, epoch_ts=epoch)
+        twins = {str(r.get("trade_id") or ""): r for r in closed}
+        stamps = []
+        for c in chains:
+            if not c.get("closed") or str(c.get("exit_order_class") or "").upper() == "EXCHANGE_RESIDENT":
+                continue
+            if (c.get("exit_fill_at_ts") or c.get("fill_at_ts") or 0) < epoch:
+                continue
+            row = {**(twins.get(str(c.get("correlation_id") or "")) or {}), "exit_ack_at_ts": c.get("exit_ack_at_ts"),
+                   "exit_order_class": c.get("exit_order_class"), "exit_reason": c.get("exit_reason")}
+            stamps.append({"correlation_id": c.get("correlation_id"), "account": c.get("account"),
+                           "exit_reason": c.get("exit_reason"), **_elr.live_exit_stamp_check(row)})
+        legacy = {**_elr.arm_gate(closed, required=req), "scope": {"since_ts": _elr.DEPLOY_TS, "required": req},
+                  "recomputed_p95": dict(_elr.RECOMPUTED_P95)}
+        return {**gate, **_monitor_tiles_common(now), "live_epoch_ts": epoch, "live_exit_stamps": stamps,
+                "live_exit_stamps_missing": [x["correlation_id"] for x in stamps if x.get("missing")],
+                "legacy_v1": legacy}
 
     return _monitor_tiles_guard(build, 1_500_000)
 

@@ -577,22 +577,33 @@ def test_closed_row_carries_trigger_vs_book_and_tape_age():
 
 
 def test_exit_lag_arm_gate_route(bot, monkeypatch):
-    """RK ruling 22:32: HM reads the consecutive-under-threshold count on the receive_ts measure."""
+    """RK ruling 25 Oct + option (a): scope from #868, admin / exchange-stop ids listed, UNPROVEN while n < 10, GS-01 not
+    blocked, legacy 24 Oct view kept under legacy_v1."""
     import exit_lag_regression as elr
-    t = elr.DEPLOY_TS + 5000
+    t = elr.GATE_SCOPE_START_TS + 5000
 
     def ev(rx, dec):
         return {"exit_trigger_receive_ts": rx, "exit_trigger_receive_ts_source": "WS_FRAME" if rx else None,
                 "exit_decision_ts": dec, "exit_fill_ts": dec + 0.5}
     rows = [{"trade_id": "a", "event_timestamps": ev(None, t)},
+            {"trade_id": "adm", "exit_reason": "ADMIN_FORCE_FLAT", "event_timestamps": ev(None, t + 5)},
+            {"trade_id": "xs", "exit_reason": "EXCHANGE_STOP_30BP", "event_timestamps": ev(None, t + 6)},
             {"trade_id": "b", "event_timestamps": ev(t + 9.99, t + 10)},
             {"trade_id": "c", "event_timestamps": ev(t + 19.98, t + 20)}]
+    chains = [{"correlation_id": "gs1-live", "closed": True, "exit_order_class": "BOT_SENT", "exit_reason": "TP",
+               "exit_fill_at_ts": t + 30, "exit_ack_at_ts": t + 29}]
     monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: rows)
+    monkeypatch.setattr(bot, "_tile_integrity_chains", lambda now: chains)
     r = _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required=3)
     assert r.status_code == 200
     body = r.get_json()
-    assert body["schema"] == "exit_lag_arm_gate_v1" and body["consecutive_under_threshold"] == 2
-    assert body["armable"] is False and body["run_broken_by"]["status"] == "UNMEASURED"
-    assert body["threshold_s"] == 0.062 and body["recomputed_p95"]["n"] == 0
+    assert body["schema"] == "exit_lag_arm_gate_v2" and body["gate"] == "UNPROVEN" and body["arm_eligible"] is False
+    assert body["gs01_arm_blocked_by_exit_lag"] is False and body["gs01_unproven_policy"]["max_notional_usd"] == 0.25
+    assert body["threshold_s"] is None and body["n_exchange_stops"] == 0 and body["real_exchange_figure"]["source_ids"] == []
+    assert body["admin_excluded_ids"] == ["adm"] and body["exchange_filled_ids"] == ["xs"]
+    assert body["consecutive_measured_unjudged"] == 2 and body["run_broken_by"]["trade_id"] == "a"
+    assert body["scope"]["since_ts"] == elr.GATE_SCOPE_START_TS and body["scope"]["reason"]
+    assert body["live_exit_stamps_missing"] == ["gs1-live"]   # no paper twin => receive/decision/send missing
+    assert body["legacy_v1"]["schema"] == "exit_lag_arm_gate_v1" and body["legacy_v1"]["threshold_s"] == 0.062
     assert MONITOR not in r.get_data(as_text=True) and ADMIN not in r.get_data(as_text=True)
     assert _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required="x").status_code == 400
