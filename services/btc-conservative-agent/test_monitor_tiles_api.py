@@ -644,3 +644,84 @@ def test_exit_lag_gate_now_fails_closed(bot, monkeypatch):
     assert elr.arm_block_reason(bot._exit_lag_gate_now(), "gs1") == elr.ARM_BLOCK_UNREADABLE
     monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: [])
     assert bot._exit_lag_gate_now()["schema"] == "exit_lag_arm_gate_v2"
+
+
+# ---- HM R3 B2 (#876): Flask-client behavioural tests; each fails if its barrier is changed to `if False:` ----
+import types as _types
+
+_GS01_LANE = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
+
+
+class _Sw:
+    def __init__(self):
+        self.on = []
+
+    def request_on(self, lane, **kw):
+        self.on.append(lane)
+
+    def request_off(self, lane, **kw):
+        pass
+
+    def why_not_armed(self, lane, **kw):
+        return {"eligible": True, "denials": []}
+
+    def snapshot(self, lane):
+        return {"bitfinex_live_orders": lane in self.on}
+
+
+def _open_gates(bot, monkeypatch):
+    """Every gate on the arm routes passes, so only the barrier under test can refuse."""
+    sw = _Sw()
+    enabled = []
+    boot = _types.SimpleNamespace(snapshot=lambda: {"lanes": {}}, disable=lambda **k: {},
+                                  enable=lambda lane, **k: enabled.append(lane) or (True, {}))
+    elig = _types.SimpleNamespace(is_eligible=lambda lane: True, set=lambda *a, **k: (True, {}))
+    for name, val in {"_get_bfx_live_switch": lambda: sw,
+                      "_refresh_bitfinex_exposure_audit": lambda: {}, "_bitfinex_readiness_context": lambda: {},
+                      "_bitfinex_size_checks_for_lane": lambda lane, ctx: {}, "_bitfinex_master_state": lambda: {},
+                      "_get_live_copy_eligibility": lambda: elig, "_get_live_copy_bootstrap": lambda: boot,
+                      "_live_guardian_heartbeat_stale": lambda: False, "_live_guardian_arm_block": lambda: None,
+                      "_live_guardian_tile_arm_block": lambda lane: None,
+                      "_exit_lag_live_block": lambda *a, **k: None}.items():
+        monkeypatch.setattr(bot, name, val)
+    return sw, enabled
+
+
+def _non_allowlisted_active_lane():
+    from combo_pathway_config import ACTIVE_TILE_ORDER
+    import live_tile_gate as ltg_
+    return next(l for l in ACTIVE_TILE_ORDER if ltg_.operator_eligibility_refusal(l) is not None)
+
+
+def test_b2_tile_live_orders_route_allowlist_refuses(bot, monkeypatch):
+    sw, _ = _open_gates(bot, monkeypatch)
+    c = bot.app.test_client()
+    for lane in (_non_allowlisted_active_lane(), "DISLOC", "ROUTER", "H-A", "zz-anything"):
+        r = c.post(f"/api/bitfinex/tiles/{lane}/live-orders", json={"enabled": True}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+        assert r.status_code == 409 and r.get_json()["error"] == "LANE_NOT_ARM_ALLOWLISTED", (lane, r.get_json())
+    assert sw.on == []
+    r = c.post(f"/api/bitfinex/tiles/{_GS01_LANE}/live-orders", json={"enabled": True}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 200 and sw.on == [_GS01_LANE]   # control: the open path does reach request_on
+
+
+def test_b2_protection_bootstrap_allowlist_refuses(bot, monkeypatch):
+    _, enabled = _open_gates(bot, monkeypatch)
+    c = bot.app.test_client()
+    lane = _non_allowlisted_active_lane()
+    r = c.post("/api/live-copy/protection-bootstrap", json={"enabled": True, "lane": lane}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 409 and r.get_json()["results"][lane]["error"] == "LANE_NOT_ARM_ALLOWLISTED"
+    assert enabled == []
+    r = c.post("/api/live-copy/protection-bootstrap", json={"enabled": True, "lane": _GS01_LANE}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 200 and enabled == [_GS01_LANE]
+
+
+def test_b2_tile_arm_exit_lag_block_refuses_before_request_on(bot, monkeypatch):
+    import exit_lag_regression as elr
+    sw, _ = _open_gates(bot, monkeypatch)
+    seen = []
+    monkeypatch.setattr(bot, "_exit_lag_live_block",
+                        lambda lane, margin, where, **k: seen.append(where) or elr.ARM_BLOCK_GS01)
+    r = bot.app.test_client().post(f"/api/bitfinex/tiles/{_GS01_LANE}/live-orders", json={"enabled": True},
+                                   environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 409 and r.get_json()["error"] == elr.ARM_BLOCK_GS01 and seen == ["TILE_ARM"]
+    assert sw.on == []
