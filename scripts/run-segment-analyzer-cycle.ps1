@@ -73,7 +73,8 @@ if (-not $cycleLock) { Write-ChainLog -Config $cfg -Name $logName -Message 'SKIP
 $cycleStatus = [ordered]@{ schema = 'segment_analyzer_cycle_status_v1'; pid = $PID; reason = $Reason
                            startedAt = (Get-UtcNowIso); phase = 'PROMOTION'; updatedAt = $null
                            finishedAt = $null; exitCode = $null; stopReason = $null; detail = $null
-                           promotionLevel = $null; promotionWarnings = @(); pullExit = $null; pullDetail = $null }
+                           promotionLevel = $null; promotionWarnings = @(); pullExit = $null; pullDetail = $null
+                           mirrorPublishFreshness = $null; alerts = @() }
 Set-CycleStatus 'PROMOTION'
 
 if (-not $env:BOT_ADMIN_TOKEN) {
@@ -224,6 +225,7 @@ Set-CycleStatus 'ANALYZER'
 # Promotion plus migration outlive the default 10-minute receipt SLA as the
 # epoch grows; the receipt is still bound to this cycle's applied seq.
 $env:ANALYZER_MIRROR_SYNC_MAX_AGE_SEC = "$SyncMaxAgeSec"
+$env:ANALYZER_MIRROR_PUBLISH_RECEIPT = (Join-Path $cfg.StateDir 'analyzer-mirror-publish.status.json')
 & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'run-analyzer-once.ps1') `
   -RepoRoot $cfg.RepoRoot -CanonicalRoot $cfg.CanonicalRoot -StateDir $cfg.StateDir -Port $Port -Reason $Reason
 $analyzerExit = $LASTEXITCODE
@@ -263,6 +265,26 @@ if ($analyzerExit -eq 0) {
   } finally {
     $ErrorActionPreference = $previous
   }
+}
+
+# Monitor: the last VERIFIED mirror publish must be <= 2 h old. Runs every cycle (even when the analyzer or the
+# publish failed) so a silently stuck publisher raises ANALYZER_MIRROR_PUBLISH_STALE in the log and cycle status.
+$mirrorReceiptPath = Join-Path $cfg.StateDir 'analyzer-mirror-publish.status.json'
+$ErrorActionPreference = 'Continue'
+try {
+  $staleOut = (& $Python (Join-Path $cfg.RepoRoot 'scripts\publish_analyzer_mirror.py') '--check-stale' '--receipt' $mirrorReceiptPath 2>&1 | Out-String).Trim()
+  $staleExit = $LASTEXITCODE
+  try { $cycleStatus.mirrorPublishFreshness = $staleOut | ConvertFrom-Json } catch { $cycleStatus.mirrorPublishFreshness = $staleOut }
+  if ($staleExit -eq 5) {
+    $cycleStatus.alerts = @($cycleStatus.alerts) + @('ANALYZER_MIRROR_PUBLISH_STALE')
+    Write-ChainLog -Config $cfg -Name $logName -Message ("ALERT ANALYZER_MIRROR_PUBLISH_STALE {0}" -f $staleOut)
+  } else {
+    Write-ChainLog -Config $cfg -Name $logName -Message ("MIRROR_PUBLISH_FRESHNESS exit={0} {1}" -f $staleExit, $staleOut)
+  }
+} catch {
+  Write-ChainLog -Config $cfg -Name $logName -Message ("MIRROR_PUBLISH_FRESHNESS check failed: {0}" -f $_.Exception.Message)
+} finally {
+  $ErrorActionPreference = $previous
 }
 
 # Custody-gated retention (120 GB cap) runs only after a successful generation,

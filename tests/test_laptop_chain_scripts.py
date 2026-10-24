@@ -1107,3 +1107,13 @@ def test_dashboard_revision_refreshes_after_every_generation():
     assert "Update-AnalyzerDashboardCode" in main_finally.split("$status.exitCode = $exitCode", 1)[0]
     body = runner.split("function Update-AnalyzerDashboardCode {", 1)[1].split("\n}\n", 1)[0]
     assert "Set-DashboardCodeRevision $head" in body
+
+
+def test_cycle_runs_mirror_publish_stale_check_every_cycle():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    check = cycle.split("$mirrorReceiptPath = ", 1)[1].split("# Custody-gated retention", 1)[0]
+    assert "'--check-stale'" in check and "$staleExit -eq 5" in check
+    assert "ALERT ANALYZER_MIRROR_PUBLISH_STALE" in check and "mirrorPublishFreshness" in check
+    # not nested under `if ($analyzerExit -eq 0)`: a failing analyzer still raises the alert
+    assert cycle.split("$mirrorReceiptPath = ", 1)[0].rstrip().endswith("}") or "if ($analyzerExit" not in check
+    assert "$env:ANALYZER_MIRROR_PUBLISH_RECEIPT" in cycle
