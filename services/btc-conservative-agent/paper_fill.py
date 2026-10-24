@@ -799,7 +799,7 @@ TILE_FILL_SITES = {
 # R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
 # (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five
 # remaining entries, PENDING_MIGRATION, ALLOWED_FILL_MODELS, FRESH_EXIT_STATUSES and every pricing
-# function in this module are unchanged (byte-identity pinned by test_tile67_byte_identity.py).
+# function in this module are unchanged (byte-identity pinned by test_shared_pricing_byte_identity.py).
 # Step B migrates these and empties the set. HM 12:35: the list may only shrink (CI pins the
 # baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
 # non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
