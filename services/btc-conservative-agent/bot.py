@@ -51914,6 +51914,66 @@ def _admin_auth_method() -> str:
     return "NONE"   # RK (4): there is no local-control credential any more
 
 
+@app.route('/api/admin/trades/delete-by-id', methods=['POST'])
+def api_admin_trades_delete_by_id():
+    """RK PASS 24 Oct (R17): delete closed trades from CSV_TRADES by explicit id list.
+
+    Body: {"ids": [...], "list_sha256": "<sha256 of json.dumps(ids)>", "dry_run": true (default), "actor", "reason"}.
+    Refuses on sha mismatch, any id not present, duplicates or an empty list. Runs under the trade-file lock,
+    takes a temporary rollback snapshot and writes atomically (trade_delete_by_id). Never echoes a token.
+    """
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import trade_delete_by_id as _tdi
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    dry_run = body.get("dry_run", True) is not False
+    if not dry_run and CSV_TRADES in _csv_fallback_pending_targets:
+        return jsonify({"ok": False, "refused": "CSV_FALLBACK_PENDING"}), 409
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+
+    class _TradeFileLock:
+        def __enter__(self):
+            research_gate.acquire()
+            csv_lock.acquire()
+
+        def __exit__(self, *a):
+            csv_lock.release()
+            research_gate.release()
+            return False
+    try:
+        out = _tdi.delete_trades_by_id(os.path.abspath(CSV_TRADES), body.get("ids"), body.get("list_sha256"),
+                                       dry_run=dry_run, lock=_TradeFileLock())
+    except _tdi.DeleteRefused as e:
+        logger.warning(f"[TRADE-DELETE-BY-ID] refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": False, "refused": e.code, "detail": e.detail}), 409
+    logger.warning(
+        f"[TRADE-DELETE-BY-ID] actor={actor} reason={reason[:120]!r} dry_run={out['dry_run']} "
+        f"before={out['before_count']} removed={out['removed_count']} after={out['after_count']} "
+        f"list_sha={out['list_sha256']} snapshot={out['snapshot_path']} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": True, **out})
+
+
+@app.route('/api/admin/trades/delete-rollback-snapshot', methods=['POST'])
+def api_admin_trades_delete_rollback_snapshot():
+    """Delete the temporary rollback snapshot from delete-by-id and read back that it is gone (never archived)."""
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import trade_delete_by_id as _tdi
+    body = request.get_json(silent=True) or {}
+    try:
+        out = _tdi.delete_rollback_snapshot(os.path.abspath(CSV_TRADES), body.get("snapshot_path"))
+    except _tdi.DeleteRefused as e:
+        return jsonify({"ok": False, "refused": e.code}), 409
+    logger.warning(f"[TRADE-DELETE-BY-ID] rollback snapshot deleted={out['deleted']} path={out['snapshot_path']} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
+
+
 @app.route('/api/admin/emergency-wal/clear-alarms', methods=['POST'])
 def api_emergency_wal_clear_alarms():
     """Clear latched emergency-WAL alarms whose condition is re-proven resolved.
