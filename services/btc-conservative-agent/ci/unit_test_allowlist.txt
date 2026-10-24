@@ -647,3 +647,7 @@ test_r17_reason_always_full.py
 test_v3_ledger_write_stamp.py
 test_ws_trade_wake_book_mark.py
 test_ledger_unstamped_route.py
+test_booktail_incremental.py
+test_exit_lag_regression.py
+test_exit_scan_stamps.py
+test_trigger_receive_stamp.py
