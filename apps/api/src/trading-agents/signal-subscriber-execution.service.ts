@@ -3954,6 +3954,44 @@ export function staleFlattenFenceWhere(userId: string, nowMs: number, processSta
   };
 }
 /**
+ * RK 24 Oct 16:42: the boot stale-flatten-fence delete is ONE atomic, conditional SQL statement judged on the DB clock.
+ * A row goes only if, at delete time: it is another holder's flatten:* fence AND its last heartbeat
+ * ("expiresAt" - lease) is more than 60 s old by the DB's now(), or it is a legacy no-heartbeat row acquired before this
+ * process started. Exit-fill and entry fences never match (prefix). Caller gates on the boot verdict.
+ */
+export const STALE_FLATTEN_HEARTBEAT_AGE_S = 60;
+export const STALE_FLATTEN_FENCE_DELETE_SQL = `DELETE FROM "LiveEntryFence"
+ WHERE "userId" = $1
+   AND "id" LIKE 'flatten:%'
+   AND "id" NOT LIKE $2
+   AND (
+     ("expiresAt" <> $3 AND ("expiresAt" - make_interval(secs => ${LIVE_FENCE_LEASE_MS / 1000})) < now() - make_interval(secs => ${STALE_FLATTEN_HEARTBEAT_AGE_S}))
+     OR ("expiresAt" = $3 AND "acquiredAt" < $4)
+   )
+ RETURNING "id", "acquiredAt", "expiresAt"`;
+/** Pure mirror of the SQL predicate (same inputs, dbNowMs = the DB's now()); unit-tested, incl. the 59 s case. */
+export function staleFlattenFenceRowIsStale(
+  r: { id: string; userId: string; acquiredAt: Date; expiresAt: Date }, userId: string, dbNowMs: number, processStartMs: number,
+  holder: string = LIVE_PROCESS_ID,
+): boolean {
+  if (r.userId !== userId || !r.id.startsWith(FLATTEN_FENCE_PREFIX) || r.id.startsWith(`${FLATTEN_FENCE_PREFIX}${holder}:`)) return false;
+  if (r.expiresAt.getTime() === LIVE_ENTRY_FENCE_NO_EXPIRY.getTime()) return r.acquiredAt.getTime() < processStartMs;
+  return r.expiresAt.getTime() - LIVE_FENCE_LEASE_MS < dbNowMs - STALE_FLATTEN_HEARTBEAT_AGE_S * 1000;
+}
+/** Only FLAT_NO_STOPS or a DB match with every stop resident may clear stale flatten fences. */
+export function staleFlattenFenceDeleteAllowed(stamp: { verdict: string; allowed: boolean }): boolean {
+  return stamp.allowed === true && (stamp.verdict === 'FLAT_NO_STOPS' || stamp.verdict === 'MATCH_STOPS_RESIDENT');
+}
+export const flattenFenceHolder = (id: string) => id.slice(FLATTEN_FENCE_PREFIX.length).split(':')[0] ?? '';
+export async function deleteStaleFlattenFences(
+  db: { $queryRawUnsafe: (q: string, ...v: unknown[]) => Promise<unknown> }, userId: string, processStartMs: number,
+  holder: string = LIVE_PROCESS_ID,
+): Promise<Array<{ id: string; holder: string; acquiredAt: unknown; expiresAt: unknown }>> {
+  const rows = (await db.$queryRawUnsafe(STALE_FLATTEN_FENCE_DELETE_SQL, userId, `${FLATTEN_FENCE_PREFIX}${holder}:%`,
+    LIVE_ENTRY_FENCE_NO_EXPIRY, new Date(processStartMs))) as Array<{ id: string; acquiredAt: unknown; expiresAt: unknown }>;
+  return (rows ?? []).map((r) => ({ ...r, holder: flattenFenceHolder(r.id) }));
+}
+/**
  * HM R5 N2: the flatten fence is held from the flatten's START. The route waits (bounded) for the acquisition before its
  * first exchange write; if it is not held by then the flatten still runs (safety first) but fenced=false (route ok=false,
  * Fly RED). fenced=true therefore means: held for the whole flatten, start to release.
@@ -22717,11 +22755,18 @@ await this.notifications
     if (stamp.red) this.logger.error(`${line} RED: live entries blocked`);
     else this.logger.warn(line);
     await this.persistBootStamp(userId, stamp);
-    if (stamp.allowed) {
-      // HM R5 nit 1: owner-scoped: only another holder's flatten:* fence whose heartbeat stopped (or a legacy
-      // no-heartbeat row from before this process). Never an exit-fill fence, never a live holder's fence.
-      await this.prisma.liveEntryFence.deleteMany({ where: staleFlattenFenceWhere(userId, Date.now(), LIVE_PROCESS_START_MS) })
-        .catch(this.swallowedError('live-boot-reconcile-stale-fence'));
+    if (staleFlattenFenceDeleteAllowed(stamp)) {
+      // RK 24 Oct: atomic conditional delete on the DB clock (heartbeat > 60 s old AT delete time), only after a
+      // FLAT_NO_STOPS / MATCH_STOPS_RESIDENT boot verdict; never exit-fill or entry fences; each delete logged + alerted.
+      try {
+        const gone = await deleteStaleFlattenFences(this.prisma as any, userId, LIVE_PROCESS_START_MS);
+        for (const g of gone) {
+          this.logger.error(`[STALE-FLATTEN-FENCE-ALERT] user=${userId} deleted fence_key=${g.id} holder=${g.holder} `
+            + `verdict=${stamp.verdict} acquired_at=${String(g.acquiredAt)} expires_at=${String(g.expiresAt)}`);
+        }
+      } catch (e) {
+        this.swallowedError('live-boot-reconcile-stale-fence')(e);
+      }
     }
     return stamp;
   }

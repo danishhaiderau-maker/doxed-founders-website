@@ -18,6 +18,10 @@ import {
   LIVE_ENTRY_FENCE_NO_EXPIRY,
   LIVE_FENCE_LEASE_MS,
   staleFlattenFenceWhere,
+  staleFlattenFenceRowIsStale,
+  staleFlattenFenceDeleteAllowed,
+  deleteStaleFlattenFences,
+  STALE_FLATTEN_FENCE_DELETE_SQL,
   flattenFenceId,
   exitFillUnreadableFenceId,
   SignalSubscriberExecutionService,
@@ -75,6 +79,7 @@ function svc(o: { read: Read; rows?: Array<{ id: string; status: string; directi
       tradingAgentInstance: { findMany: async () => (o.users ?? ['u1']).map((userId) => ({ userId })) },
       signalCycleParticipant: { findMany: async () => rows.map((r) => ({ id: r.id, status: r.status })) },
       liveEntryFence: { deleteMany: async (a: unknown) => { calls.push(`fence-clear:${JSON.stringify(a)}`); } },
+      $queryRawUnsafe: async (q: string, ...v: unknown[]) => { calls.push(`fence-clear-sql:${q.includes('now()')}:${JSON.stringify(v[0])}`); return []; },
       $executeRaw: async (..._a: unknown[]) => { calls.push('stamp'); return 1; },
     },
   });
@@ -100,7 +105,7 @@ test('RK: restart with an open position + resident stop -> entries allowed ONLY 
   assert.ok(Date.parse(String(st.read_sent_at)) > Date.parse(String(st.process_start_at)));     // read time after the boot
   assert.equal(st.process_start_at, new Date(LIVE_PROCESS_START_MS).toISOString());
   assert.ok(ok.calls.includes('stamp'));
-  assert.ok(ok.calls.some((c) => c.startsWith('fence-clear:') && c.includes('"lt"')));         // crashed holders' fences cleared only now
+  assert.ok(ok.calls.includes('fence-clear-sql:true:"u1"'));         // crashed holders' fences cleared only now, DB clock
 
   const cases: Array<[string, Read, typeof row | null]> = [
     ['stop not resident', { pos: { amount: 0.001 }, orders: [] }, row],
@@ -115,7 +120,7 @@ test('RK: restart with an open position + resident stop -> entries allowed ONLY 
     assert.equal(await countLiveMutexOthers(tx, 'u1', null), 1, why);
     assert.equal((liveBootReconcileStampFor('u1') as Record<string, unknown>).red, true, why);
     assert.ok(b.logs.some((l) => l.startsWith('E ') && l.includes('RED')), why);
-    assert.ok(!b.calls.some((c) => c.startsWith('fence-clear:')), `${why}: stale fences must stay`);
+    assert.ok(!b.calls.some((c) => c.startsWith('fence-clear')), `${why}: stale fences must stay`);
   }
   liveBootGateSetPhase('NOT_RUN');
 });
@@ -270,6 +275,44 @@ test('HM R5 nit 1: boot cleanup is owner-scoped: never an exit-fill fence, never
   assert.deepEqual(deleted, ['deadHolder', 'legacyBeforeBoot']);
   const src = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
   const run = src.slice(src.indexOf('  private async reconcileBootUser('), src.indexOf('  private async persistBootStamp('));
-  assert.ok(run.includes('deleteMany({ where: staleFlattenFenceWhere(userId, Date.now(), LIVE_PROCESS_START_MS) })'));
+  assert.ok(run.includes('deleteStaleFlattenFences(this.prisma as any, userId, LIVE_PROCESS_START_MS)'));
+  assert.ok(run.includes('staleFlattenFenceDeleteAllowed(stamp)'));
+  assert.ok(run.includes('[STALE-FLATTEN-FENCE-ALERT]') && run.includes('holder=${g.holder}') && run.includes('fence_key=${g.id}'));
+  assert.equal(run.includes('deleteMany({ where: staleFlattenFenceWhere'), false);
   assert.equal(/acquiredAt: \{ lt: new Date\(LIVE_PROCESS_START_MS\)/.test(src), false);   // the unscoped delete is gone
+});
+
+
+test('RK 24 Oct: stale flatten-fence delete: DB clock, >60 s heartbeat at delete time, 59 s survives, exit-fill/entry untouched', async () => {
+  const dbNow = 50_000_000; const procStart = dbNow - 5_000; const at = (ms: number) => new Date(ms);
+  const hb = (ageS: number) => at(dbNow - ageS * 1000 + LIVE_FENCE_LEASE_MS);   // expiresAt written by a heartbeat ageS ago
+  const rows = {
+    hb59: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(dbNow - 600_000), expiresAt: hb(59) },
+    hb60: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(dbNow - 600_000), expiresAt: hb(60) },
+    hb61: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(dbNow - 600_000), expiresAt: hb(61) },
+    mineOld: { id: flattenFenceId('me'), userId: 'u1', acquiredAt: at(dbNow - 600_000), expiresAt: hb(999) },
+    legacyBeforeBoot: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(procStart - 1), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
+    legacyAfterBoot: { id: flattenFenceId('old'), userId: 'u1', acquiredAt: at(procStart + 1), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
+    exitFill: { id: exitFillUnreadableFenceId('p1'), userId: 'u1', acquiredAt: at(dbNow - 9e9), expiresAt: hb(9999) },
+    entry: { id: 'entry:u1:abc', userId: 'u1', acquiredAt: at(dbNow - 9e9), expiresAt: hb(9999) },
+    otherUser: { id: flattenFenceId('old'), userId: 'u2', acquiredAt: at(dbNow - 600_000), expiresAt: hb(999) },
+  };
+  const del = Object.entries(rows).filter(([, r]) => staleFlattenFenceRowIsStale(r, 'u1', dbNow, procStart, 'me')).map(([k]) => k);
+  assert.deepEqual(del, ['hb61', 'legacyBeforeBoot']);
+  // the SQL is one statement, judged on the DB clock, prefix-scoped, owner-excluded, RETURNING for the per-row log
+  assert.match(STALE_FLATTEN_FENCE_DELETE_SQL, /^DELETE FROM "LiveEntryFence"/);
+  assert.match(STALE_FLATTEN_FENCE_DELETE_SQL, /now\(\) - make_interval\(secs => 60\)/);
+  assert.match(STALE_FLATTEN_FENCE_DELETE_SQL, /"id" LIKE 'flatten:%'/);
+  assert.match(STALE_FLATTEN_FENCE_DELETE_SQL, /RETURNING "id"/);
+  assert.equal(/Date\.now|new Date\(\)/.test(STALE_FLATTEN_FENCE_DELETE_SQL), false);
+  const calls: unknown[][] = [];
+  const out = await deleteStaleFlattenFences({ $queryRawUnsafe: async (...a: unknown[]) => { calls.push(a); return [{ id: 'flatten:old-1:x', acquiredAt: 1, expiresAt: 2 }]; } }, 'u1', procStart, 'me');
+  assert.equal(calls.length, 1); assert.equal(calls[0][2], 'flatten:me:%');
+  assert.deepEqual(out.map((o) => [o.id, o.holder]), [['flatten:old-1:x', 'old-1']]);
+  // gate: only FLAT_NO_STOPS or MATCH_STOPS_RESIDENT (allowed)
+  assert.equal(staleFlattenFenceDeleteAllowed({ verdict: 'FLAT_NO_STOPS', allowed: true }), true);
+  assert.equal(staleFlattenFenceDeleteAllowed({ verdict: 'MATCH_STOPS_RESIDENT', allowed: true }), true);
+  for (const v of ['MISMATCH', 'STOP_NOT_RESIDENT', 'STALE_READ', 'UNREADABLE', 'PENDING_ENTRY_CANCEL_FAILED'])
+    assert.equal(staleFlattenFenceDeleteAllowed({ verdict: v, allowed: true }), false);
+  assert.equal(staleFlattenFenceDeleteAllowed({ verdict: 'FLAT_NO_STOPS', allowed: false }), false);
 });
