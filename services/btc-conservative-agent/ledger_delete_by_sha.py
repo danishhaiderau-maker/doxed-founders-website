@@ -63,7 +63,8 @@ REFUSAL_CODES = (
     "ROW_UNPARSEABLE", "RECORD_ID_SHARED_WITH_SURVIVOR", "RECEIPT_MISSING", "RECEIPT_INVALID",
     "INVARIANT_FAILED_RESTORED", "SNAPSHOT_PATH_NOT_ALLOWED", "SNAPSHOT_MISSING",
     "MULTI_STREAM_LIST_REFUSED", "DELETED_ROW_TOMBSTONES_MISSING", "DELETED_ROW_TOMBSTONES_CORRUPT",
-    "SNAPSHOT_INCOMPLETE_DELETE",
+    "SNAPSHOT_INCOMPLETE_DELETE", "DELETED_ROW_TOMBSTONES_PIN_MISSING",
+    "DELETED_ROW_TOMBSTONES_INDEX_MISSING",
 )
 
 
@@ -244,7 +245,18 @@ def tombstone_integrity(shas) -> str:
 
 
 def tombstone_state(root: str | Path, ledger: str) -> tuple[bool, frozenset[str], str]:
-    """(ok, shas, reason).  Fail closed when deletes are recorded but the tombstone file is missing/corrupt.
+    """(ok, shas, reason).  Fail closed when deletes are recorded but the tombstone file is missing/corrupt,
+    or when the tombstone file exists but complete.json / its pin is gone.
+
+    Limitations (documented for HM R2b):
+      * Legacy (generation-0, receipt-file) backend only.  delete_ledger_rows_by_sha refuses
+        TRANSACTIONAL_AUTHORITY_ACTIVE, and the transactional backend's set_ledger_complete does NOT carry
+        the integrity pin.  If a stream with tombstones is later migrated to the transactional backend,
+        its complete.json stops being maintained and appends to that stream fail closed
+        (PIN_MISSING / INDEX_MISSING) until the pin is ported to the backend.  Do not enable transactional
+        authority on a stream with tombstones without that port.
+      * If BOTH the tombstone file and complete.json are removed, absence is indistinguishable from
+        "no deletes ever"; complete.json loss also forces a full re-index, which is alerted separately.
 
     The expected integrity hash is pinned in the ledger's complete.json (rebound by every delete), and the
     tombstone file carries its own integrity hash; both must agree with the file's sha set.
@@ -253,9 +265,11 @@ def tombstone_state(root: str | Path, ledger: str) -> tuple[bool, frozenset[str]
     p = root / "v3" / "receipts" / TOMBSTONE_DIRNAME / f"{ledger}.json"
     comp_p = root / "v3" / "receipts" / "emergency_record_idempotency_v1" / ledger / "complete.json"
     expected = None
+    comp_ok = False
     try:
         expected = json.loads(comp_p.read_text("utf-8")).get(TOMBSTONE_PIN_KEY)
-    except (FileNotFoundError, ValueError, AttributeError):
+        comp_ok = True
+    except (FileNotFoundError, ValueError, AttributeError, UnicodeDecodeError):
         expected = None
     try:
         row = json.loads(p.read_text("utf-8"))
@@ -270,6 +284,11 @@ def tombstone_state(root: str | Path, ledger: str) -> tuple[bool, frozenset[str]
             or row.get("integrity_sha256") != tombstone_integrity(shas)
             or (expected is not None and expected != row.get("integrity_sha256"))):
         return False, frozenset(), "DELETED_ROW_TOMBSTONES_CORRUPT"
+    if shas and expected is None:
+        # HM R2b: deletes are recorded but complete.json (or its pin) was lost; the tombstone file can no
+        # longer be cross-checked, so fail closed instead of trusting it.
+        return False, frozenset(), ("DELETED_ROW_TOMBSTONES_PIN_MISSING" if comp_ok
+                                    else "DELETED_ROW_TOMBSTONES_INDEX_MISSING")
     return True, frozenset(shas), ""
 
 
