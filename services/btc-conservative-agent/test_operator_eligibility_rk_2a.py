@@ -73,3 +73,24 @@ def test_route_uses_allowlist_not_retired_denylist():
     start = src.index("def api_bitfinex_tile_live_orders")
     body = src[start:start + 3000]
     assert "operator_eligibility_refusal(lane)" in body and "RETIRED_TILE_LANES" not in body
+
+
+def test_gf3_hm_gate_requires_pass_colon_nonempty_ref():
+    """HM R3 nit (mirrors #877): bare PASS / PASSED / PASS: / PASS:   no longer satisfy either gf3 gate site."""
+    import live_tile_gate as ltg
+    reg = {"FADE3": {"id_prefix": "gf3"}}
+    for bad in ("PASS", "PASSED", "pass", "PASS:", "PASS:   ", "PASSX:ref", "FAIL:ref", "", None):
+        assert not ltg.hm_gate_passed(bad), bad
+        assert ltg.operator_eligibility_refusal("FADE3", reg, env={"LIVE_HM_GATE_FADE3": bad or ""}) \
+            == "FADE3_HM_GATE_NOT_PASSED", bad
+    for good in ("PASS:hm-r3", " pass : ref-1 "):
+        assert ltg.hm_gate_passed(good)
+        assert ltg.operator_eligibility_refusal("FADE3", reg, env={"LIVE_HM_GATE_FADE3": good}) is None
+
+
+def test_g6_arm_gate_hm_gate_requires_pass_colon_ref():
+    import live_tile_gate as ltg
+    first = {"outcome": ltg.G4_A}
+    for bad in ("PASS", "PASSED", "PASS:", None):
+        assert ltg.arm_gate_block("gf3", first, hm_gate=bad) == ltg.DENY_G6_HM_GATE, bad
+    assert ltg.arm_gate_block("gf3", first, hm_gate="PASS:hm-ref") is None

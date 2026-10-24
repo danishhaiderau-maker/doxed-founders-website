@@ -199,9 +199,15 @@ def operator_eligibility_refusal(lane: str | None, registry: Mapping[str, Mappin
         return "OPERATOR_ELIGIBILITY_UNREADABLE"
     if key not in OPERATOR_ELIGIBLE_TILE_KEYS:
         return "TILE_NEVER_OPERATOR_ELIGIBLE"
-    if key == "gf3" and not str((os.environ if env is None else env).get(FADE3_HM_GATE_ENV) or "").upper().startswith("PASS"):
+    if key == "gf3" and not hm_gate_passed((os.environ if env is None else env).get(FADE3_HM_GATE_ENV)):
         return "FADE3_HM_GATE_NOT_PASSED"
     return None
+
+
+def hm_gate_passed(value: Any) -> bool:
+    """HM R3 nit (mirrors #877): the HM gate is passed only by `PASS:<non-empty ref>`; bare PASS / PASSED / PASS: fail."""
+    head, sep, ref = str(value or "").strip().partition(":")
+    return head.strip().upper() == "PASS" and bool(sep) and bool(ref.strip())
 
 
 def tile_key_for_trade_id(trade_id: str | None) -> str | None:
@@ -605,7 +611,7 @@ def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, h
     if tile_key == G6_GATED_TILE:
         if out not in (G4_A, G4_B):
             return DENY_G6_NO_FIRST_L
-        if not str(hm_gate or "").strip().upper().startswith("PASS"):
+        if not hm_gate_passed(hm_gate):
             return DENY_G6_HM_GATE
     return None
 
