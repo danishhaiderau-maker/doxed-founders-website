@@ -14046,7 +14046,8 @@ def _replay_csv_write_fallback_locked(targets) -> dict:
         for digest, row in items:
             key = (str(row.get("trade_id") or ""), str(row.get("ts") or ""))
             try:
-                if target == CSV_TRADES and key[0] and key[0] in _DELETED_TRADE_IDS:
+                if (target == globals().get("CSV_TRADES") and key[0]
+                        and key[0] in (globals().get("_DELETED_TRADE_IDS") or ())):
                     # HM #869 R2 blocker 1: a pending fallback row for a deleted id must not be re-appended.
                     _note_deleted_resave_refused(key[0], "replay")
                     already += 1
