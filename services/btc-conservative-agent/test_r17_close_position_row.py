@@ -118,6 +118,11 @@ def _close(monkeypatch, reason, exit_pricer_wrap=None):
     monkeypatch.setattr(bot, "open_positions", [pos])
     monkeypatch.setattr(bot, "validate_state", lambda: True)
     monkeypatch.setattr(bot, "accrue_position_funding", lambda *a, **k: None)  # no network funding fetch in CI
+    # RK ruling 22:32: the trigger row's own WS_FRAME receive_ts (as _stamp_trigger_basis stamps it); a row
+    # without it is EXIT_LAG_UNMEASURED and non-countable, so a clean measured trigger is stamped here.
+    _rx = time.time()
+    pos.update(exit_trigger_row_s=int(_rx), exit_trigger_receive_ts=_rx, exit_trigger_receive_ts_source="WS_FRAME",
+               exit_trigger_eval_ts=_rx + 0.01)
     with pytest.raises(_RowBuilt):
         bot.close_position(pos, reason)
     return built["row"]
