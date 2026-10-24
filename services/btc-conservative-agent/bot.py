@@ -32026,6 +32026,14 @@ def close_position(pos: dict, exit_reason: str):
                 observed_ts=pos.get("entry_ts"),
             ),
         }
+        # R17 (RK 23 Oct 2026): every new closed row is stamped non_countable / non_countable_reason on write (pinned
+        # discard ids, or R17_UNPROVEN when the row lacks r17_fields contract proof); a stamping error fails closed.
+        try:
+            import r17_exclusion as _r17
+            _r17.stamp_on_write(trade_row)
+        except Exception as _r17_exc:
+            trade_row.update({"non_countable": True, "fresh_eligible": False,
+                              "non_countable_reason": f"R17_STAMP_ERROR:{type(_r17_exc).__name__}"})
     def target_mutator(target):
         matches = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") == str(trade_id)]
         if len(matches) != 1:
@@ -38542,6 +38550,7 @@ __ADMIN_ACCESS_CONTROLS__
   <strong style="color:#58a6ff;">Trading Params</strong>
   <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. Registered tiles use their signed per-policy entry offsets (__TILE_ENTRY_OFFSETS__).</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
+<p id="r17TileCounts" style="color:#f0883e;font-size:0.84em;margin:4px 0 4px 0;"><strong>R17 countability:</strong> __TILE_R17_COUNTS__ (same rule as /api/monitor/fills/by-model)</p>
 <p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Entry offsets:</strong> registered tile policies __TILE_ENTRY_OFFSETS__. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain research/advisory fields only.</p>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
@@ -41317,6 +41326,7 @@ def dashboard():
         .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
         .replace("__ADMIN_ACCESS_CONTROLS__", admin_controls)
         .replace("__TILE_ENTRY_OFFSETS__", html_escape(_dashboard_tile_offsets_text(tiles)))
+        .replace("__TILE_R17_COUNTS__", html_escape(_dashboard_r17_tile_text(tiles)))
     )
     resp = make_response(render_template_string(page))
     resp.headers['Cache-Control'] = 'no-store'
@@ -44698,6 +44708,40 @@ def _dashboard_tile_view() -> list[dict]:
             "entry_rule": _dashboard_entry_rule(entry),
         })
     return sorted(rows, key=lambda row: row["display_order"])
+
+
+def _dashboard_r17_tiles(tiles) -> dict:
+    """Per-tile R17 view from the in-memory closed rows (fills_by_model.summarise, the /api/monitor/fills/by-model
+    rule): {lane: {"countable", "r17_excluded", "r17_label", "r17_reason_counts"}}. Read-only; errors -> {}."""
+    try:
+        import fills_by_model
+        summ = fills_by_model.summarise([r for r in list(trades) if isinstance(r, dict)],
+                                        [t["lane"] for t in tiles if t.get("lane")])
+    except Exception:
+        return {}
+    out = {}
+    for lane, t in (summ.get("tiles") or {}).items():
+        out[lane] = {"countable": int(t.get("countable") or 0),
+                     "r17_excluded": int((t.get("by_category") or {}).get("r17_unproven") or 0),
+                     "r17_label": t.get("r17_label"), "r17_reason_counts": dict(t.get("r17_reason_counts") or {})}
+    return out
+
+
+def _dashboard_r17_tile_text(tiles) -> str:
+    view = _dashboard_r17_tiles(tiles)
+    if not view:
+        return "not available"
+    parts = []
+    for tile in tiles:
+        v = view.get(tile.get("lane"))
+        if v is None:
+            continue
+        text = f"{tile['label']}: {v['countable']} countable"
+        if v["r17_excluded"]:
+            top = ", ".join(f"{k}={n}" for k, n in sorted(v["r17_reason_counts"].items(), key=lambda kv: -kv[1])[:3])
+            text += f", {v['r17_label']} ({top})"
+        parts.append(text)
+    return "; ".join(parts) or "no registered tiles"
 
 
 def _dashboard_tile_offsets_text(tiles) -> str:

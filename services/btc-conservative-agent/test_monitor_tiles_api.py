@@ -9,6 +9,16 @@ import pytest
 import monitor_api
 import monitor_tiles as mt
 
+
+@pytest.fixture(autouse=True)
+def _r17_proof_rule_out_of_scope(monkeypatch):
+    """R17 proof rule (countable only with book/delay/walk/level proof) is covered by test_r17_exclusion.py.
+    These synthetic rows test other properties, so the proof check is neutralised here; the pinned-list and
+    stamped exclusions still apply."""
+    import r17_exclusion
+    monkeypatch.setattr(r17_exclusion, "proof_failures", lambda row: [])
+
+
 ADMIN = "tiles-test-admin-token"
 MONITOR = "monitor-read-token-for-tiles-0123456789"
 REMOTE = {"REMOTE_ADDR": "198.51.100.9"}

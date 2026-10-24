@@ -1,9 +1,19 @@
 """Book-pricing PR A: shared paper_fill + CI guards (ticker / book_tape_1s ban, new-tile rule)."""
 import ast, pathlib
+import pytest
 import paper_fill as pf
 
 BOOK = {"s": 100, "a": [[100.0, 1.0], [101.0, 1.0]], "b": [[99.0, 1.0], [98.0, 1.0]]}
 at = lambda t: BOOK if t >= 100 else None
+
+
+@pytest.fixture(autouse=True)
+def _r17_proof_rule_out_of_scope(monkeypatch):
+    """R17 proof rule (countable only with book/delay/walk/level proof) is covered by test_r17_exclusion.py.
+    These synthetic rows test other properties, so the proof check is neutralised here; the pinned-list and
+    stamped exclusions still apply."""
+    import r17_exclusion
+    monkeypatch.setattr(r17_exclusion, "proof_failures", lambda row: [])
 
 
 def test_walks_depth_at_signal_plus_delay():

@@ -1794,6 +1794,14 @@ def load_data():
         print(f"   Hygiene: {_hyg.SUMMARY} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as _exc:
         print(f"   Hygiene filter failed ({type(_exc).__name__}: {_exc}) {PIPELINE_ENFORCEMENT_TAG}")
+        # R17: a hygiene failure must never let a non-countable row into a verdict (fail closed).
+        try:
+            import analysis_hygiene as _hyg
+            trades = _hyg.r17_filter(trades)
+        except Exception as _r17_exc:
+            print(f"   R17 filter failed ({type(_r17_exc).__name__}: {_r17_exc}); no trades counted "
+                  f"{PIPELINE_ENFORCEMENT_TAG}")
+            trades = trades.iloc[0:0]
 
     print(
         f"Loaded: Trades={len(trades)} | Blocked={len(blocked)} | Decisions={len(decisions)} | "
@@ -1803,10 +1811,19 @@ def load_data():
     )
     return trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
 
+def _r17_empty_note():
+    """R17 label for an empty report ("0 countable: N excluded R17_UNPROVEN (...)"), None when R17 excluded nothing."""
+    try:
+        import analysis_hygiene as _hyg
+        return _hyg.r17_empty_label()
+    except Exception:
+        return None
+
+
 def build_master_dataset(trades, blocked, decisions, ai_log, signal_persist, near_edge):
     print("\n=== BUILDING MASTER DATASET (v62 DEDUPED) ===")
     if trades.empty:
-        print(f"⚠️ No trades yet - using decisions for partial funnel only {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"⚠️ {_r17_empty_note() or 'No trades yet'} - using decisions for partial funnel only {PIPELINE_ENFORCEMENT_TAG}")
         return pd.DataFrame()
 
     df = trades.drop_duplicates(subset=["trade_id"], keep="last").copy()
@@ -2130,7 +2147,7 @@ def post_signal_price_excursion(df):
     """Favorable vs adverse price movement during the trade (margin % from max_profit / max_drawdown)."""
     print("\n=== POST-SIGNAL PRICE EXCURSION (favorable vs adverse) ===")
     if df.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     mfe = pd.to_numeric(df.get("mfe_margin_pct", df.get("max_profit", 0)), errors="coerce")
     mae = pd.to_numeric(df.get("mae_margin_pct", df.get("max_drawdown", 0)), errors="coerce")
@@ -2201,7 +2218,7 @@ def pullback_optimization_analysis(df, decisions=None):
     """Sweep pullback % vs post-signal price path to find optimum fill threshold."""
     print("\n=== OPTIMUM PULLBACK % ANALYSIS (post-signal price movement) ===")
     if df.empty:
-        print(f"No executed trades for pullback sweep. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No executed trades for pullback sweep.'} {PIPELINE_ENFORCEMENT_TAG}")
         return None
     work = df.copy()
     work["configured_pullback"] = work.apply(_parse_pullback_threshold, axis=1)
@@ -6007,7 +6024,7 @@ def margin_size_sweep_analysis(df, blocked_df=None):
                     f"($20 vs scaled ${flat20 - scaled:+.2f}) {PIPELINE_ENFORCEMENT_TAG}"
                 )
     else:
-        print(f"No executed trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No executed trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
 
     # --- 2) APPROVE replay cohort: counterfactual margin sizes ---
     cohort = _build_approve_cohort(blocked_df)
@@ -6099,7 +6116,7 @@ def thesis_fast_cut_optimization(df):
     print(f"Current default: {THESIS_FAST_EXIT_DEFAULT}% margin | Ladder arms at peak >= {TRAIL_LADDER[0][0]}% {PIPELINE_ENFORCEMENT_TAG}")
     df = _filter_policy_analysis_df(df, "thesis fast-cut optimization")
     if df.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return None
     work = df.copy()
     work["margin"] = pd.to_numeric(work.get("margin_usdt"), errors="coerce")
@@ -6401,7 +6418,7 @@ def time_exit_deep_analysis(df):
         return
     te = df[df["exit_reason"] == "TIME_EXIT"].copy()
     if te.empty:
-        print("No TIME_EXIT trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No TIME_EXIT trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     pnl = pd.to_numeric(te["net_pnl_usd"], errors="coerce")
     mfe = pd.to_numeric(te.get("mfe_margin_pct", 0), errors="coerce")
@@ -6997,7 +7014,7 @@ def edge_funnel_by_bucket_report(decisions, ai_log, trades, near_edge):
 def edge_monotonicity_report(df):
     print("\n=== V80 EDGE MONOTONICITY ===")
     if df is None or df.empty:
-        print(f"No executed trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No executed trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     work = _enrich_trades_with_buckets(df)
     edge = pd.to_numeric(work.get("edge_score_at_entry", work.get("edge_score")), errors="coerce")
@@ -7046,7 +7063,7 @@ def ladder_booking_slip_report(df):
     """
     print("\n=== LADDER BOOKING vs LOCK FLOOR (USD on $margin) ===")
     if df is None or df.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     rows = []
     for _, row in df.iterrows():
@@ -7074,7 +7091,7 @@ def ladder_booking_slip_report(df):
             "slip_vs_lock_$": round(slip_usd, 2) if pd.notna(slip_usd) else None,
         })
     if not rows:
-        print(f"No PROFIT_LOCK_LADDER trades in dataset. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No PROFIT_LOCK_LADDER trades in dataset.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     view = pd.DataFrame(rows)
     print(view.to_string(index=False))
@@ -7094,7 +7111,7 @@ def ema_hybrid_entry_report(df, trade_outcomes):
     elif df is not None and not df.empty:
         work = df.copy()
     if work.empty:
-        print(f"No trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     if "entry_mode" not in work.columns:
         work["entry_mode"] = "PULLBACK_LIMIT"
@@ -7123,7 +7140,7 @@ def entry_health_exit_report(df):
     """v83: TYPE_A_STALL and TREND_WEAKENING exit outcomes + spread-penalty trades."""
     print("\n=== V83 ENTRY-HEALTH EXITS (TYPE_A_STALL / TREND_WEAKENING) ===")
     if df is None or df.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     for reason, label in (
         ("TYPE_A_STALL", "Type-A stall (8min, MFE<5%, underwater or weak tape)"),
@@ -7186,7 +7203,7 @@ def first_3_candle_report(trade_outcomes):
 def sr_direction_bucket_report(df):
     print("\n=== V80 SUPPORT/RESISTANCE × DIRECTION ===")
     if df is None or df.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     work = _enrich_trades_with_buckets(df)
     direction = work.get("final_direction", work.get("dir", "LONG")).astype(str).str.upper()
@@ -7338,7 +7355,7 @@ def research_lane_execution_report(trades, decisions, ai_log, pipeline_events, s
             )
             print(gm.to_string())
     else:
-        print(f"  No executed trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No executed trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
 
     if snapshots:
         snap_lanes = []
@@ -7381,7 +7398,7 @@ def pathway_matrix_report(trades, snapshots: dict = None):
     print("\n=== PATHWAY MATRIX (research_lane × entry_path) ===")
     print(f"  Expected bot: {EXPECTED_BOT_VERSION} | analyzer: {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG}")
     if trades is None or trades.empty:
-        print(f"  No executed trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No executed trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
     else:
         work = trades.copy()
         work["net"] = pd.to_numeric(work.get("net_pnl_usd"), errors="coerce")
@@ -7455,7 +7472,7 @@ def _pathway_column_coverage(trades: pd.DataFrame) -> None:
     """Report pathway telemetry columns populated on executed trades."""
     print("\n=== PATHWAY COLUMN COVERAGE (trades_3factor.csv) ===")
     if trades is None or trades.empty:
-        print(f"  No trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     n = len(trades)
     for col in PATHWAY_TRADE_COLUMNS:
@@ -7677,7 +7694,7 @@ def profitable_ranges_report(trades):
     """Session profitability buckets — tracks what worked (edge/AI excluded from gates)."""
     print("\n=== V86 PROFITABLE RANGES (executed trades) ===")
     if trades is None or trades.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     work = _enrich_trades_with_buckets(trades.copy())
     work["net"] = pd.to_numeric(work.get("net_pnl_usd"), errors="coerce")
@@ -7742,7 +7759,7 @@ def v80_research_intelligence_report(df, decisions, ai_log, trades, near_edge, p
         _bucket_perf_table(work, "ai_probability_bucket", "Executed trades by AI PROB bucket", AI_PROB_BUCKET_ORDER)
         sr_direction_bucket_report(work)
     else:
-        print(f"\nNo executed trades — bucket performance tables skipped. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"\n{_r17_empty_note() or 'No executed trades — bucket performance tables skipped.'} {PIPELINE_ENFORCEMENT_TAG}")
 
     ladder_booking_slip_report(work if not work.empty else df)
     entry_health_exit_report(work if not work.empty else df)
@@ -7789,7 +7806,7 @@ def run_v55_analysis(df, decisions, blocked, ai_log):
     regime_segment_analysis(blocked)
     margin_size_sweep_analysis(df if not df.empty else None, blocked)
     if df.empty:
-        print(f"No trades for v5.5 analytics. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades for v5.5 analytics.'} {PIPELINE_ENFORCEMENT_TAG}")
         factor_gate_funnel(decisions, blocked, ai_log)
         return
     mfe_mae_analysis(df)
@@ -7876,7 +7893,7 @@ def executive_summary(trades, analysis_df, decisions, ai_log, blocked, near_edge
         print(f"🚨 ROW COUNT MISMATCH — analysis may still be inflated {PIPELINE_ENFORCEMENT_TAG}")
 
     if analysis_df.empty:
-        print(f"⏳ No closed trades to score yet {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or '⏳ No closed trades to score yet'} {PIPELINE_ENFORCEMENT_TAG}")
     else:
         net = pd.to_numeric(analysis_df.get("net_pnl_usd", 0), errors="coerce").sum()
         gross = pd.to_numeric(analysis_df.get("gross_pnl_usd", 0), errors="coerce").sum()
@@ -7907,7 +7924,7 @@ def executive_summary(trades, analysis_df, decisions, ai_log, blocked, near_edge
                 for _, row in era_df.iterrows():
                     print(f"  {row['label']}: {int(row['trades'])} trades WR={row['win_rate_pct']}% net=${row['sum_net_usd']:.2f} {PIPELINE_ENFORCEMENT_TAG}")
                 if depth.empty:
-                    print(f"  ⚠️ No depth-realism trades — headline WR/PnL may be inflated vs live. {PIPELINE_ENFORCEMENT_TAG}")
+                    print(f"  {_r17_empty_note() or '⚠️ No depth-realism trades — headline WR/PnL may be inflated vs live.'} {PIPELINE_ENFORCEMENT_TAG}")
 
     if not decisions.empty and "reason" in decisions.columns:
         staged = normalize_decision_stages(decisions)
@@ -8041,7 +8058,7 @@ def ai_errors_analysis(ai_errors, decisions, ai_log):
 def core_metrics(df):
     print("\n=== CORE PERFORMANCE (UNIQUE TRADES) ===")
     if len(df) == 0:
-        print(f"No trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
         return 0, 0
     pnl_series = pd.to_numeric(df.get("net_pnl_usd", pd.Series([0]*len(df))), errors='coerce')
     gross_series = pd.to_numeric(df.get("gross_pnl_usd", pnl_series), errors='coerce')
@@ -8130,7 +8147,7 @@ def outcome_distribution(df):
     print("\n=== OUTCOME DISTRIBUTION ===")
     total = len(df)
     if total == 0:
-        print("No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     tp_hits = len(df[safe_bool_filter(df, "exit_reason", "TAKE_PROFIT")])
     time_exits = len(df[safe_bool_filter(df, "exit_reason", "TIME_EXIT")])
@@ -8341,7 +8358,7 @@ def realism_sim_audit(trades, analysis_df):
     )
     base = analysis_df if analysis_df is not None and not analysis_df.empty else trades
     if base is None or base.empty:
-        print(f"  No trades to audit. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No trades to audit.'} {PIPELINE_ENFORCEMENT_TAG}")
         return None
 
     work = _attach_realism_era(base)
@@ -8531,7 +8548,7 @@ def realism_sim_audit(trades, analysis_df):
 def slippage_analysis(df):
     print("\n=== EXECUTION QUALITY (SLIPPAGE) ===")
     if df is None or df.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     work = _attach_realism_era(df)
     if "slippage" in work.columns:
@@ -8643,7 +8660,7 @@ def time_exit_diagnosis(df):
     print("\n=== TIME EXIT ROOT CAUSE ===")
     te = df[safe_bool_filter(df, "exit_reason", "TIME_EXIT")].copy()
     if len(te) == 0:
-        print("No TIME_EXIT trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No TIME_EXIT trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     te["entry_delay_min"] = _normalize_entry_delay_min(te)
     print(f"Avg momentum     : {pd.to_numeric(te.get('momentum', pd.Series(0)), errors='coerce').mean():.3f} {PIPELINE_ENFORCEMENT_TAG}")
@@ -9549,7 +9566,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         v80_research_intelligence_report(analysis_df, decisions, ai_log, trades, near_edge, pipeline_events)
 
         if analysis_df.empty:
-            print(f"⏳ No executed trades — funnel-only mode {PIPELINE_ENFORCEMENT_TAG}")
+            print(f"{_r17_empty_note() or '⏳ No executed trades — funnel-only mode'} {PIPELINE_ENFORCEMENT_TAG}")
             pipeline_funnel(setups, decisions, trades)
             pipeline_funnel_staged(decisions, blocked, trades)
             approve_outcome_analysis(decisions, blocked, trades)
@@ -15929,7 +15946,7 @@ def scenario_c_leakage_report(trades=None, session=None):
     scope = _shadow_scope_label(session)
     print(f"\n=== SCENARIO C LEAKAGE REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
     if trades is None or trades.empty:
-        print(f"  No trades {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No trades'} {PIPELINE_ENFORCEMENT_TAG}")
         payload = {
             "schema": "scenario_c_leakage_v1",
             "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -16645,7 +16662,7 @@ def scenario_c_capture_ratio_report(trades=None, session=None):
     print(f"\n=== SCENARIO C CAPTURE RATIO — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
     if trades is None or trades.empty:
-        print(f"  No trades {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No trades'} {PIPELINE_ENFORCEMENT_TAG}")
         payload = {
             "schema": "scenario_c_capture_ratio_v1",
             "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -17739,7 +17756,7 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
     print(f"\n=== TOP COMBINATIONS — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
     work = _direction_only_trade_cohort(trades)
     if work.empty:
-        print(f"  No trades for combination heatmap. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No trades for combination heatmap.'} {PIPELINE_ENFORCEMENT_TAG}")
         payload = {"schema": "top_combinations_v2", "top": [], "bottom": [], "session_scope": scope}
         with open(analyzer_report_path(TOP_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -19523,7 +19540,7 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "cells": [],
             "regimes": [],
-            "note": "No trades — collect data with 4 live tiles",
+            "note": _r17_empty_note() or "No trades — collect data with 4 live tiles",
         }
         with open(REGIME_LEADERBOARD_REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
