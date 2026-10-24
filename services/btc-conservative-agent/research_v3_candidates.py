@@ -945,6 +945,23 @@ PROTECTION_REPLAY_WINDOW_SUMMARY_SCHEMA = "protection_replay_window_summary_v1"
 PROTECTION_REPLAY_RED_COVERAGE_RATIO = 0.5
 
 
+def _current_epoch_id() -> str | None:
+    """The run's declared data epoch (the epoch guard's manifest, else DATA_EPOCH_ID); None outside a run."""
+    try:
+        from analyzer_epoch_guard import process_guard
+        manifest = process_guard().manifest or {}
+    except Exception:
+        manifest = {}
+    return str(manifest.get("epoch_id") or os.getenv("DATA_EPOCH_ID") or "") or None
+
+
+def _not_current_epoch(source: Mapping[str, Any], current: str | None) -> bool:
+    # data_epoch_id is the data-epoch stamp; epoch_id / dataset_epoch carry the collector sub-epoch
+    # (epoch-<hash>, inside the data epoch) and are never compared to the data epoch.
+    stamped = source.get("data_epoch_id")
+    return bool(current and stamped and str(stamped) != current)
+
+
 def protection_replay_window_summary(receipt: Mapping[str, Any] | None) -> dict[str, Any]:
     """Compact, health-ready view of one replay window receipt.
 
@@ -2298,6 +2315,8 @@ def evaluate_protection_screen(
         drain(0)
         apply_episode(replayer.replay_episode(jobs), [job[0] for job in jobs], event_indexes)
 
+    epoch_excluded: dict[str, int] = defaultdict(int)
+    current_epoch_id = _current_epoch_id()
     stream_started = time.perf_counter()
     try:
         for position, source in _source_order(inputs):
@@ -2317,6 +2336,11 @@ def evaluate_protection_screen(
                     events_by_basis[R17_UNPROVEN] += 1
                     unproven_reasons["EPISODE_FIRST_EVENT_R17_UNPROVEN"] += 1
                     path = None
+                elif _not_current_epoch(source, current_epoch_id):
+                    # Item 1: current epoch only; an other-epoch event is dropped before pricing, by reason.
+                    epoch_excluded["NOT_CURRENT_EPOCH"] += 1
+                    path = None
+                    replay_path_basis = None
                 else:
                     path = _event_price_path(source, book_walk)
                 if path is not None:
@@ -2379,6 +2403,7 @@ def evaluate_protection_screen(
     mark_source = coverage_summary(
         events_by_basis, episodes_by_basis, unproven_reasons, getattr(book_walk, "receipt", None),
         horizon_sec=PATH_HORIZON_SEC, unproven_cells=unproven_cells, c2_clauses=c2_clauses,
+        excluded_events=dict(epoch_excluded),
     )
     streaming_receipt = {
         "schema": "protection_replay_streaming_v1",

@@ -444,7 +444,8 @@ class PreparedBookWalkArrays:
 def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapping[str, int],
                      unproven_reasons: Mapping[str, int], tape_receipt: Mapping[str, Any] | None,
                      *, horizon_sec: float, unproven_cells: Mapping[str, int] | None = None,
-                     c2_clauses: Mapping[str, int] | None = None) -> dict[str, Any]:
+                     c2_clauses: Mapping[str, int] | None = None,
+                     excluded_events: Mapping[str, int] | None = None) -> dict[str, Any]:
     """Per-analysis coverage stamp; R17_UNPROVEN events are excluded from every countable result.
 
     ``unproven_cells`` counts replay cells (policy x episode) made R17_UNPROVEN inside a covered event,
@@ -454,10 +455,20 @@ def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapp
     unproven = int(events_by_basis.get(R17_UNPROVEN, 0))
     countable = total - unproven
     cells = {str(k): int(v) for k, v in (unproven_cells or {}).items() if int(v)}
-    if not total:
+    # Book-only, current-epoch-only replay: R17_UNPROVEN events (no book coverage: candle / 1 s microstructure
+    # pricing is gone) and other-epoch events are DROPPED before any metric. They are listed by reason here and
+    # never priced, so a large dropped share is AMBER (disclosed), not a pricing failure. A basis other than the
+    # book walk can never be countable: RED.
+    other = {str(k): int(v) for k, v in (excluded_events or {}).items() if int(v)}
+    non_book = sorted(b for b, n in events_by_basis.items() if int(n) and b not in (BASIS_BOOK_WALK, R17_UNPROVEN))
+    if non_book:
+        level, reason = "RED", "NON_BOOK_PRICING_BASIS:" + ",".join(non_book)
+    elif int(unproven_reasons.get("BOOK_WALK_NOT_LOADED", 0)):
+        level, reason = "RED", "BOOK_WALK_NOT_LOADED"  # no book at all: the replay itself did not run
+    elif not total:
         level, reason = "AMBER", "NO_REPLAYED_EVENTS"
-    elif unproven * 2 > total:
-        level, reason = "RED", "R17_UNPROVEN_MAJORITY"
+    elif not countable:
+        level, reason = "AMBER", "NO_COUNTABLE_EVENTS_ALL_R17_UNPROVEN_DROPPED"
     elif unproven:
         level, reason = "AMBER", "R17_UNPROVEN_EVENTS_EXCLUDED"
     elif cells:
@@ -482,6 +493,10 @@ def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapp
         "countable_events": countable,
         "r17_unproven_events": unproven,
         "r17_unproven_reasons": dict(sorted(unproven_reasons.items())),
+        "pricing_policy": "BOOK_ONLY_CURRENT_EPOCH",
+        "excluded_events_by_reason": dict(sorted(
+            {**{f"R17_UNPROVEN:{k}": int(v) for k, v in unproven_reasons.items() if int(v)}, **other}.items())),
+        "excluded_events_total": unproven + sum(other.values()),
         "r17_unproven_cells": sum(cells.values()),
         "r17_unproven_cell_reasons": dict(sorted(cells.items())),
         # RK #847 cond 2: how many cells the C2 rule flagged in THIS report (0 is stamped, not omitted), and

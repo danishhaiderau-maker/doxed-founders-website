@@ -136,8 +136,15 @@ def test_coverage_summary_counts_only_covered_events():
                              horizon_sec=7200)
     assert (amber["alert_level"], amber["reason"], amber["countable_events"]) == (
         "AMBER", "R17_UNPROVEN_EVENTS_EXCLUDED", 3)
-    red = coverage_summary({BASIS_BOOK_WALK: 1, R17_UNPROVEN: 2}, {}, {}, {"book_first_s": 5}, horizon_sec=7200)
-    assert (red["alert_level"], red["reason"], red["coverage_book_first_s"]) == ("RED", "R17_UNPROVEN_MAJORITY", 5)
+    dropped = coverage_summary({BASIS_BOOK_WALK: 1, R17_UNPROVEN: 2}, {}, {"BOOK_ROW_GAP_OVER_2S": 2},
+                               {"book_first_s": 5}, horizon_sec=7200, excluded_events={"NOT_CURRENT_EPOCH": 4})
+    # Item 1: R17_UNPROVEN events are dropped (never priced), so a majority is disclosed AMBER, not RED.
+    assert (dropped["alert_level"], dropped["reason"], dropped["coverage_book_first_s"]) == (
+        "AMBER", "R17_UNPROVEN_EVENTS_EXCLUDED", 5)
+    assert dropped["excluded_events_by_reason"] == {"NOT_CURRENT_EPOCH": 4, "R17_UNPROVEN:BOOK_ROW_GAP_OVER_2S": 2}
+    assert dropped["excluded_events_total"] == 6 and dropped["pricing_policy"] == "BOOK_ONLY_CURRENT_EPOCH"
+    candle = coverage_summary({BASIS_BOOK_WALK: 2, "CANDLE_1M": 1}, {}, {}, None, horizon_sec=7200)
+    assert (candle["alert_level"], candle["reason"]) == ("RED", "NON_BOOK_PRICING_BASIS:CANDLE_1M")
     assert coverage_summary({}, {}, {}, None, horizon_sec=7200)["alert_level"] == "AMBER"
 
 
@@ -344,3 +351,14 @@ def test_load_book_walk_reads_the_boot_log(tmp_path):
     assert tape.receipt["boot_log_samples"] == 3
     (tmp_path / "runtime_telemetry_1m.jsonl").unlink()
     assert load_book_walk(tmp_path, [(1000, 1001)]).boot_log is None
+
+
+def test_replay_drops_other_data_epoch_sources_by_reason(monkeypatch):
+    import research_v3_candidates as cand
+    monkeypatch.setenv("DATA_EPOCH_ID", "ce-20261004-v31-freeze21b")
+    monkeypatch.setattr("analyzer_epoch_guard._PROCESS_GUARD", None, raising=False)
+    assert cand._current_epoch_id() == "ce-20261004-v31-freeze21b"
+    assert cand._not_current_epoch({"data_epoch_id": "ce-20260901-old"}, cand._current_epoch_id())
+    # the collector sub-epoch (epoch-<hash>) lives inside the data epoch and is never compared to it
+    assert not cand._not_current_epoch({"epoch_id": "epoch-e13a634e93d8d9a87305476c",
+                                        "data_epoch_id": "ce-20261004-v31-freeze21b"}, cand._current_epoch_id())

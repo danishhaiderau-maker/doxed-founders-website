@@ -116,7 +116,8 @@ def test_unproven_events_are_excluded_and_alerted():
     mark = screen["mark_source"]
     assert mark["events_by_basis"] == {R17_UNPROVEN: 3}
     assert mark["r17_unproven_reasons"] == {"BOOK_ROW_HOLE_DIFF_GE_2S": 2, "BOOK_ROWS_DO_NOT_COVER_WINDOW": 1}
-    assert (mark["countable_events"], mark["alert_level"], mark["reason"]) == (0, "RED", "R17_UNPROVEN_MAJORITY")
+    assert (mark["countable_events"], mark["alert_level"], mark["reason"]) == (
+        0, "AMBER", "NO_COUNTABLE_EVENTS_ALL_R17_UNPROVEN_DROPPED")
     assert screen["candidates"] == []
     clean = _book_walk(1, seconds=PATH_HORIZON_SEC + 3000)
     screen = evaluate_protection_screen(sources, book_walk=clean)
