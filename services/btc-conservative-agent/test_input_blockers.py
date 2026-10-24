@@ -259,3 +259,30 @@ class InputBlockersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceRetiredR17Test(unittest.TestCase):
+    """HM C9: inputs fed only by R17-retired writers read "source retired (R17)", never BLOCKED."""
+
+    def test_signal_replay_without_rows_or_section_is_retired_not_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp)
+            item = ib.signal_replay_item(report_dir)
+            self.assertEqual((item["status"], item["reason_code"], item["reason"]),
+                             ("RETIRED", "SOURCE_RETIRED_R17", "source retired (R17)"))
+            (report_dir / ib.DATA_HEALTH_REPORT).write_text(json.dumps({"signal_replay": {"distinct_trades": 0}}))
+            item = ib.signal_replay_item(report_dir)
+            self.assertEqual(item["status"], "RETIRED")
+            self.assertNotEqual(item["reason_code"], "NO_SIGNAL_REPLAY_ROWS")
+
+    def test_counterfactual_without_rows_is_retired_not_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            item = ib.counterfactual_item(Path(tmp), Path(tmp), EPOCH)
+            self.assertEqual((item["status"], item["reason"]), ("RETIRED", "source retired (R17)"))
+
+    def test_retired_items_do_not_raise_the_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = ib.collect_input_blockers(Path(tmp), Path(tmp), write=False)
+        retired = {i["input"] for i in doc["items"] if i["status"] == "RETIRED"}
+        self.assertTrue({"signal_replay", "counterfactual_stream"} <= retired)
+        self.assertNotIn("NO_SIGNAL_REPLAY_ROWS", json.dumps(doc))

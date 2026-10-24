@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from collector_signal_snapshot import FIELDS, load_signal_snapshot
-from collector_v22 import build_research_event
+from collector_v22 import V22_RETIRED_R17, build_research_event
 
 SIGNAL = 1_700_000_040.0
 SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
@@ -56,7 +56,7 @@ def runtime(tmp_path):
         build_decision_tree_v22=lambda **kw: kw, build_research_event=build_research_event,
         terminal_observation=lambda obs: False,
         upsert_provisional_event=upsert, remove_provisional_event=remove,
-        write_research_event_once=write,
+        write_research_event_once=write, V22_RETIRED_R17=V22_RETIRED_R17,
         _safe_append_jsonl=lambda *a, **kw: None,
         ORDER_MULTIVERSE_FILE="unused", OPPORTUNITY_CAPTURE_FILE="unused",
     )

@@ -107,8 +107,8 @@ def test_startup_order_after_identity_restore_before_worker_owners():
     for name in ("_start_api_state_cache_refresher", "_start_lifecycle_pipeline_runtime"):
         positions = [position for called, position in calls if called == name]
         assert positions and all(position > line for position in positions), name
-    worker_targets = {"periodic_pipeline_loop", "engine_loop", "microstructure_capture_loop",
-                      "all_opportunity_future_path_evidence_loop"}
+    # R17 (23 Oct): the all-opportunity future-path worker is no longer started.
+    worker_targets = {"periodic_pipeline_loop", "engine_loop", "microstructure_capture_loop"}
     assert worker_targets <= {n.id for n in ast.walk(main) if isinstance(n, ast.Name)}
     for n in ast.walk(main):
         if isinstance(n, ast.Name) and n.id in worker_targets:

@@ -15,12 +15,12 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   DATA_SYNC_INVENTORY_FILE_BUDGET = "1000"
   # Sealed research segments, shadow mode: write-once store on this volume
   # (/app/data/segment-store), served read-only at /api/research-segments/*.
-  # Hard-capped (10 GiB store, 4 GiB free floor). Pruning is custody-gated
-  # (laptop ACK + per-file hash parity + analyzer-consumed seq + archive
-  # snapshot); it starts in dry_run and is switched via the authenticated
-  # /api/research-segments/<prefix>/prune-mode route, persisted on the volume.
+  # Hard-capped (10 GiB store, 4 GiB free floor).
+  # R5: cap/age, no custody gate (r5_segment_pass + rotation_cap). The old
+  # custody prune (ACK-gated) is retired (HM C4): mode is always off and the
+  # prune-mode route answers 409 CUSTODY_PRUNE_RETIRED_R5.
   RESEARCH_SEGMENTS_PRUNE_ENABLED = "1"
-  RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "dry_run"
+  RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "off"
   RESEARCH_SEGMENTS_ENABLED = "1"
   RESEARCH_SEGMENTS_SINK = "volume"
   RESEARCH_SEGMENTS_ACK_POLL_SECONDS = "300"

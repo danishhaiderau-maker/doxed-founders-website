@@ -85,6 +85,42 @@ def test_success_resets_backoff_and_pressure_clamps_to_one(tmp_path, monkeypatch
     assert status["source_cleanup_authorized"] is False
 
 
+def test_c11_qualification_retired_r17_total_accumulates_across_worker_cycles(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    assert runtime.status()["qualification_retired_r17_total"] == 0
+    _install_launch(monkeypatch, runtime, _Process(), pipeline={
+        "candidate_count": 3, "bundle_count": 0, "pressure_mode": False,
+        "qualification_retired_r17_count": 2,
+    })
+    assert runtime._run_once() is True
+    assert runtime._run_once() is True
+    status = runtime.status()
+    assert status["last_result"]["qualification_retired_r17_count"] == 2
+    assert status["qualification_retired_r17_total"] == 4
+    _install_launch(monkeypatch, runtime, _Process(), pipeline={
+        "candidate_count": 1, "bundle_count": 0, "pressure_mode": False,
+        "qualification_retired_r17_count": True,   # non-int is ignored, never counted
+    })
+    assert runtime._run_once() is True
+    assert runtime.status()["qualification_retired_r17_total"] == 4
+
+
+def test_c11_health_exposes_lifecycle_qualification_retired_r17():
+    src = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
+    assert '"lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(),' in src
+    assert '"lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(fast=True),' in src
+    import bot
+    real = bot._lifecycle_pipeline_runtime_status
+    try:
+        bot._lifecycle_pipeline_runtime_status = lambda: {"qualification_retired_r17_total": 5}
+        import lifecycle_pipeline
+        assert bot._lifecycle_qualification_retired_r17_total() == 5 + lifecycle_pipeline.lifecycle_qualification_retired_r17_count()
+        bot._lifecycle_pipeline_runtime_status = lambda: {"qualification_retired_r17_total": "x"}
+        assert bot._lifecycle_qualification_retired_r17_total() == lifecycle_pipeline.lifecycle_qualification_retired_r17_count()
+    finally:
+        bot._lifecycle_pipeline_runtime_status = real
+
+
 def test_success_retains_only_bounded_emergency_wal_observability(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     generation = "12345678-1234-1234-1234-123456789abc"

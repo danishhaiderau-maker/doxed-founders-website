@@ -482,6 +482,13 @@ def _store_cursor(root: Path, epoch_id: str, cursor: int) -> None:
     os.replace(temporary, target)
 
 
+# R17 (23 Oct): market_segments writers are retired (HM R17 (B)1). The
+# segment rows were copies of L1 microstructure, which paper_fill bans; no
+# fill, exit or tile decision reads them. Callers get "disabled: R17".
+SEGMENT_WRITES_RETIRED_R17 = True
+R17_DISABLED = "disabled: R17"
+
+
 def mature_future_market_paths(
     *, data_dir: str | Path, epoch_id: str, now_ts: float,
     required_horizons_sec: Iterable[int] = DEFAULT_REQUIRED_HORIZONS_SEC,
@@ -490,6 +497,13 @@ def mature_future_market_paths(
     pre_entry_sec: int = DEFAULT_PRE_ENTRY_SEC,
 ) -> dict[str, Any]:
     """Mature a bounded batch; absent evidence remains PENDING/UNKNOWN."""
+    if SEGMENT_WRITES_RETIRED_R17:
+        return {
+            "schema": "all_opportunity_future_path_maturation_v1",
+            "epoch_id": str(epoch_id), "status": R17_DISABLED, "retired": "R17",
+            "candidate_count": 0, "selected_count": 0, "complete_count": 0,
+            "unknown_count": 0, "writes": [],
+        }
     root = Path(data_dir).resolve()
     tape = _contained(root, root / SOURCE_TAPE_FILE)
     horizons = tuple(sorted({int(value) for value in required_horizons_sec if int(value) > 0}))

@@ -1,4 +1,4 @@
-"""Custody-gated Fly pruning: plan, server custody/mode routes, shipper execution."""
+"""Custody-gated Fly pruning (retired under R5, HM C4): plan library, custody route, retired mode route."""
 
 from __future__ import annotations
 
@@ -111,66 +111,33 @@ def test_custody_ahead_of_ack_is_refused(venv):
     assert status == 409 and body["error"] == "CUSTODY_AHEAD_OF_ACK"
 
 
-def test_prune_mode_route_needs_env_master_switch(venv, monkeypatch):
-    monkeypatch.delenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", raising=False)
-    status, _h, raw = venv.call("prune-mode")
-    assert status == 200 and json.loads(raw)["mode"] == "off"
-    status, _h, raw = venv.call("prune-mode", method="POST", body=b'{"mode": "enforce"}')
-    assert status == 200 and json.loads(raw)["mode"] == "off"
-    monkeypatch.setenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", "1")
-    status, _h, raw = venv.call("prune-mode")
-    assert json.loads(raw)["mode"] == "enforce"
-    status, _h, _raw = venv.call("prune-mode", method="POST", body=b'{"mode": "explode"}')
-    assert status == 400
+def test_c4_prune_mode_route_is_retired_409(venv, monkeypatch):
+    for env in (None, "1"):
+        if env is None:
+            monkeypatch.delenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", raising=False)
+        else:
+            monkeypatch.setenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", env)
+        status, _h, raw = venv.call("prune-mode")
+        assert status == 200 and json.loads(raw)["mode"] == "off"
+        status, _h, raw = venv.call("prune-mode", method="POST", body=b'{"mode": "enforce"}')
+        assert status == 409 and json.loads(raw)["error"] == "CUSTODY_PRUNE_RETIRED_R5"
+        assert json.loads(raw)["mode"] == "off"
     status, _h, _raw = venv.call("prune-mode", token="wrong")
     assert status == 401
 
 
-def test_default_mode_is_dry_run_when_enabled(tmp_path):
-    assert prune_mod.read_mode(tmp_path, {"RESEARCH_SEGMENTS_PRUNE_ENABLED": "1"})[0] == "dry_run"
+def test_c4_mode_is_always_off_and_cannot_be_written(tmp_path):
+    assert prune_mod.CUSTODY_PRUNE_RETIRED is True
+    assert prune_mod.read_mode(tmp_path, {"RESEARCH_SEGMENTS_PRUNE_ENABLED": "1"})[0] == "off"
     assert prune_mod.read_mode(tmp_path, {})[0] == "off"
+    with pytest.raises(PermissionError):
+        prune_mod.write_mode(tmp_path, "enforce")
 
 
-def test_dry_run_then_enforce_deletes_only_verified_old_files(venv, monkeypatch):
-    monkeypatch.setenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", "1")
-    monkeypatch.setattr(prune_mod, "TIER_B_KEEP_LATEST", 0)
-    rotated, protected = _ship_two_acks(venv)
-    sha = fmt.sha256_bytes(_rows(0, 20))
-    assert _post(venv, _custody(venv, 2, {"signal_replay.jsonl.1": sha}))[0] == 201
-    venv.clock[0] = rotated.stat().st_mtime + 2 * 86400
-    _age_segments(venv, 86400)
-    store_before = json.loads((venv.state_dir / "state.json").read_text())["store_bytes"]
-
-    dry = _volume_shipper(venv).prune_pass()
-    assert dry["mode"] == "dry_run" and dry["plan"]["allowed"] is True
-    assert dry["plan"]["runtime_examples"] == ["signal_replay.jsonl.1"]
-    assert dry["plan"]["segment_count"] == 2 and dry["plan"]["segment_seq_range"] == [1, 2]
-    assert rotated.exists() and (venv.state_dir / "prune-plan-latest.json").is_file()
-    assert all(p.exists() for p in (venv.store_root / "v1" / "seg").glob("*.tar.gz"))
-
-    prune_mod.write_mode(venv.state_dir, "enforce")
-    done = _volume_shipper(venv).prune_pass()
-    assert done["result"]["deleted"] == 3
-    assert not rotated.exists() and protected.read_bytes() == _rows(0, 3)
-    assert list((venv.store_root / "v1" / "seg").glob("*.tar.gz")) == []
-    assert (venv.store_root / "v1" / "man" / "000000000001.json").is_file()
-    ledger = [json.loads(line) for line in
-              (venv.runtime / "retention" / "prune_ledger.jsonl").read_text().splitlines()]
-    assert sorted(row["kind"] for row in ledger) == ["runtime", "segment", "segment"]
-    assert [r["sha256"] for r in ledger if r["kind"] == "runtime"] == [sha]
-    state = json.loads((venv.state_dir / "state.json").read_text())
-    assert state["store_bytes"] == store_before - done["result"]["segment_bytes"]
-    status, _h, raw = venv.call("seg/1")
-    assert status == 410 and json.loads(raw)["error"] == "PRUNED"
-    status, _h, raw = venv.call("man/1")
-    assert status == 200
-    head = json.loads(venv.call("head")[2])
-    assert head["pruning_enabled"] is True and head["prune_mode"] == "enforce"
-    assert head["pruned_through_seq"] == 2 and head["custody_through_seq"] == 2
-    venv.ship_all()
-    shipped = venv.shipper().load_state()
-    assert "retention/prune_ledger.jsonl" in shipped["files"]
-    assert "signal_replay.jsonl.1" in shipped["tombstones"]
+def test_c4_shipper_has_no_custody_prune_pass(venv):
+    shipper = _volume_shipper(venv)
+    assert not hasattr(shipper, "prune_pass")
+    assert shipper.prune_mode() == "off"
 
 
 def test_unverified_young_newest_and_changed_rotations_are_kept(venv):
@@ -224,23 +191,6 @@ def test_tape_rotations_outlive_the_restart_minute_bar_window(venv, monkeypatch)
     held = plan(window_days)
     assert held["runtime"] == [] and held["runtime_skipped"]["TOO_YOUNG"] == 1
     assert [item["relpath"] for item in plan(window_days + 2)["runtime"]] == ["market_microstructure_1s.jsonl.1"]
-
-
-def test_prune_never_runs_with_an_intent_pending(venv, monkeypatch):
-    monkeypatch.setenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", "1")
-    venv.write("a.jsonl", _rows(0, 2))
-    venv.ship_all()
-    shipper = _volume_shipper(venv)
-    shipper.intent_dir.mkdir(parents=True, exist_ok=True)
-    (shipper.intent_dir / "intent.json").write_text("{}")
-    assert shipper.prune_pass()["skipped"] == "INTENT_PENDING"
-
-
-def test_non_volume_sink_never_prunes(venv, monkeypatch):
-    monkeypatch.setenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", "1")
-    shipper = venv.shipper()
-    shipper.sink = "tigris"
-    assert shipper.prune_pass() == {"mode": "off"}
 
 
 def test_shipper_calls_prune_only_between_cycles():

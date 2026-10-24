@@ -320,30 +320,27 @@ def test_public_summary_is_redacted():
 
 # ------------------------------------------------------------ runtime wiring
 
-def test_dump_replay_submits_after_releasing_the_replay_lock():
+def test_dump_replay_no_longer_submits_shadow_exit_paths_r17():
     body = BOT[BOT.index("def dump_replay("):BOT.index("def load_policy(")]
-    capture = body.index("shadow_exit_payload = {")
-    submit = body.index("_submit_shadow_exit_path(shadow_exit_payload)")
-    lock_block_end = body.index('logger.error(f"Replay dump failed for {trade_id}: {e}")')
-    assert capture < lock_block_end < submit
-    assert 'if buf.get("closed") and not terminal_reason:' in body
+    assert "_submit_shadow_exit_path" not in body
+    assert "shadow_exit_payload = {" not in body
 
 
-def test_runtime_declares_file_status_routes_and_reset_inventory():
-    assert '"SHADOW_EXIT_PATH_FILE",' in BOT
-    assert 'label="SHADOW_EXIT_PATH"' in BOT
+def test_runtime_retires_recorder_but_keeps_reset_inventory_r17():
+    assert 'SHADOW_EXIT_PATH_FILE = "shadow_exit_paths.jsonl"' in BOT
+    serialized = BOT[BOT.index("_JSONL_SERIALIZED_APPEND_CONSTANTS = ("):BOT.index("_JSONL_SERIALIZED_APPEND_LITERALS = (")]
+    assert '"SHADOW_EXIT_PATH_FILE",' not in serialized
+    assert 'label="SHADOW_EXIT_PATH"' not in BOT
+    assert "ShadowExitRecorder(" not in BOT
+    assert "\nimport shadow_exit_paths\n" not in BOT
     assert '"shadow_exit_recorder": shadow_exit_recorder_status_snapshot()' in BOT
-    assert "@app.route('/api/research/shadow_exits')" in BOT
-    assert "@app.route('/api/shadow_exits/summary')" in BOT
-    read_only = BOT[BOT.index("_READ_ONLY_GET_PATHS = {"):BOT.index("}", BOT.index("_READ_ONLY_GET_PATHS = {"))]
-    assert '"/api/shadow_exits/summary"' in read_only and "/api/research/shadow_exits" not in read_only
     wipe = BOT[BOT.index("def research_wipe_file_paths("):BOT.index("def _fresh_collection_derived_history_paths(")]
     assert "SHADOW_EXIT_PATH_FILE" in wipe
     import research_reset_inventory
     import data_retention_policy
 
     assert sxp.FILE_NAME in research_reset_inventory.RESEARCH_FILES
-    assert data_retention_policy.TIER_A_DATASETS[sxp.FILE_NAME][0] == "shadow_exit_paths"
+    assert sxp.FILE_NAME not in data_retention_policy.TIER_A_DATASETS
 
 
 def test_recorder_module_has_no_order_or_relay_surface():
@@ -372,15 +369,15 @@ def bot(monkeypatch):
     return bot_module
 
 
-def test_routes_public_summary_open_research_view_admin_only(bot):
+def test_routes_report_retired_r17(bot):
     client = bot.app.test_client()
     remote = {"REMOTE_ADDR": "198.51.100.7"}
     public = client.get("/api/shadow_exits/summary", environ_base=remote)
-    assert public.status_code == 200 and public.get_json()["schema"] == sxp.SUMMARY_SCHEMA
+    assert public.status_code == 200
+    assert public.get_json()["status"] == "disabled: R17" and public.get_json()["enabled"] is False
     assert client.get("/api/research/shadow_exits", environ_base=remote).status_code in (401, 403)
     authed = client.get("/api/research/shadow_exits", environ_base=remote,
                         headers={"X-Bot-Admin-Token": "shadow-exit-admin-token"})
     assert authed.status_code == 200
-    body = authed.get_json()
-    assert body["observation_only"] is True and body["status"]["schema"] == sxp.STATUS_SCHEMA
-    assert set(body["tile_shadow_exit_set_ids"]) == set(registry.ACTIVE_TILE_ORDER)
+    assert authed.get_json()["retired"] == "R17"
+    assert bot.shadow_exit_recorder_status_snapshot()["status"] == "disabled: R17"

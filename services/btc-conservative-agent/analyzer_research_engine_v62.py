@@ -4806,7 +4806,12 @@ def qualified_exit_policy_grid_report():
         "selected_on_train": selected,
         "conclusions_allowed": conclusions_allowed,
         "live_policy_change_allowed": conclusions_allowed,
-        "verdict": "QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed else "INSUFFICIENT_QUALIFIED_HOLDOUT",
+        # HM C9 (R17): signal_replay and counterfactual writers are retired, so with no replay rows the grid
+        # is "source retired (R17)", never INSUFFICIENT_QUALIFIED_HOLDOUT.
+        "verdict": ("QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed
+                    else "SOURCE_RETIRED_R17" if not all_replays and not qualified
+                    else "INSUFFICIENT_QUALIFIED_HOLDOUT"),
+        "source_status": "source retired (R17)" if not all_replays and not qualified else None,
         "preliminary_descriptive_estimate": {
             "status": "DESCRIPTIVE_ONLY" if selected else "NO_ESTIMATE",
             "selected_on_train": selected,
@@ -4988,7 +4993,12 @@ def qualified_chase_policy_report():
         "selected_holdout": validation,
         "descriptive_conclusion_allowed": descriptive_qualified,
         "live_policy_change_allowed": False,
-        "verdict": "QUALIFIED_DESCRIPTIVE_HOLDOUT" if descriptive_qualified else "INSUFFICIENT_QUALIFIED_HOLDOUT",
+        # HM C9 (R17): with no natural rows the only producer left was the retired counterfactual entry replay.
+        "verdict": ("QUALIFIED_DESCRIPTIVE_HOLDOUT" if descriptive_qualified
+                    else "SOURCE_RETIRED_R17" if not rows
+                    else "INSUFFICIENT_QUALIFIED_HOLDOUT"),
+        "source_status": "source retired (R17)" if not rows else None,
+        "counterfactual_source": "source retired (R17)",
         "question_outputs": {
             "chase": {
                 "status": "QUALIFIED_DESCRIPTIVE" if descriptive_qualified else "PRELIMINARY_ONLY" if rows else "NO_EVIDENCE",

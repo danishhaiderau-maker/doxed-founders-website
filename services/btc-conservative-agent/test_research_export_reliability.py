@@ -234,3 +234,23 @@ def test_unexpected_build_failure_is_generic_and_closes_temp_file(tmp_path, monk
     assert "sensitive-path-detail" not in response.get_data(as_text=True)
     assert len(created) == 1
     assert created[0].closed is True
+
+
+def test_r17_retired_files_not_exported_and_absent_members_still_return_200(tmp_path, monkeypatch):
+    """R17 (23 Oct): retired ticker-derived files are dropped from the real export list;
+    any listed member that is absent is reported, never a 5xx."""
+    real_files = list(bot.research_export_files())
+    for retired in ("signal_replay.jsonl", "counterfactual.jsonl", "order_multiverse.jsonl",
+                    "post_exit_replay.jsonl", "shadow_exit_paths.jsonl", "order_multiverse_entry_grid.jsonl"):
+        assert retired not in real_files
+    (tmp_path / bot.CSV_TRADES).write_text("safe", encoding="utf-8")
+    _prepare_route(tmp_path, monkeypatch, real_files)
+    response = _authenticated_export(bot.app.test_client())
+    try:
+        assert response.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(response.data), "r") as archive:
+            manifest = json.loads(archive.read(bot._RESEARCH_EXPORT_MANIFEST_NAME))
+        assert manifest["included_members"] == [bot.CSV_TRADES]
+        assert bot.TRADE_OUTCOME_FILE in manifest["omitted_optional_absent"]
+    finally:
+        response.close()

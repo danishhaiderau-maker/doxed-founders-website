@@ -100,6 +100,8 @@ DELETE_EXACT_NAMES = frozenset({
     "disloc_trades.jsonl", "disloc_foi_trades.jsonl", "disloc_paused_skips.jsonl",
     # shadow / counterfactual streams
     "shadow_exit_paths.jsonl", "xvp_shadow_signals.jsonl", "ai_shadow_challengers.jsonl",
+    # DISK-CAP rotation-cap receipts (self-capped; never shipped)
+    "cap_receipts.jsonl", "v22_discard_receipts.jsonl",
     # market streams (tape, book, deriv, trades, bbo, cross venue, context, liquidations)
     "market_microstructure_1s.jsonl", "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "bfx_deriv_status_1s.jsonl",
     "venue_bbo_1m.jsonl", "cross_venue_tape_1m.jsonl", "market_context_1m.jsonl", "liquidations.jsonl",
