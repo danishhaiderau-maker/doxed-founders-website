@@ -638,3 +638,6 @@ test_integration_848_resolution.py
 test_r17_retired_sources.py
 test_hm_r4_b2_guardian.py
 test_live_fences_health.py
+test_epoch_unplaced_rows_excluded.py
+test_generation_artifacts_r17.py
+test_tile_realism_and_receipt_validity.py
