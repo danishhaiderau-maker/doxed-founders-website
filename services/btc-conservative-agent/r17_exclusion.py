@@ -38,6 +38,7 @@ REASON_ID_LIST = "R17_ID_LIST"
 REASON_UNPROVEN = "R17_UNPROVEN"
 REASON_UNVERIFIED = "R17_LIST_UNVERIFIED"
 REASON_STAMPED = "R17_STAMPED"
+REASON_PRECOUNT = "R17_PRECOUNT"
 
 
 def _ids_from(payload) -> set:
@@ -270,12 +271,32 @@ def non_countable_reason(row, *, ids=None, load_errors=None):
     tid = str(row.get("trade_id") or "").strip()
     if tid and (tid in ids or _base_trade_id(tid) in ids):
         return REASON_ID_LIST
-    if _truthy(row.get("non_countable")):
-        return str(row.get("non_countable_reason") or REASON_STAMPED)
+    # RK (24 Oct): no early return. proof_failures ALWAYS runs and every reason is recorded, so a stamped row is
+    # never a bare R17_STAMPED. Countability is unchanged: the row is non-countable iff any part below is present.
+    parts = []
+    stamped = _truthy(row.get("non_countable"))
+    prior = row.get("non_countable_reason")
+    # Recorded reasons only describe a row that is stamped non_countable (countability is decided as before).
+    if stamped and isinstance(prior, str) and prior.strip() and prior.strip() != REASON_STAMPED:
+        parts.extend(p for p in prior.strip().split(";") if p and p != REASON_STAMPED
+                     and not p.startswith((REASON_UNPROVEN + ":", REASON_PRECOUNT + ":")))
+    plural = row.get("non_countable_reasons")
+    if isinstance(plural, str):
+        plural = [plural]
+    if stamped and isinstance(plural, (list, tuple)):
+        names = [str(r).strip() for r in plural if str(r).strip()]
+        if names:
+            parts.append(REASON_PRECOUNT + ":" + "|".join(names))
     failed = proof_failures(row)
     if failed:
-        return REASON_UNPROVEN + ":" + "|".join(failed)
-    return None
+        parts.append(REASON_UNPROVEN + ":" + "|".join(failed))
+    out = []
+    for part in parts:
+        if part not in out:
+            out.append(part)
+    if out:
+        return ";".join(out)
+    return REASON_STAMPED if stamped else None
 
 
 def stamp_on_write(row: dict) -> dict:
