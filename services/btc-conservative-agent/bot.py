@@ -48160,6 +48160,7 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
         })
     checks.append(_memory_oom_check(now))
     checks.append(_offline_sim_epoch_check())
+    checks.append(_ledger_delete_boot_recover_check())
     try:
         checks.append(_live_guardian_force_flat_check())
     except Exception as exc:  # noqa: BLE001
@@ -48206,7 +48207,13 @@ def _system_health_alert_history(full: bool = False) -> dict:
         statuses = {}
     history = system_health_alerts.build_history(events, statuses=statuses, statuses_at=statuses_at)
     history["source"] = "laptop watcher push (POST /api/system-health/report)"
-    return history if (full or _admin_authed_strict()) else system_health_alerts.public_view(history)
+    out = history if (full or _admin_authed_strict()) else system_health_alerts.public_view(history)
+    out = dict(out)
+    check = _ledger_delete_boot_recover_check()
+    out["ledger_delete_boot_recover"] = check  # HM 25 Oct: visible on /api/system-health/alerts + /api/monitor/alerts
+    if check["status"] == "RED":
+        out.setdefault("fly_alerts", []).append(check)
+    return out
 
 
 def _system_health_alert_history_full() -> dict:
@@ -52139,18 +52146,37 @@ def api_admin_trades_delete_rollback_snapshot():
     return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
 
 
+# HM 25 Oct: boot-recover outcome surfaces in system-health and both alert routes, not only the log.
+_LEDGER_DELETE_BOOT_RECOVER_STATUS: dict = {"status": "NOT_RUN", "ts": None, "detail": None, "restored": []}
+
+
 def _ledger_delete_boot_recover() -> None:
     """HM R2: restore any ledger left mid-write by a process death during ledgers/delete-by-sha."""
+    st = _LEDGER_DELETE_BOOT_RECOVER_STATUS
+    st.update(ts=time.time(), detail=None, restored=[])
     try:
         import ledger_delete_by_sha as _lds
         from research_v3_store import V3EvidenceStore
         root = _data_sync_runtime_root()
         if not (Path(root) / "v3" / _lds.SNAPSHOT_DIRNAME).is_dir():
+            st["status"] = "OK_NO_SNAPSHOTS"
             return
         for row in _lds.restore_incomplete_deletes(V3EvidenceStore.open_read_only(root)):
+            st["restored"].append(row.get("ledger") if isinstance(row, dict) else str(row))
             logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot restored interrupted delete {row} [PIPELINE ENFORCEMENT]")
+        st["status"] = "RESTORED" if st["restored"] else "OK"
     except Exception as exc:
+        st.update(status="FAILED", detail=f"{type(exc).__name__}: {exc}"[:300])
         logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot recovery failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _ledger_delete_boot_recover_check() -> dict:
+    st = dict(_LEDGER_DELETE_BOOT_RECOVER_STATUS)
+    return {"id": "fly.ledger_delete_boot_recover",
+            "status": {"FAILED": "RED", "RESTORED": "AMBER", "NOT_RUN": "AMBER"}.get(st["status"], "GREEN"),
+            "observed": st["status"] + (f" {st['detail']}" if st.get("detail") else "")
+            + (f" restored={st['restored']}" if st.get("restored") else ""),
+            "threshold": "boot recovery ran without error"}
 
 
 @app.route('/api/admin/ledgers/delete-by-sha', methods=['POST'])

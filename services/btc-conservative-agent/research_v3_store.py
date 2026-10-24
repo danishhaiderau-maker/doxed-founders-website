@@ -415,18 +415,25 @@ class V3EvidenceStore:
                 instance._read_identity_override = dict(identity)
                 instance.epoch_id = str(identity.get("epoch_id") or "")
         for stream, identity in retired_pending:
-            if instance._read_identity_override in (None, identity):
-                if instance._read_identity_override is None:
-                    instance._read_identity_override = dict(identity)
-                    instance.epoch_id = str(identity.get("epoch_id") or "")
+            adopted = instance._read_identity_override
+            if adopted is None and len({json.dumps(i, sort_keys=True) for _, i in retired_pending}) == 1:
+                # Only retired authorities, all agreeing: unchanged legacy behaviour (nothing is exempted).
+                instance._read_identity_override = dict(identity)
+                instance.epoch_id = str(identity.get("epoch_id") or "")
+                continue
+            if adopted is None:
+                # HM 5: an exempt identity is never adopted; a non-exempt authority must exist.
+                raise ValueError("V3 read authority identity conflict (no non-retired authority)")
+            if identity == adopted:
                 continue  # not stale: ordinary handling, identity check applies as before
-            # Stale retired pointer: epoch must still match and the file must prove no writes since retirement.
-            if str(identity.get("epoch_id") or "") != instance.epoch_id:
-                raise ValueError("V3 read authority identity conflict")
-            unchanged, why = retired_stream_unchanged(instance.ledger_dir, stream)
-            if not unchanged:
+            why = instance._retired_exemption_refusal(stream, identity)
+            if why:
                 raise ValueError(f"V3 read authority identity conflict ({stream}: {why})")
             instance._retired_excluded[stream] = RETIRED_STREAM_ALLOWLIST[stream]
+            logging.getLogger(__name__).warning(
+                "[V3-RETIRED-STREAM-EXEMPT] ledger=%s ruling=%s stale_identity=%s adopted_identity=%s",
+                stream, RETIRED_STREAM_ALLOWLIST[stream], json.dumps(identity, sort_keys=True),
+                json.dumps(adopted, sort_keys=True))
         if instance._read_identity_override is None and expected_identity is not None:
             instance._read_identity_override = dict(expected_identity)
             instance.epoch_id = str(expected_identity.get("epoch_id") or "")
@@ -546,6 +553,50 @@ class V3EvidenceStore:
                 "blocked": auto_clear.get("blocked"),
             },
         }
+
+    def _retired_exemption_refusal(self, stream: str, identity: dict) -> str:
+        """'' only if a stale pointer on an allowlisted retired stream proves no writes since retirement
+        (RK PASS + HM conditions, 25 Oct 2026). Any doubt returns a refusal reason (RED)."""
+        adopted = self._read_identity_override or {}
+        if stream not in RETIRED_STREAM_ALLOWLIST:
+            return "RETIRED_STREAM_NOT_ALLOWLISTED"
+        if set(identity) != set(adopted):
+            return "RETIRED_IDENTITY_KEYS_DIFFER"
+        for key in ("epoch_id", "tile_config_signature"):
+            if identity.get(key) != adopted.get(key):
+                return "RETIRED_IDENTITY_" + key.upper() + "_DIFFERS"
+        if any(identity.get(k) != adopted.get(k) for k in identity
+               if k not in ("source_revision", "deployed_revision")):
+            return "RETIRED_IDENTITY_FIELD_DIFFERS"
+        if (self.receipt_dir / "ledger_generations_v1" / stream / "ACTIVE.json").exists():
+            return "RETIRED_STREAM_HAS_GENERATION_POINTER"
+        unchanged, why = retired_stream_unchanged(self.ledger_dir, stream)
+        if not unchanged:
+            return why
+        path = self.ledger_dir / f"{stream}.jsonl"
+        try:
+            receipt = json.loads(self._completeness_path(stream).read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "RETIRED_COMPLETE_JSON_UNREADABLE"
+        signature = _path_signature(path)
+        if (signature is None or receipt.get("ledger") != stream
+                or receipt.get("ledger_signature") != self._signature_payload(signature)):
+            return "RETIRED_LEDGER_SIGNATURE_MISMATCH"
+        if signature[2] and not self._anchor_valid(path, receipt.get("tail_anchor")):
+            return "RETIRED_TAIL_ANCHOR_INVALID"
+        headers = self.root / "v3" / "emergency_evidence_wal_v2" / "mandatory-reserve.headers"
+        try:
+            from emergency_evidence_wal import EmergencyEvidenceWal, HEADER_BYTES
+            if headers.exists() or headers.is_symlink():
+                wal = EmergencyEvidenceWal.__new__(EmergencyEvidenceWal)
+                wal.extents = headers.stat().st_size // HEADER_BYTES
+                with headers.open("rb") as handle:
+                    rows = wal._read_headers(handle)
+                if any(row and row.get("ledger") == stream for row in rows):
+                    return "RETIRED_STREAM_HAS_WAL_ENTRIES"
+        except (OSError, RuntimeError, ValueError):
+            return "RETIRED_WAL_UNREADABLE"
+        return ""
 
     def _assert_contained(self, path: Path) -> Path:
         resolved = path.resolve()
