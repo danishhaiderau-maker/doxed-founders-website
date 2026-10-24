@@ -181,6 +181,29 @@ def tile_key_for_lane(lane: str | None, registry: Mapping[str, Mapping] | None =
     return prefix if prefix in TILE_KEY_CODES else None
 
 
+# RK 25 Oct 06:29 (2a): ONLY GS-01 (gs1) and FADE3 (gf3, GS-FADE3-TP30) may EVER be operator-eligible. gf3 additionally
+# needs its own LIVE_HM_GATE_FADE3=PASS:<ref> (it stays unset => refused). Every other tile is refused in code whatever the
+# admin action (eligibility route, tile-switch one-click, persisted sidecar). Changing this set needs an RK-ruled code PR.
+OPERATOR_ELIGIBLE_TILE_KEYS = frozenset({"gs1", "gf3"})
+FADE3_HM_GATE_ENV = "LIVE_HM_GATE_FADE3"
+
+
+def operator_eligibility_refusal(lane: str | None, registry: Mapping[str, Mapping] | None = None,
+                                 env: Mapping[str, str] | None = None) -> str | None:
+    """None when the lane MAY be operator-eligible, else the refusal code. Fail closed on any lookup error."""
+    import os
+    try:
+        reg = _registry() if registry is None else registry
+        key = str(((reg.get(str(lane or "").upper()) or {}).get("id_prefix")) or "").lower()
+    except Exception:  # noqa: BLE001
+        return "OPERATOR_ELIGIBILITY_UNREADABLE"
+    if key not in OPERATOR_ELIGIBLE_TILE_KEYS:
+        return "TILE_NEVER_OPERATOR_ELIGIBLE"
+    if key == "gf3" and not str((os.environ if env is None else env).get(FADE3_HM_GATE_ENV) or "").upper().startswith("PASS"):
+        return "FADE3_HM_GATE_NOT_PASSED"
+    return None
+
+
 def tile_key_for_trade_id(trade_id: str | None) -> str | None:
     tid = str(trade_id or "").strip().lower()
     for wrap in ("adopt:", "relink:"):

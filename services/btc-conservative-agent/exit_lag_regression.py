@@ -171,11 +171,14 @@ def reasons(row: Any) -> list:
     if str(row.get("trade_id") or "") in LEGACY_REGRESSION_IDS:
         return [REASON]
     st = gate_status(row)
-    if st == PRE_DEPLOY:
+    # UNTIMED (no exit fill/decision ts at all) BREAKS the arm-gate run (fail closed for arming, rk_gate) but is judged for
+    # countability by the legacy rule: it cannot be placed in the 25 Oct scope, so EXIT_LAG adds no reason of its own
+    # (CI 40120779395: stamping every ts-less row non-countable broke the r17/delay-pool/tile-realism contracts).
+    if st in (PRE_DEPLOY, UNTIMED_STATUS):
         c = classify(row)
         return [REASON] if c == REGRESSION else [UNMEASURED] if c == UNMEASURED_STATUS else []
     # EXCHANGE_FILLED adds no exit-lag reason of its own: the exchange filled it, our timer did not (RK 25 Oct (3)).
-    out = {ADMIN_EXCLUDED: [ADMIN_EXCLUDED_REASON], UNMEASURED_STATUS: [UNMEASURED], UNTIMED_STATUS: [UNMEASURED]}.get(st, [])
+    out = {ADMIN_EXCLUDED: [ADMIN_EXCLUDED_REASON], UNMEASURED_STATUS: [UNMEASURED]}.get(st, [])
     if st == MEASURED and threshold_proven():
         lag = lag_s(row)
         if lag is None or lag > float(REAL_EXCHANGE_THRESHOLD_S):

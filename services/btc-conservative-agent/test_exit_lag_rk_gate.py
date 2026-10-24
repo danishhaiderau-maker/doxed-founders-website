@@ -176,7 +176,7 @@ def test_gs01_margin_cap_enforced():
 def test_untimed_in_scope_exit_breaks_the_run():
     r = {"trade_id": "nots", "exit_reason": "TP", "event_timestamps": repr({"exit_trigger_receive_ts": None})}
     assert elr.gate_status(r) == elr.UNTIMED_STATUS
-    assert elr.UNMEASURED in elr.reasons(r) and elr.UNPROVEN_REASON in elr.reasons(r)
+    assert elr.UNPROVEN_REASON not in elr.reasons(r)   # countability: legacy rule (CI 40120779395); the RUN still breaks
     rows = [_row("m1", S + 10, rx=S + 9.99), r, _row("m2", S + 20, rx=S + 19.99)]
     gate = elr.rk_gate(rows)
     assert gate["run_broken_by"]["trade_id"] == "nots" and gate["run_broken_by"]["why"] == "NO_EXIT_TS"

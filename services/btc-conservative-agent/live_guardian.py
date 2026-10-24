@@ -38,7 +38,7 @@ STOP_UNPROTECTED_RED_CODES = frozenset({"STOP_MISSING_GT_5S", "STOP_PLACEMENT_FA
 # R20 (Danish 25 Oct 06:21): a hard TOTAL (cumulative, all-time, all live tiles) live realised-loss limit. Hitting it (or
 # failing to evaluate it) disarms ALL live tiles + force-flats (RED, latched: arming is refused until FLAT_NO_STOPS read-back
 # and a human clears it). FROZEN constant: no env override, no bot/admin route reads or writes it; Danish sets the amount
-# in code review. Pending Danish it equals the D3 daily total cap (live_tile_gate.DAILY_LOSS_CAP_TOTAL_USD = $0.10).
+# in code review. The amount changes ONLY by a code PR that carries Danish's own words (quoted verbatim). Pending Danish it equals the D3 daily total cap (live_tile_gate.DAILY_LOSS_CAP_TOTAL_USD = $0.10).
 LIVE_TOTAL_LOSS_CAP_USD = 0.10
 LIVE_TOTAL_LOSS_CAP_SOURCE = "R20 (Danish 25 Oct 06:21 AEDT); amount = D3 daily total cap pending Danish"
 VIOL_LIVE_TOTAL_LOSS_CAP = "LIVE_TOTAL_LOSS_CAP"

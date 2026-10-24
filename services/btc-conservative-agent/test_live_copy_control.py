@@ -136,10 +136,11 @@ def test_live_eligibility_default_off_persist_and_retired(tmp_path):
     ok, row = e.set("NOT_A_TILE", True)
     assert not ok and row["error"] == "TILE_NOT_ACTIVE"
     assert not e.is_eligible("NOT_A_TILE")
-    ok, _ = e.set(LANE, True)
-    assert ok and lc.LiveEligibility(path=p).is_eligible(LANE)  # persisted config
-    e.set(LANE, False)
-    assert not lc.LiveEligibility(path=p).is_eligible(LANE)
+    from combo_pathway_config import RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP as GS01   # RK 06:29 (2a): gs1/gf3 only
+    ok, _ = e.set(GS01, True)
+    assert ok and lc.LiveEligibility(path=p).is_eligible(GS01)  # persisted config
+    e.set(GS01, False)
+    assert not lc.LiveEligibility(path=p).is_eligible(GS01)
 
 
 def test_live_eligibility_fails_closed_when_unpersistable(tmp_path, monkeypatch):

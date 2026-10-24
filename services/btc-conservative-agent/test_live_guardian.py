@@ -659,3 +659,32 @@ def test_rk3_evidence_read_timeout_is_stamped_e6_read_timeout():
     sf2 = [v for v in g.evaluate([c], {"ok": False, "error": "HTTP 500"}, st2, NOW + 11, book=None)
            if v["code"] == g._ltg_caps.STOP_FAILURE_FLATTEN]
     assert sf2 and sf2[0]["cause"] == "EXCHANGE_READ_FAILED"
+
+
+def _r20_tick(chains_fn):
+    FF.clear()
+    ns, calls = _tick_ns(True, chains_fn, _mir(), None)
+    v = ns["_live_guardian_tick"](_t.time())
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    return {x["code"] for x in v}, calls, list(FF), (st.get("red_alert") or {}).get("codes", []), (st.get("amber") or {}).get("codes", [])
+
+
+def test_r20_daily_cap_hit_alone_disarms_force_flats_and_latches_red():
+    """R20 (Danish 25 Oct 06:21, supersedes AMEND4 E1): a DAILY cap hit (here $0.06 on one tile today: tile cap $0.05,
+    total $0.06 < every total cap) disarms ALL, force-flats, latches RED and keeps the entry block."""
+    codes, calls, ff, red, amber = _r20_tick(lambda n: [ch(correlation_id="gs1-r20", lane=None, fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-0.06,
+                                                          closed_at_ts=n - 100, exit_fill_at_ts=n - 100, exit_at_ts=n - 100)])
+    import live_tile_gate as ltg
+    assert ltg.VIOL_TILE_LOSS_CAP in codes and g.VIOL_LIVE_TOTAL_LOSS_CAP not in codes, codes
+    assert len(calls) == 1 and ltg.VIOL_TILE_LOSS_CAP in calls[0] and ff == calls
+    assert ltg.VIOL_TILE_LOSS_CAP in red and ltg.VIOL_TILE_LOSS_CAP in amber
+
+
+def test_r20_total_cap_hit_alone_disarms_force_flats_and_latches_red():
+    """R20: the TOTAL (all-time) cap: $0.04 lost on each of 3 earlier days (no daily cap hit) = $0.12 >= $0.10."""
+    def rows(n):
+        return [ch(correlation_id=f"GS01-{i}", fill_at_ts=n - d - 500, stop_confirmed=True, closed=True, pnl_usd=-0.04,
+                   closed_at_ts=n - d, exit_fill_at_ts=n - d, exit_at_ts=n - d) for i, d in enumerate((2 * 86400, 3 * 86400, 4 * 86400))]
+    codes, calls, ff, red, amber = _r20_tick(rows)
+    assert g.VIOL_LIVE_TOTAL_LOSS_CAP in codes and not ({"DAILY_LOSS_CAP"} | g.DAILY_CAP_DISARM_CODES) & codes, codes
+    assert calls == ["AUTO_DISARM:" + g.VIOL_LIVE_TOTAL_LOSS_CAP] and ff == calls and g.VIOL_LIVE_TOTAL_LOSS_CAP in red
