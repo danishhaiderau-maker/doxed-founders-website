@@ -335,6 +335,13 @@ def _posix_lock_and_unlink(path: Path):
 # R5/R17: a segment ref whose object was pruned verifies as PRUNED_R5.
 SEGMENT_PRUNED_R5 = "PRUNED_R5"
 
+from retired_streams import RETIRED_STREAM_ALLOWLIST, retired_stream_unchanged  # noqa: E402
+
+
+class RetiredStreamUnreadable(ValueError):
+    """A retired stream excluded by open_read_only; no rows are served."""
+
+
 class V3EvidenceStore:
     """One JSONL ledger per entity plus content-addressed market segments.
 
@@ -390,16 +397,36 @@ class V3EvidenceStore:
         )
         if marker.exists() or marker.is_symlink():
             candidates.append(marker)
+        instance._retired_excluded = {}
+        retired_pending: list[tuple[str, dict]] = []
         for pointer in candidates:
             try:
                 row = json.loads(pointer.read_text("utf-8")); identity = row.get("identity")
             except (OSError, json.JSONDecodeError):
                 continue
             if isinstance(identity, dict):
+                stream = "" if pointer == marker else pointer.parent.name
+                if stream in RETIRED_STREAM_ALLOWLIST:
+                    # RK PASS 25 Oct: judged after the active identity is known (below).
+                    retired_pending.append((stream, dict(identity)))
+                    continue
                 if instance._read_identity_override not in (None, identity):
                     raise ValueError("V3 read authority identity conflict")
                 instance._read_identity_override = dict(identity)
                 instance.epoch_id = str(identity.get("epoch_id") or "")
+        for stream, identity in retired_pending:
+            if instance._read_identity_override in (None, identity):
+                if instance._read_identity_override is None:
+                    instance._read_identity_override = dict(identity)
+                    instance.epoch_id = str(identity.get("epoch_id") or "")
+                continue  # not stale: ordinary handling, identity check applies as before
+            # Stale retired pointer: epoch must still match and the file must prove no writes since retirement.
+            if str(identity.get("epoch_id") or "") != instance.epoch_id:
+                raise ValueError("V3 read authority identity conflict")
+            unchanged, why = retired_stream_unchanged(instance.ledger_dir, stream)
+            if not unchanged:
+                raise ValueError(f"V3 read authority identity conflict ({stream}: {why})")
+            instance._retired_excluded[stream] = RETIRED_STREAM_ALLOWLIST[stream]
         if instance._read_identity_override is None and expected_identity is not None:
             instance._read_identity_override = dict(expected_identity)
             instance.epoch_id = str(expected_identity.get("epoch_id") or "")
@@ -544,6 +571,10 @@ class V3EvidenceStore:
     def ledger_path(self, name: str) -> Path:
         if name not in LEDGER_NAMES:
             raise ValueError(f"unknown V3 ledger: {name}")
+        retired = getattr(self, "_retired_excluded", None) or {}
+        if name in retired:
+            # Excluded retired stream (stale pointer skipped by open_read_only): serve no rows.
+            raise RetiredStreamUnreadable(f"V3 ledger {name} is RETIRED ({retired[name]})")
         return self.ledger_dir / f"{name}.jsonl"
 
     def _active_ledger_generation(self, ledger: str) -> dict[str, Any]:
@@ -2636,7 +2667,11 @@ class V3EvidenceStore:
         """
         counts: dict[str, int] = {}
         defects: list[dict[str, str]] = []
+        retired = getattr(self, "_retired_excluded", None) or {}
         for ledger in LEDGER_NAMES:
+            if ledger in retired:
+                counts[ledger] = 0
+                continue
             path = self.ledger_path(ledger)
             try:
                 with self._exclusive(path):
@@ -2665,6 +2700,10 @@ class V3EvidenceStore:
             "market_segment_count": segment_count,
             "defects": defects,
             "passed": not defects,
+            # RETIRED streams are reported as RETIRED, never GREEN (RK PASS 25 Oct).
+            "ledger_status": {ledger: ("RETIRED" if ledger in retired else ("RED" if any(
+                d.get("ledger") == ledger for d in defects) else "GREEN")) for ledger in LEDGER_NAMES},
+            "retired_streams": {k: {"status": "RETIRED", "reason": v} for k, v in retired.items()},
         }
 
     def verify_write_set(
