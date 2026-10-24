@@ -669,7 +669,12 @@ class _Sw:
         return {"bitfinex_live_orders": lane in self.on}
 
 
+_REAL_ARM_BLOCK = None
+
+
 def _open_gates(bot, monkeypatch):
+    global _REAL_ARM_BLOCK
+    _REAL_ARM_BLOCK = _REAL_ARM_BLOCK or bot._live_guardian_arm_block
     """Every gate on the arm routes passes, so only the barrier under test can refuse."""
     sw = _Sw()
     enabled = []
@@ -792,3 +797,32 @@ def test_r4_live_order_site_withholds_gs01_over_cap(bot, monkeypatch):
     appended = _stamp_env(bot, monkeypatch, 0.25)
     out = bot._live_copy_stamp_payload({"event": "ORDER_PLACED", "trade_id": "gs1-r4c", "research_lane": _GS01_LANE})
     assert out.get("live_copy_approval", {}).get("entry_allowed") is True and len(appended) == 1
+
+
+# ---- HM R5 B1 (#876): global guardian arm block + tile arm block on the live-orders route, behavioural ----
+def _post_gs01(bot):
+    return bot.app.test_client().post(f"/api/bitfinex/tiles/{_GS01_LANE}/live-orders", json={"enabled": True},
+                                      environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+
+
+def test_r5_live_orders_refused_on_global_arm_block_stub(bot, monkeypatch):
+    sw, _ = _open_gates(bot, monkeypatch)
+    monkeypatch.setattr(bot, "_live_guardian_arm_block", lambda: "LIVE_TOTAL_LOSS_CAP")
+    r = _post_gs01(bot)
+    assert r.status_code == 409 and r.get_json()["error"] == "LIVE_TOTAL_LOSS_CAP" and sw.on == []
+
+
+def test_r5_live_orders_refused_on_real_r20_red_latch(bot, monkeypatch):
+    sw, _ = _open_gates(bot, monkeypatch)
+    monkeypatch.setattr(bot, "_live_guardian_arm_block", _REAL_ARM_BLOCK)
+    monkeypatch.setitem(bot._LIVE_GUARDIAN_STATE, "red_alert", {"ts": 1, "code": "LIVE_TOTAL_LOSS_CAP"})
+    r = _post_gs01(bot)
+    assert r.status_code == 409 and r.get_json()["error"] == "LIVE_GUARDIAN_FORCE_FLAT_RED" and sw.on == []
+
+
+def test_r5_live_orders_refused_on_tile_arm_block(bot, monkeypatch):
+    import live_tile_gate as ltg_
+    sw, _ = _open_gates(bot, monkeypatch)
+    monkeypatch.setattr(bot, "_live_guardian_tile_arm_block", lambda lane: ltg_.DENY_G6_NO_FIRST_L)
+    r = _post_gs01(bot)
+    assert r.status_code == 409 and r.get_json()["error"] == ltg_.DENY_G6_NO_FIRST_L and sw.on == []
