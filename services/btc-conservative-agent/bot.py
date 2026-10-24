@@ -35222,6 +35222,8 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/nonaccum-plans",
     # R16 (RK 24 Oct): V3 ledger rows written without a countable stamp since ?since=TS
     "/api/monitor/ledger-unstamped",
+    # HM post-#872: total_trades disk/memory/source/mismatch (monitor view of the /api/state overlay)
+    "/api/monitor/trade-count",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -50800,6 +50802,24 @@ def monitor_ledger_unstamped_route():
             raise monitor_tiles.BadRequest("since required (fresh epoch floor unreadable)")
         return _lsm.check(str(_data_sync_runtime_root()), since)
     return _monitor_tiles_guard(build, 65536)
+
+
+@app.route('/api/monitor/trade-count', methods=["GET"])
+def monitor_trade_count_route():
+    """HM post-#872: #872's analytics.total_trades overlay (disk CSV rows vs in-memory count) for the monitor.
+    Read-only; admin/monitor auth; mismatch is reported, never hidden."""
+    import api_state_analytics as _asa
+
+    def build(now):
+        with state_lock:
+            live = copy.deepcopy(state.get("analytics") or {})
+            ts = state.get("analytics_ts")
+        a, ts = _asa.overlay(live, ts, CSV_TRADES)
+        out = {k: a.get(k) for k in _asa.TRADE_COUNT_FIELDS}
+        out.update({"check": "trade_count", "analytics_ts": ts,
+                    "status": "AMBER" if out["total_trades_mismatch"] else "GREEN"})
+        return out
+    return _monitor_tiles_guard(build, 8192)
 
 
 @app.route('/api/monitor/integrity-gaps', methods=["GET"])

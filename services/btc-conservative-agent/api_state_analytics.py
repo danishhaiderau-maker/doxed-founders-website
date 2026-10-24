@@ -10,6 +10,8 @@ import os
 import threading
 from typing import Any
 
+TRADE_COUNT_FIELDS = ("total_trades", "total_trades_memory", "total_trades_disk", "total_trades_source",
+                      "total_trades_mismatch")
 _lock = threading.Lock()
 _cache: dict[str, tuple[tuple[int, int], int]] = {}
 
