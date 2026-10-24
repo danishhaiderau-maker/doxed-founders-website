@@ -36,6 +36,8 @@ def _setup(tmp, monkeypatch, grid_age=600, opportunities=1000, evaluated=900, pa
                                   "grid": {"policies_evaluated": 20000, "policies_ranked": 30},
                                   "canonical_parity": {"status": parity}}), encoding="utf-8")
     monkeypatch.setattr(an, "GENOME_GRID_REPORT", report)
+    # Legacy grid semantics; the R3 quarantine is asserted separately below.
+    monkeypatch.setattr(an, "GENOME_GRID_R3_QUARANTINED", False)
     led = tmp / "mirror" / "v3" / "ledgers"
     led.mkdir(parents=True)
     (led / "opportunity.jsonl").write_text("{}\n" * opportunities, encoding="utf-8")
@@ -95,3 +97,12 @@ def test_skip_when_not_run_recently_and_diagnose_wiring(tmp_path, monkeypatch):
     assert all(f.category == "analyzer" for f in found)
     old = dict(doc, generated_at=iso(NOW - 4 * 3600))
     assert {f.severity for f in diagnose.check_analyzer_sections({"analyzer_sections": old, "now": NOW}, {}, None)} == {"SKIP"}
+
+def test_r3_quarantined_grid_is_not_read_and_reads_amber(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(an, "GENOME_GRID_R3_QUARANTINED", True)
+    body = _health(_section("summary"), _section("combos"), _section("genome"))
+    doc = an.run(_paths(tmp_path), {}, NOW, fetch=lambda url, timeout: (body, None, 1.0))
+    assert doc["genome_grid"] == {"present": False, "quarantined": True, "status": "R3_QUARANTINED",
+                                  "path": str(an.GENOME_GRID_REPORT)}
+    assert _sev(doc)["analyzer.consistency"] == "AMBER"

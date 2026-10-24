@@ -21,6 +21,9 @@ from .facts import http_json, iso, parse_ts
 DASHBOARD = os.environ.get("SELF_AWARE_ANALYZER_URL", "http://127.0.0.1:9001")
 GENOME_GRID_REPORT = Path(os.environ.get(
     "ANALYZER_GENOME_GRID_REPORT", r"C:\DoxxedCrypto\analyzer-exports\genome-grid\genome_grid_report.json"))
+# R3 quarantine (mirrors services/btc-conservative-agent/research/r3_quarantine.py):
+# the genome grid prices on the 1s tape, so its stale report is never read.
+GENOME_GRID_R3_QUARANTINED = True
 GRID_AMBER_SEC = 3 * 3600
 GRID_RED_SEC = 12 * 3600
 SHRINK_RATIO = 0.2
@@ -36,6 +39,8 @@ def _line_count(path: Path) -> int | None:
 
 
 def _grid_on_disk(now: float) -> dict[str, Any]:
+    if GENOME_GRID_R3_QUARANTINED:
+        return {"present": False, "quarantined": True, "status": "R3_QUARANTINED", "path": str(GENOME_GRID_REPORT)}
     try:
         rep = json.loads(GENOME_GRID_REPORT.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -115,7 +120,9 @@ def findings(doc: dict[str, Any] | None, now: float, max_age_sec: float) -> list
                 "evidence": {"checks": dim_checks}})
     grid, collected = doc.get("genome_grid") or {}, doc.get("collected_opportunities")
     problems = []
-    if not grid.get("present"):
+    if grid.get("quarantined"):
+        problems.append(("AMBER", "genome grid R3_QUARANTINED (prices on 1s tape); not read until rebuilt on paper_fill"))
+    elif not grid.get("present"):
         problems.append(("RED", f"genome grid report missing: {grid.get('error')}"))
     else:
         age = grid.get("age_sec") or 0

@@ -18870,16 +18870,31 @@ def exit_ladder_simulator_report(trades=None, session=None):
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LADDER SIMULATOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
+    from research import r3_quarantine
+
+    if r3_quarantine.is_active("EXIT_LADDER_SIM"):
+        # R3: this simulator replays signal_replay ticker/BBO ticks through the
+        # fast-cut ladder. Run nothing and write nothing until it is rebuilt on
+        # paper_fill + quote_trigger (R4).
+        print(f"   exit ladder simulator: {r3_quarantine.STATUS} — not run, no report written. "
+              f"{PIPELINE_ENFORCEMENT_TAG}")
+        return r3_quarantine.disabled_payload(
+            "EXIT_LADDER_SIM", generated_at=datetime.now(timezone.utc).isoformat(), scope=scope,
+        )
+
     from research.exit_ladder_paper_cohort import filter_for_exit_ladder
 
     raw_replays = _load_jsonl_replays()
     trades, replays, ladder_cohort = filter_for_exit_ladder(
         trades, raw_replays, epoch_id=_fresh_epoch_provenance().get("fresh_epoch_id"),
+        data_dir=os.path.dirname(os.path.abspath(_agent_data_path(SIGNAL_REPLAY_FILE))),
     )
     print(
         f"   exit ladder simulator: {ladder_cohort['cohort']} eligibility "
         f"{ladder_cohort['eligible_count']}/{ladder_cohort['current_registry_trades']} "
-        f"(exclusions={ladder_cohort['exclusion_reason_counts']}). {PIPELINE_ENFORCEMENT_TAG}"
+        f"(exclusions={ladder_cohort['exclusion_reason_counts']}; "
+        f"R17_UNPROVEN={ladder_cohort['r17_unproven_count']} {ladder_cohort['r17_unproven_reasons']}). "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
     )
     raw_replays_available = len(raw_replays)
     executed_ids = set()
@@ -20175,7 +20190,11 @@ def _save_rolling_snapshot():
             shutil.copy2(src, dst)
             return True
 
+        from research.r3_quarantine import quarantined_file as _r3_quarantined
+
         for fname in ANALYZER_JSON_REPORT_FILES:
+            if _r3_quarantined(fname):
+                continue  # R3: never snapshot a quarantined producer's stale output
             if os.path.isfile(fname) and _copy(fname, os.path.join(dest, os.path.basename(fname))):
                 copied += 1
         rep_dir = REPORTS_DIR
@@ -20183,6 +20202,8 @@ def _save_rolling_snapshot():
             snap_rep = os.path.join(dest, "reports")
             os.makedirs(snap_rep, exist_ok=True)
             for p in glob.glob(os.path.join(rep_dir, "*.json")):
+                if _r3_quarantined(p):
+                    continue
                 _copy(p, os.path.join(snap_rep, os.path.basename(p)))
         for txt in (
             EXECUTIVE_SUMMARY_FILE, RESEARCH_FINDINGS_FILE, REPORT_MANIFEST_FILE,
@@ -22074,7 +22095,9 @@ def write_report_manifest(
         baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
-        from research.entry_baseline_replay import write_replay_report
+        from research.entry_baseline_replay import replay_health, write_replay_report
+
+        baseline_replay["health"] = replay_health(baseline_replay)
 
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
         replay_sidecar = write_replay_report(
@@ -22092,6 +22115,8 @@ def write_report_manifest(
             "analysis_provenance": analysis_provenance,
             "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
             "summaries": baseline_replay.get("summaries"),
+            "status": baseline_replay["health"]["status"],
+            "health": baseline_replay["health"],
             "episode_receipts_sidecar": replay_sidecar,
         })
     except Exception as exc:
@@ -22131,7 +22156,13 @@ def write_report_manifest(
         })
     except Exception as exc:
         lifecycle_bundle_inventory_error = f"{type(exc).__name__}: {exc}"
+    from research.r3_quarantine import quarantined_file as _r3_quarantined
+
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
+        if _r3_quarantined(fname):
+            # R3: quarantined producers are never members of a generation,
+            # even if a stale working copy is still on disk.
+            continue
         if fname == DYNAMIC_POLICY_ANALYSIS_REPORT_FILE:
             # Built below from this invocation's discovery, never a stale file.
             continue

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from analyzer_epoch_guard import epoch_csv_rows, epoch_lines, guarded_open
+from research import r3_quarantine
 
 SCHEMA = "analyzer_input_blockers_v1"
 REPORT_FILE = "analyzer_input_blockers.json"
@@ -106,18 +107,65 @@ def current_epoch(data_dir: Path) -> tuple[str | None, str]:
 
 
 # --------------------------------------------------------------------------- exit ladder
+def _no_eligible_exit_ladder_item(cohort: Mapping, eligible: int, registry_trades: int, evidence: dict) -> dict:
+    """No countable trade: RETIRED when no current-registry trade has a replay at all (the replay writer is
+    retired under R17); BLOCKED R17_UNPROVEN_OUTSIDE_BOOK_COVERAGE when replays exist but none is book-covered."""
+    unproven = int(cohort.get("r17_unproven_count") or 0)
+    if not int(cohort.get("current_registry_trades_with_replay") or 0):
+        return _retired("exit_ladder_simulator", evidence=evidence, total=registry_trades)
+    if unproven:
+        return _item(
+            "exit_ladder_simulator", "BLOCKED", "R17_UNPROVEN_OUTSIDE_BOOK_COVERAGE",
+            f"{unproven} current-registry paper trade replay(s) are R17_UNPROVEN (span not covered by "
+            "1s book rows and trade prints) and are excluded; no countable trade remains.",
+            eligible=eligible, total=registry_trades, side="COLLECTION", evidence=evidence,
+        )
+    return _item(
+        "exit_ladder_simulator", "BLOCKED", "NO_COMPLETE_REPLAY_FOR_CURRENT_REGISTRY_TRADES",
+        "No current-registry executed paper trade has a complete replay path yet.",
+        eligible=eligible, total=registry_trades, side="COLLECTION", evidence=evidence,
+    )
+
+
+def _current_paper_cohort(report: Mapping) -> Mapping | None:
+    """The report's cohort receipt only if it is the current schema AND was built with book coverage loaded."""
+    from research.exit_ladder_paper_cohort import SCHEMA as PAPER_SCHEMA
+
+    cohort = report.get("cohort_receipt") if isinstance(report.get("cohort_receipt"), Mapping) else None
+    if cohort is None or cohort.get("schema") != PAPER_SCHEMA or cohort.get("book_coverage_loaded") is not True:
+        return None
+    return cohort
+
+
 def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, replay_index=None) -> dict:
     from research.exit_ladder_paper_cohort import (
-        SCHEMA as PAPER_SCHEMA,
         build_paper_exit_ladder_cohort,
+        load_book_coverage,
         load_replay_index,
     )
 
-    report = _load_json(report_dir / EXIT_LADDER_REPORT) or {}
-    cohort = report.get("cohort_receipt") if isinstance(report.get("cohort_receipt"), Mapping) else None
-    if cohort is None or cohort.get("schema") != PAPER_SCHEMA:
+    if r3_quarantine.is_active("EXIT_LADDER_SIM"):
+        # R3: the simulator replays ticker/BBO ticks; its report is never read.
+        # The paper cohort (trades + replay index, no pricing) stays as evidence.
         index = replay_index if replay_index is not None else load_replay_index(data_dir)
-        cohort = build_paper_exit_ladder_cohort(_read_trades(data_dir), index, epoch_id=epoch_id)
+        book_coverage, coverage_receipt = load_book_coverage(data_dir, index)
+        cohort = build_paper_exit_ladder_cohort(_read_trades(data_dir), index, epoch_id=epoch_id,
+                                                book_coverage=book_coverage, coverage_receipt=coverage_receipt)
+        return _item(
+            "exit_ladder_simulator", "BLOCKED", r3_quarantine.STATUS,
+            "Exit-ladder simulator is R3_QUARANTINED: it prices on ticker/BBO ticks. Its report is not "
+            "written or read until rebuilt on paper_fill + quote_trigger.",
+            eligible=0, total=int(cohort.get("current_registry_trades") or 0), side="ANALYZER",
+            evidence={"quarantine": "EXIT_LADDER_SIM", "relay_state_assumed": "DISARMED_PAPER_ONLY",
+                      "paper_cohort": {k: v for k, v in cohort.items() if k != "eligible_trade_ids"}},
+        )
+    report = _load_json(report_dir / EXIT_LADDER_REPORT) or {}
+    cohort = _current_paper_cohort(report)
+    if cohort is None:
+        index = replay_index if replay_index is not None else load_replay_index(data_dir)
+        book_coverage, coverage_receipt = load_book_coverage(data_dir, index)
+        cohort = build_paper_exit_ladder_cohort(_read_trades(data_dir), index, epoch_id=epoch_id,
+                                                book_coverage=book_coverage, coverage_receipt=coverage_receipt)
         report_uses_paper_cohort = False
     else:
         report_uses_paper_cohort = True
@@ -143,14 +191,15 @@ def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, 
                 "is pending.",
                 eligible=0, total=registry_trades, side="ANALYZER", evidence=evidence,
             )
-        return _retired("exit_ladder_simulator", evidence=evidence, total=registry_trades)
+        return _no_eligible_exit_ladder_item(cohort, 0, registry_trades, evidence)
     if not eligible or not matched:
-        return _retired("exit_ladder_simulator", evidence=evidence, total=registry_trades)
+        return _no_eligible_exit_ladder_item(cohort, eligible, registry_trades, evidence)
     if eligible < registry_trades:
         return _item(
             "exit_ladder_simulator", "DEGRADED", "PARTIAL_REPLAY_COVERAGE",
-            f"{eligible}/{registry_trades} current-registry paper trades have a complete replay; "
-            "the rest are missing or still inside their post-exit horizon.",
+            f"{eligible}/{registry_trades} current-registry paper trades have a complete, book-covered "
+            "replay; the rest are missing, still inside their post-exit horizon, or R17_UNPROVEN "
+            f"({int(cohort.get('r17_unproven_count') or 0)} outside book coverage, excluded).",
             eligible=eligible, total=registry_trades, side="COLLECTION", evidence=evidence,
         )
     return _item("exit_ladder_simulator", "OK", None, "All current-registry paper trades replayable.",
@@ -422,6 +471,31 @@ def protection_replay_item(report_dir: Path) -> dict:
     )
 
 
+ENTRY_BASELINE_REPLAY_REPORT = "entry_baseline_replay_report.json"
+
+
+def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any]:
+    """DEGRADED (never OK) when any baseline in the entry baseline replay has 0 fills, or the report is missing."""
+    from research.entry_baseline_replay import replay_health
+
+    report = _load_json(report_dir / ENTRY_BASELINE_REPLAY_REPORT)
+    if report is None:
+        # HM #847 N2: an absent report is a measured gap, never silently dropped.
+        return _item("entry_baseline_replay", "DEGRADED", "REPORT_MISSING",
+                     f"{ENTRY_BASELINE_REPLAY_REPORT} was not produced.", side="ANALYZER")
+    health = replay_health(report)
+    status = "OK" if health["status"] == "OK" else "DEGRADED"
+    return _item(
+        "entry_baseline_replay", status, health.get("reason_code"),
+        (f"Entry baseline replay: {health['fills']} fills, {health['unknown']}/"
+         f"{health['directional_evaluations']} directional evaluations UNKNOWN"
+         + (f"; zero-fill baselines: {', '.join(health['degraded_baselines'])}."
+            if health.get("degraded_baselines") else ".")),
+        eligible=health["directional_evaluations"] - health["unknown"], total=health["directional_evaluations"],
+        side="ANALYZER" if status != "OK" else None, evidence=health,
+    )
+
+
 def segment_promotion_item(data_dir: Path) -> dict[str, Any] | None:
     """DEGRADED when this dataset was promoted with disclosed Fly-side warnings."""
     receipt = _load_json(data_dir / MIGRATION_RECEIPT) or {}
@@ -445,7 +519,8 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
     epoch_id, epoch_source = current_epoch(data_dir)
     exit_ladder = exit_ladder_item(
         report_dir, data_dir, epoch_id,
-        replay_index=None if (_load_json(report_dir / EXIT_LADDER_REPORT) or {}).get("cohort_receipt")
+        replay_index=None if (not r3_quarantine.is_active("EXIT_LADDER_SIM")
+                              and _current_paper_cohort(_load_json(report_dir / EXIT_LADDER_REPORT) or {}))
         else load_replay_index(data_dir),
     )
     items = [
@@ -456,6 +531,7 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
         signal_replay_item(report_dir, cohort=exit_ladder["evidence"].get("paper_cohort")),
         counterfactual_item(report_dir, data_dir, epoch_id),
     ]
+    items.append(entry_baseline_replay_item(report_dir))
     promotion = segment_promotion_item(data_dir)
     if promotion is not None:
         items.append(promotion)

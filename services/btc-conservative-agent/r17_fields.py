@@ -67,3 +67,19 @@ CONTRACT = {
 # Matching is EXACT: string values are compared after stripping surrounding spaces only (no case folding);
 # numbers must be finite and >= 0.
 REQUIRED_FIELDS = tuple(CONTRACT)
+
+# RK #847 condition 1 / R3: an entry priced on the 1s tape is never proof. Negative rule in the SAME module
+# (no second filter, R4): a row FAILS with ENTRY_PRICED_ON_1S_TAPE when its entry_price_source is a 1s
+# tape/ticker source, or any entry-status field carries R17_UNPROVEN_ENTRY (research_v3_candidates stamps both
+# on every CONSERVATIVE entry priced by research.conservative_limit_fill.evaluate_limit_fill). Missing passes this
+# check only; the positive CONTRACT above still has to prove the row (defence in depth).
+R17_UNPROVEN_ENTRY = "R17_UNPROVEN_ENTRY"
+ENTRY_PRICE_SOURCE_1S = "MARKET_MICROSTRUCTURE_1S"
+ENTRY_PRICE_SOURCES_1S = frozenset({ENTRY_PRICE_SOURCE_1S, "BOOK_TAPE_1S", "TICKER"})  # compared upper-cased
+ENTRY_STATUS_FIELDS = ("r17_entry_status", "r17_unproven_reason")
+REASON_ENTRY_PRICED_ON_1S_TAPE = "ENTRY_PRICED_ON_1S_TAPE"
+FORBIDDEN = {
+    "entry_price_source": "never one of " + " | ".join(sorted(ENTRY_PRICE_SOURCES_1S)) + " (case-insensitive)",
+    "r17_entry_status": R17_UNPROVEN_ENTRY + " fails",
+    "r17_unproven_reason": R17_UNPROVEN_ENTRY + " fails",
+}

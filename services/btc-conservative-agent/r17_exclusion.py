@@ -229,7 +229,19 @@ def proof_failures(row) -> list:
     if lf:
         out.append(lf)
     out.extend(book_receive_failures(row))
+    if entry_priced_on_1s_tape(row):
+        out.append(F.REASON_ENTRY_PRICED_ON_1S_TAPE)
     return out
+
+
+def entry_priced_on_1s_tape(row) -> bool:
+    """RK #847 cond 1 / R3: entry priced on market_microstructure_1s / book_tape_1s / ticker, or stamped
+    R17_UNPROVEN_ENTRY (r17_fields.FORBIDDEN). Never countable whatever else the row proves."""
+    src = row.get("entry_price_source")
+    if isinstance(src, str) and src.strip().upper() in F.ENTRY_PRICE_SOURCES_1S:
+        return True
+    return any(isinstance(row.get(k), str) and row.get(k).strip().upper() == F.R17_UNPROVEN_ENTRY
+               for k in F.ENTRY_STATUS_FIELDS)
 
 
 def non_countable_reason(row, *, ids=None, load_errors=None):

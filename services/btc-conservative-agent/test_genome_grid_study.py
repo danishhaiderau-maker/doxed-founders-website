@@ -146,3 +146,23 @@ def test_cache_round_trip_and_cycle_gate(tmp_path):
 def test_run_refuses_onedrive(tmp_path):
     with pytest.raises(SystemExit, match="REFUSED_ONEDRIVE"):
         g.run(tmp_path, tmp_path, tmp_path / "OneDrive" / "out")
+
+def test_r3_quarantine_run_writes_nothing(tmp_path, monkeypatch):
+    """R3: genome fast replay prices on 1s tape bid/ask -> no outputs at all."""
+    from research import r3_quarantine
+
+    def _no_tape(*_a, **_k):
+        raise AssertionError("quarantined run must not load the 1s tape")
+    monkeypatch.setattr(g, "load_tape", _no_tape)
+    out = tmp_path / "out"
+    rep = g.run(tmp_path, tmp_path, out)
+    assert rep["status"] == r3_quarantine.STATUS and rep["countable"] is False
+    assert not out.exists() or not any(out.iterdir())
+
+
+def test_r3_quarantine_main_reports_status(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(g, "_below_normal", lambda: None)
+    assert g.main(["--ignore-cycle", "--out-dir", str(tmp_path / "o"), "--mirror", str(tmp_path),
+                   "--tier-a", str(tmp_path)]) == 0
+    assert '"R3_QUARANTINED"' in capsys.readouterr().out
+    assert not (tmp_path / "o" / "genome_grid_report.json").exists()

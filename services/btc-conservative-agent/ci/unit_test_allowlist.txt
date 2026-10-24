@@ -51,6 +51,7 @@ test_baseline_execution_context.py
 test_baseline_execution_context_integration.py
 test_baseline_nested_bbo_capture.py
 test_baseline_pre_entry_join_integration.py
+test_baseline_row_index_exit.py
 test_bbo_refresh_nonblocking.py
 test_best_policy_research_dashboard.py
 test_bitfinex_live_switch.py
@@ -168,6 +169,7 @@ test_emergency_wal_runtime_integration.py
 test_empty_epoch_authority_retirement.py
 test_empty_paper_trade_index.py
 test_entry_baseline_replay.py
+test_entry_baseline_replay_health.py
 test_entry_baseline_replay_sidecar.py
 test_epoch_boundary_rotation.py
 test_epoch_guard_fresh_floor.py
@@ -456,6 +458,7 @@ test_research_timing_capture.py
 test_research_timing_startup.py
 test_research_trade_accumulator_epoch.py
 test_research_v3_bridge.py
+test_research_v3_book_walk.py
 test_research_v3_candidates.py
 test_research_v3_contract.py
 test_research_v3_future_paths.py
@@ -622,3 +625,4 @@ test_rotation_cap.py
 test_taker_counterfactual_r17.py
 test_signal_replay_r17.py
 test_v22_retired_r17.py
+test_r17_gap_detector.py
