@@ -662,3 +662,6 @@ test_retired_stream_identity_bot.py
 test_monitor_trade_count_and_force_paper.py
 test_live_total_loss_cap.py
 test_operator_eligibility_rk_2a.py
+test_delete_by_id_reload.py
+test_delete_by_id_route_r2c.py
+test_delete_by_id_r2d.py
