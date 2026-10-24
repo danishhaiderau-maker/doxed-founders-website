@@ -15,9 +15,10 @@ from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
 import r17_exclusion
+import research_freeze as _rf
 
 SCHEMA = "tile_realism_table_v1"
-EXPECTED_DATA_EPOCH_ID = "ce-20261004-v31-freeze21b"
+EXPECTED_DATA_EPOCH_ID = _rf.FREEZE_DATA_EPOCH_ID  # single configured epoch (R6); no literal
 REASON_EPOCH = "NOT_CURRENT_DATA_EPOCH"
 REASON_EPOCH_MISSING = "DATA_EPOCH_STAMP_MISSING"
 REASON_BP_MISSING = "NET_BP_MISSING"
