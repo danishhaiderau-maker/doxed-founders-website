@@ -14157,7 +14157,16 @@ def _salvage_tombstone_ids(path: str) -> set:
         return set()
     k = text.find("]", j)
     chunk = text[j + 1:] if k < 0 else text[j + 1:k]
-    return {m.group(1) for m in _TOMBSTONE_SALVAGE_ID_RE.finditer(chunk)}
+    found = list(_TOMBSTONE_SALVAGE_ID_RE.finditer(chunk))
+    if k < 0:
+        # HM R2d N2: a truncated final id (opening quote, no closing quote) cannot be salvaged; alert, never silent.
+        tail = chunk[found[-1].end():] if found else chunk
+        tail = tail.lstrip(" \t\r\n,")
+        if tail.startswith('"') and len(tail) > 1:
+            _DELETED_TRADE_TOMBSTONE["salvage_truncated_ids"] = _DELETED_TRADE_TOMBSTONE.get("salvage_truncated_ids", 0) + 1
+            logger.error(f"[ALERT] [TRADE-DELETE-BY-ID] tombstone salvage: truncated final id {tail[:40]!r} in "
+                         f"{os.path.basename(path)} not recoverable; reconcile by hand [PIPELINE ENFORCEMENT]")
+    return {m.group(1) for m in found}
 
 
 def _absorb_salvaged_ids(paths) -> int:
@@ -14176,7 +14185,9 @@ def _quarantine_tombstone(reason: str) -> str:
     while os.path.exists(dest + (f".{n}" if n else "")):
         n += 1
     dest = dest + (f".{n}" if n else "")
-    _absorb_salvaged_ids([DELETED_TRADE_IDS_FILE])
+    # HM R2d N3: salvage from every older quarantine still present too, not only the current file
+    _absorb_salvaged_ids([DELETED_TRADE_IDS_FILE]
+                         + sorted(glob.glob(f"{glob.escape(DELETED_TRADE_IDS_FILE)}.corrupt.*")))
     try:
         os.rename(DELETED_TRADE_IDS_FILE, dest)
         _fsync_dir(dest)
@@ -14251,6 +14262,78 @@ def load_deleted_trade_ids() -> int:
     return len(ids)
 
 
+def _delete_uncertain_path() -> str:
+    return f"{DELETED_TRADE_IDS_FILE}.uncertain"
+
+
+def _mark_delete_uncertain(ids, reason: str) -> None:
+    """HM R2d B1: DELETE_UNCERTAIN is durable. The ids and reason are fsynced to a sidecar (merged with any earlier
+    marker) so a restart re-verifies them against the CSV instead of silently going GREEN."""
+    _tombstone_alert("DELETE_UNCERTAIN", reason)
+    path = _delete_uncertain_path()
+    prior = set()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            prior = {str(i) for i in (json.load(handle).get("ids") or [])}
+    except (OSError, ValueError, AttributeError):
+        pass
+    all_ids = sorted(prior | {str(i) for i in ids or ()})
+    _DELETED_TRADE_TOMBSTONE["uncertain_ids"] = all_ids
+    doc = {"schema": "delete_uncertain_v1", "at": utc_iso(), "reason": str(reason)[:300], "ids": all_ids}
+    candidate = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(candidate, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, path)
+        _fsync_dir(path)
+    except OSError as exc:
+        logger.error(f"[ALERT] [TRADE-DELETE-BY-ID] DELETE_UNCERTAIN marker not persisted ({type(exc).__name__}); "
+                     f"status RED in memory only [PIPELINE ENFORCEMENT]")
+
+
+def reverify_delete_uncertain(csv_path) -> str:
+    """Boot (after load_deleted_trade_ids): re-check a persisted DELETE_UNCERTAIN marker against the trades CSV.
+    Auto-clears ONLY when unambiguous (every id tombstoned and none in the CSV): the marker is renamed to
+    ``.resolved.<UTC>`` (never deleted). Otherwise the status stays DELETE_UNCERTAIN (RED, deletes 409) until an
+    operator reconciles. Returns NONE / CLEARED / UNCERTAIN."""
+    path = _delete_uncertain_path()
+    if not os.path.exists(path):
+        return "NONE"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+        ids = {str(i) for i in doc["ids"]}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        ids, detail = None, f"marker unreadable ({type(exc).__name__})"
+    if ids is not None:
+        try:
+            present = _trade_ids_present(csv_path, ids)
+        except (OSError, ValueError) as exc:
+            present, detail = None, f"CSV unreadable ({type(exc).__name__})"
+        if present is not None:
+            if not present and ids <= _DELETED_TRADE_IDS:
+                dest = f"{path}.resolved.{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}"
+                try:
+                    os.rename(path, dest)
+                    _fsync_dir(dest)
+                    logger.warning(f"[TRADE-DELETE-BY-ID] DELETE_UNCERTAIN re-verified at boot: {len(ids)} ids absent "
+                                   f"from CSV and tombstoned; marker -> {os.path.basename(dest)} [PIPELINE ENFORCEMENT]")
+                    return "CLEARED"
+                except OSError as exc:
+                    detail = f"marker rename failed ({type(exc).__name__})"
+            else:
+                detail = (f"boot re-verify: {len(present)} of {len(ids)} uncertain ids still in CSV; "
+                          f"{len(ids - _DELETED_TRADE_IDS)} not tombstoned")
+    _DELETED_TRADE_TOMBSTONE["uncertain_ids"] = sorted(ids or ())
+    if _DELETED_TRADE_TOMBSTONE["status"] == "CORRUPT":  # CORRUPT is already RED + 409; keep it, log the extra cause
+        logger.error(f"[ALERT] [TRADE-DELETE-BY-ID] DELETE_UNCERTAIN also pending: {detail} [PIPELINE ENFORCEMENT]")
+    else:
+        _tombstone_alert("DELETE_UNCERTAIN", detail)
+    return "UNCERTAIN"
+
+
 def _tombstone_ids_before_delete(deleted_ids, list_sha256=None) -> set:
     """HM R2b nit: persist the tombstone BEFORE the CSV delete (closes the crash window). Returns the newly added
     ids so a refused/rolled-back delete can remove them again (_untombstone)."""
@@ -14299,6 +14382,8 @@ def _deleted_trade_health() -> dict:
             "tombstone_status": _DELETED_TRADE_TOMBSTONE["status"],
             "tombstone_quarantined_to": _DELETED_TRADE_TOMBSTONE["quarantined_to"],
             "tombstone_salvaged_ids": _DELETED_TRADE_TOMBSTONE.get("salvaged_ids", 0),
+            "tombstone_salvage_truncated_ids": _DELETED_TRADE_TOMBSTONE.get("salvage_truncated_ids", 0),
+            "tombstone_uncertain_ids": len(_DELETED_TRADE_TOMBSTONE.get("uncertain_ids") or ()),
             "tombstone_corrupt_non_countable_writes": _DELETED_TRADE_TOMBSTONE.get("non_countable_writes", 0)}
 
 
@@ -52389,6 +52474,9 @@ def api_admin_trades_delete_by_id():
             if not dry_run:
                 if _DELETED_TRADE_TOMBSTONE["status"] == "CORRUPT":
                     return jsonify({"ok": False, "refused": "TOMBSTONE_CORRUPT"}), 409
+                if (_DELETED_TRADE_TOMBSTONE["status"] == "DELETE_UNCERTAIN"
+                        or os.path.exists(_delete_uncertain_path())):  # HM R2d B1
+                    return jsonify({"ok": False, "refused": "DELETE_UNCERTAIN"}), 409
                 to_delete = _trade_ids_present(CSV_TRADES, body.get("ids"))
                 try:  # HM R2b: tombstone persisted BEFORE the CSV rewrite, for the ids actually present
                     added = _tombstone_ids_before_delete(sorted(to_delete), body.get("list_sha256"))
@@ -52407,14 +52495,14 @@ def api_admin_trades_delete_by_id():
                         except (OSError, ValueError):
                             confirmed = False
                     if not confirmed:
-                        _tombstone_alert("DELETE_UNCERTAIN", f"delete {e.code}: restore not confirmed, ids kept tombstoned")
+                        _mark_delete_uncertain(to_delete, f"delete {e.code}: restore not confirmed, ids kept tombstoned")
                         return jsonify({"ok": False, "error": "RESTORE_UNCONFIRMED", "refused": e.code,
                                         "ids_kept_tombstoned": len(to_delete)}), 500
                     _untombstone(added)
                     raise
                 except Exception as e:  # noqa: BLE001 - CSV state unknown after a possible write: fail closed
-                    _tombstone_alert("DELETE_UNCERTAIN", f"delete raised after tombstoning ({type(e).__name__}); "
-                                                         f"ids kept tombstoned")
+                    _mark_delete_uncertain(to_delete, f"delete raised after tombstoning ({type(e).__name__}); "
+                                                      f"ids kept tombstoned")
                     return jsonify({"ok": False, "error": "DELETE_STATE_UNCERTAIN",
                                     "ids_kept_tombstoned": len(to_delete)}), 500
                 gone = _settle_tombstone_after_delete(CSV_TRADES, added)
@@ -61609,6 +61697,8 @@ def main():
     try:
         _n_tomb = load_deleted_trade_ids()  # HM #869 R2 blocker 2: tombstone before any replay
         logger.info(f"[STARTUP] deleted-trade tombstone loaded ids={_n_tomb} [PIPELINE ENFORCEMENT]")
+        _unc = reverify_delete_uncertain(CSV_TRADES)  # HM R2d B1: re-verify, never blindly clear
+        logger.info(f"[STARTUP] delete-uncertain re-verify: {_unc} [PIPELINE ENFORCEMENT]")
     except Exception as exc:
         logger.error(f"[STARTUP] deleted-trade tombstone load failed: {exc} [PIPELINE ENFORCEMENT]")
     try:

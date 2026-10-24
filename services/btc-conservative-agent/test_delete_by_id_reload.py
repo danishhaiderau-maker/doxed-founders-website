@@ -15,13 +15,14 @@ def _ns(path):
             "_tombstone_alert", "_fsync_dir", "_quarantine_tombstone", "_read_tombstone_doc",
             "_tombstone_ids_before_delete", "_untombstone", "_deleted_trade_health", "TombstoneUnavailable",
             "_salvage_tombstone_ids", "_absorb_salvaged_ids", "_stamp_tombstone_corrupt", "_trade_ids_present",
-            "_settle_tombstone_after_delete"}
+            "_settle_tombstone_after_delete", "_delete_uncertain_path", "_mark_delete_uncertain",
+            "reverify_delete_uncertain"}
     names = {"_DELETED_TRADE_IDS", "DELETED_TRADE_IDS_FILE", "_DELETED_TRADE_RESAVE_REFUSED",
              "_DELETED_TRADE_TOMBSTONE", "_UNTOMBSTONED", "_TOMBSTONE_SALVAGE_ID_RE"}
     body = [n for n in tree.body if (isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in want)
             or (isinstance(n, ast.AnnAssign) and getattr(n.target, "id", None) in names)
             or (isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) in names)]
-    assert len(body) == 25
+    assert len(body) == 28
     import glob, hashlib, json, os, re, time
     ns = {"re": re, "glob": glob, "time": time, "hashlib": hashlib, "json": json, "os": os, "csv": csv, "utc_iso": lambda: "2026-10-25T00:00:00Z",
           "CSV_FALLBACK_REPLAY_TARGETS": {path}, "CSV_FALLBACK_JSONL": str(pathlib.Path(path).parent / "fb.jsonl"),
