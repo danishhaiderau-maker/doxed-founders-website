@@ -51974,6 +51974,20 @@ def api_admin_trades_delete_rollback_snapshot():
     return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
 
 
+def _ledger_delete_boot_recover() -> None:
+    """HM R2: restore any ledger left mid-write by a process death during ledgers/delete-by-sha."""
+    try:
+        import ledger_delete_by_sha as _lds
+        from research_v3_store import V3EvidenceStore
+        root = _data_sync_runtime_root()
+        if not (Path(root) / "v3" / _lds.SNAPSHOT_DIRNAME).is_dir():
+            return
+        for row in _lds.restore_incomplete_deletes(V3EvidenceStore.open_read_only(root)):
+            logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot restored interrupted delete {row} [PIPELINE ENFORCEMENT]")
+    except Exception as exc:
+        logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot recovery failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
 @app.route('/api/admin/ledgers/delete-by-sha', methods=['POST'])
 def api_admin_ledgers_delete_by_sha():
     """RK PASS 24 Oct (R17): delete V3 ledger rows (decision/lifecycle/market_segment/order_intent) by row sha256.
@@ -52018,12 +52032,20 @@ def api_admin_ledgers_delete_rollback_snapshot():
     import ledger_delete_by_sha as _lds
     from research_v3_store import V3EvidenceStore
     body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
     try:
         store = V3EvidenceStore.open_read_only(_data_sync_runtime_root())
         out = _lds.delete_rollback_snapshot(store, body.get("snapshot_path"))
     except _lds.DeleteRefused as e:
+        logger.warning(f"[LEDGER-DELETE-BY-SHA] rollback snapshot delete refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
         return jsonify({"ok": False, "refused": e.code}), 409
-    logger.warning(f"[LEDGER-DELETE-BY-SHA] rollback snapshot deleted={out['deleted']} path={out['snapshot_path']} [PIPELINE ENFORCEMENT]")
+    logger.warning(f"[LEDGER-DELETE-BY-SHA] rollback snapshot deleted={out['deleted']} path={out['snapshot_path']} "
+                   f"actor={actor} reason={reason[:120]!r} [PIPELINE ENFORCEMENT]")
     return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
 
 
@@ -61381,6 +61403,7 @@ def main():
         )
     _agent_dbg("H1", "main.startup", "boot_complete", {"version": EXECUTION_FIX_VERSION, "exposure": boot_exposure, "pending": len(pending_orders), "positions": len(open_positions)})
     logger.info(f"Bot start time locked at {bot_start_time} - old trades blocked")
+    _ledger_delete_boot_recover()  # before any ledger writer thread starts
     fetch_ohlcv()
     logger.info(
         f"[STARTUP] Exchange=Bitfinex symbol={BITFINEX_WS_SYMBOL} data=WS+REST sim_fees={EXCHANGE_FEE_PROFILE} "

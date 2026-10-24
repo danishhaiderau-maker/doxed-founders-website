@@ -49,6 +49,9 @@ SNAPSHOT_DIRNAME = ".ledger_delete_rollback"
 TOMBSTONE_DIRNAME = "deleted_row_tombstones_v1"
 TOMBSTONE_PIN_KEY = "deleted_row_tombstones_integrity_sha256"
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+MANIFEST_NAME = "manifest.json"
+APPLIED_MARKER = "applied.json"
+RESTORED_MARKER = "restored.json"
 _SNAPSHOT_RE = re.compile(r"^[0-9]{13}-[0-9a-f]{12}$")
 _STREAM_RE = re.compile(r"^v3/ledgers/([a-z_]+)\.jsonl$")
 
@@ -60,6 +63,7 @@ REFUSAL_CODES = (
     "ROW_UNPARSEABLE", "RECORD_ID_SHARED_WITH_SURVIVOR", "RECEIPT_MISSING", "RECEIPT_INVALID",
     "INVARIANT_FAILED_RESTORED", "SNAPSHOT_PATH_NOT_ALLOWED", "SNAPSHOT_MISSING",
     "MULTI_STREAM_LIST_REFUSED", "DELETED_ROW_TOMBSTONES_MISSING", "DELETED_ROW_TOMBSTONES_CORRUPT",
+    "SNAPSHOT_INCOMPLETE_DELETE",
 )
 
 
@@ -295,18 +299,14 @@ def _apply_ledger(store, plan: dict[str, Any], snap: Path) -> dict[str, Any]:
             restore.append((p, dst))
         else:
             restore.append((p, None))
-    (snap / ledger / "manifest.json").write_text(json.dumps(
-        [[str(p.relative_to(store.root)), None if d is None else d.name] for p, d in restore]))
-    _fsync_dir(snap / ledger)
+    # Manifest is published atomically only after every snapshot copy is durable; no ledger
+    # file is touched before it exists, so a process death before this point changed nothing.
+    _write_atomic(snap / ledger / MANIFEST_NAME, json.dumps(
+        [[str(p.relative_to(store.root)), None if d is None else d.name] for p, d in restore]).encode())
+    _fsync_dir(snap)
 
     def _restore() -> None:
-        for p, d in restore:
-            if d is None:
-                if p.exists():
-                    p.unlink()
-            else:
-                _write_atomic(p, d.read_bytes())
-        _id_cache.pop(str(path.resolve()), None)
+        _restore_from_manifest(store, snap / ledger)
 
     try:
         new_data = b"".join(l for _o, l, _r in plan["keep"])
@@ -358,6 +358,7 @@ def _apply_ledger(store, plan: dict[str, Any], snap: Path) -> dict[str, Any]:
     if not ok:
         _restore()
         raise DeleteRefused("INVARIANT_FAILED_RESTORED", {"ledger": ledger})
+    _write_atomic(snap / ledger / APPLIED_MARKER, b'{"applied": true}')
     return {"after_count_read_back": len(after), "remaining_rows_sha256_read_back": _rows_hash(after)}
 
 
@@ -387,6 +388,55 @@ def delete_ledger_rows_by_sha(store, list_jsonl: Any, sha: Any, *, dry_run: bool
         return result
 
 
+def _restore_from_manifest(store, ledger_snap: Path) -> list[str]:
+    """Put every file listed in the manifest back byte-identically (or remove it if it did not exist)."""
+    from research_v3_store import _id_cache
+
+    root = Path(store.root).resolve()
+    manifest = json.loads((ledger_snap / MANIFEST_NAME).read_text("utf-8"))
+    restored = []
+    for rel, blob in manifest:
+        target = (root / rel).resolve()
+        if root / "v3" not in target.parents:
+            raise DeleteRefused("SNAPSHOT_PATH_NOT_ALLOWED", {"path": rel[:120]})
+        if blob is None:
+            if target.exists():
+                target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _write_atomic(target, (ledger_snap / blob).read_bytes())
+        restored.append(rel)
+    _id_cache.pop(str(store.ledger_path(ledger_snap.name).resolve()), None)
+    _write_atomic(ledger_snap / RESTORED_MARKER, b'{"restored": true}')
+    return restored
+
+
+def _incomplete(ledger_snap: Path) -> bool:
+    return ((ledger_snap / MANIFEST_NAME).exists() and not (ledger_snap / APPLIED_MARKER).exists()
+            and not (ledger_snap / RESTORED_MARKER).exists())
+
+
+def restore_incomplete_deletes(store) -> list[dict[str, Any]]:
+    """Boot-time recovery (HM R2): a process death mid-_apply_ledger leaves a snapshot with a manifest but
+    neither applied.json nor restored.json.  Restore those ledgers from the snapshot under the ledger lock."""
+    base = store.root / "v3" / SNAPSHOT_DIRNAME
+    out: list[dict[str, Any]] = []
+    if not base.is_dir():
+        return out
+    for snap in sorted(base.iterdir()):
+        if not _SNAPSHOT_RE.match(snap.name) or not snap.is_dir():
+            continue
+        for ledger_snap in sorted(snap.iterdir()):
+            if ledger_snap.name not in ALLOWED_LEDGERS or not _incomplete(ledger_snap):
+                continue
+            with store._exclusive(store.ledger_path(ledger_snap.name)):
+                if not _incomplete(ledger_snap):
+                    continue
+                files = _restore_from_manifest(store, ledger_snap)
+            out.append({"snapshot_path": str(snap), "ledger": ledger_snap.name, "restored_files": len(files)})
+    return out
+
+
 def delete_rollback_snapshot(store, snapshot_path: Any) -> dict[str, Any]:
     """Remove one rollback snapshot (only inside the snapshot dir) and read back that it is gone."""
     base = (store.root / "v3" / SNAPSHOT_DIRNAME).resolve()
@@ -395,6 +445,8 @@ def delete_rollback_snapshot(store, snapshot_path: Any) -> dict[str, Any]:
         raise DeleteRefused("SNAPSHOT_PATH_NOT_ALLOWED")
     if not p.is_dir():
         raise DeleteRefused("SNAPSHOT_MISSING")
+    if any(_incomplete(d) for d in p.iterdir() if d.is_dir()):
+        raise DeleteRefused("SNAPSHOT_INCOMPLETE_DELETE")
     shutil.rmtree(p)
     _fsync_dir(base)
     exists = p.exists()

@@ -368,3 +368,57 @@ def test_tombstone_corrupt_fails_closed(tmp_path, mutate):
 def test_other_streams_unaffected_without_deletes(tmp_path):
     s = _store(tmp_path, n=1, ledgers=("decision", "lifecycle"))
     assert s.append("lifecycle", {"record_id": "lifecycle-9", "i": 9})["written"]
+
+
+class _Death(BaseException):
+    """Simulates the process dying (not an Exception, so no in-process restore runs)."""
+
+
+def test_boot_restore_after_process_death_mid_write(tmp_path, monkeypatch):
+    s = _store(tmp_path, ledgers=("decision",))
+    files = [s.ledger_path("decision"), s._completeness_path("decision")] + [
+        legacy_receipt_path(s.root, "decision", f"decision-{i}") for i in range(6)]
+    before = {p: p.read_bytes() for p in files}
+    text, sha = _list(_entries(s, "decision", [1]))
+    real = s._atomic_json_receipt
+    calls = []
+
+    def dying(path, row, **kw):
+        calls.append(path)
+        if len(calls) == 2:  # ledger already replaced, receipts half-rebased
+            raise _Death()
+        return real(path, row, **kw)
+
+    monkeypatch.setattr(s, "_atomic_json_receipt", dying)
+    with pytest.raises(_Death):
+        lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=False)
+    monkeypatch.setattr(s, "_atomic_json_receipt", real)
+    assert s.ledger_path("decision").read_bytes() != before[s.ledger_path("decision")]
+    snap = next((tmp_path / "v3" / lds.SNAPSHOT_DIRNAME).iterdir())
+    with pytest.raises(lds.DeleteRefused) as e:  # cannot drop the snapshot of an interrupted delete
+        lds.delete_rollback_snapshot(s, str(snap))
+    assert e.value.code == "SNAPSHOT_INCOMPLETE_DELETE"
+    fresh = V3EvidenceStore.open_read_only(tmp_path)
+    out = lds.restore_incomplete_deletes(fresh)
+    assert [r["ledger"] for r in out] == ["decision"]
+    assert {p: p.read_bytes() for p in files} == before
+    assert lds.restore_incomplete_deletes(fresh) == []  # idempotent
+    for i in range(6):
+        fresh.verified_record_receipt("decision", f"decision-{i}")
+    assert lds.delete_rollback_snapshot(fresh, str(snap))["deleted"] is True
+
+
+def test_boot_restore_ignores_applied_and_death_before_manifest(tmp_path, monkeypatch):
+    s = _store(tmp_path, ledgers=("decision",))
+    text, sha = _list(_entries(s, "decision", [1]))
+    lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=False)
+    after = s.ledger_path("decision").read_bytes()
+    assert lds.restore_incomplete_deletes(s) == []
+    assert s.ledger_path("decision").read_bytes() == after
+    # death while copying snapshot files: no manifest, nothing touched, nothing to restore
+    text2, sha2 = _list(_entries(s, "decision", [0]))
+    monkeypatch.setattr(lds, "_copy_fsync", lambda a, b: (_ for _ in ()).throw(_Death()))
+    with pytest.raises(_Death):
+        lds.delete_ledger_rows_by_sha(s, text2, sha2, dry_run=False)
+    assert s.ledger_path("decision").read_bytes() == after
+    assert lds.restore_incomplete_deletes(s) == []
