@@ -607,3 +607,40 @@ def test_exit_lag_arm_gate_route(bot, monkeypatch):
     assert body["legacy_v1"]["schema"] == "exit_lag_arm_gate_v1" and body["legacy_v1"]["threshold_s"] == 0.062
     assert MONITOR not in r.get_data(as_text=True) and ADMIN not in r.get_data(as_text=True)
     assert _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required="x").status_code == 400
+
+
+def test_exit_lag_gate_enforced_on_arm_and_live_entry(bot, monkeypatch):
+    """HM R2 (a): the arm (tile ON) and live-entry / live-order paths read the gate flags, fail closed when the gate is
+    unreadable, and refuse a GS-01 order above $0.25 margin with an [ALERT]."""
+    import inspect
+    import exit_lag_regression as elr
+    unproven = elr.rk_gate([])
+    monkeypatch.setattr(bot, "_exit_lag_gate_now", lambda: dict(unproven))
+    bot._EXIT_LAG_ALERTS.clear()
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.25, where="TILE_ARM") is None
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.5, where="LIVE_ORDER") == elr.GS01_SIZE_BLOCK
+    assert bot._exit_lag_live_block("FAMILY_GSB1_CVD_DIV_REGIME", 0.25, where="TILE_ARM") == elr.ARM_BLOCK_NOT_ELIGIBLE
+    monkeypatch.setattr(bot, "_exit_lag_gate_now", lambda: {**unproven, "gs01_arm_blocked_by_exit_lag": True})
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.25, where="LIVE_ENTRY") == elr.ARM_BLOCK_GS01
+    monkeypatch.setattr(bot, "_exit_lag_gate_now", lambda: None)
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.25, where="LIVE_ENTRY") == elr.ARM_BLOCK_UNREADABLE
+    assert [a["reason"] for a in bot._EXIT_LAG_ALERTS] == [elr.GS01_SIZE_BLOCK, elr.ARM_BLOCK_NOT_ELIGIBLE,
+                                                           elr.ARM_BLOCK_GS01, elr.ARM_BLOCK_UNREADABLE]
+    # live entry: refused before any provider / chain work
+    monkeypatch.setattr(bot, "_exit_lag_live_block", lambda *a, **k: elr.ARM_BLOCK_GS01)
+    ok, reasons, info = bot._live_tile_admission("FAMILY_GS01_XV_PREMIUM_ATR_TP", "gs1-abc", 1.0)
+    assert ok is False and reasons == [elr.ARM_BLOCK_GS01] and info["exit_lag_block"] == elr.ARM_BLOCK_GS01
+    # tile-ON route checks before request_on; the signed order is checked before it is attached
+    route = inspect.getsource(bot.api_bitfinex_tile_live_orders)
+    assert route.index('_exit_lag_live_block(lane, _live_copy.MAX_MARGIN_USD, where="TILE_ARM")') < route.index("sw.request_on(")
+    stamp = inspect.getsource(bot._live_copy_stamp_payload)
+    assert stamp.index('approval.get("max_margin_usd"), where="LIVE_ORDER"') < stamp.index('payload["live_copy_approval"] = approval')
+
+
+def test_exit_lag_gate_now_fails_closed(bot, monkeypatch):
+    import exit_lag_regression as elr
+    monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: (_ for _ in ()).throw(RuntimeError("x")))
+    assert bot._exit_lag_gate_now() is None
+    assert elr.arm_block_reason(bot._exit_lag_gate_now(), "gs1") == elr.ARM_BLOCK_UNREADABLE
+    monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: [])
+    assert bot._exit_lag_gate_now()["schema"] == "exit_lag_arm_gate_v2"

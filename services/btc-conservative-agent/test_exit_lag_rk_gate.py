@@ -136,3 +136,103 @@ def test_missing_or_unread_stop_flattens_and_is_red():
     assert g.STOP_ORDER_ID_NOT_RESIDENT in codes
     m["open_orders"][0]["id"] = 7
     assert g.STOP_ORDER_ID_NOT_RESIDENT not in {v["code"] for v in g.evaluate([c], m, {}, now)}
+
+
+# --------------------------------------------------------------------------------------------------- HM R2 (a) / (b)
+def _gate(**over):
+    g_ = elr.rk_gate([])
+    g_.update(over)
+    return g_
+
+
+def test_arm_block_reason_reads_the_flags_and_fails_closed():
+    # UNPROVEN today: GS-01 allowed (option (a)), every other tile refused (arm_eligible False)
+    g0 = elr.rk_gate([])
+    assert g0["gate"] == "UNPROVEN" and elr.arm_block_reason(g0, "gs1") is None
+    assert elr.arm_block_reason(g0, "gb1") == elr.ARM_BLOCK_NOT_ELIGIBLE
+    # a blocked flag refuses GS-01
+    assert elr.arm_block_reason(_gate(gs01_arm_blocked_by_exit_lag=True), "gs1") == elr.ARM_BLOCK_GS01
+    assert elr.arm_block_reason(_gate(arm_eligible=True), "gb1") is None
+    # unreadable -> refused
+    for bad in (None, {}, "x", {"schema": "exit_lag_arm_gate_v1"}):
+        assert elr.arm_block_reason(bad, "gs1") == elr.ARM_BLOCK_UNREADABLE
+        assert elr.arm_block_reason(bad, "gb1") == elr.ARM_BLOCK_UNREADABLE
+    assert elr.arm_block_reason(_gate(gs01_arm_blocked_by_exit_lag=None), "gs1") == elr.ARM_BLOCK_UNREADABLE
+    assert elr.arm_block_reason(_gate(gs01_arm_blocked_by_exit_lag="false"), "gs1") == elr.ARM_BLOCK_UNREADABLE
+    assert elr.arm_block_reason(_gate(arm_eligible=1), "gb1") == elr.ARM_BLOCK_UNREADABLE
+    assert elr.arm_block_reason(g0, None) == elr.ARM_BLOCK_NOT_ELIGIBLE
+
+
+def test_gs01_margin_cap_enforced():
+    assert elr.GS01_MAX_NOTIONAL_USD == 0.25
+    assert elr.gs01_size_block_reason("gs1", 0.25) is None
+    assert elr.gs01_size_block_reason("gs1", 0.26) == elr.GS01_SIZE_BLOCK
+    assert elr.gs01_size_block_reason("gs1", 25.0) == elr.GS01_SIZE_BLOCK
+    for bad in (None, "", "x", 0, -1, float("nan")):
+        assert elr.gs01_size_block_reason("gs1", bad) == elr.GS01_SIZE_UNREADABLE
+    assert elr.gs01_size_block_reason("gb1", 5.0) is None   # cap is GS-01's (other tiles refused by arm_eligible)
+
+
+def test_untimed_in_scope_exit_breaks_the_run():
+    r = {"trade_id": "nots", "exit_reason": "TP", "event_timestamps": repr({"exit_trigger_receive_ts": None})}
+    assert elr.gate_status(r) == elr.UNTIMED_STATUS
+    assert elr.UNMEASURED in elr.reasons(r) and elr.UNPROVEN_REASON in elr.reasons(r)
+    rows = [_row("m1", S + 10, rx=S + 9.99), r, _row("m2", S + 20, rx=S + 19.99)]
+    gate = elr.rk_gate(rows)
+    assert gate["run_broken_by"]["trade_id"] == "nots" and gate["run_broken_by"]["why"] == "NO_EXIT_TS"
+    assert gate["consecutive_measured_unjudged"] == 0 and gate["counts"][elr.UNTIMED_STATUS] == 1
+    # even with a proven threshold it can never pass
+    import pytest
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(elr, "REAL_EXCHANGE_THRESHOLD_S", 1.0)
+        mp.setattr(elr, "REAL_EXCHANGE_THRESHOLD_SOURCE_IDS", tuple(f"x{i}" for i in range(10)))
+        many = [_row(f"m{i}", S + 100 + i, rx=S + 99.99 + i) for i in range(30)] + [r]
+        g2 = elr.rk_gate(many)
+        assert g2["gate"] == "FAIL" and g2["run_broken_by"]["trade_id"] == "nots"
+    finally:
+        mp.undo()
+
+
+def test_scope_reason_names_the_v724_release_and_keeps_0212():
+    assert elr.GATE_SCOPE_START_TS == 1792854720.0
+    assert "02:30:20" in elr.GATE_SCOPE_REASON and "v724" in elr.GATE_SCOPE_REASON and "02:12" in elr.GATE_SCOPE_REASON
+
+
+def test_exchange_resident_class_needs_bot_provenance():
+    base = _row("c", S + 10, reason="TP", exit_order_class="EXCHANGE_RESIDENT")
+    assert elr.gate_status(base) == elr.UNMEASURED_STATUS     # class alone (no bot stamp) is NOT excluded
+    bot_fill = _row("c", S + 10, reason="TP", exit_order_class="EXCHANGE_RESIDENT",
+                    exit_stop_flags=["EXCHANGE_RESIDENT", "STOP_BASIS_UNVERIFIED"])
+    race = _row("c", S + 10, reason="TP", exit_order_class="EXCHANGE_RESIDENT", exit_race_lost_by="TP")
+    assert elr.gate_status(bot_fill) == elr.EXCHANGE_FILLED and elr.gate_status(race) == elr.EXCHANGE_FILLED
+
+
+def test_only_bot_code_sets_exchange_resident():
+    """HM R2 (b): on the PAPER rows the gate run reads, EXCHANGE_RESIDENT is assigned only by order_model / bot.py
+    (exchange-stop fill + paper race), and is_exchange_stop also needs the bot's provenance stamp. The only non-bot
+    emitter is the website's residentExitLegStamps (live resident-stop fill -> signed POSITION_CLOSED -> reporter
+    whitelist -> live_copy_monitor whitelist): that reaches live CHAINS only (real_exchange_stop_samples candidate figure
+    for HM, never a gate input), never the paper rows."""
+    import pathlib
+    import re
+    here = pathlib.Path(__file__).resolve().parent
+    repo = here.parent.parent
+    pat = re.compile(r"""exit_order_class["']?\]?\s*(?::|(?<![=!<>])=(?!=))\s*[^\n=]*EXCHANGE_RESIDENT|EXCHANGE_RESIDENT\s*=\s*["']""")
+    hits = set()
+    for p in repo.rglob("*"):
+        if (p.suffix not in (".py", ".ts", ".tsx", ".js", ".mjs") or "node_modules" in p.parts or ".git" in p.parts
+                or p.name.startswith("test_") or ".test." in p.name or "fixtures" in p.parts):
+            continue
+        try:
+            txt = p.read_text(errors="ignore")
+        except OSError:
+            continue
+        if pat.search(txt):
+            hits.add(str(p.relative_to(repo)))
+    svc = "services/btc-conservative-agent/"
+    web = "apps/api/src/trading-agents/signal-subscriber-execution.service.ts"
+    assert hits <= {svc + "order_model.py", svc + "bot.py", web}, hits
+    assert svc + "order_model.py" in hits and svc + "bot.py" in hits
+    src = (here / "live_copy_monitor.py").read_text()
+    assert 'if cl.get("exit_order_class") in ("BOT_SENT", "EXCHANGE_RESIDENT"):' in src
