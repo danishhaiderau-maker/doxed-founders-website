@@ -11,6 +11,11 @@ image context, so it shipped. This check:
 3. imports every reachable local module inside the context (one subprocess each, cwd=context, sys.path = context
    + site-packages only) and fails on ModuleNotFoundError / ImportError for a LOCAL module.
 
+4. RK 24 Oct 18:07: function-level / ImportError-guarded local imports reachable from bot.py or the analyzer (all
+   research/* included) that are missing from the image ALSO fail, unless listed in ci/image_optional_excluded.txt
+   (a reviewed baseline of currently-excluded optional modules; adding a line there is an explicit review decision).
+   A baseline entry that is now present in the image is reported as stale (fail) so the list only shrinks.
+
 Usage: python ci_image_import_check.py --src . --ctx /tmp/bot-image-ctx [--no-import] [--entry bot ...]
 (default entries: bot + every `python /app/<x>.py` process fly-entrypoint.sh starts, e.g. the analyzer)
 """
@@ -147,10 +152,20 @@ def main(argv=None) -> int:
     print(f"entries {entries}\nreachable local modules: {len(mods)}; missing from image context: {len(missing)}")
     for m in missing:
         print(f"  MISSING_FROM_IMAGE_CONTEXT {m}")
-    opt_missing = sorted(f"{m} ({p})" for m, p in optional.items() if not (ctx / p).is_file())
-    print(f"optional (function-level / ImportError-guarded) local imports missing from context: {len(opt_missing)} (warn only)")
-    for m in opt_missing:
-        print(f"  WARN_OPTIONAL_NOT_IN_IMAGE {m}")
+    base_f = src / "ci" / "image_optional_excluded.txt"
+    baseline = set()
+    if base_f.is_file():
+        baseline = {ln.split("#")[0].strip() for ln in base_f.read_text().splitlines()} - {""}
+    opt_missing_mods = sorted(m for m, p in optional.items() if not (ctx / p).is_file())
+    opt_unlisted = [m for m in opt_missing_mods if m not in baseline]
+    stale = sorted(b for b in baseline if b not in opt_missing_mods)
+    print(f"optional (function-level / ImportError-guarded) local imports missing from context: {len(opt_missing_mods)} "
+          f"({len(opt_missing_mods) - len(opt_unlisted)} in reviewed baseline {base_f.name})")
+    for m in opt_missing_mods:
+        tag = "BASELINE_OPTIONAL_NOT_IN_IMAGE" if m in baseline else "MISSING_OPTIONAL_FROM_IMAGE_CONTEXT"
+        print(f"  {tag} {m} ({optional[m]})")
+    for b in stale:
+        print(f"  STALE_BASELINE_ENTRY {b} (now in the image or no longer imported: remove it from {base_f.name})")
     bad = []
     if not a.no_import:
         data = tempfile.mkdtemp(prefix="bot-import-data-")
@@ -182,7 +197,7 @@ def main(argv=None) -> int:
             elif r.returncode != 0:
                 print(f"  NOTE {m} exit {r.returncode}: {tail}")
         print(f"imported {len(mods) - 1} modules in image context; local import failures: {len(bad)}")
-    if missing or bad:
+    if missing or bad or opt_unlisted or stale:
         print("FAIL: a module bot.py needs is not in the Fly image context. Re-include it in .dockerignore.")
         return 1
     print("OK: every module bot.py imports is in the image context and imports there.")
