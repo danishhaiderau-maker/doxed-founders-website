@@ -657,3 +657,5 @@ test_exit_lag_regression.py
 test_exit_lag_rk_gate.py
 test_exit_scan_stamps.py
 test_trigger_receive_stamp.py
+test_live_total_loss_cap.py
+test_operator_eligibility_rk_2a.py
