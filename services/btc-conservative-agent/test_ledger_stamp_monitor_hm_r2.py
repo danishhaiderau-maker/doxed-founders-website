@@ -104,3 +104,18 @@ def test_flag_mismatch_red_even_with_writes(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "MARKET_SEGMENT_WRITES_RETIRED", False)
     res = mon.check(tmp_path, SINCE)
     assert res["red_streams"]["market_segment"] == "RETIREMENT_FLAG_MISMATCH"
+
+
+def test_flag_mismatch_red_on_capped_incomplete_scan(tmp_path, monkeypatch):
+    """HM PR880 B1: a mismatch must stay RED even when the scan is capped (budget/deadline) and incomplete."""
+    import research_v3_bridge as b
+    _active(tmp_path)
+    _write(tmp_path / "v3" / "ledgers" / "market_segment.jsonl",
+           [{"record_id": f"x{i}", "pad": "p" * 200} for i in range(50)], mtime=SINCE + 100)
+    monkeypatch.setattr(b, "MARKET_SEGMENT_WRITES_RETIRED", False)
+    for kw in ({"max_bytes": 64}, {"time_budget_s": 0}):
+        res = mon.check(tmp_path, SINCE, **kw)
+        ms = res["ledgers"]["market_segment"]
+        assert ms["scan"]["complete"] is False, kw
+        assert ms["red_reason"] == "RETIREMENT_FLAG_MISMATCH" and ms["status"] == "RED", kw
+        assert res["red_streams"]["market_segment"] == "RETIREMENT_FLAG_MISMATCH" and res["status"] == "RED", kw
