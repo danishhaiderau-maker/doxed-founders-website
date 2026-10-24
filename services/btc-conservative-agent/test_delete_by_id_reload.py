@@ -193,6 +193,11 @@ def test_restart_after_quarantine_stays_closed_and_salvages_ids(tmp_path):
     ns2["load_deleted_trade_ids"]()
     assert ns2["_DELETED_TRADE_TOMBSTONE"]["status"] == "CORRUPT"
     assert ns2["_DELETED_TRADE_IDS"] == set(DEL) and ns2["_DELETED_TRADE_TOMBSTONE"]["salvaged_ids"] == 3
+    try:  # the quarantined-and-not-restored read is a refusal, not "no tombstone"
+        ns2["_read_tombstone_doc"]()
+        raise AssertionError("must raise while quarantined")
+    except ns2["TombstoneUnavailable"] as e:
+        assert str(e) == "TOMBSTONE_QUARANTINED"
     # manual recovery: a valid file restored next to the quarantine reopens
     pathlib.Path(ns["DELETED_TRADE_IDS_FILE"]).write_text(json_doc(DEL))
     ns3 = _ns(p)
