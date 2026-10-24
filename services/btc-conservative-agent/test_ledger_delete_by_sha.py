@@ -422,3 +422,19 @@ def test_boot_restore_ignores_applied_and_death_before_manifest(tmp_path, monkey
         lds.delete_ledger_rows_by_sha(s, text2, sha2, dry_run=False)
     assert s.ledger_path("decision").read_bytes() == after
     assert lds.restore_incomplete_deletes(s) == []
+
+
+def test_real_r17_list_d0dcf920_refused_as_multi_stream(tmp_path):
+    """HM R2 nit: the literal RK list d0dcf920…f473 (4 streams) is refused, in dry run and real run."""
+    import gzip
+    raw = gzip.decompress((Path(__file__).parent / "fixtures" / "r17_analyzer_epoch_unplaced_rows_d0dcf920.jsonl.gz").read_bytes())
+    text = raw.decode("utf-8")
+    sha = lds.list_sha256(text)
+    assert sha == "d0dcf9206dd77297913c59013555104367792a6f372731687ebd6d676d2af473"
+    assert len(text.splitlines()) == 10771
+    s = _store(tmp_path, n=1)
+    for dry in (True, False):
+        with pytest.raises(lds.DeleteRefused) as e:
+            lds.delete_ledger_rows_by_sha(s, text, sha, dry_run=dry)
+        assert e.value.code == "MULTI_STREAM_LIST_REFUSED"
+        assert e.value.detail == {"streams": ["decision", "lifecycle", "market_segment", "order_intent"]}
