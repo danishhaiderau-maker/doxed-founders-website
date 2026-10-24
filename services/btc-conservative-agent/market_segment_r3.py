@@ -12,9 +12,30 @@ from __future__ import annotations
 
 from typing import Any
 
-INPUT_ALLOWED = False
-REASON = "INVALID_R3_MARKET_SEGMENT_INPUT"
+_INPUT_ALLOWED = False
+_REASON = "INVALID_R3_MARKET_SEGMENT_INPUT"
 RULE = "R3"
+# Every consumer touch of the gate is recorded so the R3 legacy-xfail plugin
+# (r3_legacy_xfail.py) can prove a failure came from this gate and nothing else.
+# A bounded counter (never a growing list): safe in the long-running bot process.
+HIT_COUNT = 0
+LAST_HIT = ""
+
+
+def _hit(tag: str) -> None:
+    global HIT_COUNT, LAST_HIT
+    HIT_COUNT += 1
+    LAST_HIT = tag
+
+
+def __getattr__(name: str):
+    if name == "INPUT_ALLOWED":
+        _hit("INPUT_ALLOWED")
+        return _INPUT_ALLOWED
+    if name == "REASON":
+        _hit("REASON")
+        return _REASON
+    raise AttributeError(name)
 LEDGERS = ("v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl")
 
 
@@ -22,20 +43,23 @@ class MarketSegmentInputInvalid(ValueError):
     """Raised where a consumer cannot drop the input and must fail closed."""
 
     def __init__(self, source: str):
-        super().__init__(f"{REASON}:{source}")
+        _hit("require_envelope:" + str(source))
+        super().__init__(f"{_REASON}:{source}")
         self.source = source
-        self.reason = REASON
+        self.reason = _REASON
 
 
 def invalid(source: str) -> dict[str, Any]:
     """Visible marker a consumer attaches to its output."""
-    return {"status": "INVALID", "rule": RULE, "reason": REASON, "source": str(source),
+    _hit("invalid:" + str(source))
+    return {"status": "INVALID", "rule": RULE, "reason": _REASON, "source": str(source),
             "input_dropped": True}
 
 
 def rows(source: str, loader=None) -> list:
     """Dropped input: market_segment rows are never loaded (loader is not called)."""
-    if INPUT_ALLOWED and loader is not None:  # pragma: no cover - INPUT_ALLOWED is pinned False
+    _hit("rows:" + str(source))
+    if _INPUT_ALLOWED and loader is not None:  # pragma: no cover - INPUT_ALLOWED is pinned False
         return list(loader())
     return []
 

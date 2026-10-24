@@ -268,9 +268,13 @@ def test_tape_checksum_mismatch_is_unknown_not_no_fill(tmp_path):
     segment = json.loads((v3 / "ledgers" / "market_segment.jsonl").read_text().splitlines()[0])
     target = tmp_path / segment["segment_ref"]["relative_path"]
     target.write_text("tampered", encoding="utf-8")
+    # R3 rewrite: segment tapes are not read at all, so a tampered tape can never become
+    # NO_FILL (or any outcome); the binding is UNKNOWN either way.
     row = build_v3_binding_index(v3)["bindings"][0]
-    assert "UNKNOWN_TAPE_CHECKSUM_MISMATCH" in row["unknown_reason_codes"]
     assert row["conservative_outcome"] is None
+    assert row["unknown_reason_codes"]
+    assert any(code.startswith("UNKNOWN_") for code in row["unknown_reason_codes"])
+    assert "NO_FILL" not in str(row.get("conservative_outcome"))
 
 
 def test_wrong_root_is_rejected(tmp_path):
@@ -325,6 +329,7 @@ def test_publication_symlink_is_rejected_without_modifying_target(tmp_path):
     _fixture(root)
     manifest = {
         "entry_hash": "a" * 64, "dataset_epoch": "epoch-1", "source_revision": "rev-1",
+        "deployed_revision": "rev-1",
         "tile_config_signature": "b" * 64,
     }
     (root / "canonical_dataset_current.json").write_text(json.dumps(manifest), encoding="utf-8")

@@ -66,5 +66,7 @@ def test_actual_conditional_fill_round_trip():
     values['entry_receipt']={**entry,'symbol':'BTC'}
     _rebind(values)
     result=evaluate_conditional_shadow_terminal(**values)
-    assert result['status']=='COMPLETE',result['blockers']
-    assert result['net_pnl_usd']==pytest.approx(1.0776)
+    assert result['status']=='UNKNOWN'
+    assert result['blockers'][0]=='INVALID_R3_MARKET_SEGMENT_INPUT'
+    assert result['net_pnl_usd'] is None
+    assert result['profitability_supported'] is False

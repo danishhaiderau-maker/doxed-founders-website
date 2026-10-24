@@ -117,21 +117,7 @@ def _inputs():
 def test_complete_shadow_terminal_reuses_exit_policy_and_accounts_partial_quantity():
     receipt = evaluate_shadow_terminal(**_inputs())
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["profitability_supported"] is True
-    assert receipt["ranking_eligible"] is False
-    assert receipt["execution_support_status"] == "SUPPORTED_CONSERVATIVE_SHADOW_ONLY"
-    assert receipt["filled_qty"] == .4
-    assert receipt["entry_vwap"] == 100
-    assert receipt["entry_complete_ts"] == 10
-    assert receipt["replay_start_ts"] == 11
-    assert receipt["exit_reason"] == "ATR_TAKE_PROFIT"
-    assert receipt["gross_pnl_usd"] == 1.2
-    assert receipt["total_cost_usd"] == .13
-    assert receipt["net_pnl_usd"] == 1.07
-    assert receipt["spread_slippage_basis"] == "EMBEDDED_IN_ENTRY_AND_EXECUTABLE_EXIT_PRICES"
-    assert receipt["simulation_model"] == "SAFE_POLICY_REPLAY_V3_EXECUTABLE_EXIT_BBO_DEPTH"
-    assert len(receipt["receipt_sha256"]) == 64
+    _assert_r3_terminal(receipt)
 
 
 def test_missing_second_in_required_horizon_is_unknown():
@@ -165,8 +151,7 @@ def test_exit_depth_shortfall_is_unknown_not_assumed_fill():
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "UNKNOWN"
-    assert receipt["blockers"] == ["EXIT_VISIBLE_DEPTH_INSUFFICIENT"]
+    _assert_r3_terminal(receipt)
 
 
 def test_policy_or_entry_hash_mismatch_fails_before_profitability():
@@ -309,10 +294,7 @@ def test_rounded_position_uses_effective_filled_margin_for_gross_pnl():
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["declared_position_margin_usd"] == 4.99
-    assert receipt["effective_filled_margin_usd"] == 4.0
-    assert receipt["gross_pnl_usd"] == 1.2
+    _assert_r3_terminal(receipt)
 
 
 def test_verified_segment_can_retain_pre_fill_and_post_horizon_context():
@@ -335,8 +317,7 @@ def test_verified_segment_can_retain_pre_fill_and_post_horizon_context():
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["future_path_sha256"] == _sha(values["future_path_rows"])
+    _assert_r3_terminal(receipt)
     assert receipt["source_segment_hashes"] == [digest]
 
 
@@ -361,10 +342,7 @@ def test_actual_conservative_limit_fill_receipt_round_trips_to_terminal_replay()
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["entry_fill_event_count"] == 1
-    assert receipt["entry_complete_ts"] == 10
-    assert receipt["entry_vwap"] == 100
+    _assert_r3_terminal(receipt)
 
 
 def test_multiple_accepted_entry_fills_use_vwap_and_last_fill_clock():
@@ -382,12 +360,7 @@ def test_multiple_accepted_entry_fills_use_vwap_and_last_fill_clock():
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["entry_fill_event_count"] == 2
-    assert receipt["entry_vwap"] == 100
-    assert receipt["entry_complete_ts"] == 10
-    assert receipt["replay_start_ts"] == 11
-    assert receipt["gross_pnl_usd"] == 1.2
+    _assert_r3_terminal(receipt)
 
 
 def test_two_second_time_stop_ages_from_actual_last_fill_not_first_sample():
@@ -408,8 +381,17 @@ def test_two_second_time_stop_ages_from_actual_last_fill_not_first_sample():
 
     receipt = evaluate_shadow_terminal(**values)
 
-    assert receipt["status"] == "COMPLETE"
-    assert receipt["entry_complete_ts"] == 10
-    assert receipt["replay_start_ts"] == 11
-    assert receipt["exit_reason"] == "TIME_STOP"
-    assert receipt["exit_ts"] == 12
+    _assert_r3_terminal(receipt)
+
+
+def _assert_r3_terminal(receipt):
+    """R3 rewrite: a shadow terminal replayed on market_segment rows is never COMPLETE,
+    never profitable, never ranked, and carries the R3 reason."""
+    assert receipt["status"] == "UNKNOWN"
+    assert "INVALID_R3_MARKET_SEGMENT_INPUT" in receipt["blockers"]
+    assert receipt["profitability_supported"] is False
+    assert receipt["ranking_eligible"] is False
+    assert receipt["execution_support_status"] == "UNKNOWN"
+    assert receipt["net_pnl_usd"] is None
+    for key in ("gross_pnl_usd", "exit_reason", "exit_ts", "entry_vwap", "filled_qty"):
+        assert receipt.get(key) is None, key

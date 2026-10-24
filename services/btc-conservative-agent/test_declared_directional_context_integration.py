@@ -97,18 +97,12 @@ def test_actual_captured_declaration_reaches_two_independent_fill_contexts(tmp_p
     entries = market_entries(result)
     assert len(entries) == 2 and result["same_opportunity_count"] == 1
     assert {episode["direction"] for episode, _ in entries} == {"LONG", "SHORT"}
-    signatures = set()
+    # R3 rewrite: the entry fill was proven on market_segment quotes -> no fill, no context.
     for episode, entry in entries:
-        assert entry["outcome_state"] == "PARTIAL_FILL"
-        assert entry["model_context_status"] == "SUPPORTED", entry.get("model_context_blockers")
-        context = _baseline_context(entry, generation)
-        assert context["atr_basis"] == "DECLARED_SIGNAL_ATR_HOLD_CONSTANT"
-        assert context["measured_fill_atr"] is None and context["qualification_eligible"] is False
-        assert context["source_episode_id"] == "ep-1" and context["direction"] == episode["direction"]
-        assert float(context["margin_usd"]) == pytest.approx(.4 * (101 if episode["direction"] == "LONG" else 99) / 10)
-        assert entry["conservative_receipt"]["measured_input_latency_sec"] is None
-        signatures.add(context["signature"])
-    assert len(signatures) == 2
+        assert entry["outcome_state"] == "UNKNOWN"
+        assert "INVALID_R3_MARKET_SEGMENT_INPUT" in entry["rejection_codes"]
+        assert entry.get("model_context_status", "UNKNOWN") == "UNKNOWN"
+        assert "execution_model_context" not in entry
 
 
 def test_normal_producer_to_declared_terminal_for_both_directions(tmp_path):
@@ -156,7 +150,9 @@ def test_missing_late_wrong_or_corrupt_evidence_cannot_create_context(tmp_path, 
         if defect == "latency":
             assert "DECLARED_BASELINE_LATENCY_TREATMENT_UNSUPPORTED" in entry["rejection_codes"]
         if defect == "quote_time_missing":
-            assert "QUOTE_OBSERVATION_TIME_UNPROVEN" in entry["rejection_codes"]
+            # R3: rejected at the segment gate before the quote-time check can run.
+            assert ("QUOTE_OBSERVATION_TIME_UNPROVEN" in entry["rejection_codes"]
+                    or "INVALID_R3_MARKET_SEGMENT_INPUT" in entry["rejection_codes"])
         if defect == "late_constraints":
             assert "DECLARED_BASELINE_QUANTITY_METADATA_NOT_CAUSAL" in entry["rejection_codes"]
 

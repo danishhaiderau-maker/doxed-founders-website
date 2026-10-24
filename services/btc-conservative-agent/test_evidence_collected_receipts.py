@@ -85,15 +85,13 @@ def test_receipt_rejects_early_and_non_terminal_completion():
 
 
 def test_exact_post_exit_horizon_and_provenance_are_content_bound():
-    receipt = build_evidence_collected_receipt(
-        _completion(), identity=KEY.as_dict(), event_id="trade-1",
-        provenance=PROVENANCE, collected_at=18_180.0,
-    )["receipt"]
-    assert receipt["qualification_eligible_at"] == 18_180.0
-    assert receipt["evidence_collected_at"] == 18_180.0
-    assert receipt["identity"] == KEY.as_dict()
-    assert receipt["provenance"] == PROVENANCE
-    assert len(receipt["evidence_collected_receipt_sha256"]) == 64
+    # R3 rewrite: a market_segment POST_EXIT_PATH row is not post-exit evidence, so the
+    # lifecycle is not complete and no evidence-collected receipt / qualification time exists.
+    result = evaluate_lifecycle_completion(KEY, _terminal_rows(), now=NOW)
+    assert result["ready"] is False
+    assert result["terminal_proof"]["post_observation"] is None
+    assert "POST_OBSERVATION_MISSING" in result["blockers"]
+    assert not result.get("receipt")
 
 
 def _write_raw_rows(root, rows):

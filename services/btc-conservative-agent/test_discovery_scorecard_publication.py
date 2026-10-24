@@ -153,7 +153,8 @@ def shadow_inputs(root):
     shadow = build_conservative_shadow_report(
         root, expected_generation=GENERATION, baseline_report=baseline,
         policy_candidates=candidates, policy_artifact_receipt=artifact, research_model=model)
-    assert shadow["complete_replay_count"] == 1
+    # R3: the shadow replay path is market_segment rows, so it is never complete
+    # (asserted by the tests that consume it, not by this shared helper).
     return baseline, shadow
 
 
@@ -230,10 +231,19 @@ def test_evaluator_version_and_separate_segment_ids_are_consumed(tmp_path):
 
 
 def test_missing_explicit_segment_ids_do_not_fall_back_to_legacy_content_hash(tmp_path):
-    root, status, baseline = inputs(tmp_path, [evaluator_row(market_segment_ids=[])])
-    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
-                                                   evaluator_status=status, baseline_report=baseline)
-    assert report["missing_field_diagnostics"]["evaluator_conservative:tape_ids"] == 1
+    # R3 rewrite: market_segment_ids are not an input at all, so neither their absence nor
+    # their presence can change the publication (no fallback to a legacy content hash).
+    import json as _json
+    reports = []
+    for index, ids in enumerate(([], ["segment-a", "segment-b"])):
+        root, status, baseline = inputs(tmp_path / str(index), [evaluator_row(market_segment_ids=ids)])
+        report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+                                                       evaluator_status=status, baseline_report=baseline)
+        assert "segment-a" not in _json.dumps(report, default=str)
+        reports.append({key: report.get(key) for key in (
+            "status", "missing_field_diagnostics", "unjoinable_counts", "input_counts", "blockers")})
+    assert reports[0] == reports[1]
+    assert reports[0]["status"] == "BUILT_INCOMPLETE"
 
 
 def test_row_generation_mismatch_is_unjoinable_not_relabelled(tmp_path):

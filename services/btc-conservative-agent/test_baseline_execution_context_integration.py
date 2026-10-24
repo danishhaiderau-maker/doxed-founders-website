@@ -167,8 +167,9 @@ def test_tampering_blocks_context_not_historical_entry_fill(tmp_path, tamper):
             payload["source_revision"] = "other"
         path.write_text(json.dumps(payload))
     result = _market_result(materialize_v3_opportunity_replay(tmp_path, generation=generation))
-    assert result["outcome_state"] == "PARTIAL_FILL"
-    assert result["model_context_status"] == "UNKNOWN"
+    # R3: the historical entry fill was proven on market_segment rows -> no fill claim survives.
+    assert result["outcome_state"] == "UNKNOWN"
+    assert result.get("model_context_status", "UNKNOWN") == "UNKNOWN"
     assert "execution_model_context" not in result
 
 

@@ -409,6 +409,8 @@ def test_market_segment_is_copied_and_corruption_is_detected():
 
 
 def test_singular_post_exit_segment_reference_is_never_omitted():
+    # R3 rewrite: a market_segment_ref is not evidence; it is never copied into a bundle
+    # and never listed as a MARKET_SEGMENT bundle role.
     now = 20_000.0
     key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
     with tempfile.TemporaryDirectory() as tmp:
@@ -426,10 +428,10 @@ def test_singular_post_exit_segment_reference_is_never_omitted():
                 "sha256": digest,
             },
         )], now=now)
-        bundled = Path(result["path"]) / "market_segments" / digest[:2] / segment.name
         roles = {item["role"] for item in result["manifest"]["files"]}
-        assert bundled.is_file()
-        assert "MARKET_SEGMENT" in roles
+        assert not (Path(result["path"]) / "market_segments").exists()
+        assert "MARKET_SEGMENT" not in roles
+        assert segment.read_text(encoding="utf-8") == envelope  # source untouched
 
 
 def test_truncated_source_ledger_fails_closed():

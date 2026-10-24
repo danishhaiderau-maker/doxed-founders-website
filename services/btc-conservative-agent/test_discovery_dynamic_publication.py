@@ -13,9 +13,12 @@ def fixture(tmp_path):
     episode.update(signal_ts=9.0, market="BITFINEX", symbol="BTCUSD",
         pre_entry_features={"regime": {"value": "BULL", "observed_ts": 8.0}},
         bucket_definition_signature="predeclared-regime-taxonomy-v1")
-    terminal = shadow["results"][0]["terminal"]
-    terminal.update(economics_evidence_basis="DECLARED_SIMULATION", declared_contract_sha256="d" * 64)
-    terminal["receipt_sha256"] = digest({k: v for k, v in terminal.items() if k != "receipt_sha256"})
+    # R3: the shadow replay is built on market_segment rows and is never complete, so a
+    # terminal may be absent; consumers must then see an incomplete shadow, not a fixture error.
+    terminal = shadow["results"][0].get("terminal") if shadow.get("results") else None
+    if terminal:
+        terminal.update(economics_evidence_basis="DECLARED_SIMULATION", declared_contract_sha256="d" * 64)
+        terminal["receipt_sha256"] = digest({k: v for k, v in terminal.items() if k != "receipt_sha256"})
     return root, evaluator, baseline, shadow
 
 

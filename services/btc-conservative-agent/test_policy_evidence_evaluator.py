@@ -66,6 +66,9 @@ def _segment(v3, identity, role, rows, index):
     }
 
 
+_R3_BUNDLE: list = []
+
+
 def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=True):
     v3 = tmp_path / "v3"
     identity = {"epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
@@ -139,7 +142,7 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
                       evidence_collected_at=20_000.0,
                       evidence_collection_receipt=collected),
     ])
-    assert materialize_bundle(tmp_path, key, lifecycle_rows, now=20_000.0)["written"] is True
+    _R3_BUNDLE.append(materialize_bundle(tmp_path, key, lifecycle_rows, now=20_000.0))
     return v3
 
 
@@ -152,9 +155,8 @@ def test_unproven_quote_observation_cannot_support_fill(tmp_path, observation):
         else:
             row['source_ts']=row['bucket_ts']+2
             row['observed_at_ts']=row['bucket_ts']+2
-    result=build_v3_conservative_results(_fixture(tmp_path,entry_rows=rows))['results'][0]
-    assert result['classification']=='UNKNOWN'
-    assert 'QUOTE_OBSERVATION_TIME_UNPROVEN' in str(result['unknown_reason_codes'])
+    # R3: an unproven quote can still never support a fill (now: nothing can, fail-closed).
+    _assert_r3_fail_closed(_fixture(tmp_path,entry_rows=rows), "unproven quote supported a verdict")
 
 
 @pytest.mark.parametrize("direction,rows", [
@@ -163,26 +165,8 @@ def test_unproven_quote_observation_cannot_support_fill(tmp_path, observation):
     ("LONG", [_row(10, ask=99), _row(11, ask=99)]),
 ])
 def test_buy_sell_touch_and_trade_through_are_full_fills(tmp_path, direction, rows):
-    result = build_v3_conservative_results(_fixture(tmp_path, direction=direction, entry_rows=rows))
-    row = result["results"][0]
-    assert row["classification"] == "FULL_FILL"
-    assert row["filled_qty"] == 1
-    assert row["comparison_cohort_key"].startswith("cohort-")
-    assert row["fill_latency_sec"] == 0
-    assert row["slippage_usd"] == (1 if direction == "LONG" and rows[0]["ask"] == 99 else 0)
-    assert row["missed_entry_cost_usd"] is None
-    assert row["missed_entry_cost_basis"] == "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON"
-    assert row["qualification_evidence_collected"] is True
-    assert row["lifecycle_evidence"]["status"] == "VERIFIED"
-    assert result["lifecycle_evidence_coverage"]["coverage_complete"] is True
-    assert row["volatility_at_signal"] == {
-        "volatility_atr": 145.5,
-        "volatility_percentile": 72.5,
-        "atr14": 142.0,
-        "atr14_pct_3m": 0.18,
-        "realized_volatility": None,
-        "volatility_metric": None,
-    }
+    # R3: touch/trade-through on market_segment quotes is no longer a fill.
+    _assert_r3_fail_closed(_fixture(tmp_path, direction=direction, entry_rows=rows), "segment touch became a fill")
 
 
 def test_evaluator_preserves_collected_causal_provenance_without_generation_stamping(tmp_path):
@@ -261,17 +245,7 @@ def test_missing_lifecycle_receipt_blocks_episode_before_ranking(tmp_path):
 
 
 def test_partial_fill_preserves_all_quantity_boundaries(tmp_path):
-    rows = [_row(10, ask=100, ask_qty=.45), _row(11, ask=100, ask_qty=.45)]
-    row = build_v3_conservative_results(_fixture(tmp_path, entry_rows=rows))["results"][0]
-    assert row["classification"] == "PARTIAL_FILL"
-    assert row["requested_qty"] == 1
-    assert row["available_qty"] == .45
-    assert row["raw_partial_qty"] == .45
-    assert row["rounded_executable_qty"] == .4
-    assert row["accumulated_qty"] == .4
-    assert row["minimum_lot_decision"] == "PASS"
-    assert row["minimum_notional_decision"] == "PASS"
-    assert row["quantity_attempts"][0]["accepted"] is True
+    _assert_r3_fail_closed(_fixture(tmp_path, qty=2), "segment quote produced a partial fill")
 
 
 def test_realized_terminal_outcome_requires_complete_measured_costs(tmp_path):
@@ -304,44 +278,15 @@ def test_realized_terminal_outcome_requires_complete_measured_costs(tmp_path):
 
 
 def test_missing_terminal_cost_is_unknown_without_changing_fill_classification(tmp_path):
-    v3 = _fixture(tmp_path, direction="SHORT", entry_rows=[_row(10, bid=100), _row(11, bid=100)])
-    identity = {"epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
-                "policy_signature": "sig-1"}
-    _write(v3 / "ledgers/execution.jsonl", [{
-        **identity, "close_ts": 20, "gross_pnl_usd": 2.0,
-        "trading_fees_usd": 0.2, "funding_fees_usd": 0.0,
-        "filled_qty": 1.0, "net_pnl_usd": 1.8,
-    }])
-    _write(v3 / "ledgers/lifecycle.jsonl", [{**identity, "terminal": True}])
-    row = build_v3_conservative_results(v3)["results"][0]
-    assert row["classification"] == "FULL_FILL"
-    assert row["terminal_outcome_status"] == "UNKNOWN"
-    assert row["profitability_supported"] is False
-    assert "UNKNOWN_EXIT_SLIPPAGE_MISSING" in row["terminal_outcome_reason_codes"]
-    assert row["net_pnl_usd"] is None
+    _assert_r3_fail_closed(_fixture(tmp_path), "segment quote produced a fill classification")
 
 
 def test_true_no_fill_has_terminal_zero_outcome_without_execution_row(tmp_path):
-    rows = [_row(10, ask=101), _row(11, ask=101)]
-    row = build_v3_conservative_results(_fixture(tmp_path, entry_rows=rows))["results"][0]
-    assert row["classification"] == "NO_FILL"
-    assert row["terminal_outcome_status"] == "NOT_APPLICABLE_NO_FILL"
-    assert row["profitability_supported"] is True
-    assert row["net_pnl_usd"] == 0.0
+    _assert_r3_fail_closed(_fixture(tmp_path, entry_rows=[_row(10, ask=101), _row(11, ask=101)]), "segment tape produced TRUE_NO_FILL")
 
 
 def test_missing_pre_entry_path_blocks_profitability_but_preserves_fill_truth(tmp_path):
-    v3 = _fixture(tmp_path)
-    path = v3 / "ledgers/market_segment.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    _write(path, [row for row in rows if row.get("context_role") != "PRE_ENTRY_PATH"])
-    row = build_v3_conservative_results(v3)["results"][0]
-    assert row["classification"] == "FULL_FILL"
-    assert row["pre_entry_path_status"] == "UNKNOWN"
-    assert row["profitability_supported"] is False
-    assert row["terminal_outcome_reason_codes"] == [
-        "UNKNOWN_REQUIRED_PRE_ENTRY_BBO_DEPTH_TRADE_PATH_INCOMPLETE"
-    ]
+    _assert_r3_fail_closed(_fixture(tmp_path), "segment quote produced fill truth/profitability")
 
 
 def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_path):
@@ -697,11 +642,7 @@ def test_directional_score_gap_is_never_relabelled_as_exchange_spread(tmp_path):
 
 
 def test_complete_non_crossing_tape_is_true_no_fill(tmp_path):
-    rows = [_row(10, ask=101), _row(11, ask=101)]
-    row = build_v3_conservative_results(_fixture(tmp_path, entry_rows=rows))["results"][0]
-    assert row["classification"] == "NO_FILL"
-    assert row["supported"] is True
-    assert row["filled_qty"] == 0
+    _assert_r3_fail_closed(_fixture(tmp_path, entry_rows=[_row(10, ask=101), _row(11, ask=101)]), "segment tape produced TRUE_NO_FILL")
 
 
 def test_terminal_authoritative_schedule_is_used_instead_of_open_submit_version(tmp_path):
@@ -809,11 +750,7 @@ def test_incomplete_all_opportunity_future_tape_remains_unknown(tmp_path):
 
 
 def test_missing_market_second_is_unknown_not_no_fill(tmp_path):
-    row = build_v3_conservative_results(
-        _fixture(tmp_path, entry_rows=[_row(10, ask=101)])
-    )["results"][0]
-    assert row["classification"] == "UNKNOWN"
-    assert "UNKNOWN_CONSERVATIVE_EVALUATOR_EVIDENCE_GAP" in row["unknown_reason_codes"]
+    _assert_r3_fail_closed(_fixture(tmp_path, entry_rows=[_row(10, ask=101)]), "missing second became no-fill")
 
 
 def test_missing_constraints_is_unknown_and_never_speculates(tmp_path):
@@ -940,3 +877,24 @@ def _legacy_limit_fill_1s_unquarantined(monkeypatch):
     # These tests pin the legacy 1 s limit-fill math; production has LIMIT_FILL_1S retired (R17, RK #847 cond 4),
     # covered by test_r17_retired_sources.py.  Kept (not deleted) pending the book_limit_entry rebuild.
     monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"LIMIT_FILL_1S"})
+
+
+def _assert_r3_fail_closed(v3, why):
+    """R3 rewrite: market_segment rows are not evidence, so a bundle built on them
+    is never written and the evaluator produces no fill/no-fill/profit verdict."""
+    bundle = _R3_BUNDLE[-1]
+    assert bundle["written"] is False, why
+    assert bundle["completion"]["classification"] == "UNKNOWN"
+    assert bundle["completion"]["ready"] is False
+    result = build_v3_conservative_results(v3)
+    assert result["market_segment_input"]["reason"] == "INVALID_R3_MARKET_SEGMENT_INPUT", why
+    assert result["market_segment_input"]["input_dropped"] is True
+    assert result["classification_counts"] == {"FULL_FILL": 0, "PARTIAL_FILL": 0, "NO_FILL": 0,
+                                               "UNKNOWN": result["row_count"]}, why
+    assert result["terminal_outcome_counts"]["REALIZED_COST_COMPLETE"] == 0
+    assert result["terminal_outcome_counts"]["NOT_APPLICABLE_NO_FILL"] == 0
+    assert result["regime_feature_coverage"]["profitability_calculated"] is False
+    for row in result["results"]:
+        assert row["classification"] == "UNKNOWN", why
+        assert not row.get("filled_qty"), why
+        assert row.get("qualification_evidence_collected") is not True
