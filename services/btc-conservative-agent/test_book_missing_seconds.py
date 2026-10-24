@@ -136,3 +136,25 @@ def test_ten_second_retry_cap_boundary(monkeypatch):
     out, marks = _run_exit_with_book_back_at(monkeypatch, model + tile_fill.EXIT_FORCE_AFTER_S + 0.5)
     assert out is None and marks["exit_status"] == "NO_BOOK_UNPRICED" and marks["non_fill_category"] == "NO_BOOK_EXIT"
     assert marks["fill_valid"] is False
+
+
+def test_carried_row_uses_its_frame_receive_ts_not_the_bucket(tmp_path):
+    """HM #851 nit c: a carried-forward row's receive_ts is the frame it repeats (collector writes the frame's time),
+    so the pricer proves no look-ahead on that frame time, not on s; a carried row without receive_ts still fails
+    closed with BOOK_RECEIVE_TS_MISSING."""
+    p = tmp_path / "book.jsonl"
+    rows = [{"s": 100, "b": [[1, 5]], "a": [[2, 5]], "receive_ts": 100.1, "receive_mono": 3.1,
+             "receive_ts_source": "WS_FRAME"},
+            {"s": 101, "b": [[1, 5]], "a": [[2, 5]], "carried": True, "receive_ts": 100.1, "receive_mono": 3.1,
+             "receive_ts_source": "WS_FRAME"},
+            {"s": 102, "b": [[1, 5]], "a": [[2, 5]], "carried": True}]
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    t = paper_fill.BookTail(str(p))
+    row = t.at(102.5)
+    assert row["s"] == 101 and row["carried"] is True and row["receive_ts"] == 100.1  # frame time, not 101/102
+    proof = paper_fill.book_receive_proof(row, 102.5, "LATEST")
+    assert proof["book_receive_ts"] == 100.1 and proof["book_receive_unverified"] is None
+    missing = t.at(103.5)
+    assert missing["s"] == 102 and missing["receive_ts"] is None
+    assert paper_fill.book_receive_proof(missing, 103.5, "LATEST")["book_receive_unverified"] == \
+        paper_fill.BOOK_RECEIVE_TS_MISSING

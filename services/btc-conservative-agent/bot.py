@@ -71,7 +71,7 @@ from raw_generation_cleanup_owner import RawGenerationCleanupOwner
 from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
-from relay_event_outbox import RelayEventOutbox
+from relay_event_outbox import RelayEventOutbox, fly_send_stamp_headers as _fly_send_stamp_headers
 import relay_stack_mode as _relay_stack_mode
 import live_copy_control as _live_copy
 import thread_health as _thread_health
@@ -5198,6 +5198,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         # first fresh book row.
         import quote_trigger as _qtc
         if not _qtc.is_clock_exit_reason(getattr(action, "reason", None)):
+            _note_level_crossed_unfired(source_pos, getattr(action, "reason", None), price, now, "STALE_BOOK_HELD")
             action = None
     if source_pos.get("_tp1_pending") and _is_paper_book_lane(pos):
         # REALISM_V2 PR2: a pending TP1 leg is a SENT reduce-only market order; it completes with its own committed
@@ -5399,6 +5400,11 @@ def _realism_family_exit(pos: dict, price: float, now: float, *, exit_source: st
     start = max(float(pos.get("_trigger_cursor_ts") or 0), float(pos.get("entry_ts") or 0))
     page = _qt.book_rows_window(start, float(now), _pf.book10l_at)
     pos["_trigger_cursor_ts"] = float(page["checked_to"])
+    # R17 / HM (c): proof the hold scan really ran - levels_crossed_unfired is only answered from this scan.
+    if pos.get("levels_scan_from_s") is None:
+        pos["levels_scan_from_s"] = float(start)
+    pos["levels_scan_to_s"] = float(page["checked_to"])
+    pos["levels_scan_rows_n"] = int(pos.get("levels_scan_rows_n") or 0) + len(page["rows"] or [])
     if page["gap_seconds"]:
         pos["trigger_gap_seconds_n"] = int(pos.get("trigger_gap_seconds_n") or 0) + len(page["gap_seconds"])
         pos["trigger_gap_last"] = [page["gap_seconds"][0], page["gap_seconds"][-1]]
@@ -5473,6 +5479,36 @@ def _stamp_trigger_book_age(pos: dict, book) -> None:
     pos["exit_trigger_bbo_ts"] = (float(book["s"]) + 1.0) if book and book.get("s") is not None else None
 
 
+LIQ_ROW_KEYS = ("liq_model", "liq_model_validated", "liq_mark_at_open", "liq_bp", "liq_px", "liq_trigger_ts",
+                "liq_trigger_source", "liq_before_stop", "liq_stop_slipped_past", "liq_mark_rows_n", "liq_unverified",
+                "liq_reason")
+
+
+EXIT_EVIDENCE_ROW_KEYS = ("exit_evidence_status", "exit_unverified_reason", "exit_depth_short_qty",
+                          "exchange_stop_px", "exchange_stop_anchor_px")  # anchor carried for the G5/B2 twin pair
+
+
+def _exit_evidence_fields(pos: dict) -> dict:
+    """Closed-row exit evidence (HM C7 depth-short resident walk) + resident-stop trades coverage (HM C3).
+    None on live rows / non-book lanes."""
+    keys = EXIT_EVIDENCE_ROW_KEYS + STOP_COVERAGE_ROW_KEYS
+    if not _is_paper_book_lane(pos):
+        return {k: None for k in keys}
+    return {k: pos.get(k) for k in keys}
+
+
+def _terminal_liq_fields(pos: dict, exit_price) -> dict:
+    """HM C4: every terminal paper close carries the liquidation check on its closed row. Exits priced by
+    _paper_lane_exit are already stamped (at their trigger); any other paper close (legacy lanes, admin) is stamped
+    here at its exit trigger. Live rows are the exchange's own outcome (not re-judged)."""
+    if pos.get("bitfinex_order_id") or pos.get("bitfinex_live_entry") or pos.get("bitfinex_position_id"):
+        return {}
+    if pos.get("liq_model") is None and pos.get("liq_unverified") is None:
+        t = pos.get("exit_model_trigger_ts") or pos.get("exit_trigger_ts") or time.time()
+        _liquidation_stamp(pos, t, exit_price)
+    return {k: pos.get(k) for k in LIQ_ROW_KEYS}
+
+
 def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: float, meta: dict) -> None:
     """REALISM_V2 F2 stamp on a terminal exit trigger: trigger_basis + source + the 1 s book-top / last-trade view at
     the trigger instant + the full trigger stamp (trade id / receive second / window / version). No ticker."""
@@ -5514,7 +5550,7 @@ def _exchange_stop_fields(pos: dict) -> dict:
     return lvl
 
 
-def _exchange_stop_trigger(pos: dict, t0: float, t1: float, *, page: dict = None):
+def _exchange_stop_trigger(pos: dict, t0: float, t1: float, *, page: dict = None, late_trades=()):
     """First trade print at/through the resident stop level (RK 17:24: trades only; book touch = comparison column) in
     (t0, t1]. The trigger basis is the tile's registry option resident_stop_trigger_basis. Trades are read whatever
     the book state, so the resident stop still fires with a stale book (RK 17:22 (a))."""
@@ -5528,15 +5564,138 @@ def _exchange_stop_trigger(pos: dict, t0: float, t1: float, *, page: dict = None
         "resident_stop_trigger_basis"]
     rows = (page or {}).get("rows") if page is not None else _qt.book_rows_between(t0, t1, _pf.book10l_at)
     trades = _qt.trades_between(t0, t1)
-    return _qt.first_level_trigger(pos.get("dir"), _qt.KIND_STOP, lvl["exchange_stop_px"], t0, t1,
-                                   book_rows=rows or (), trades=trades, stop_basis=basis)
+    # HM C3: prints that arrived late (written after the cursor passed their time) are evaluated, never skipped.
+    seen = {(p.get("id"), p.get("ts")) for p in trades}
+    late = [p for p in late_trades or () if (p.get("id"), p.get("ts")) not in seen and float(p["ts"]) <= t1]
+    t_lo = min([t0] + [float(p["ts"]) - 1e-6 for p in late])
+    hit = _qt.first_level_trigger(pos.get("dir"), _qt.KIND_STOP, lvl["exchange_stop_px"], t_lo, t1,
+                                  book_rows=rows or (), trades=sorted(late + trades, key=lambda p: p["ts"]),
+                                  stop_basis=basis)
+    if hit is not None and late and any(float(p["ts"]) == float(hit["trigger_ts"]) for p in late):
+        hit["stop_trigger_late_print"] = True
+    return hit
+
+
+STOP_COVERAGE_ROW_KEYS = ("stop_tail_lo_s", "stop_tail_hi_s", "stop_coverage_gap_s", "stop_coverage_flag",
+                          "stop_coverage_unverified", "stop_late_prints_n", "stop_late_print_max_s")
+
+
+R17_CONTRACT_ROW_KEYS = ("trigger_price_source", "exit_priced_delay_source", "exit_price_age_s",
+                         "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage",
+                         "exit_book_age_ms")
+LEVELS_CROSSED_UNFIRED_MAX = 20
+
+
+def _note_level_crossed_unfired(pos: dict, reason, price, ts, why: str) -> None:
+    """R17 / HM C3: a stop / TP / BE level the policy saw reached that did NOT fire (e.g. held back by a stale book)."""
+    log = pos.setdefault("_levels_crossed_unfired_log", [])
+    if isinstance(log, list) and len(log) < LEVELS_CROSSED_UNFIRED_MAX:
+        log.append({"reason": None if reason is None else str(reason), "why": str(why),
+                    "px": None if price is None else float(price), "ts": None if ts is None else float(ts)})
+
+
+def _stop_coverage_value(pos: dict):
+    """R17 contract ``stop_coverage``: STOP_COVERAGE_GAP when any part of the hold was not covered by the trades tail
+    (a resident-stop crossing may have been missed), STOP_COVERAGE_UNVERIFIED when the scan never ran, else
+    STOP_COVERAGE_OK. None on live rows / non-book lanes (the exchange holds the live stop; not re-judged here)."""
+    import quote_trigger as _qt
+    if not _is_paper_book_lane(pos):
+        return None
+    if pos.get("stop_coverage_flag") == _qt.STOP_COVERAGE_GAP or float(pos.get("stop_coverage_gap_s") or 0) > 0:
+        return _qt.STOP_COVERAGE_GAP
+    if pos.get("stop_tail_hi_s") is None and pos.get("stop_tail_lo_s") is None:
+        return _qt.STOP_COVERAGE_UNVERIFIED
+    return _qt.STOP_COVERAGE_OK
+
+
+def _levels_crossed_unfired(pos: dict):
+    """R17 contract ``levels_crossed_unfired``: the stop / TP / BE crossings seen during the hold that did not fire
+    ([] = none). Every completed book row and every trade print is evaluated, so a crossing can only be missed where
+    the evidence is missing: a book gap second, a stale-book span (price-level exits held), or a trades-tail
+    coverage gap. Then the answer is UNKNOWN -> None (never a fabricated []). HM (c): [] only comes from the REAL hold
+    scan (_realism_family_exit stamps levels_scan_to_s); a position whose scan never ran is UNKNOWN -> None.
+    None on live rows / non-book lanes."""
+    import quote_trigger as _qt
+    if not _is_paper_book_lane(pos):
+        return None
+    log = [dict(x) for x in (pos.get("_levels_crossed_unfired_log") or []) if isinstance(x, dict)]
+    if log:
+        return log
+    if pos.get("levels_scan_to_s") is None:
+        return None
+    if int(pos.get("trigger_gap_seconds_n") or 0) > 0 or pos.get("stale_book_since_s") is not None \
+            or pos.get("stale_book_age_s") is not None or _stop_coverage_value(pos) != _qt.STOP_COVERAGE_OK:
+        return None
+    return []
+
+
+def _r17_exit_book_age_ms(pos: dict):
+    ms = _finite_nonneg(pos.get("exit_book_age_ms"))
+    if ms is not None:
+        return int(round(float(ms)))
+    age_s = _finite_nonneg(pos.get("exit_price_age_s"))
+    return int(round(float(age_s) * 1000)) if age_s is not None else None
+
+
+def _r17_contract_fields(pos: dict) -> dict:
+    """R17 (#845 r17_exclusion.proof_failures) fields that live on the position: stamped on the closed row under
+    exactly the contract names. Exit price stale = the exit book row was older than 2 s at the model fill time."""
+    xs = pos.get("exit_fill_sim") if isinstance(pos.get("exit_fill_sim"), dict) else {}
+    paper = _is_paper_book_lane(pos)
+    stale = None
+    if paper and (xs.get("price_stale") is not None or pos.get("exit_stale_book_at_fill") is not None):
+        stale = bool(xs.get("price_stale") or pos.get("exit_stale_book_at_fill"))
+    return {"trigger_price_source": pos.get("trigger_price_source"),
+            "exit_priced_delay_source": pos.get("exit_priced_delay_source"),
+            "exit_price_age_s": pos.get("exit_price_age_s"),
+            "exit_eval_price_age_s": pos.get("exit_eval_price_age_s"),
+            "exit_price_stale": stale,
+            # contract alternative to exit_price_age_s (same measured book age, in ms; None when unmeasured)
+            # contract alternative to exit_price_age_s: the exit pricer's book age (ms; _exit_book_age_ms), else the
+            # same measured exit_price_age_s in ms; None when neither is a finite number >= 0 (never fabricated)
+            "exit_book_age_ms": _r17_exit_book_age_ms(pos),
+            "levels_crossed_unfired": _levels_crossed_unfired(pos),
+            "stop_coverage": _stop_coverage_value(pos),
+            **_book_receive_row_fields("exit", xs if paper else None)}
+
+
+def _stop_late_prints(pos: dict, now: float) -> list:
+    """HM C3: prints in (entry, now] written in a collector second after the last scan's tail head - i.e. prints the
+    trailing cursor would have skipped. Empty on the first scan (that scan reads the whole window)."""
+    import quote_trigger as _qt
+    prev = pos.get("_xstop_recv_s")
+    if prev is None:
+        return []
+    return _qt.trades_received_after(float(pos.get("entry_ts") or 0), float(now), float(prev))
+
+
+def _stamp_stop_coverage(pos: dict, start: float, now: float, late: list) -> None:
+    """HM C3: stamp the trades-tail coverage of the resident-stop scan on the position (carried to the closed row):
+    tail seconds held, cumulative uncovered seconds of (entry, now] (tail rolled past the cursor, or no tail) ->
+    STOP_COVERAGE_GAP / UNVERIFIED, and late prints (> 2 s after their own time) recorded, never skipped."""
+    import quote_trigger as _qt
+    cov = _qt.trades_coverage()
+    c = _qt.stop_scan_coverage(start, now, cov)
+    pos["stop_tail_lo_s"], pos["stop_tail_hi_s"] = c["lo_s"], c["hi_s"]
+    if c["gap_s"] > 0:
+        pos["stop_coverage_gap_s"] = round(float(pos.get("stop_coverage_gap_s") or 0) + c["gap_s"], 3)
+        pos["stop_coverage_flag"] = _qt.STOP_COVERAGE_GAP
+        pos["stop_coverage_unverified"] = True
+    if cov:
+        pos["_xstop_recv_s"] = max(float(pos.get("_xstop_recv_s") or 0), float(cov["hi_s"]))
+    lates = [float(p.get("recv_s", p["ts"])) + 1.0 - float(p["ts"]) for p in late or ()]
+    lates = [x for x in lates if x > _qt.LATE_PRINT_S]
+    if lates:
+        pos["stop_late_prints_n"] = int(pos.get("stop_late_prints_n") or 0) + len(lates)
+        pos["stop_late_print_max_s"] = round(max([float(pos.get("stop_late_print_max_s") or 0)] + lates), 3)
 
 
 def _realism_level_stops(pos: dict, price: float, now: float, src: str = None, *, exit_source: str,
                          close_async: bool) -> bool:
     """REALISM_V2 PR2 + RK 17:18 (3): the exchange-resident stop (min(hard + 25 bp, liq - 15 bp), anchored at the
-    entry fill, never moved) fires on the first trade at/through (or book top reaching, per tile option) its level
-    since the last checked time - resumed from the cursor, no 30 s look-back skip. It closes the whole open qty as
+    entry fill, never moved) fires on the first trade print at/through its level (RK 17:24: trades only; a book touch
+    is a comparison column, never a trigger) since the last checked time - resumed from the cursor, no 30 s look-back
+    skip; late prints are re-read and the tail coverage is stamped (HM C3). It closes the whole open qty as
     EXCHANGE_RESIDENT, filled on the first book row completed at or after the trigger (delay 0, price age recorded),
     stamped EXCHANGE_RESIDENT + STOP_BASIS_UNVERIFIED. The paper hard stop stays in the policy (BOT_SENT); the
     in-flight race against it is settled in _paper_lane_exit."""
@@ -5546,8 +5705,10 @@ def _realism_level_stops(pos: dict, price: float, now: float, src: str = None, *
         return False
     # Armed from entry to close (HM M5 / RK 17:24): no _tp1_pending skip, no look-back cap.
     start = max(float(pos.get("_xstop_cursor_ts") or 0), float(pos.get("entry_ts") or 0))
-    hit = _exchange_stop_trigger(pos, start, float(now))
-    # late prints (written after their own ms time) are re-read: the cursor trails now by the 2 s staleness grace.
+    late = _stop_late_prints(pos, float(now))
+    hit = _exchange_stop_trigger(pos, start, float(now), late_trades=late)
+    _stamp_stop_coverage(pos, start, float(now), late)
+    # the cursor trails now by the 2 s staleness grace; prints later than that are caught by _stop_late_prints.
     pos["_xstop_cursor_ts"] = max(start, float(now) - _qt.STALE_S)
     if not hit:
         return False
@@ -5582,6 +5743,16 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
         now = time.time()
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress") or pos.get("_exit_dispatch_pending"):
         return False
+    if str(pos.get("research_lane") or "").upper() not in COMBO_EXECUTION_LANES:
+        # RK step 2 / HM B3: non-combo lanes re-read the book row here (a caller-supplied price is never trusted).
+        book_px = _legacy_book_gate(pos, now)
+        if book_px is None:
+            return _legacy_clock_exit(pos, now)
+        price = book_px
+    if not price or float(price) <= 0:
+        # STALE_BOOK on a combo lane: no MFE/MAE/replay stats from a non-book price; the combo branch below handles
+        # the clock-only evaluation from its own book read.
+        return _apply_combo_lane_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
     unreal_pct = unrealized_margin_pct(pos, price)
     with state_lock:
         replay_book = copy.deepcopy(state.get("order_book") or {})
@@ -5631,6 +5802,12 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
     pos["_exit_eval_price"] = float(price or 0)
 
     if str(pos.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
+        return _apply_combo_lane_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
+    return _apply_legacy_lane_exit(pos, price, now, unreal_pct, entry_ts)
+
+
+def _apply_combo_lane_exit(pos: dict, price: float, now: float, *, exit_source: str, close_async: bool):
+    if str(pos.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
         if _is_paper_book_lane(pos):
             return _realism_family_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
         # RK 17:24 BINDING: the live TP / BE / hard-stop trigger (the Fly close that the relay copies) is the SAME
@@ -5652,6 +5829,10 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
         pos["_trigger_meta"] = {"basis": bx["basis"], "ts": float(now), "px": float(bx["px"]), "quote_stale": False,
                                 "book_s": bx["book_s"], "trigger_version": _qt.TRIGGER_VERSION}
         return _apply_family_tile_exit(pos, float(bx["px"]), now, exit_source=exit_source, close_async=close_async)
+    return False
+
+
+def _apply_legacy_lane_exit(pos: dict, price: float, now: float, unreal_pct: float, entry_ts: float):
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
         return True
@@ -5726,7 +5907,9 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
         close_position(pos, "EARLY_FAIL")
         return True
 
-    if (pos.get("dir") == "LONG" and price <= pos.get("sl", 0)) or (pos.get("dir") == "SHORT" and price >= pos.get("sl", 0)):
+    import quote_trigger as _qt
+    # HM B3: the level tests are the shared trigger helper on the book-row price from _legacy_book_gate (never ticker).
+    if _qt.level_reached(pos.get("dir"), _qt.KIND_STOP, pos.get("sl"), price):
         logger.info(f"[EXIT TRIGGER] STOP_LOSS trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
         close_position(pos, "STOP_LOSS")
         return True
@@ -5744,12 +5927,18 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
         return True
 
     tp_price = pos.get("tp", 0)
-    if tp_price > 0:
-        if (pos.get("dir") == "LONG" and price >= tp_price) or (pos.get("dir") == "SHORT" and price <= tp_price):
+    if tp_price and float(tp_price) > 0:
+        if _qt.level_reached(pos.get("dir"), _qt.KIND_TARGET, tp_price, price):
             logger.info(f"[EXIT TRIGGER] TAKE_PROFIT_EMERGENCY trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
             close_position(pos, "TAKE_PROFIT")
             return True
 
+    return _legacy_clock_exit(pos, now)
+
+
+def _legacy_clock_exit(pos: dict, now: float) -> bool:
+    """The legacy (non-combo) CLOCK exits: TIME_EXIT / EMERGENCY_MAX_HOLD. They need no price, so they also fire
+    while the book is stale; their fill is priced on the first book row at or after the close (price age stamped)."""
     if FIXED_TIME_EXIT_ENABLED:
         time_in_trade = now - pos.get("entry_ts", 0)
         if time_in_trade > MAX_POSITION_AGE_SEC:
@@ -5766,6 +5955,31 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
             close_position(pos, "EMERGENCY_MAX_HOLD")
             return True
     return False
+
+
+def _legacy_book_gate(pos: dict, now: float):
+    """RK step 2 / HM B3: a non-combo lane (CONTINUOUS adoption owner of adopted LIVE exposure, retired-lane orphans,
+    any tile missing from COMBO_EXECUTION_LANES) is exit-managed from the same shared book pricer as the combo lanes.
+    Returns the fresh book-side price, or None on STALE_BOOK (stamped; only clock exits may fire this pass and every
+    price-level exit fires on the first fresh row)."""
+    import quote_trigger as _qt
+    bx = book_exit_mark(pos.get("dir"), now)
+    pos["exit_eval_book_s"], pos["exit_eval_price_age_s"] = bx["book_s"], bx["price_age_s"]
+    if bx["px"] is None:
+        pos.setdefault("_stale_book_since", float(now))
+        pos["stale_book_age_s"] = bx["price_age_s"]
+        pos["_trigger_meta"] = {"basis": _qt.BASIS_CLOCK, "ts": float(now), "px": bx.get("last_book_px"),
+                                "quote_stale": True, "clock_only": True, "stale_book_age_s": bx["price_age_s"],
+                                "trigger_version": _qt.TRIGGER_VERSION}
+        return None
+    since = pos.pop("_stale_book_since", None)
+    if since is not None:
+        pos["exit_stale_book_wait_s"] = round(float(now) - float(since), 3)
+    pos["_trigger_meta"] = {"basis": bx["basis"], "ts": float(now), "px": float(bx["px"]), "quote_stale": False,
+                            "book_s": bx["book_s"], "price_age_s": bx["price_age_s"],
+                            "trigger_version": _qt.TRIGGER_VERSION}
+    return float(bx["px"])
+
 
 CIRCUIT_BREAKER_REASONS = frozenset({
     "STALE_DATA_HARD_STOP", "THREAD_CRASH", "WS_STALE", "PRICE_STALE_OR_MISSING",
@@ -7227,18 +7441,35 @@ def simulate_marketable_limit_fill(
     }
 
 
-def get_mark_price(direction: str, fallback: float = None) -> float:
-    """Realistic mark for PnL/exits: LONG marks at bid (sellable), SHORT at ask (cover buy)."""
-    direction = str(direction or "").upper()
-    with state_lock:
-        bid = float(state.get("bid") or 0)
-        ask = float(state.get("ask") or 0)
-        last = float(fallback if fallback is not None else (state.get("price") or 0))
-    if direction == "LONG" and bid > 0:
-        return bid
-    if direction == "SHORT" and ask > 0:
-        return ask
-    return last if last > 0 else 0.0
+_BOOK_MARK_STATUS = {"fresh": 0, "stale": 0, "last_stale_ts": None, "ticker_refused": 0}
+
+
+def book_exit_mark(direction: str, now: float = None) -> dict:
+    """RK step 2 / HM B3: THE exit mark for EVERY lane (combo, CONTINUOUS adoption owner, retired orphans, any tile
+    missing from the combo lists): the shared pricer quote_trigger.book_exit_price on the 1 s bfx_book_10l rows
+    (LONG best bid, SHORT best ask of the latest complete row). Stale (> 2 s) or missing -> px None + STALE_BOOK.
+    Never the WS ticker, book_tape_1s or market_microstructure_1s."""
+    import quote_trigger as _qt
+    import paper_fill as _pf
+    bx = _qt.book_exit_price(str(direction or "").upper(), float(time.time() if now is None else now), _pf.book10l_at)
+    if bx.get("stale"):
+        _BOOK_MARK_STATUS["stale"] += 1
+        _BOOK_MARK_STATUS["last_stale_ts"] = time.time()
+    else:
+        _BOOK_MARK_STATUS["fresh"] += 1
+    return bx
+
+
+def get_mark_price(direction: str, fallback: float = None, now: float = None) -> float:
+    """Side-correct exit mark from the order-book rows (book_exit_mark), 0.0 when the book is stale (STALE_BOOK).
+
+    RK step 2: this used to read the WS ticker bid/ask and fall back to the last trade; ``fallback`` is kept for call
+    compatibility and IGNORED (every caller passed the ticker last price). Callers treat 0.0 as "no price-level exit
+    on this pass; fire on the first fresh book row"."""
+    if fallback is not None:
+        _BOOK_MARK_STATUS["ticker_refused"] += 1
+    bx = book_exit_mark(direction, now)
+    return float(bx["px"]) if bx.get("px") else 0.0
 
 
 def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
@@ -7314,6 +7545,16 @@ def _paper_entry_quote_gate(order: dict, lane: str, direction: str, signal_ts: f
 
 
 def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
+    """Entry fill (see _paper_lane_entry_core) with the F1 pool stamp (pool_n, pool_ts, quantile_method,
+    delay_unverified, delay_flag) of the delay that priced it."""
+    cached = order.get("paper_fill_result")
+    if isinstance(cached, dict):
+        return cached
+    res = _paper_lane_entry_core(order, now, force=force)
+    return _paper_stamp_pool(res, str(order.get("research_lane") or "").upper(), "entry")
+
+
+def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
     """IOC entry at signal_ts + measured delay from the 10-level book; cached on the order.
     Returns None while the fill time has not arrived (unless force)."""
     import tile_fill as _tf
@@ -7322,7 +7563,8 @@ def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
         return cached
     lane = str(order.get("research_lane") or "").upper()
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or now)
-    delay_s, delay_source = _disloc_delay(lane, "entry")
+    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+                                          own_signal_to_send_s=_paper_own_s2s_entry(order))
     if not force and now < signal_ts + float(delay_s):
         return None
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
@@ -7396,11 +7638,11 @@ def _paper_entry_rest_finish(order: dict, direction: str, walk: dict, t0: float,
     limit = float(walk["cap_px"])
     queue = _om.queue_ahead_at(direction, limit, walk.get("depth_snapshot_fill"))
     step = _om.maker_rest_step(direction, limit, remaining, queue, _qt.trades_between(t0, t1),
-                               model.get("entry_rest_fill_basis") or _om.REST_FILL_QUEUE_CLEAR) if t1 > t0 else \
+                               model.get("entry_rest_fill_basis") or _om.REST_FILL_DEFAULT) if t1 > t0 else \
         {"fills": [], "remaining": remaining, "queue_ahead": queue}
     out = _om.combine_entry(walk, step["fills"], req, model=model, rest_end_ts=t1, rest_end_reason=why)
     out.update({"entry_rest_limit_px": limit, "entry_rest_queue_ahead_start": queue,
-                "entry_rest_start_ts": t0})
+                "entry_rest_start_ts": t0, **_rest_unsized_stamp(step.get("unsized_prints"))})
     return out
 
 
@@ -7442,14 +7684,15 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
         res = _om.combine_entry(walk, st["fills"], req, model=model, rest_end_ts=sent,
                                 rest_end_reason="TOUCH_TAKER_FALLBACK")
         res.update({"entry_rest_reprices": st["reprices"], "signal_ts": signal_ts, "delay_s": delay_s,
-                    "delay_source": delay_source, "side": direction})
+                    "delay_source": delay_source, "side": direction, **_rest_unsized_stamp(st.get("unsized_prints"))})
         order["paper_fill_result"] = res
         return res
     if upto > float(st["cursor_ts"]):
         step = _om.maker_rest_step(direction, limit, st["remaining"], st["queue_ahead"],
                                    _qt.trades_between(float(st["cursor_ts"]), upto),
-                                   model.get("entry_rest_fill_basis") or _om.REST_FILL_QUEUE_CLEAR)
+                                   model.get("entry_rest_fill_basis") or _om.REST_FILL_DEFAULT)
         st["fills"] = list(st["fills"]) + [list(f) for f in step["fills"]]
+        st["unsized_prints"] = int(st.get("unsized_prints") or 0) + int(step.get("unsized_prints") or 0)
         st["remaining"] = step["remaining"]
         st["queue_ahead"] = step["queue_ahead"]
         st["cursor_ts"] = upto
@@ -7471,9 +7714,18 @@ def _paper_entry_rest_close(order: dict, direction: str, signal_ts: float, delay
                             rest_end_ts=st.get("cursor_ts"), rest_end_reason=why)
     res.update({"entry_rest_reprices": st.get("reprices"), "entry_rest_limit_px": st.get("limit_px"),
                 "signal_ts": signal_ts, "delay_s": delay_s, "delay_source": delay_source, "side": direction,
-                "price_source": "MAKER_REST_LIMIT" if res.get("filled_qty") else None})
+                "price_source": "MAKER_REST_LIMIT" if res.get("filled_qty") else None,
+                **_rest_unsized_stamp(st.get("unsized_prints"))})
     order["paper_fill_result"] = res
     return res
+
+
+def _rest_unsized_stamp(n) -> dict:
+    """HM C1: prints at/through our resting limit with no printed size filled nothing; the rest is UNVERIFIED."""
+    import order_model as _om
+    n = int(n or 0)
+    return {"entry_rest_unsized_prints": n, **({"entry_rest_flag": _om.UNSIZED_PRINT, "entry_rest_unverified": True}
+                                               if n else {})}
 
 
 def _paper_entry_rest_drop(order: dict, why: str) -> bool:
@@ -7485,7 +7737,8 @@ def _paper_entry_rest_drop(order: dict, why: str) -> bool:
     if not st.get("fills"):
         return False
     lane = str(order.get("research_lane") or "").upper()
-    delay_s, delay_source = _disloc_delay(lane, "entry")
+    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+                                          own_signal_to_send_s=_paper_own_s2s_entry(order))
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or 0)
     _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source,
@@ -7577,7 +7830,9 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     original = float(source_pos.get("policy_original_qty") or source_pos.get("qty") or 0)
     pend = source_pos.get("_tp1_pending")
     if not (isinstance(pend, dict) and pend.get("key") == key):
-        delay_s, delay_source = _disloc_delay(lane, "exit")
+        # RK (2): the gate is this leg's send code point; own trigger -> send measured per row, pooled EXIT_RO_MKT
+        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+                                              own_signal_to_send_s=_paper_own_s2s_exit(now, time.time()))
         marker = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s), "delay_s": float(delay_s),
                   "delay_source": delay_source, "close_fraction": float(close_fraction), "attempts": 0}
         if action is not None:
@@ -7591,7 +7846,8 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     if wall < float(pend["due_ts"]):
         return "WAIT", None
     qty = max(0.0, original * float(pend.get("close_fraction", close_fraction)))
-    res = _tf.exit_fill(direction, qty, float(pend["trigger_ts"]), pend["delay_s"], pend["delay_source"]) if qty > 0 else None
+    res = (_paper_stamp_pool(_tf.exit_fill(direction, qty, float(pend["trigger_ts"]), pend["delay_s"],
+                                           pend["delay_source"]), lane, "exit") if qty > 0 else None)
     pend["attempts"] = int(pend.get("attempts") or 0) + 1
     filled = bool(res) and res.get("status") == "FILLED" and float(res.get("price") or 0) > 0
     if not filled and wall < float(pend["due_ts"]) + _tf.EXIT_FORCE_AFTER_S:
@@ -7653,7 +7909,8 @@ def _paper_unpriced_marks(t0, missing=None, why: str = "NO_BOOK") -> dict:
     return {"missing_book_seconds": missing, "exit_status": "NO_BOOK_UNPRICED", "fresh_data_excluded": True,
             "exit_fallback": None, "_paper_exit_trigger_ts": t0, "fill_valid": False,
             "non_fill_category": "NO_BOOK_EXIT", "exit_pricing_basis": "NO_BOOK_UNPRICED",
-            "exit_unpriced_reason": why}
+            "exit_unpriced_reason": why, "exit_price_age_s": None, "exit_evidence_status": "UNVERIFIED",
+            "exit_unverified_reason": f"NO_BOOK_UNPRICED:{why}"}
 
 
 def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
@@ -7663,13 +7920,23 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     import tile_fill as _tf
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
-    delay_s, delay_source = _disloc_delay(lane, "exit")
+    # RK (2): own trigger -> send code point (exit_sent_ts), never now - t0 (pricing lag); missing -> fail closed
+    delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+                                          own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
+    _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
-    res = _tf.exit_fill(direction, qty, t0, delay_s, delay_source)
+    res = _paper_stamp_pool(_tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
     if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
         return None, {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None}
+    # HM R4 (#845 review): the inline MODEL_TIME marks carry the same exit evidence as the threaded path (price age,
+    # evidence status / unverified reason, book-row rule, depth short) - never left missing on the closed row.
     marks.update(exit_status="PAPER_FILL", exit_pricing_basis="MODEL_TIME",
+                 exit_price_age_s=res.get("price_age_s"), exit_book_row_rule=res.get("book_row_rule"),
+                 exit_evidence_status=res.get("evidence_status"),
+                 exit_unverified_reason=res.get("unverified_reason"),
+                 exit_depth_short_qty=res.get("depth_short_qty"),
                  **_paper_exit_model_times(t0, res, time.time(), 1))
+    marks.update(_liquidation_stamp(pos, t0, res.get("price")))  # HM C4: every terminal close
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
@@ -7682,7 +7949,30 @@ def _paper_exit_model_times(t0: float, res: dict, priced_wall: float, attempts: 
             "exit_model_trigger_to_fill_s": (round(float(mf) - float(t0), 3) if mf is not None else None),
             "exit_book_s": res.get("book_s"), "exit_priced_wall_ts": priced_wall,
             "exit_book_wait_s": (round(priced_wall - float(mf), 3) if mf is not None else None),
-            "exit_pricing_attempts": attempts}
+            "exit_pricing_attempts": attempts, "exit_book_age_ms": _exit_book_age_ms(res)}
+
+
+def _finite_nonneg(v):
+    """R17 (HM R2): a finite number >= 0, else None (NaN, +-inf, negatives, bools and strings never pass)."""
+    import math
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) or float(v) < 0:
+        return None
+    return v
+
+
+def _exit_book_age_ms(res) -> "int | None":
+    """R17 contract exit_book_age_ms from the EXIT PRICER's own result (accepted instead of exit_price_age_s):
+    latest-row legs (TP/BE/time, BOT_SENT MODEL_TIME) -> the pricer's book_age_ms; first-row-at-or-after legs
+    (resident stop / forced) -> price_age_s*1000 (row-ready minus fill time). Only a BFX_BOOK_10L walk counts; a
+    top-of-book fallback or an unpriced result -> None. Never negative, never non-finite."""
+    import paper_fill as _pf
+    if not isinstance(res, dict) or res.get("price_source") != "BFX_BOOK_10L":
+        return None
+    if res.get("book_row_rule") == _pf.ROW_RULE_FIRST_AFTER:
+        age_s = _finite_nonneg(res.get("price_age_s"))
+        return int(round(float(age_s) * 1000)) if age_s is not None else None
+    ms = _finite_nonneg(res.get("book_age_ms"))
+    return int(round(float(ms))) if ms is not None else None
 
 
 def _paper_exit_missing_book_seconds(trigger_ts: float):
@@ -7700,6 +7990,14 @@ def _paper_exit_attempt_trigger(t0: float, delay_s, attempt: int, now: float) ->
     if attempt <= 0:
         return float(t0)
     return max(float(t0), float(now) - float(delay_s))
+
+
+def _resident_priced(res) -> bool:
+    """A resident-stop walk that priced: FILLED, or (HM C7) a depth-short PARTIAL on the first row at/after the trigger
+    (the exchange walks deeper than the 10 visible levels; the row is stamped UNVERIFIED DEPTH_SHORT_PARTIAL)."""
+    if not isinstance(res, dict) or float(res.get("price") or 0) <= 0:
+        return False
+    return res.get("status") == "FILLED" or (res.get("status") == "PARTIAL" and bool(res.get("depth_short")))
 
 
 def _paper_lane_exit(pos: dict, exit_reason: str):
@@ -7726,18 +8024,25 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
         price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
     else:
-        delay_s, delay_source = _disloc_delay(lane, "exit")
-        price_fn = lambda: _tf.exit_fill(direction, qty, t0, delay_s, delay_source)  # noqa: E731
+        # RK (2): own trigger -> send code point (exit_sent_ts, stamped by close_position before pricing); never
+        # now - t0 (pricing lag: the thread waits for the book row). Pooled send->ack by order type (EXIT_RO_MKT).
+        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
+                                              own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
+        _paper_note_exit_trigger(pos, t0)
+        price_fn = lambda: _paper_stamp_pool(  # noqa: E731
+            _tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
     base = {"exit_order_class": cls, "exit_reason_fired": str(exit_reason)}
     if getattr(_PAPER_EXIT_TLS, "no_wait", False):
         out, marks = _paper_forced_exit(pos, now, direction, qty) if cls == _om.BOT_SENT else (None, {})
         if cls == _om.EXCHANGE_RESIDENT:
             res = price_fn()
-            if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
+            if _resident_priced(res):
                 marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None,
                          "exit_pricing_basis": "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER",
                          "exit_price_age_s": res.get("price_age_s"), "exit_book_row_rule": res.get("book_row_rule"),
                          "exit_unverified_reason": res.get("unverified_reason"),
+                         "exit_evidence_status": res.get("evidence_status"),
+                         "exit_depth_short_qty": res.get("depth_short_qty"),
                          **_paper_exit_model_times(t0, res, time.time(), 1)}
                 marks.update(_liquidation_stamp(pos, t0, res.get("price")))
                 out = _paper_exit_sim(res, pos, direction, qty, marks)
@@ -7764,6 +8069,8 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         attempts += 1
         if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
             break
+        if base["exit_order_class"] == _om.EXCHANGE_RESIDENT and _resident_priced(res):
+            break  # HM C7: depth-short PARTIAL walk of the resident stop: priced on the visible depth, UNVERIFIED
         if time.time() - (t0 + float(delay_s)) >= _tf.EXIT_FORCE_AFTER_S:
             res = None
             break
@@ -7792,9 +8099,10 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
              "exit_price_age_s": res.get("price_age_s"), "exit_book_row_rule": res.get("book_row_rule"),
              "exit_evidence_status": res.get("evidence_status"),
              "exit_unverified_reason": res.get("unverified_reason"),
+             "exit_depth_short_qty": res.get("depth_short_qty"),
              **_paper_exit_model_times(t0, res, time.time(), attempts)}
-    if base["exit_order_class"] == _om.EXCHANGE_RESIDENT:
-        marks.update(_liquidation_stamp(pos, t0, res.get("price")))  # HM M10: liq_unverified per row
+    # HM M10 + C4: the liquidation check runs on EVERY terminal close (resident stop, TP, time, bot exits).
+    marks.update(_liquidation_stamp(pos, t0, res.get("price")))
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
@@ -7855,12 +8163,73 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
         # later change of the delay model (analyzers must never pool rows across models). Stamp only; no pricing change.
         "priced_delay_s": efs.get("delay_s"),
         "priced_delay_model": _dmodel,
+        # HM C2 / F1: the delay-pool provenance of BOTH bot-sent legs rides onto the closed row (pool_n, pool_ts,
+        # quantile_method, delay_unverified, delay_flag). n < 10 (the 1.5 s default) is UNVERIFIED_DELAY.
+        **{k: efs.get(k) for k in ("delay_source_kind", "pool_n", "pool_ts", "quantile_method", "delay_unverified",
+                                   "delay_flag")},
+        **{"exit_" + k: (pos.get("exit_fill_sim") or {}).get(k) if isinstance(pos.get("exit_fill_sim"), dict) else None
+           for k in ("delay_source", "delay_source_kind", "pool_n", "pool_ts", "quantile_method", "delay_unverified",
+                     "delay_flag")},
         "evidence_status": efs.get("evidence_status"),  # the pricer's own COMPLETE/INCOMPLETE/NO_FILL on the closed row
         "ask_age_ms": efs.get("ask_age_ms"),
         "depth_snapshot_signal": efs.get("depth_snapshot_signal"),
         "depth_snapshot_fill": efs.get("depth_snapshot_fill"),
         "entry_provenance": __import__("tile_fill").provenance(efs) if paper else None,
+        # R17 contract (#845): the entry book row's price age + stale flag, top level (the pricer's own values).
+        "entry_price_age_s": (efs.get("price_age_s") if efs.get("price_age_s") is not None else
+                              (round(float(efs["book_age_ms"]) / 1000.0, 3) if efs.get("book_age_ms") is not None else None))
+                             if paper else None,
+        # R17 contract (r17_fields, #845): entry_book_age_ms = the pricer's book_age_ms (first-row legs: price age).
+        "entry_book_age_ms": (efs.get("book_age_ms") if efs.get("book_age_ms") is not None else
+                              (round(float(efs["price_age_s"]) * 1000) if efs.get("price_age_s") is not None else None))
+                             if paper else None,
+        "entry_price_stale": (bool(efs.get("price_stale")) if efs.get("price_stale") is not None else None) if paper else None,
+        # RK/HM #851: the entry book row's MEASURED receive time (r17 BOOK_RECEIVE_TS_MISSING when absent)
+        **_book_receive_row_fields("entry", efs if paper else None),
     }
+
+
+def _book_receive_row_fields(side: str, sim) -> dict:
+    """ONE helper (R4) for both legs: copy paper_fill.book_receive_proof's stamp from a fill result onto the row under
+    the r17 contract names <side>_book_receive_ts / _mono / _ts_source. None when unpriced or not a paper book lane."""
+    sim = sim if isinstance(sim, dict) else {}
+    return {f"{side}_book_receive_ts": sim.get("book_receive_ts"),
+            f"{side}_book_receive_mono": sim.get("book_receive_mono"),
+            f"{side}_book_receive_ts_source": sim.get("book_receive_ts_source"),
+            # HM 02:55 nit: the price age measured from the RECEIPT (fill time - receive_ts, ms)
+            f"{side}_book_receive_age_ms": sim.get("book_receive_age_ms")}
+
+
+def _delay_leg_unverified(sim) -> bool:
+    """True when a bot-sent leg was priced with the default delay (live-ack pool n < 10): UNVERIFIED_DELAY."""
+    if not isinstance(sim, dict) or not sim.get("delay_source"):
+        return False
+    src = str(sim.get("delay_source"))
+    if src == "EXCHANGE_RESIDENT_NO_DELAY":
+        return False
+    if sim.get("delay_unverified") is not None:
+        return bool(sim.get("delay_unverified"))
+    import paper_fill as _pf
+    return bool(_pf.delay_stamp(src).get("delay_unverified"))
+
+
+def _non_countable_reasons(pos: dict, exit_reason) -> list:
+    """Why a closed row must not count in any statistic: FORCE_FLATTENED (HM R8-live) and/or DEFAULT_DELAY_ENTRY /
+    DEFAULT_DELAY_EXIT (HM C2: priced with the 1.5 s default because the live-ack pool had n < 10) and/or the
+    shared r17_exclusion.liq_failure label (LIQ_UNVERIFIED / LIQ_CHECK_MISSING / ... ; RK/HM K1) on paper rows."""
+    out = []
+    if str(exit_reason or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS:
+        out.append("FORCE_FLATTENED")
+    if _is_paper_book_lane(pos):
+        if _delay_leg_unverified(_entry_fill_sim(pos)):
+            out.append("DEFAULT_DELAY_ENTRY")
+        if _delay_leg_unverified(pos.get("exit_fill_sim")):
+            out.append("DEFAULT_DELAY_EXIT")
+        import r17_exclusion as _r17
+        lf = _r17.liq_failure(pos)  # RK/HM K1: the shared r17 liquidation proof (liq stamped before this call)
+        if lf:
+            out.append(lf)
+    return out
 
 
 _SLIPPAGE_ROW_KEYS = (
@@ -8078,6 +8447,79 @@ def _is_trigger_consistent_exit_reason(reason) -> bool:
     )
 
 
+LEGACY_EXIT_BOOK_WAIT_S = float(os.getenv("LEGACY_EXIT_BOOK_WAIT_S", "5"))
+LEGACY_EXIT_DEAD_FEED_S = 30.0  # a book silent this long is a dead feed: FORCED_NO_BOOK at once, no wait
+
+
+def _legacy_exit_book_fill(direction: str, fill_ts: float, trigger: float, pos: dict):
+    """RK step 2: the non-paper-book exit fill is the side-correct top of the book row at the fill time (the shared
+    pricer's rows, never the WS ticker). A fresh row (age <= quote_trigger.STALE_S) prices it immediately: no wait, so
+    no close ever blocks on the feed. On a STALE_BOOK it waits up to LEGACY_EXIT_BOOK_WAIT_S for the FIRST row at or
+    after the fill time (no wait on inline closes, or when the feed has been dead > LEGACY_EXIT_DEAD_FEED_S); if none
+    arrives the exit is FORCED_NO_BOOK: priced on the first available row (the latest one), stamped UNVERIFIED with its
+    price age, never dropped. Returns (px, source, meta)."""
+    import paper_fill as _pf
+    import quote_trigger as _qt
+    bx = _qt.book_exit_price(direction, fill_ts, _pf.book10l_at)
+    if bx.get("px"):
+        return float(bx["px"]), "exit_book_row_at_fill", {
+            "exit_pricing_basis": "BOOK_ROW_AT_FILL", "exit_book_s": bx.get("book_s"),
+            "exit_price_age_s": bx.get("price_age_s"), "exit_evidence_status": "COMPLETE"}
+    age0 = bx.get("price_age_s")
+    dead = bx.get("last_book_px") is None or (age0 is not None and float(age0) > LEGACY_EXIT_DEAD_FEED_S)
+    wait = 0.0 if (getattr(_PAPER_EXIT_TLS, "no_wait", False) or dead) else LEGACY_EXIT_BOOK_WAIT_S
+    deadline = time.time() + wait
+    while True:
+        # RK 24 Oct (3): the FIRST row received at/after the fill time (shared helper); a row that cannot be proven
+        # first (or has no measured receive_ts) is still priced but UNVERIFIED via the shared first_after_proof.
+        _hz = max(1.0, LEGACY_EXIT_BOOK_WAIT_S + 2)
+        row = (_pf.first_row_received_at_or_after(_pf.book10l_at, fill_ts, horizon_s=_hz)
+               or _pf.first_row_at_or_after(_pf.book10l_at, fill_ts, horizon_s=_hz))
+        px = _qt.exec_px(direction, "exit", row) if row else None
+        if px:
+            age = round(float(row["s"]) + 1.0 - float(fill_ts), 3)
+            _rx = row.get("receive_ts")
+            _fa = _pf.first_after_proof(row, fill_ts, max(float(fill_ts), float(_rx or 0)))
+            return float(px), "exit_book_row_at_or_after_fill", {
+                "exit_pricing_basis": "BOOK_ROW_AT_OR_AFTER_FILL", "exit_book_s": row.get("s"),
+                "exit_price_age_s": max(0.0, age), "exit_stale_book_at_fill": True,
+                "exit_book_receive_ts": _rx, "exit_first_after_reason": _fa["first_after_reason"],
+                "exit_evidence_status": "COMPLETE" if _fa["first_after_ok"] else "UNVERIFIED",
+                **({} if _fa["first_after_ok"] else {"exit_unverified_reason": _fa["first_after_reason"]})}
+        if time.time() >= deadline:
+            break
+        time.sleep(0.25)
+    bx = _qt.book_exit_price(direction, time.time(), _pf.book10l_at)
+    last = bx.get("last_book_px")
+    meta = {"exit_pricing_basis": "FORCED_NO_BOOK_FIRST_ROW", "exit_forced_no_book": True,
+            "exit_book_s": bx.get("book_s"), "exit_price_age_s": bx.get("price_age_s"),
+            "exit_evidence_status": "UNVERIFIED", "exit_unverified_reason": "FORCED_NO_BOOK"}
+    if last:
+        return float(last), "exit_forced_no_book_first_row", meta
+    meta.update(exit_pricing_basis="FORCED_NO_BOOK_TRIGGER", exit_book_s=None)
+    return float(trigger or pos.get("entry") or 0), "exit_forced_no_book_trigger", meta
+
+
+def _legacy_maker_tp_fill(direction: str, fill_ts: float, trigger: float, pos: dict):
+    """HM B3 / R3: the legacy resting maker take-profit is priced from the shared book pricer, never from the trigger mark
+    or the ticker. It books its OWN limit (pos['tp']; the trigger only when no tp is stored) - a resting limit never gets
+    price improvement - and only when the latest complete book row confirms the side-correct price is at or through the
+    limit (LONG best bid >= tp, SHORT best ask <= tp: the take_profit_fill label's 'side-correct mark trades through').
+    Otherwise the limit is not proven filled and the close is a taker exit on the book row (_legacy_exit_book_fill),
+    stamped exit_maker_tp_unconfirmed. Returns (px, source, meta)."""
+    import paper_fill as _pf
+    import quote_trigger as _qt
+    limit = float(pos.get("tp") or 0) or float(trigger or 0)
+    bx = _qt.book_exit_price(direction, fill_ts, _pf.book10l_at)
+    if limit > 0 and bx.get("px") and _qt.level_reached(direction, _qt.KIND_TARGET, limit, bx["px"]):
+        return limit, "exit_maker_limit_fill", {
+            "exit_pricing_basis": "BOOK_CONFIRMED_MAKER_LIMIT", "exit_book_s": bx.get("book_s"),
+            "exit_price_age_s": bx.get("price_age_s"), "exit_evidence_status": "COMPLETE",
+            "exit_maker_limit_px": round(limit, 2)}
+    px, source, meta = _legacy_exit_book_fill(direction, fill_ts, trigger, pos)
+    return px, source, {**meta, "exit_maker_tp_unconfirmed": True}
+
+
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
     """Paper exit fill = side-correct BBO at the moment the close executes.
 
@@ -8101,14 +8543,10 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
         with state_lock:
             bbo_ts = float(state.get("bbo_ts") or state.get("price_ts") or 0)
         maker_tp = bool(exit_is_maker) and "TAKE_PROFIT" in reason_u
-        if maker_tp and trigger > 0:
-            px, source = trigger, "exit_maker_limit_fill"
+        if maker_tp:
+            px, source, book_meta = _legacy_maker_tp_fill(direction, fill_ts, trigger, pos)
         else:
-            px = get_mark_price(direction, fallback=0.0)
-            source = "exit_bbo_at_fill"
-            if px <= 0:
-                px, source = (trigger, "exit_trigger_no_bbo") if trigger > 0 else (
-                    float(state.get("price") or pos.get("entry") or 0), "exit_last_no_bbo")
+            px, source, book_meta = _legacy_exit_book_fill(direction, fill_ts, trigger, pos)
         sim = {
             "avg_price": round(px, 2),
             "filled_qty": qty,
@@ -8121,23 +8559,19 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
             "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
                                     if trigger > 0 and px > 0 else None),
         }
+        sim.update(book_meta)
+        pos.update({k: v for k, v in book_meta.items() if k.startswith("exit_")})
         pos["exit_trigger_price"] = sim["trigger_price"]
         pos["exit_fill_price"] = sim["fill_price"]
         return round(px, 2), sim
-    refresh_bbo_state()
-    refresh_order_book_state()
-    fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
-    if exit_is_maker:
-        tp_px = float(pos.get("tp") or 0)
-        if tp_px > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
-            pos["exit_trigger_price"] = pos["exit_fill_price"] = round(tp_px, 2)
-            return tp_px, None
-        pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
-        pos["exit_fill_price"] = round(fallback, 2)
-        return fallback, None
-    exit_side = "sell" if direction == "LONG" else "buy"
-    sim = simulate_market_fill(exit_side, qty)
-    px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else fallback
+    # RK step 2 / HM B3: every remaining exit is priced on the shared pricer's book rows (no ticker, no trigger mark,
+    # no cached WS book walk). A maker TP books its limit only when the book row confirms it (_legacy_maker_tp_fill).
+    if exit_is_maker and float(pos.get("tp") or 0) > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
+        px, source, book_meta = _legacy_maker_tp_fill(direction, time.time(), trigger, pos)
+    else:
+        px, source, book_meta = _legacy_exit_book_fill(direction, time.time(), trigger, pos)
+    sim = {"avg_price": round(px, 2), "filled_qty": qty, "fully_filled": True, "source": source, **book_meta}
+    pos.update({k: v for k, v in book_meta.items() if k.startswith("exit_")})
     pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
     pos["exit_fill_price"] = round(px, 2)
     return px, sim
@@ -10882,6 +11316,21 @@ def _commit_marketable_relay_payload(payload: dict) -> bool:
         return True
 
 
+def _relay_close_exit_stamps(pos, exit_reason) -> dict:
+    """RK (1) 24 Oct: the exit trigger instant (epoch s, as measured on this row) and its order class for the signed
+    POSITION_CLOSED body. Additive only: an unmeasured trigger is omitted, never invented."""
+    import order_model as _om
+    pos = pos if isinstance(pos, dict) else {}
+    out = {"exit_order_class": str(pos.get("exit_order_class") or _om.exit_order_class(exit_reason))}
+    try:
+        trig = float(pos.get("exit_trigger_ts") or 0)
+    except (TypeError, ValueError):
+        trig = 0.0
+    if trig > 0 and math.isfinite(trig):
+        out["exit_trigger_ts"] = round(trig, 6)
+    return out
+
+
 def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     """POST one already-durable event and remove it only on an exact DB ACK."""
     if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
@@ -10907,12 +11356,18 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     if legacy_secret:
         headers["X-Bot-Control-Secret"] = legacy_secret
     started = time.perf_counter()
+    send_wall = time.time()  # HM 01:43 blocker 1: Fly send stamp (wall, Fly chrony clock) of THIS POST
+    # RK (1): the same stamp travels to Railway in HMAC-signed headers (not the body: retries stay hash-identical).
+    headers.update(_fly_send_stamp_headers(
+        webhook_secret, str(payload.get("event_id") or event_id), send_wall))
     try:
         response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
         response.raise_for_status()
         receipt = response.json() if response.content else {}
         if not _relay_response_has_durable_receipt(receipt, payload):
             raise RuntimeError("relay durable receipt identity mismatch")
+        send_timing = {"fly_send_started_at_unix": round(send_wall, 6),
+                       "fly_send_rtt_s": round(time.perf_counter() - started, 6)}
         ack_state = None
         if payload.get("marketable_fallback"):
             commit_before_ack = lambda: _commit_marketable_relay_payload(payload)
@@ -10924,10 +11379,10 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
                     reason=f"relay_ack:{payload.get('event')}"
                 )
                 acknowledged = _relay_event_outbox.acknowledge(
-                    event_id, receipt, state_payload=ack_state
+                    event_id, receipt, state_payload=ack_state, send_timing=send_timing
                 )
         else:
-            acknowledged = _relay_event_outbox.acknowledge(event_id, receipt)
+            acknowledged = _relay_event_outbox.acknowledge(event_id, receipt, send_timing=send_timing)
         if not acknowledged:
             raise RuntimeError("relay outbox acknowledgement mismatch")
         _relay_push_state.update({
@@ -23846,11 +24301,14 @@ _RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "priced_delay_s", "as
                           "entry_walk_bp", "exit_walk_bp", "entry_delay_drift_usd", "entry_delay_drift_bp",
                           "exit_delay_drift_usd", "exit_delay_drift_bp", "exit_touch_drift_usd",
                           "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
-                          "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts")
+                          "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts",
+                          "entry_price_age_s", "exit_price_age_s", "exit_eval_price_age_s",
+                          "entry_book_age_ms", "exit_book_age_ms")  # R17 contract ages
 _RELOAD_INT_FIELDS = ("fill_model_version", "exit_legs", "exit_legs_unmeasured")
 _RELOAD_LITERAL_FIELDS = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
                           "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",
-                          "entry_provenance", "exit_provenance", "funding_settlement_rates")
+                          "entry_provenance", "exit_provenance", "funding_settlement_rates",
+                          "levels_crossed_unfired")
 
 
 def _restore_reloaded_row_types(trade: dict) -> None:
@@ -27698,13 +28156,16 @@ def _protective_exit_due(pos: dict, mark: float, now: float):
     """Cheap check: 'HARD_STOP' / 'TIME_BACKSTOP' when one is due on this mark, else None."""
     levels = _protective_exit_levels(pos)
     entry = _buf_float(pos.get("entry"), 0.0)
-    if not levels or entry <= 0 or not mark or mark <= 0:
+    if not levels or entry <= 0:
         return None
     hard_bp, time_sec = levels
-    sign = 1.0 if str(pos.get("dir") or "").upper() == "LONG" else -1.0
-    cur_bp = sign * (float(mark) - entry) / entry * 1e4
-    if cur_bp <= -hard_bp:
-        return "HARD_STOP"
+    # RK step 2: no fresh book row (mark 0 = STALE_BOOK) -> no price-level exit on this pass (it fires on the first
+    # fresh row); the TIME_BACKSTOP is a CLOCK exit and still fires (priced on the first book row at/after its time).
+    if mark and mark > 0:
+        sign = 1.0 if str(pos.get("dir") or "").upper() == "LONG" else -1.0
+        cur_bp = sign * (float(mark) - entry) / entry * 1e4
+        if cur_bp <= -hard_bp:
+            return "HARD_STOP"
     entry_ts = _buf_float(pos.get("entry_ts"), 0.0)
     if entry_ts > 0 and now - entry_ts >= time_sec:
         return "TIME_BACKSTOP"
@@ -27729,7 +28190,7 @@ def protective_exit_scan(now: float = None) -> int:
         _levels, _src, _why = _protective_exit_levels_ex(pos)
         coverage.append({"trade_id": str(pos.get("trade_id") or ""), "lane": pos.get("research_lane"),
                          "covered": bool(_levels and _levels[0] > 0), "source": _src, "reason": _why})
-        mark = get_mark_price(pos.get("dir"))
+        mark = get_mark_price(pos.get("dir"))  # book rows at wall now (RK step 2), never the ticker
         due = _protective_exit_due(pos, mark, now)
         if not due:
             continue
@@ -27823,7 +28284,7 @@ def process_positions():
         # Exit evaluation can close a position, persist research artifacts, and
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
-            mark = get_mark_price(pos.get("dir"), fallback=price)
+            mark = get_mark_price(pos.get("dir"))  # book rows at wall now (RK step 2), never the ticker
             # Closes run on their own thread: one trigger closing several tiles
             # must not queue each close behind the previous one's I/O (HM audit
             # 10 Oct: 6.9/9.6/12.0 s serialized PROFIT_PROTECTION_STOP burst).
@@ -29901,7 +30362,7 @@ def _tick_driven_position_exits(price: float):
                 if isinstance(p, dict) and p.get("status") == "OPEN"
             ]
         for pos in positions:
-            mark = get_mark_price(pos.get("dir"), fallback=price)
+            mark = get_mark_price(pos.get("dir"))  # book rows at wall now (RK step 2), never the ticker
             _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK", close_async=True)
         return True
     finally:
@@ -32305,6 +32766,7 @@ def close_position(pos: dict, exit_reason: str):
             funding_total=funding_total,
             net_pnl=net_pnl,
         )
+        _liq_row = _terminal_liq_fields(pos, price)  # RK/HM K1: stamp liq before _non_countable_reasons reads it
         trade_row = {
             "ts": close_iso,
             "close_ts": close_iso,
@@ -32405,7 +32867,14 @@ def close_position(pos: dict, exit_reason: str):
             # closes from strategy outcomes without re-deriving close_origin.
             "deploy_flatten": _forced_close_origin(exit_reason) == "DEPLOY_MAINTENANCE",
             # HM R8-live: force-flattened rows (deploy / operator / admin flatten) never count in any statistic.
-            "non_countable": str(exit_reason or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS,
+            # HM C2: a row priced with the default delay (live-ack pool n < 10, UNVERIFIED_DELAY) on either bot-sent
+            # leg is non_countable too (non_countable_reasons says why).
+            "non_countable": bool(_non_countable_reasons(pos, exit_reason)),
+            "non_countable_reasons": _non_countable_reasons(pos, exit_reason) or None,
+            **_liq_row,
+            **_exit_evidence_fields(pos),
+            **_r17_contract_fields(pos),  # R17 (#845): exact contract names on the closed row
+            "exit_order_class": pos.get("exit_order_class"),
             "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
             "r_multiple": round(r_multiple, 2),
             "ai_win_prob": pos.get("ai_win_prob") or master.get("ai_win_prob"),
@@ -32626,6 +33095,9 @@ def close_position(pos: dict, exit_reason: str):
             "exit_reason": exit_reason, "direction": pos.get("dir"),
             "exit_price": price,
             "research_lane": pos.get("research_lane") or (master or {}).get("research_lane"),
+            # RK (1): measured exit trigger + order class on the signed POSITION_CLOSED (static, so retries stay
+            # hash-identical); absent when unmeasured -> the live row stays non-countable.
+            **_relay_close_exit_stamps(pos, exit_reason),
         },
         target_mutator=target_mutator, live_mutator=live_mutator,
         canonical_lock=position_close_lock,
@@ -32829,21 +33301,26 @@ def _stamp_regime_at_signal(trade_row: dict, pos, master) -> None:
 
 
 def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
-    """HM-BATCH2: record the touch (bid/ask) at close on every closed row; never raises."""
+    """HM-BATCH2 / R3 (no ticker anywhere): record the book top at close on every closed row as COMPARISON columns only
+    (never pricing): exit_book_top_bid / exit_book_top_ask / exit_book_top_s from the latest complete bfx_book_10l_1s row
+    (paper_fill.book10l_at, the shared pricer's rows). The old exit_bid / exit_ask came from the WS-ticker microstructure
+    tape ring and are no longer written. A row older than max_age_sec is not stamped (exit_book_top_missing). Never raises.
+    HM R2 N-c: kept (not dead) - read by monitor_checks (exit spread check), data_gaps (exit_bid/ask columns) and
+    monitor_tiles (row view). Comparison only; no pricer or trigger reads these columns."""
     try:
+        import paper_fill as _pf
+        import quote_trigger as _qt
         now = time.time()
-        ts, rows = _TILE_TAPE_RING.slice(now - max_age_sec, now + 1)
-        if not rows:
-            trade_row.setdefault("exit_bbo_missing", True)
+        book = _pf.book10l_at(now)
+        s = float(book.get("s")) if isinstance(book, dict) and book.get("s") is not None else None
+        if s is None or now - (s + 1.0) > float(max_age_sec):
+            trade_row.setdefault("exit_book_top_missing", True)
             return
-        last = rows[-1]
-        if not isinstance(last, dict):  # TapeSliceRing stores value tuples in fields() order
-            last = dict(zip(_TILE_TAPE_RING.fields, last))
-        trade_row["exit_bid"] = last.get("bid")
-        trade_row["exit_ask"] = last.get("ask")
-        trade_row["exit_bbo_ts"] = ts[-1]
+        trade_row["exit_book_top_bid"] = _qt.exec_px("SHORT", "entry", book)  # best bid
+        trade_row["exit_book_top_ask"] = _qt.exec_px("LONG", "entry", book)   # best ask
+        trade_row["exit_book_top_s"] = s
     except Exception:
-        trade_row.setdefault("exit_bbo_missing", True)
+        trade_row.setdefault("exit_book_top_missing", True)
 _AI_SHADOW_BOOK = _ai_shadow.ChallengerBook()
 _AI_SHADOW_OI = _ai_shadow.OpenInterestHistory()
 _AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
@@ -33452,16 +33929,242 @@ def _xvl_wait_anchor_ready(deadline: float):
 
 
 _DISLOC_DELAYS = None
+PAPER_DELAY_POOL_FILE = "paper_delay_pool.json"  # F1 live-ack pool, persisted per DATA_EPOCH_ID (capped per lane/leg)
+_PAPER_DELAY_POOL_LOCK = threading.Lock()
 
 
-def _disloc_delay(lane: str, leg: str):
-    """Measured live delay per lane/leg (DelaySampler); default_until_n10 while live is OFF."""
+def _paper_delay_pool_path():
+    return _live_copy.data_path(PAPER_DELAY_POOL_FILE)
+
+
+def _paper_delay_sampler():
+    """The process-wide F1 DelaySampler, restored from the per-epoch pool file on first use (a file from another
+    DATA epoch is ignored, so a new epoch starts with an empty pool)."""
     global _DISLOC_DELAYS
     import paper_fill as _pf
     if _DISLOC_DELAYS is None:
-        _DISLOC_DELAYS = _pf.DELAYS or _pf.DelaySampler()
+        sampler = _pf.DELAYS or _pf.DelaySampler()
+        try:
+            path = _paper_delay_pool_path()
+            if path.is_file():
+                payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+                if sampler.load(payload, globals().get("DATA_EPOCH_ID")):
+                    _paper_exit_triggers_restore(payload)  # HM R2 N-d: same epoch only (load rejects others)
+                    _cross_lane_pool().load(payload.get(_live_ack_pool.POOL_KEY), globals().get("DATA_EPOCH_ID"))
+        except Exception as exc:  # noqa: BLE001 - an unreadable pool is an empty pool (default delay, UNVERIFIED)
+            logger.warning(f"[F1 DELAY POOL] load failed: {type(exc).__name__}")
+        _DISLOC_DELAYS = sampler
         _pf.DELAYS = _DISLOC_DELAYS
-    return _DISLOC_DELAYS.delay(lane, leg)
+    return _DISLOC_DELAYS
+
+
+def _paper_delay_pool_persist() -> bool:
+    with _PAPER_DELAY_POOL_LOCK:
+        try:
+            payload = _paper_delay_sampler().to_json(globals().get("DATA_EPOCH_ID"))
+            payload[PAPER_EXIT_TRIGGERS_KEY] = dict(list(_PAPER_EXIT_TRIGGERS.items())[-PAPER_EXIT_TRIGGERS_CAP:])
+            payload[_live_ack_pool.POOL_KEY] = _cross_lane_pool().to_json(globals().get("DATA_EPOCH_ID"))
+            return bool(_live_copy._atomic_write_json(_paper_delay_pool_path(), payload))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[F1 DELAY POOL] persist failed: {type(exc).__name__}")
+            return False
+
+
+def _paper_delay_pool_reset() -> None:
+    """Reset hook: the live-ack pool starts empty (persisted empty for the current epoch)."""
+    _paper_delay_sampler().clear()
+    _cross_lane_pool().clear()  # RK A: the cross-lane pool is per epoch too
+    _PAPER_EXIT_TRIGGERS.clear()
+    _paper_delay_pool_persist()
+
+
+import live_ack_pool as _live_ack_pool
+
+_CROSS_LANE_POOL = None
+
+
+def _cross_lane_pool():
+    """RK A: the ONE POOLED_LIVE_ACK_CROSS_LANE pool (live_ack_pool.CrossLanePool, extends the B1 DelaySampler),
+    restored with the B1 pool from paper_delay_pool.json (same epoch check)."""
+    global _CROSS_LANE_POOL
+    if _CROSS_LANE_POOL is None:
+        _CROSS_LANE_POOL = _live_ack_pool.CrossLanePool()
+    return _CROSS_LANE_POOL
+
+
+def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
+    """The paper delay for one lane/leg: the row's own signal->send + the pooled send->ack/fill of the shared
+    live_ack_pool (one definition: per order-type key, skew/boot/leg checks, n<10 fail closed, MAX at 10-19, q0.90 at
+    n>=20).  HM 02:55 N1: the old per-lane B1 DelaySampler is stamps-only and never prices a row (it is not split by
+    order type, has no skew/boot/leg checks or per-row s2s, and its exit sample was live ack - paper exit trigger);
+    a leg with no pool key fails closed (default delay, UNVERIFIED -> non-countable)."""
+    import paper_fill as _pf
+    _paper_delay_sampler()  # restores the per-epoch pool file (the cross-lane pool is persisted with it)
+    if pool_key is None:
+        return _pf.DEFAULT_DELAY_S, "default_until_n10"
+    pool = _cross_lane_pool()
+    try:
+        if pool.admit_pending(time.time(), _live_ack_pool.boot_log_path()):
+            _paper_delay_pool_persist()
+    except Exception as exc:  # noqa: BLE001 - admission failure only delays admission (fail closed)
+        logger.warning(f"[RK-A POOL] admit failed: {type(exc).__name__}")
+    d, src, _meta = pool.total(pool_key, own_signal_to_send_s)
+    return d, src
+
+
+def _iso_or_unix(v):
+    """Epoch seconds from an epoch number or an ISO-8601 string (Railway platform_received_at); None otherwise."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v) if v > 0 else None
+    if isinstance(v, str) and v.strip():
+        try:
+            return datetime.fromisoformat(v.strip().replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _fly_exit_send_record(trade_id: str):
+    """HM 01:43 blocker 1: this bot's own Fly exit-send stamps for a trade (the acknowledged POSITION_CLOSED relay
+    event): Fly intent (durable enqueue), the POST that got the durable ack + its RTT, Railway's durable receive and
+    the attempt count. None when the event was not acknowledged here (-> FLY_SEND_TS_MISSING, fail closed)."""
+    try:
+        rows = _relay_event_outbox.acknowledged_events(str(trade_id or ""))
+    except Exception:  # noqa: BLE001
+        return None
+    for row in reversed(rows or []):
+        if str(row.get("event_type") or "") != "POSITION_CLOSED":
+            continue
+        return {"fly_intent_at_ts": row.get("fly_intent_at_unix"),
+                "fly_send_started_at_ts": row.get("fly_send_started_at_unix"),
+                "fly_send_rtt_s": row.get("fly_send_rtt_s"),
+                "railway_received_at_ts": _iso_or_unix(row.get("platform_received_at")),
+                "attempts": row.get("fly_attempts"),
+                "exit_signal_at_ts": row.get("exit_signal_at_unix")}  # RK (1): POSITION_CLOSED exit_trigger_ts
+    return None
+
+
+def _paper_own_s2s_entry(order: dict):
+    """The row's OWN bot-side signal -> send (order created - signal created); None when either is missing."""
+    try:
+        sig, sent = float(order.get("signal_created_ts") or 0), float(order.get("created_ts") or 0)
+    except (TypeError, ValueError):
+        return None
+    return round(sent - sig, 6) if sig > 0 and sent >= sig else None
+
+
+def _paper_own_s2s_exit(t0, sent_ts):
+    """RK (2): a paper BOT_SENT exit's OWN trigger -> send, measured per row: the exit trigger (exit_trigger_ts) to
+    the close path's send code point (close_position stamps exit_sent_ts before pricing, the same point for live-
+    relayed and paper rows; _tp1_gate's marker for a partial leg). None when either is missing or the send precedes
+    the trigger (-> the pooled label carries default_own_s2s_missing -> UNVERIFIED -> non-countable)."""
+    try:
+        a, b = float(t0 or 0), float(sent_ts or 0)
+    except (TypeError, ValueError):
+        return None
+    return round(b - a, 6) if a > 0 and b >= a else None
+
+
+def _paper_entry_pool_key(order: dict, lane: str):
+    return _live_ack_pool.key_for("entry", entry_order_model=_paper_entry_order_model(order, lane).get("entry_order_model"))
+
+
+def _paper_delay_meta(lane: str, leg: str) -> dict:
+    try:
+        return _paper_delay_sampler().describe(lane, leg)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+_DELAY_STAMP_KEYS = ("delay_source_kind", "pool_n", "pool_ts", "quantile_method", "delay_unverified", "delay_flag")
+
+
+def _paper_stamp_pool(res, lane: str, leg: str):
+    """Stamp the F1 pool provenance (pool_ts included) on a fill result priced with this lane/leg's pool delay."""
+    if not isinstance(res, dict):
+        return res
+    if _live_ack_pool.is_pooled(res.get("delay_source")):
+        return _cross_lane_pool().stamp(res)  # RK A: POOLED_LIVE_ACK_CROSS_LANE provenance
+    meta = _paper_delay_meta(lane, leg)
+    if meta and str(res.get("delay_source") or "") == str(meta.get("delay_source") or ""):
+        res.update({k: meta.get(k) for k in _DELAY_STAMP_KEYS})
+        if leg in ("entry", "exit"):
+            # HM 01:43 item 5: the B1 lane pool is already END-TO-END (Fly signal / paper trigger -> live ack); the
+            # row's own signal->send is inside it and is never added again.
+            d = res.get("delay_s")
+            res.update({"delay_span": ("POOLED_FLY_SIGNAL_TO_ACK_END_TO_END" if leg == "entry"
+                                       else "POOLED_PAPER_TRIGGER_TO_EXIT_ACK_END_TO_END"),
+                        "sig_to_send_ms": None,
+                        "pool_send_to_ack_ms": round(float(d) * 1000) if isinstance(d, (int, float)) else None})
+    return res
+
+
+_PAPER_EXIT_TRIGGERS: dict = {}  # trade_id -> paper exit trigger ts (the anchor of that trade's live exit ack)
+PAPER_EXIT_TRIGGERS_KEY = "exit_triggers"  # HM R2 N-d: persisted in the same per-epoch pool file as the B1 pool
+PAPER_EXIT_TRIGGERS_CAP = 2000
+
+
+def _paper_exit_triggers_restore(payload) -> int:
+    """HM R2 N-d: restore the exit-leg anchors persisted with the B1 pool (caller has already checked schema + epoch),
+    so a live exit ack that lands after a restart still pairs with its paper exit trigger. In-memory entries win."""
+    raw = payload.get(PAPER_EXIT_TRIGGERS_KEY) if isinstance(payload, dict) else None
+    n = 0
+    for tid, t0 in list((raw if isinstance(raw, dict) else {}).items())[-PAPER_EXIT_TRIGGERS_CAP:]:
+        try:
+            v = float(t0)
+        except (TypeError, ValueError):
+            continue
+        if tid and math.isfinite(v) and v > 0:
+            _PAPER_EXIT_TRIGGERS.setdefault(str(tid), v)
+            n += 1
+    return n
+
+
+def _paper_note_exit_trigger(pos: dict, t0) -> None:
+    tid = str((pos or {}).get("trade_id") or "")
+    if tid and t0:
+        _paper_delay_sampler()  # restore the persisted anchors first (per epoch)
+        if tid in _PAPER_EXIT_TRIGGERS:
+            return
+        while len(_PAPER_EXIT_TRIGGERS) >= PAPER_EXIT_TRIGGERS_CAP:
+            _PAPER_EXIT_TRIGGERS.pop(next(iter(_PAPER_EXIT_TRIGGERS)))
+        _PAPER_EXIT_TRIGGERS[tid] = float(t0)
+        _paper_delay_pool_persist()  # HM R2 N-d: once per trade, survives restarts like the B1 pool
+
+
+def _paper_delay_observe_report(report: dict) -> dict:
+    """REALISM_V2 F1: feed the pool from a VERIFIED live executor report (live acks only, never paper), three legs:
+    entry = exchange_ack_at_ts - fly_signal_at_ts; exit = exit_ack_at_ts - this trade's paper exit trigger;
+    stop = stop_confirmed_at_ts - fill_at_ts (stamped only; it never times a fill). One sample per trade and leg.
+    Railway stamps acks on its clock, Fly stamps the signal on its own (both NTP)."""
+    import paper_fill as _pf
+    out = {}
+    if not isinstance(report, dict):
+        return out
+    tl = report.get("timeline") if isinstance(report.get("timeline"), dict) else {}
+    cid = str(report.get("correlation_id") or report.get("trade_id") or "")
+    lane = str(report.get("lane") or "").upper()
+    if not (cid and lane):
+        return out
+    sampler = _paper_delay_sampler()
+    trig = _PAPER_EXIT_TRIGGERS.get(cid) or _PAPER_EXIT_TRIGGERS.get(str(report.get("trade_id") or ""))
+    for leg, end_k, start in (("entry", "exchange_ack_at_ts", _pf._f(tl.get("fly_signal_at_ts"))),
+                              ("exit", "exit_ack_at_ts", _pf._f(trig)),
+                              ("stop", "stop_confirmed_at_ts", _pf._f(tl.get("fill_at_ts")))):
+        end = _pf._f(tl.get(end_k))
+        if end and start and end >= start and not sampler.has_trade(lane, leg, cid):
+            v = sampler.add(lane, leg, end - start, measured_ts=end, trade_id=cid)
+            if v is not None:
+                out[leg] = v
+    queued = []
+    try:  # RK A: the same verified report feeds the cross-lane send->ack pool (queued; admitted after the boot check)
+        queued = _cross_lane_pool().observe(report, book_at=_pf.book10l_at, missing_seconds=_pf.book10l_missing_seconds,
+                                            fly_exit_send=_fly_exit_send_record)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[RK-A POOL] observe failed: {type(exc).__name__}")
+    if out or queued:
+        _paper_delay_pool_persist()
+    return out
 
 
 def xvl_evaluator_loop():
@@ -35489,6 +36192,10 @@ def reset_all_research_files(*, archive_path: str = None) -> dict:
                 ],
             }
     deleted, errors = _delete_paths(live_paths)
+    try:
+        _paper_delay_pool_reset()  # F1: the live-ack delay pool is cleared at reset (persisted empty for the epoch)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"paper_delay_pool_reset: {type(exc).__name__}")
     # Fly runs from data/runtime while research/ is a sibling volume path
     # reached through a link. Use their verified common data root so the purge
     # guard accepts only that volume instead of falsely treating the canonical
@@ -61574,6 +62281,7 @@ def _live_copy_paper_twins() -> dict:
                     "exit_price": row.get("exit") or row.get("exit_price"),
                     "exit_ts": row.get("exit_ts") or row.get("close_ts"),
                     "exit_reason": row.get("exit_reason") or row.get("reason"),
+                    "exchange_stop_anchor_px": row.get("exchange_stop_anchor_px"),
                     **_twin_trigger_fields(row),
                 }
     except Exception:  # noqa: BLE001
@@ -61591,6 +62299,7 @@ def _live_copy_paper_twins() -> dict:
                             "exit_ts": row.get("ts"), "exit_reason": row.get("exit_reason"),
                             "entry_ts": row.get("entry_ts"), "signal_ts": row.get("signal_ts"),
                             "funding_usd_raw": row.get("funding_usd_raw"), "funding_fees_usd": row.get("funding_fees_usd"),
+                            "exchange_stop_anchor_px": row.get("exchange_stop_anchor_px"),
                             "source": "trade_outcome_journal", **_twin_trigger_fields(row)}
     except Exception:  # noqa: BLE001 - twin lookup is best-effort, fail closed
         pass
@@ -61908,6 +62617,11 @@ def api_live_copy_execution_report():
     stored, why = _get_live_copy_journal().append(report)
     if not stored:
         return jsonify({"ok": False, "error": why}), 503
+    if why != "DUPLICATE":
+        try:
+            _paper_delay_observe_report(report)  # REALISM_V2 F1: live acks are the only delay samples
+        except Exception as exc:  # noqa: BLE001 - a stored report is never rejected
+            logger.warning(f"[F1 DELAY POOL] observe failed: {type(exc).__name__}")
     protection = None
     if report.get("type") == "STOP_CONFIRMED" and why != "DUPLICATE":
         protection = _get_live_copy_protection().record_stop_confirmation(report)
@@ -62073,6 +62787,7 @@ def _live_copy_monitor_context() -> dict:
         "journal_write_failures": journal.write_failures,
         "ingest_rejects": list(_live_copy_ingest_rejects),
         "paper_twins": _live_copy_paper_twins(),
+        "fly_exit_send": _fly_exit_send_record,  # HM 01:43 item 3: live exit legs (callable; not serialised)
         "relay": {
             "pending": _relay_event_outbox.pending_count() if _relay_event_outbox else None,
             "live_copy_outbox": _get_live_copy_outbox().status(),

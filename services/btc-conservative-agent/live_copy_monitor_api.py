@@ -375,7 +375,8 @@ def live_vs_paper_route():
     out = lvp.build(accts, twins, intents,
                     paper_signal_ids=[c for c, i in intents.items() if not lane or lane in str(i.get("lane") or "").upper()],
                     skip_reasons=ctx.get("live_skip_reasons") or {}, lane_filter=None if not lane else
-                    (lambda ch, tw: _keep(ch, tw) if ch else True), limit=limit)
+                    (lambda ch, tw: _keep(ch, tw) if ch else True), limit=limit,
+                    exit_send_for=ctx.get("fly_exit_send"))
     return _ok(out)
 
 
