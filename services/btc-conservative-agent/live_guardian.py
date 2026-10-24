@@ -45,8 +45,12 @@ VIOL_LIVE_TOTAL_LOSS_CAP = "LIVE_TOTAL_LOSS_CAP"
 VIOL_LIVE_TOTAL_LOSS_CAP_ERROR = "LIVE_TOTAL_LOSS_CAP_ERROR"
 VIOL_LIVE_TOTAL_LOSS_UNREADABLE = "LIVE_TOTAL_LOSS_UNREADABLE"
 LIVE_TOTAL_LOSS_RED_CODES = frozenset({VIOL_LIVE_TOTAL_LOSS_CAP, VIOL_LIVE_TOTAL_LOSS_CAP_ERROR})
+# R20 (supersedes AMEND4 E1): a DAILY cap hit (or its evaluation error) also disarms ALL + force-flat + RED latch; it stays
+# in ENTRY_BLOCK_CODES too, so the entry block is kept. Unreadable pnl / stale book remain entry blocks only.
+DAILY_CAP_DISARM_CODES = frozenset({"DAILY_LOSS_CAP", _ltg_caps.VIOL_TILE_LOSS_CAP, _ltg_caps.VIOL_TOTAL_LOSS_CAP,
+                                    _ltg_caps.VIOL_TOTAL_LOSS_CAP + "_ERROR"})
 RED_CODES = (frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN, _ltg_caps.LIQ_CHECK_FLATTEN})
-             | STOP_UNPROTECTED_RED_CODES | LIVE_TOTAL_LOSS_RED_CODES)
+             | STOP_UNPROTECTED_RED_CODES | LIVE_TOTAL_LOSS_RED_CODES | DAILY_CAP_DISARM_CODES)
 
 
 def total_live_loss_violations(chains: Iterable[Mapping[str, Any]]) -> list:
@@ -136,7 +140,7 @@ def latch_red(state: dict, red: Mapping[str, Any]) -> dict:
 
 # AMEND5 G4(b) (L22): the L-10 clamp with the exchange stop resident flattens THAT position only - no disarm, no RED.
 POSITION_FLATTEN_CODES = frozenset({_ltg_caps.LIQ_CLAMP_FLATTEN})
-# AMEND4 E1 (L12): the daily loss caps (and an unreadable realised pnl / open mark, a book > 2 s) are an
+# AMEND4 E1 (L12; daily-cap hits superseded by R20 -> also disarm+flatten+RED, see DAILY_CAP_DISARM_CODES): the daily loss caps (and an unreadable realised pnl / open mark, a book > 2 s) are an
 # ENTRY BLOCK ONLY (AMBER): reported, enforced in live_tile_gate.admit_entry, never a disarm and never a close. The response
 # is the one switchable live_tile_gate.cap_breach_response().
 ENTRY_BLOCK_CODES = frozenset({"DAILY_LOSS_CAP", VIOL_LIVE_TOTAL_LOSS_UNREADABLE, _ltg_caps.VIOL_TILE_LOSS_CAP, _ltg_caps.VIOL_TOTAL_LOSS_CAP,
@@ -148,9 +152,13 @@ def split_violations(viol: Iterable[Mapping[str, Any]]) -> tuple[list, list]:
     """(disarm, entry_block). Entry-block codes only disarm if cap_breach_response() is ever switched away from ENTRY_BLOCK.
     AMEND5 G4(b) position-only codes (POSITION_FLATTEN_CODES) are in neither list: see position_flatten_violations()."""
     viol = [v for v in (viol or []) if (v or {}).get("code") not in POSITION_FLATTEN_CODES]
-    if _ltg_caps.cap_breach_response() != _ltg_caps.CAP_RESPONSE_ENTRY_BLOCK:
+    amber = [v for v in viol if v.get("code") in ENTRY_BLOCK_CODES]
+    disarm = [v for v in viol if v.get("code") not in ENTRY_BLOCK_CODES]
+    if _ltg_caps.cap_breach_response() == _ltg_caps.CAP_RESPONSE_DISARM_FLATTEN:   # R20: daily-cap hits in BOTH lists
+        disarm += [v for v in amber if v.get("code") in DAILY_CAP_DISARM_CODES]
+    elif _ltg_caps.cap_breach_response() != _ltg_caps.CAP_RESPONSE_ENTRY_BLOCK:
         return viol, []
-    return [v for v in viol if v.get("code") not in ENTRY_BLOCK_CODES], [v for v in viol if v.get("code") in ENTRY_BLOCK_CODES]
+    return disarm, amber
 
 
 def position_flatten_violations(viol: Iterable[Mapping[str, Any]]) -> list:

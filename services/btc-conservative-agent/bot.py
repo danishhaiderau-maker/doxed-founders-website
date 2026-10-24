@@ -50604,7 +50604,8 @@ def _live_guardian_tick(now=None) -> list:
                        f"d3_loss=${_rec.get('d3_loss_usd')} gap=${_rec.get('gap_usd')} drift=${_rec.get('drift_usd')}")
     # AMEND5 G4(b) (L22): LIQ_CLAMP_FLATTEN => flatten THAT position only (relay ops/position-flatten: no pause, no disarm)
     _posf = _lg.position_flatten_violations(viol)
-    # AMEND4 E1 (L12): cap / unreadable-PnL / stale-book codes are AMBER ENTRY BLOCKS only (never a disarm or force-flat);
+    # AMEND4 E1 (L12): unreadable-PnL / stale-book codes are AMBER ENTRY BLOCKS only. R20 (Danish 25 Oct 06:21, supersedes E1):
+    # daily-cap hits are ALSO in the disarm list (disarm ALL + force-flat + RED latch) while keeping the entry block;
     # _live_tile_admission refuses new live entries while a fresh AMBER is held (stamped LIVE_SKIPPED_DAILY_CAP).
     viol, amber = _lg.split_violations(viol)
     _LIVE_GUARDIAN_STATE["amber"] = ({"ts": now, "codes": sorted({v["code"] for v in amber}),

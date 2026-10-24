@@ -107,7 +107,8 @@ def test_guardian_daily_cap_counts_open_position_marked_to_book_via_shared_d3():
         v = g.evaluate([open_c], m, st, NOW, book={"ts": NOW})
         assert {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} <= codes(v), v
         dis, amber = g.split_violations([x for x in v if x["code"] in (ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP)])
-        assert dis == [] and amber, "D3 cap is an AMBER entry block, never a disarm"
+        # R20 (supersedes AMEND4 E1): a D3 cap hit disarms ALL + force-flat + RED AND keeps the entry block
+        assert dis and dis == amber and {x["code"] for x in dis} <= g.RED_CODES
         assert st["d3"]["open_mark_loss"] == 0.2 and calls
         ltg.open_mark_to_book_loss = lambda p, book, now: (0.20, {"book_age_s": 3.0})   # book older than 2 s => block
         v = g.evaluate([open_c], m, {}, NOW, book={"ts": NOW - 3})
@@ -216,13 +217,13 @@ def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_co
             ns["_LIVE_GUARDIAN_STATE"]["calc"]["orphan_since"] = now - 10
         v = ns["_live_guardian_tick"](now)
         assert code in {x["code"] for x in v} and calls and code in calls[0], code
-    # AMEND4 E1 (L12): a daily-loss-cap breach is an AMBER entry block only - never a disarm, never a force-flat
+    # R20 (supersedes AMEND4 E1): a daily-loss-cap breach disarms ALL + force-flat + RED latch AND keeps the entry block
     ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100, exit_fill_at_ts=n - 100,
                                              exit_at_ts=n - 100)], _mir(), None)
     ns["_live_guardian_tick"](now)
-    # ...the daily code stays AMBER; the disarm (+force-flat) here comes ONLY from the R20 total cap ($1.20 >= $0.10)
-    assert "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])
-    assert calls == ["AUTO_DISARM:LIVE_TOTAL_LOSS_CAP"], calls
+    assert "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])   # entry block kept
+    assert len(calls) == 1 and "DAILY_LOSS_CAP" in calls[0] and "LIVE_TOTAL_LOSS_CAP" in calls[0], calls
+    assert "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"].get("red_alert") or {}).get("codes", [])   # RED latched
     ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 99, stop_confirmed=True)], {"ok": False, "error": "stale"})
     ns["_LIVE_GUARDIAN_STATE"]["calc"]["blind_since"] = now - 40
     v = ns["_live_guardian_tick"](now)

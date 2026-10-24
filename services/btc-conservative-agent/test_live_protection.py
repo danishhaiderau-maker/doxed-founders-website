@@ -76,7 +76,7 @@ def test_e1_open_mark_to_book_counts_against_the_cap_and_unreadable_blocks():
     assert {b["code"] for b in blocks} >= {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} and info["open_mark_loss"] > 0.5
     blocks, _ = ltg.daily_cap_entry_block([], mirror([pos], [STOP_L]), book(size=0.0001), NOW, "gs1")
     assert "OPEN_MARK_UNREADABLE" in {b["code"] for b in blocks}
-    assert ltg.cap_breach_response() == ltg.CAP_RESPONSE_ENTRY_BLOCK
+    assert ltg.cap_breach_response() == ltg.CAP_RESPONSE_DISARM_FLATTEN   # R20 supersedes AMEND4 E1
 
 
 def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():

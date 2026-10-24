@@ -74,3 +74,24 @@ def test_no_route_env_or_setter_can_change_it():
         else:
             assert hits == [], (p.name, hits)
     assert "LIVE_TOTAL_LOSS_CAP_USD" not in (HERE / "bot.py").read_text(encoding="utf-8", errors="ignore")
+
+
+def test_r20_daily_cap_hit_disarms_flattens_red_and_keeps_entry_block():
+    assert ltg.cap_breach_response() == ltg.CAP_RESPONSE_DISARM_FLATTEN
+    for code in ("DAILY_LOSS_CAP", ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP + "_ERROR"):
+        v = [{"code": code, "tile": None, "detail": "x"}]
+        disarm, amber = lg.split_violations(v)
+        assert disarm == v and amber == v and code in lg.RED_CODES, code
+    # unreadable pnl / stale book stay entry blocks only (no force-flat on a reporting gap)
+    for code in (ltg.VIOL_PNL_UNREADABLE, "OPEN_MARK_UNREADABLE", ltg.AMBER_BOOK_STALE, lg.VIOL_LIVE_TOTAL_LOSS_UNREADABLE):
+        v = [{"code": code, "tile": None, "detail": "x"}]
+        assert lg.split_violations(v) == ([], v), code
+
+
+def test_cap_response_has_no_setter():
+    import inspect
+    src = inspect.getsource(ltg.cap_breach_response)
+    assert "environ" not in src and "getenv" not in src and "return CAP_RESPONSE_DISARM_FLATTEN" in src
+    for p in HERE.glob("*.py"):
+        if not p.name.startswith("test_"):
+            assert not re.search(r"cap_breach_response\s*=|setattr\([^)]*cap_breach_response", p.read_text(errors="ignore")), p.name
