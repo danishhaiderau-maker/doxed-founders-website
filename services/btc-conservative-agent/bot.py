@@ -49004,7 +49004,8 @@ def monitor_exit_lag():
         except ValueError:
             raise monitor_tiles.BadRequest("BAD_ARGS")
         closed = _exit_latency_closed_trade_rows(_elr.DEPLOY_TS - 3600)
-        chains = _tile_integrity_chains(now)
+        _snap = _LIVE_GUARDIAN_STATE.get("exit_lag_chains") or (None, [])
+        chains_ts, chains = _snap[0], list(_snap[1] or [])   # guardian tick snapshot (no lock, no provider call)
         try:
             epoch = _offline_sim_epoch_floor()
         except Exception:  # noqa: BLE001 - read-only view; an unreadable epoch scopes nothing out (fail closed: n may only shrink)
@@ -49024,7 +49025,8 @@ def monitor_exit_lag():
                            "exit_reason": c.get("exit_reason"), **_elr.live_exit_stamp_check(row)})
         legacy = {**_elr.arm_gate(closed, required=req), "scope": {"since_ts": _elr.DEPLOY_TS, "required": req},
                   "recomputed_p95": dict(_elr.RECOMPUTED_P95)}
-        return {**gate, **_monitor_tiles_common(now), "live_epoch_ts": epoch, "live_exit_stamps": stamps,
+        return {**gate, **_monitor_tiles_common(now), "live_epoch_ts": epoch, "live_chains_snapshot_ts": chains_ts,
+                "live_exit_stamps": stamps,
                 "live_exit_stamps_missing": [x["correlation_id"] for x in stamps if x.get("missing")],
                 "legacy_v1": legacy}
 
@@ -50564,6 +50566,8 @@ def _live_guardian_tick(now=None) -> list:
             _live_guardian_red_clear_if_flat(now)   # RK (1): never before the post-restart exchange reconcile
         return []
     chains = _tile_integrity_chains(now)
+    # read-only snapshot for /api/monitor/exit-lag (the route must not build chains itself: the provider takes trade_lock)
+    _LIVE_GUARDIAN_STATE["exit_lag_chains"] = (now, list(chains))
     _floor_fn = globals().get("_offline_sim_epoch_floor")
     if _floor_fn is None:
         raise RuntimeError("live guardian: epoch floor function missing (refusing to evaluate without the fresh-epoch filter)")
@@ -50741,7 +50745,7 @@ def monitor_live_guardian_route():
             "active": bool(_get_live_copy_output().snapshot().get("enabled")),
             "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
             "heartbeat_stale": _live_guardian_heartbeat_stale(), "heartbeat_stale_after_sec": _lg.HEARTBEAT_STALE_SEC,
-            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc")},
+            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc", "exit_lag_chains")},
             "calc": {**{k: v for k, v in (_LIVE_GUARDIAN_STATE.get("calc") or {}).items() if k != "flat_hist"},
                      "flat_hist_n": len((_LIVE_GUARDIAN_STATE.get("calc") or {}).get("flat_hist") or [])}}
     return _monitor_response(body, 32768)

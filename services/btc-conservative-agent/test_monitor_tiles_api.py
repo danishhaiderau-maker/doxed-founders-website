@@ -593,7 +593,7 @@ def test_exit_lag_arm_gate_route(bot, monkeypatch):
     chains = [{"correlation_id": "gs1-live", "closed": True, "exit_order_class": "BOT_SENT", "exit_reason": "TP",
                "exit_fill_at_ts": t + 30, "exit_ack_at_ts": t + 29}]
     monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: rows)
-    monkeypatch.setattr(bot, "_tile_integrity_chains", lambda now: chains)
+    monkeypatch.setitem(bot._LIVE_GUARDIAN_STATE, "exit_lag_chains", (t + 40, chains))
     r = _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required=3)
     assert r.status_code == 200
     body = r.get_json()
