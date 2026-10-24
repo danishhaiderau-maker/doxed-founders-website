@@ -35203,7 +35203,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 # bearer), checked in each handler; never public, never a write.
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
-    "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
+    "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency", "/api/monitor/exit-lag",
     "/api/monitor/tiles/field-completeness",
     # API-GAP-SWEEP-20261012
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
@@ -48970,6 +48970,26 @@ def monitor_exit_latency():
                 "window_hours": hours, "slo": slo, "per_tile": tiles,
                 "unfilled_orders": unfilled, "book_gaps": _exit_latency_book_gaps(hours),
                 "protective_exit_worker": protective_exit_snapshot(), "rows": recent[-nrows:] if nrows else []}
+
+    return _monitor_tiles_guard(build, 1_500_000)
+
+
+@app.route('/api/monitor/exit-lag', methods=["GET"])
+def monitor_exit_lag():
+    """RK ruling 22:32 AEDT arm gate (read-only, admin or MONITOR_READ_TOKEN): CONSECUTIVE post-346ef2bf exits with
+    decision - trigger-row WS_FRAME receive_ts <= the old p95 (0.062 s). REGRESSION / UNMEASURED exits end the run.
+    ?required=N adds armable = run >= N."""
+    import exit_lag_regression as _elr
+
+    def build(now):
+        try:
+            req = request.args.get("required")
+            req = None if req in (None, "") else max(0, min(100000, int(req)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("BAD_ARGS")
+        closed = _exit_latency_closed_trade_rows(_elr.DEPLOY_TS - 3600)
+        return {**_elr.arm_gate(closed, required=req), **_monitor_tiles_common(now),
+                "scope": {"since_ts": _elr.DEPLOY_TS, "required": req}, "recomputed_p95": dict(_elr.RECOMPUTED_P95)}
 
     return _monitor_tiles_guard(build, 1_500_000)
 
