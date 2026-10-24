@@ -1067,7 +1067,7 @@ def test_852_l27_fly_protection_bootstrap_rearm_refuses_per_lane(monkeypatch):
     import types
     # HM C-R3-3: never overwrite the real registry for the rest of the session (monkeypatch restores it)
     import combo_pathway_config as _cpc
-    monkeypatch.setattr(_cpc, "ACTIVE_TILE_REGISTRY", {"GS01": {}})
+    monkeypatch.setattr(_cpc, "ACTIVE_TILE_REGISTRY", {"GS01": {"id_prefix": "gs1"}})
     boot = types.SimpleNamespace(snapshot=lambda: {"lanes": {}}, enable=lambda *a, **k: (True, {}),
                                  disable=lambda **k: {})
     tile_src = _SRC[_SRC.index("def _live_guardian_tile_arm_block"):_SRC.index("\ndef ", _SRC.index("def _live_guardian_tile_arm_block") + 10)]

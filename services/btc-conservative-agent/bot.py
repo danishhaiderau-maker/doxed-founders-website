@@ -63321,6 +63321,10 @@ def api_live_copy_protection_bootstrap():
         if lane not in ACTIVE_TILE_REGISTRY:
             results[lane] = {"ok": False, "error": "LANE_NOT_ACTIVE"}
             continue
+        import live_tile_gate as _ltg_allow
+        if _ltg_allow.operator_eligibility_refusal(lane) is not None:   # RK 06:35 (3) arm allowlist
+            results[lane] = {"ok": False, "error": "LANE_NOT_ARM_ALLOWLISTED"}
+            continue
         if not _get_live_copy_eligibility().is_eligible(lane):
             results[lane] = {"ok": False, "error": "LANE_NOT_OPERATOR_ELIGIBLE"}
             continue
@@ -63718,10 +63722,12 @@ def api_bitfinex_tile_live_orders(lane: str):
         return jsonify({"error": "'enabled' must be a JSON boolean",
                         "example": {"enabled": True}}), 400
     if enabled:
-        from combo_pathway_config import RETIRED_TILE_LANES as _retired_lanes
-        if lane in _retired_lanes:
-            # Retired tiles stay OFF across deploys and restores (owner rule).
-            return jsonify({"ok": False, "error": "TILE_RETIRED", "lane": lane,
+        # RK 25 Oct 06:35 (3): ALLOWLIST, not a per-name retired denylist: every lane except GS01 and gf3 (gf3 only with
+        # its own LIVE_HM_GATE_FADE3=PASS:<ref>, unset) is refused - retired, unknown or any string.
+        import live_tile_gate as _ltg_allow
+        _arm_refusal = _ltg_allow.operator_eligibility_refusal(lane)
+        if _arm_refusal is not None:
+            return jsonify({"ok": False, "error": "LANE_NOT_ARM_ALLOWLISTED", "reason": _arm_refusal, "lane": lane,
                             "bitfinex_live_orders": False}), 409
     sw = _get_bfx_live_switch()
     if enabled:

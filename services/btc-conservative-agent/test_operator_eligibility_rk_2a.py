@@ -44,3 +44,32 @@ def test_gf3_needs_its_own_hm_gate():
     assert ltg.operator_eligibility_refusal("GS01", reg, env={}) is None
     assert ltg.operator_eligibility_refusal("GS06", reg, env={"LIVE_HM_GATE_FADE3": "PASS:x"}) == "TILE_NEVER_OPERATOR_ELIGIBLE"
     assert ltg.operator_eligibility_refusal("NOPE", reg) == "TILE_NEVER_OPERATOR_ELIGIBLE"
+
+
+# ---- RK 25 Oct 06:35 (3): arming is an allowlist (gs1, gf3 + HM gate); no per-name denylist
+import pathlib
+import pytest
+
+_NAMES = ["DISLOC", "DISLOC-FOI", "H-A", "ROUTER", "FADE_POOL", "GS07", "zz-arbitrary string", "", "GS01 ", "gs1"]
+
+
+@pytest.mark.parametrize("name", _NAMES)
+def test_unknown_and_retired_names_refused(name, monkeypatch):
+    monkeypatch.delenv("LIVE_HM_GATE_FADE3", raising=False)
+    assert ltg.operator_eligibility_refusal(name) is not None, name
+
+
+def test_switch_evaluate_refuses_non_allowlisted_lanes(tmp_path, monkeypatch):
+    import bitfinex_live_switch as bls
+    monkeypatch.delenv("LIVE_HM_GATE_FADE3", raising=False)
+    sw = bls.BitfinexLiveSwitch(sidecar=tmp_path / "sw.json")
+    for name in _NAMES + [l for l in ACTIVE_TILE_ORDER if str(ACTIVE_TILE_REGISTRY[l].get("id_prefix")).lower() != "gs1"]:
+        d = sw.evaluate(name, operator_eligible=True)["denials"]
+        assert any(x.startswith(bls.DENY_LANE_NOT_ARM_ALLOWLISTED) for x in d), (name, d)
+
+
+def test_route_uses_allowlist_not_retired_denylist():
+    src = (pathlib.Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8", errors="ignore")
+    start = src.index("def api_bitfinex_tile_live_orders")
+    body = src[start:start + 3000]
+    assert "operator_eligibility_refusal(lane)" in body and "RETIRED_TILE_LANES" not in body
