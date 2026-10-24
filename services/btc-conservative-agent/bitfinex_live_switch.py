@@ -87,6 +87,9 @@ DENY_QTY_UNAVAILABLE = "EXCHANGE_QUANTITY_UNAVAILABLE"
 DENY_STOP_COVERAGE = "STOP_COVERAGE_UNVERIFIED"
 DENY_REDUCE_ONLY = "REDUCE_ONLY_UNSUPPORTED"
 DENY_SWITCH_NOT_REQUESTED = "SWITCH_NOT_REQUESTED"
+# RK 25 Oct 06:35 (3): arming is an ALLOWLIST (live_tile_gate.OPERATOR_ELIGIBLE_TILE_KEYS = gs1, gf3 + its HM gate);
+# every other lane - retired, unknown, any string - is refused. No per-name denylist.
+DENY_LANE_NOT_ARM_ALLOWLISTED = "LANE_NOT_ARM_ALLOWLISTED"
 DENY_TILE_PRE_ARMING = "TILE_LIVE_SWITCH_PRE_ARMING"
 # Terminal state meaning the lane is genuinely allowed and armed.
 ALLOW_ARMED = "ARMED"
@@ -255,6 +258,15 @@ class BitfinexLiveSwitch:
         s = size_checks or {}
         spec = self._registry_spec(lane)
         denials: list[str] = []
+
+        # 0. RK 06:35 (3): the arm allowlist (fail closed on any lookup error).
+        try:
+            import live_tile_gate as _ltg
+            _refusal = _ltg.operator_eligibility_refusal(lane, {lane: dict(spec or {})})
+        except Exception:  # noqa: BLE001
+            _refusal = "OPERATOR_ELIGIBILITY_UNREADABLE"
+        if _refusal is not None:
+            denials.append(f"{DENY_LANE_NOT_ARM_ALLOWLISTED}:{_refusal}")
 
         # 1. Global relay/arm gate.
         if g.get("force_paper_mode", True):

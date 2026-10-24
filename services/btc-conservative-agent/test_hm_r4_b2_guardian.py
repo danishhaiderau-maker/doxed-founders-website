@@ -216,5 +216,7 @@ def test_every_d3_code_is_an_entry_block_code():
     rows = [_real(-6.0, fill_at_ts=now - 900, closed_at_ts=now - 600, exit_fill_at_ts=now - 600), _nofill(fill_at_ts=now - 500, closed_at_ts=now - 400, exit_fill_at_ts=now - 400)]
     seen = set(_codes(g.evaluate(rows, MIR, {}, now))) | set(_codes(ltg.daily_loss_violations(rows, now)))
     assert {"DAILY_LOSS_CAP", ltg.VIOL_PNL_UNREADABLE, ltg.VIOL_TOTAL_LOSS_CAP} <= seen
-    produced_d3 = seen & (d3 | {c for c in seen if "LOSS" in c or "PNL" in c})
+    # R20 (Danish 25 Oct 06:21): the TOTAL (all-time) live-loss cap is NOT a D3 code: it is RED (disarm ALL + force-flat)
+    assert g.VIOL_LIVE_TOTAL_LOSS_CAP in seen and g.VIOL_LIVE_TOTAL_LOSS_CAP not in g.ENTRY_BLOCK_CODES
+    produced_d3 = seen & (d3 | {c for c in seen if "LOSS" in c or "PNL" in c}) - g.LIVE_TOTAL_LOSS_RED_CODES
     assert produced_d3 <= g.ENTRY_BLOCK_CODES, produced_d3

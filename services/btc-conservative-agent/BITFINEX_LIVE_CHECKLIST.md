@@ -21,3 +21,16 @@ Code helper: `services/btc-conservative-agent/bitfinex_live_checklist.py`
 - Clearing `FORCE_PAPER`
 - Setting `live_armed=true`
 - Enabling Bitfinex copy of paper intents
+
+## Guardian REDs that need an operator ack (PR #876, HM R4)
+
+The guardian latches these REDs **ack-only**. Going FLAT does not clear them. Each one needs
+`POST /api/live-copy/guardian/red-ack`, with strict admin auth, a named actor, a reason, the exact current code and
+FLAT evidence newer than the RED:
+
+- **R20 daily-cap REDs** (`DAILY_CAP_DISARM_CODES`). Every daily-cap hit needs a fresh ack. This is stricter than the old
+  self-clear-on-flat behaviour, and that is intended.
+- **R20 all-time total-loss REDs** (`LIVE_TOTAL_LOSS_RED_CODES`). Even after an ack, arming and `admit_entry` re-compute the
+  all-time cap and stay refused while it is breached or unreadable.
+- **`LIQ_CLAMP_FLATTEN_UNCONFIRMED`**.
+- **`GUARDIAN_STATE_UNREADABLE`**. An unreadable or missing state file may have held a cap latch, so this RED fails closed.

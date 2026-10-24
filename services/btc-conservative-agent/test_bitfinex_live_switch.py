@@ -294,8 +294,7 @@ def test_restart_clears_live_request(tmp_path):
 
 
 def test_held_request_promotes_once_gates_pass(tmp_path):
-    from combo_pathway_config import ACTIVE_TILE_ORDER
-    lane = ACTIVE_TILE_ORDER[0]
+    from combo_pathway_config import RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP as lane   # RK 06:35 (3): arm allowlist
     sw = BitfinexLiveSwitch(tmp_path / "sw.json")
     sw.request_on(lane, global_arm=_global_arm(), size_checks=_size_checks(stop_coverage_verified=False),
                   operator_eligible=True)

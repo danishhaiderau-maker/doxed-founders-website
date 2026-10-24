@@ -107,7 +107,8 @@ def test_guardian_daily_cap_counts_open_position_marked_to_book_via_shared_d3():
         v = g.evaluate([open_c], m, st, NOW, book={"ts": NOW})
         assert {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} <= codes(v), v
         dis, amber = g.split_violations([x for x in v if x["code"] in (ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP)])
-        assert dis == [] and amber, "D3 cap is an AMBER entry block, never a disarm"
+        # R20 (supersedes AMEND4 E1): a D3 cap hit disarms ALL + force-flat + RED AND keeps the entry block
+        assert dis and dis == amber and {x["code"] for x in dis} <= g.RED_CODES
         assert st["d3"]["open_mark_loss"] == 0.2 and calls
         ltg.open_mark_to_book_loss = lambda p, book, now: (0.20, {"book_age_s": 3.0})   # book older than 2 s => block
         v = g.evaluate([open_c], m, {}, NOW, book={"ts": NOW - 3})
@@ -216,11 +217,13 @@ def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_co
             ns["_LIVE_GUARDIAN_STATE"]["calc"]["orphan_since"] = now - 10
         v = ns["_live_guardian_tick"](now)
         assert code in {x["code"] for x in v} and calls and code in calls[0], code
-    # AMEND4 E1 (L12): a daily-loss-cap breach is an AMBER entry block only - never a disarm, never a force-flat
+    # R20 (supersedes AMEND4 E1): a daily-loss-cap breach disarms ALL + force-flat + RED latch AND keeps the entry block
     ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100, exit_fill_at_ts=n - 100,
                                              exit_at_ts=n - 100)], _mir(), None)
     ns["_live_guardian_tick"](now)
-    assert calls == [] and "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])
+    assert "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])   # entry block kept
+    assert len(calls) == 1 and "DAILY_LOSS_CAP" in calls[0] and "LIVE_TOTAL_LOSS_CAP" in calls[0], calls
+    assert "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"].get("red_alert") or {}).get("codes", [])   # RED latched
     ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 99, stop_confirmed=True)], {"ok": False, "error": "stale"})
     ns["_LIVE_GUARDIAN_STATE"]["calc"]["blind_since"] = now - 40
     v = ns["_live_guardian_tick"](now)
@@ -551,6 +554,7 @@ def _ff_ns():
           "_live_guardian_persist": lambda: True, "_disarm_live_control": lambda reason: None}
     exec(src, ns)
     ns["_live_fences_arm_block"] = lambda: None   # live_fences health: test_live_fences_health.py
+    ns["_live_total_loss_arm_block"] = lambda: None   # R20 total cap at arm: test_live_total_loss_cap.py
     return ns
 
 
@@ -656,3 +660,32 @@ def test_rk3_evidence_read_timeout_is_stamped_e6_read_timeout():
     sf2 = [v for v in g.evaluate([c], {"ok": False, "error": "HTTP 500"}, st2, NOW + 11, book=None)
            if v["code"] == g._ltg_caps.STOP_FAILURE_FLATTEN]
     assert sf2 and sf2[0]["cause"] == "EXCHANGE_READ_FAILED"
+
+
+def _r20_tick(chains_fn):
+    FF.clear()
+    ns, calls = _tick_ns(True, chains_fn, _mir(), None)
+    v = ns["_live_guardian_tick"](_t.time())
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    return {x["code"] for x in v}, calls, list(FF), (st.get("red_alert") or {}).get("codes", []), (st.get("amber") or {}).get("codes", [])
+
+
+def test_r20_daily_cap_hit_alone_disarms_force_flats_and_latches_red():
+    """R20 (Danish 25 Oct 06:21, supersedes AMEND4 E1): a DAILY cap hit (here $0.06 on one tile today: tile cap $0.05,
+    total $0.06 < every total cap) disarms ALL, force-flats, latches RED and keeps the entry block."""
+    codes, calls, ff, red, amber = _r20_tick(lambda n: [ch(correlation_id="gs1-r20", lane=None, fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-0.06,
+                                                          closed_at_ts=n - 100, exit_fill_at_ts=n - 100, exit_at_ts=n - 100)])
+    import live_tile_gate as ltg
+    assert ltg.VIOL_TILE_LOSS_CAP in codes and g.VIOL_LIVE_TOTAL_LOSS_CAP not in codes, codes
+    assert len(calls) == 1 and ltg.VIOL_TILE_LOSS_CAP in calls[0] and ff == calls
+    assert ltg.VIOL_TILE_LOSS_CAP in red and ltg.VIOL_TILE_LOSS_CAP in amber
+
+
+def test_r20_total_cap_hit_alone_disarms_force_flats_and_latches_red():
+    """R20: the TOTAL (all-time) cap: $0.04 lost on each of 3 earlier days (no daily cap hit) = $0.12 >= $0.10."""
+    def rows(n):
+        return [ch(correlation_id=f"GS01-{i}", fill_at_ts=n - d - 500, stop_confirmed=True, closed=True, pnl_usd=-0.04,
+                   closed_at_ts=n - d, exit_fill_at_ts=n - d, exit_at_ts=n - d) for i, d in enumerate((2 * 86400, 3 * 86400, 4 * 86400))]
+    codes, calls, ff, red, amber = _r20_tick(rows)
+    assert g.VIOL_LIVE_TOTAL_LOSS_CAP in codes and not ({"DAILY_LOSS_CAP"} | g.DAILY_CAP_DISARM_CODES) & codes, codes
+    assert calls == ["AUTO_DISARM:" + g.VIOL_LIVE_TOTAL_LOSS_CAP] and ff == calls and g.VIOL_LIVE_TOTAL_LOSS_CAP in red

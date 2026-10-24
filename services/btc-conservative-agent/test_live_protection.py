@@ -76,7 +76,7 @@ def test_e1_open_mark_to_book_counts_against_the_cap_and_unreadable_blocks():
     assert {b["code"] for b in blocks} >= {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} and info["open_mark_loss"] > 0.5
     blocks, _ = ltg.daily_cap_entry_block([], mirror([pos], [STOP_L]), book(size=0.0001), NOW, "gs1")
     assert "OPEN_MARK_UNREADABLE" in {b["code"] for b in blocks}
-    assert ltg.cap_breach_response() == ltg.CAP_RESPONSE_ENTRY_BLOCK
+    assert ltg.cap_breach_response() == ltg.CAP_RESPONSE_DISARM_FLATTEN   # R20 supersedes AMEND4 E1
 
 
 def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
@@ -435,6 +435,7 @@ def test_rk1_restart_reconciles_to_the_exchange_before_any_state_change(tmp_path
     for fn in ("_live_guardian_arm_block", "_live_flatten_entry_fence"):
         exec(_fn_src(fn), ns2)
     ns2["_live_fences_arm_block"] = lambda: None   # live_fences health: test_live_fences_health.py
+    ns2["_live_total_loss_arm_block"] = lambda: None
     ns2["_live_guardian_restore"](NOW + 30)
     st = ns2["_LIVE_GUARDIAN_STATE"]
     # before the reconcile: arming AND live entries are refused, the latch stays
@@ -582,7 +583,9 @@ def test_hm5r2_latch_red_never_replaces_an_ack_only_code():
     st = {"red_alert": {"ts": 1, "code": "UNTAGGED_ORDER"}}
     g.latch_red(st, {"ts": 2, "code": "FORCE_FLAT_UNCONFIRMED"})
     assert st["red_alert"]["codes"] == ["FORCE_FLAT_UNCONFIRMED", "UNTAGGED_ORDER"] and not g.red_ack_only(st["red_alert"])
-    assert g.ACK_ONLY_RED_CODES == frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
+    assert g.red_ack_only({"code": "GUARDIAN_STATE_UNREADABLE"})   # HM R4 nit: unreadable state file fails closed
+    assert g.ACK_ONLY_RED_CODES == (frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED", "GUARDIAN_STATE_UNREADABLE"}) | g.LIVE_TOTAL_LOSS_RED_CODES
+                                    | g.DAILY_CAP_DISARM_CODES)   # HM R3 B1 (#876): R20 cap REDs are ack-only
 
 
 def test_hm5r2_force_flat_not_started_after_liq_clamp_red_records_both_codes():
@@ -1020,7 +1023,7 @@ def _route_ns(route, state, extra=None, body=None, amendment=None):
           "jsonify": lambda *a, **k: dict(*a, **k), "_admin_authed_strict": lambda: True,
           "_strict_json_boolean": lambda d, k: d.get(k) if isinstance(d.get(k), bool) else None,
           "_live_guardian_heartbeat_stale": lambda: False, "_live_guardian_arm_block": lambda: None,
-          "_live_fences_arm_block": lambda: None, "CALLS": calls}
+          "_live_fences_arm_block": lambda: None, "_live_total_loss_arm_block": lambda: None, "CALLS": calls}
     ns.update(extra or {})
     sa = _SRC.index("LIVE_ARM_GATE_SCHEMA = ")
     exec(_SRC[sa:_SRC.index("\n", sa)], ns)
@@ -1067,7 +1070,7 @@ def test_852_l27_fly_protection_bootstrap_rearm_refuses_per_lane(monkeypatch):
     import types
     # HM C-R3-3: never overwrite the real registry for the rest of the session (monkeypatch restores it)
     import combo_pathway_config as _cpc
-    monkeypatch.setattr(_cpc, "ACTIVE_TILE_REGISTRY", {"GS01": {}})
+    monkeypatch.setattr(_cpc, "ACTIVE_TILE_REGISTRY", {"GS01": {"id_prefix": "gs1"}})
     boot = types.SimpleNamespace(snapshot=lambda: {"lanes": {}}, enable=lambda *a, **k: (True, {}),
                                  disable=lambda **k: {})
     tile_src = _SRC[_SRC.index("def _live_guardian_tile_arm_block"):_SRC.index("\ndef ", _SRC.index("def _live_guardian_tile_arm_block") + 10)]
@@ -1101,7 +1104,7 @@ def test_852_l27_fly_arm_gate_endpoint_serves_the_shared_helper_verdict_for_the_
     assert ns["api_live_copy_arm_gate"]()["l27_block"] is None
     assert "LIVE_ARM_GATE_SCHEMA = \"fly_live_arm_gate_v1\"" in _SRC
     assert ns["api_live_copy_arm_gate"]()["live_fences_block"] is None
-    ns, _ = _route_ns("/api/live-copy/arm-gate", {}, {"_live_fences_arm_block": lambda: "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE"})
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {}, {"_live_fences_arm_block": lambda: "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE", "_live_total_loss_arm_block": lambda: None})
     assert ns["api_live_copy_arm_gate"]()["live_fences_block"] == "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE"
 
 

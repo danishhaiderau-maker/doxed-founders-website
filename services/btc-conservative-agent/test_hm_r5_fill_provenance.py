@@ -26,7 +26,7 @@ def _reports(*closes, fill_source="exchange_trades", reason="EXCHANGE_STOP"):
         {"correlation_id": "gs1-a", "account": "A", "type": "ORDER_PLACED", "order": {"side": "LONG", "qty": 0.002, "price": ENTRY + 5}},
         {"correlation_id": "gs1-a", "account": "A", "type": "ORDER_FILLED",
          "fill": {"price": ENTRY, "qty": 0.002, "source": fill_source}},
-        {"correlation_id": "gs1-a", "account": "A", "type": "STOP_CONFIRMED", "stop": {"price": 99_700.0}},
+        {"correlation_id": "gs1-a", "account": "A", "type": "STOP_CONFIRMED", "stop": {"price": 99_700.0, "exchange_order_id": "9", "verified_on_exchange": True}},
     ]
     for cl in closes:
         out.append({"correlation_id": "gs1-a", "account": "A", "type": "POSITION_CLOSED",

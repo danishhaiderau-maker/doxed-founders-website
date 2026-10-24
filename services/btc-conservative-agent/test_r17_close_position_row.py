@@ -95,7 +95,7 @@ def _hold_scan(monkeypatch, pos, now):
     assert pos.get("levels_scan_to_s") is not None and pos.get("status") == "OPEN"
 
 
-def _close(monkeypatch, reason, exit_pricer_wrap=None):
+def _close(monkeypatch, reason, exit_pricer_wrap=None, proven=True):
     now = time.time()
     if exit_pricer_wrap is not None:
         import tile_fill as tf
@@ -120,6 +120,12 @@ def _close(monkeypatch, reason, exit_pricer_wrap=None):
     monkeypatch.setattr(bot, "accrue_position_funding", lambda *a, **k: None)  # no network funding fetch in CI
     # RK ruling 22:32: the trigger row's own WS_FRAME receive_ts (as _stamp_trigger_basis stamps it); a row
     # without it is EXIT_LAG_UNMEASURED and non-countable, so a clean measured trigger is stamped here.
+    # RK option (a) 25 Oct: until HM sets the real exchange threshold every in-scope exit is EXIT_LAG_UNPROVEN; these
+    # contract tests prove the REST of the row, so they run with a recorded threshold (see test_unproven_... below).
+    if proven:
+        import exit_lag_regression as elr
+        monkeypatch.setattr(elr, "REAL_EXCHANGE_THRESHOLD_S", 1.0)
+        monkeypatch.setattr(elr, "REAL_EXCHANGE_THRESHOLD_SOURCE_IDS", tuple(f"x{i}" for i in range(10)))
     _rx = time.time()
     pos.update(exit_trigger_row_s=int(_rx), exit_trigger_receive_ts=_rx, exit_trigger_receive_ts_source="WS_FRAME",
                exit_trigger_eval_ts=_rx + 0.01)
@@ -231,3 +237,11 @@ def test_liq_not_proven_clear_is_non_countable(monkeypatch, tmp_path, liq):
     bad = dict(row, **liq)
     assert any(f.startswith("LIQ_") for f in r17.proof_failures(bad)), r17.proof_failures(bad)
     assert r17.non_countable_reason(dict(bad, non_countable=False)).startswith("R17_UNPROVEN")
+
+
+def test_unproven_exit_lag_makes_the_clean_row_non_countable(monkeypatch, tmp_path):
+    """RK option (a) 25 Oct: with no real exchange threshold recorded, a clean row is non-countable EXIT_LAG_UNPROVEN only."""
+    monkeypatch.chdir(tmp_path)
+    row = _close(monkeypatch, "TAKE_PROFIT", proven=False)
+    assert r17.proof_failures(row) == ["EXIT_LAG_UNPROVEN"]
+    assert row["non_countable"] is True and "EXIT_LAG_UNPROVEN" in str(row["non_countable_reason"])

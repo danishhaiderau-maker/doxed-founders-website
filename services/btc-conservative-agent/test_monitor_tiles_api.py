@@ -577,22 +577,252 @@ def test_closed_row_carries_trigger_vs_book_and_tape_age():
 
 
 def test_exit_lag_arm_gate_route(bot, monkeypatch):
-    """RK ruling 22:32: HM reads the consecutive-under-threshold count on the receive_ts measure."""
+    """RK ruling 25 Oct + option (a): scope from #868, admin / exchange-stop ids listed, UNPROVEN while n < 10, GS-01 not
+    blocked, legacy 24 Oct view kept under legacy_v1."""
     import exit_lag_regression as elr
-    t = elr.DEPLOY_TS + 5000
+    t = elr.GATE_SCOPE_START_TS + 5000
 
     def ev(rx, dec):
         return {"exit_trigger_receive_ts": rx, "exit_trigger_receive_ts_source": "WS_FRAME" if rx else None,
                 "exit_decision_ts": dec, "exit_fill_ts": dec + 0.5}
     rows = [{"trade_id": "a", "event_timestamps": ev(None, t)},
+            {"trade_id": "adm", "exit_reason": "ADMIN_FORCE_FLAT", "event_timestamps": ev(None, t + 5)},
+            {"trade_id": "xs", "exit_reason": "EXCHANGE_STOP_30BP", "event_timestamps": ev(None, t + 6)},
             {"trade_id": "b", "event_timestamps": ev(t + 9.99, t + 10)},
             {"trade_id": "c", "event_timestamps": ev(t + 19.98, t + 20)}]
+    chains = [{"correlation_id": "gs1-live", "closed": True, "exit_order_class": "BOT_SENT", "exit_reason": "TP",
+               "exit_fill_at_ts": t + 30, "exit_ack_at_ts": t + 29}]
     monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: rows)
+    monkeypatch.setitem(bot._LIVE_GUARDIAN_STATE, "exit_lag_chains", (t + 40, chains))
     r = _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required=3)
     assert r.status_code == 200
     body = r.get_json()
-    assert body["schema"] == "exit_lag_arm_gate_v1" and body["consecutive_under_threshold"] == 2
-    assert body["armable"] is False and body["run_broken_by"]["status"] == "UNMEASURED"
-    assert body["threshold_s"] == 0.062 and body["recomputed_p95"]["n"] == 0
+    assert body["schema"] == "exit_lag_arm_gate_v2" and body["gate"] == "UNPROVEN" and body["arm_eligible"] is False
+    assert body["gs01_arm_blocked_by_exit_lag"] is False and body["gs01_unproven_policy"]["max_notional_usd"] == 0.25
+    assert body["threshold_s"] is None and body["n_exchange_stops"] == 0 and body["real_exchange_figure"]["source_ids"] == []
+    assert body["admin_excluded_ids"] == ["adm"] and body["exchange_filled_ids"] == ["xs"]
+    assert body["consecutive_measured_unjudged"] == 2 and body["run_broken_by"]["trade_id"] == "a"
+    assert body["scope"]["since_ts"] == elr.GATE_SCOPE_START_TS and body["scope"]["reason"]
+    assert body["live_exit_stamps_missing"] == ["gs1-live"]   # no paper twin => receive/decision/send missing
+    assert body["legacy_v1"]["schema"] == "exit_lag_arm_gate_v1" and body["legacy_v1"]["threshold_s"] == 0.062
     assert MONITOR not in r.get_data(as_text=True) and ADMIN not in r.get_data(as_text=True)
     assert _get(bot, "/api/monitor/exit-lag", {"Authorization": f"Bearer {MONITOR}"}, required="x").status_code == 400
+
+
+def test_exit_lag_gate_enforced_on_arm_and_live_entry(bot, monkeypatch):
+    """HM R2 (a): the arm (tile ON) and live-entry / live-order paths read the gate flags, fail closed when the gate is
+    unreadable, and refuse a GS-01 order above $0.25 margin with an [ALERT]."""
+    import inspect
+    import exit_lag_regression as elr
+    unproven = elr.rk_gate([])
+    monkeypatch.setattr(bot, "_exit_lag_gate_now", lambda: dict(unproven))
+    bot._EXIT_LAG_ALERTS.clear()
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.25, where="TILE_ARM") is None
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.5, where="LIVE_ORDER") == elr.GS01_SIZE_BLOCK
+    assert bot._exit_lag_live_block("FAMILY_GSB1_CVD_DIV_REGIME", 0.25, where="TILE_ARM") == elr.ARM_BLOCK_NOT_ELIGIBLE
+    monkeypatch.setattr(bot, "_exit_lag_gate_now", lambda: {**unproven, "gs01_arm_blocked_by_exit_lag": True})
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.25, where="LIVE_ENTRY") == elr.ARM_BLOCK_GS01
+    monkeypatch.setattr(bot, "_exit_lag_gate_now", lambda: None)
+    assert bot._exit_lag_live_block("FAMILY_GS01_XV_PREMIUM_ATR_TP", 0.25, where="LIVE_ENTRY") == elr.ARM_BLOCK_UNREADABLE
+    assert [a["reason"] for a in bot._EXIT_LAG_ALERTS] == [elr.GS01_SIZE_BLOCK, elr.ARM_BLOCK_NOT_ELIGIBLE,
+                                                           elr.ARM_BLOCK_GS01, elr.ARM_BLOCK_UNREADABLE]
+    # live entry: refused before any provider / chain work
+    monkeypatch.setattr(bot, "_exit_lag_live_block", lambda *a, **k: elr.ARM_BLOCK_GS01)
+    ok, reasons, info = bot._live_tile_admission("FAMILY_GS01_XV_PREMIUM_ATR_TP", "gs1-abc", 1.0)
+    assert ok is False and reasons == [elr.ARM_BLOCK_GS01] and info["exit_lag_block"] == elr.ARM_BLOCK_GS01
+    # tile-ON route checks before request_on; the signed order is checked before it is attached
+    route = inspect.getsource(bot.api_bitfinex_tile_live_orders)
+    assert route.index('_exit_lag_live_block(lane, _live_copy.MAX_MARGIN_USD, where="TILE_ARM")') < route.index("sw.request_on(")
+    stamp = inspect.getsource(bot._live_copy_stamp_payload)
+    assert stamp.index('approval.get("max_margin_usd"), where="LIVE_ORDER"') < stamp.index('payload["live_copy_approval"] = approval')
+
+
+def test_exit_lag_gate_now_fails_closed(bot, monkeypatch):
+    import exit_lag_regression as elr
+    monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: (_ for _ in ()).throw(RuntimeError("x")))
+    assert bot._exit_lag_gate_now() is None
+    assert elr.arm_block_reason(bot._exit_lag_gate_now(), "gs1") == elr.ARM_BLOCK_UNREADABLE
+    monkeypatch.setattr(bot, "_exit_latency_closed_trade_rows", lambda since: [])
+    assert bot._exit_lag_gate_now()["schema"] == "exit_lag_arm_gate_v2"
+
+
+# ---- HM R3 B2 (#876): Flask-client behavioural tests; each fails if its barrier is changed to `if False:` ----
+import types as _types
+
+_GS01_LANE = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
+
+
+class _Sw:
+    def __init__(self):
+        self.on = []
+
+    def request_on(self, lane, **kw):
+        self.on.append(lane)
+
+    def request_off(self, lane, **kw):
+        pass
+
+    def why_not_armed(self, lane, **kw):
+        return {"eligible": True, "denials": []}
+
+    def snapshot(self, lane):
+        return {"bitfinex_live_orders": lane in self.on}
+
+
+_REAL_ARM_BLOCK = None
+
+
+def _open_gates(bot, monkeypatch):
+    global _REAL_ARM_BLOCK
+    _REAL_ARM_BLOCK = _REAL_ARM_BLOCK or bot._live_guardian_arm_block
+    """Every gate on the arm routes passes, so only the barrier under test can refuse."""
+    sw = _Sw()
+    enabled = []
+    boot = _types.SimpleNamespace(snapshot=lambda: {"lanes": {}}, disable=lambda **k: {},
+                                  enable=lambda lane, **k: enabled.append(lane) or (True, {}))
+    elig = _types.SimpleNamespace(is_eligible=lambda lane: True, set=lambda *a, **k: (True, {}))
+    for name, val in {"_get_bfx_live_switch": lambda: sw,
+                      "_refresh_bitfinex_exposure_audit": lambda: {}, "_bitfinex_readiness_context": lambda: {},
+                      "_bitfinex_size_checks_for_lane": lambda lane, ctx: {}, "_bitfinex_master_state": lambda: {},
+                      "_get_live_copy_eligibility": lambda: elig, "_get_live_copy_bootstrap": lambda: boot,
+                      "_live_guardian_heartbeat_stale": lambda: False, "_live_guardian_arm_block": lambda: None,
+                      "_live_guardian_tile_arm_block": lambda lane: None,
+                      "_exit_lag_live_block": lambda *a, **k: None}.items():
+        monkeypatch.setattr(bot, name, val)
+    return sw, enabled
+
+
+def _non_allowlisted_active_lane():
+    from combo_pathway_config import ACTIVE_TILE_ORDER
+    import live_tile_gate as ltg_
+    return next(l for l in ACTIVE_TILE_ORDER if ltg_.operator_eligibility_refusal(l) is not None)
+
+
+def test_b2_tile_live_orders_route_allowlist_refuses(bot, monkeypatch):
+    sw, _ = _open_gates(bot, monkeypatch)
+    c = bot.app.test_client()
+    for lane in (_non_allowlisted_active_lane(), "DISLOC", "ROUTER", "H-A", "zz-anything"):
+        r = c.post(f"/api/bitfinex/tiles/{lane}/live-orders", json={"enabled": True}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+        assert r.status_code == 409 and r.get_json()["error"] == "LANE_NOT_ARM_ALLOWLISTED", (lane, r.get_json())
+    assert sw.on == []
+    r = c.post(f"/api/bitfinex/tiles/{_GS01_LANE}/live-orders", json={"enabled": True}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 200 and sw.on == [_GS01_LANE]   # control: the open path does reach request_on
+
+
+def test_b2_protection_bootstrap_allowlist_refuses(bot, monkeypatch):
+    _, enabled = _open_gates(bot, monkeypatch)
+    c = bot.app.test_client()
+    lane = _non_allowlisted_active_lane()
+    r = c.post("/api/live-copy/protection-bootstrap", json={"enabled": True, "lane": lane}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 409 and r.get_json()["results"][lane]["error"] == "LANE_NOT_ARM_ALLOWLISTED"
+    assert enabled == []
+    r = c.post("/api/live-copy/protection-bootstrap", json={"enabled": True, "lane": _GS01_LANE}, environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 200 and enabled == [_GS01_LANE]
+
+
+def test_b2_tile_arm_exit_lag_block_refuses_before_request_on(bot, monkeypatch):
+    import exit_lag_regression as elr
+    sw, _ = _open_gates(bot, monkeypatch)
+    seen = []
+    monkeypatch.setattr(bot, "_exit_lag_live_block",
+                        lambda lane, margin, where, **k: seen.append(where) or elr.ARM_BLOCK_GS01)
+    r = bot.app.test_client().post(f"/api/bitfinex/tiles/{_GS01_LANE}/live-orders", json={"enabled": True},
+                                   environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+    assert r.status_code == 409 and r.get_json()["error"] == elr.ARM_BLOCK_GS01 and seen == ["TILE_ARM"]
+    assert sw.on == []
+
+
+# ---- HM R4 B1 (#876): the REAL _live_total_loss_chains_strict fails closed (no stub of the chain source) ----
+def test_r4_real_total_loss_chain_source_fails_closed(bot, monkeypatch):
+    import live_copy_monitor as lcm
+    import live_copy_monitor_api as lcma
+    monkeypatch.setitem(bot._LIVE_GUARDIAN_STATE, "red_alert", None)
+
+    def boom():
+        raise RuntimeError("provider down")
+    monkeypatch.setitem(lcma._CTX, "provider", boom)
+    assert bot._live_guardian_arm_block() == "LIVE_TOTAL_LOSS_UNREADABLE"
+    monkeypatch.setitem(lcma._CTX, "provider", lambda: ["not", "a", "dict"])
+    assert bot._live_guardian_arm_block() == "LIVE_TOTAL_LOSS_UNREADABLE"
+    monkeypatch.setitem(lcma._CTX, "provider", lambda: {"approvals": [], "reports": []})
+
+    def bad_chains(*a, **k):
+        raise ValueError("corrupt journal")
+    monkeypatch.setattr(lcm, "build_chains", bad_chains)
+    assert bot._live_guardian_arm_block() == "LIVE_TOTAL_LOSS_UNREADABLE"
+
+
+# ---- HM R4 B2 (#876): LIVE_ORDER exit-lag / GS-01 $0.25 barrier, behavioural ----
+def _stamp_env(bot, monkeypatch, margin):
+    sw = _Sw()
+    appended = []
+    ns = _types.SimpleNamespace
+    for name, val in {
+        "_platform_relay_lane_for_event": lambda tid, rl=None: _GS01_LANE,
+        "_get_live_copy_eligibility": lambda: ns(is_eligible=lambda lane: True),
+        "_get_bfx_live_switch": lambda: _types.SimpleNamespace(snapshot=lambda lane: {}, evaluate=lambda *a, **k: {}),
+        "_get_live_copy_output": lambda: ns(snapshot=lambda: {}),
+        "_bitfinex_readiness_context": lambda: {"reduce_only_supported": True},
+        "_get_live_copy_protection": lambda: ns(flags=lambda lane: {"stop_coverage_verified": True}),
+        "_bitfinex_size_checks_for_lane": lambda *a, **k: {},
+        "_live_copy_paper_lock_active": lambda: False,
+        "_get_live_copy_decisions": lambda: None,
+        "_get_live_copy_approvals": lambda: ns(append=appended.append),
+    }.items():
+        monkeypatch.setattr(bot, name, val)
+    monkeypatch.setattr(bot._live_copy, "stamp_or_block", lambda **k: (
+        {"entry_allowed": True, "max_margin_usd": margin, "trade_id": k["trade_id"], "research_lane": k["lane"]}, []))
+    return appended
+
+
+def test_r4_live_order_site_withholds_gs01_over_cap(bot, monkeypatch):
+    import exit_lag_regression as elr
+    seen = []
+    real = bot._exit_lag_live_block
+    appended = _stamp_env(bot, monkeypatch, 0.5)
+    monkeypatch.setattr(bot, "_exit_lag_live_block",
+                        lambda lane, margin, where, **k: seen.append((where, margin)) or real(lane, margin, where=where, **k))
+    out = bot._live_copy_stamp_payload({"event": "ORDER_PLACED", "trade_id": "gs1-r4", "research_lane": _GS01_LANE})
+    assert "live_copy_approval" not in out and appended == []
+    assert seen == [("LIVE_ORDER", 0.5)]
+    xl = real(_GS01_LANE, 0.5, where="LIVE_ORDER", trade_id="gs1-r4")
+    assert xl and out["live_copy_denied"] == [xl]
+    # forced-blocked gate at a compliant margin
+    monkeypatch.setattr(bot, "_exit_lag_live_block", lambda *a, **k: elr.ARM_BLOCK_UNREADABLE)
+    _stamp_env(bot, monkeypatch, 0.25)
+    out = bot._live_copy_stamp_payload({"event": "ORDER_PLACED", "trade_id": "gs1-r4b", "research_lane": _GS01_LANE})
+    assert "live_copy_approval" not in out and out["live_copy_denied"] == [elr.ARM_BLOCK_UNREADABLE]
+    # control: gate open -> the approval is attached (so the barrier, not the stubs, withholds above)
+    monkeypatch.setattr(bot, "_exit_lag_live_block", lambda *a, **k: None)
+    appended = _stamp_env(bot, monkeypatch, 0.25)
+    out = bot._live_copy_stamp_payload({"event": "ORDER_PLACED", "trade_id": "gs1-r4c", "research_lane": _GS01_LANE})
+    assert out.get("live_copy_approval", {}).get("entry_allowed") is True and len(appended) == 1
+
+
+# ---- HM R5 B1 (#876): global guardian arm block + tile arm block on the live-orders route, behavioural ----
+def _post_gs01(bot):
+    return bot.app.test_client().post(f"/api/bitfinex/tiles/{_GS01_LANE}/live-orders", json={"enabled": True},
+                                      environ_base=REMOTE, headers={"X-Bot-Admin-Token": ADMIN})
+
+
+def test_r5_live_orders_refused_on_global_arm_block_stub(bot, monkeypatch):
+    sw, _ = _open_gates(bot, monkeypatch)
+    monkeypatch.setattr(bot, "_live_guardian_arm_block", lambda: "LIVE_TOTAL_LOSS_CAP")
+    r = _post_gs01(bot)
+    assert r.status_code == 409 and r.get_json()["error"] == "LIVE_TOTAL_LOSS_CAP" and sw.on == []
+
+
+def test_r5_live_orders_refused_on_real_r20_red_latch(bot, monkeypatch):
+    sw, _ = _open_gates(bot, monkeypatch)
+    monkeypatch.setattr(bot, "_live_guardian_arm_block", _REAL_ARM_BLOCK)
+    monkeypatch.setitem(bot._LIVE_GUARDIAN_STATE, "red_alert", {"ts": 1, "code": "LIVE_TOTAL_LOSS_CAP"})
+    r = _post_gs01(bot)
+    assert r.status_code == 409 and r.get_json()["error"] == "LIVE_GUARDIAN_FORCE_FLAT_RED" and sw.on == []
+
+
+def test_r5_live_orders_refused_on_tile_arm_block(bot, monkeypatch):
+    import live_tile_gate as ltg_
+    sw, _ = _open_gates(bot, monkeypatch)
+    monkeypatch.setattr(bot, "_live_guardian_tile_arm_block", lambda lane: ltg_.DENY_G6_NO_FIRST_L)
+    r = _post_gs01(bot)
+    assert r.status_code == 409 and r.get_json()["error"] == ltg_.DENY_G6_NO_FIRST_L and sw.on == []
