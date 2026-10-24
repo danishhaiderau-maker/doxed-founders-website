@@ -429,7 +429,8 @@ class BookTail:
             return
         t0 = _t.perf_counter()
         first = False
-        if self._ino is None or st.st_ino != self._ino or st.st_size < self._offset:
+        rewritten = (self._ident is not None and st.st_size == self._offset and st.st_mtime_ns != self._ident[2])
+        if self._ino is None or st.st_ino != self._ino or st.st_size < self._offset or rewritten:
             if self._ino is not None:
                 self._reset()
             self._ino = st.st_ino
