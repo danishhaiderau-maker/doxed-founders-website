@@ -93,7 +93,7 @@ def test_ffill_matches_pandas_semantics():
 
 # ------------------------------------------------------------------ identity / T13 / costs / T23
 def test_identity_and_spec_constants():
-    assert (tf.TILE_KEY, tf.TILE_KEY_CODE, tf.DISPLAY_SLOT, tf.PAPER_ONLY) == ("gf3", 8, 6, True)
+    assert (tf.TILE_KEY, tf.TILE_KEY_CODE, tf.DISPLAY_SLOT) == ("gf3", 8, 6)
     assert ltg.TILE_KEY_CODES["gf3"] == 8 and 8 not in ltg.RESERVED_TILE_KEY_CODES.values()
     assert ltg.decode_cid(ltg.encode_cid("gf3", 12345)) == "gf3"
     assert (tf.TP_BP, tf.HARD_STOP_BP, tf.EXCHANGE_STOP_BP, tf.TIME_EXIT_S, tf.COOLDOWN_S, tf.NOTIONAL_USD) == \
@@ -122,10 +122,11 @@ def test_funding_ignored_and_no_forbidden_price_source():
     src = inspect.getsource(tf)
     tree = ast.parse(src)
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and "funding" in n.attr.lower()]
-    allowed = set(tf.FORBIDDEN_PRICE_SOURCES)
+    forbidden = ("ticker", "candles", "book_tape_1s", "microstructure_1s")
+    allowed = set(forbidden)
     for n in ast.walk(tree):
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value not in allowed:
-            for bad in tf.FORBIDDEN_PRICE_SOURCES:
+            for bad in forbidden:
                 assert bad not in n.value.lower() or n is tree.body[0].value, (bad, n.value)
         if isinstance(n, (ast.Name, ast.Attribute)):
             ident = n.id if isinstance(n, ast.Name) else n.attr
@@ -196,19 +197,20 @@ def test_live_hm_gate_fade3_not_set_anywhere_in_repo_config():
 
 
 # ------------------------------------------------------------------ countability / G4 / labels
+PARITY = {tf.E8_REAL_PARITY_ENV: "PASS:test-parity"}
 CLOSE_OK = {"event": "CLOSE", "pool_ready_at_write": True, "evidence_status": "COMPLETE"}
 
 
 def test_g4_bands():
     assert [tf.g4_band(x) for x in (None, 28, 27.9, 15.01, 15, 3)] == [None, "a", "b", "b", "c'", "c'"]
-    assert tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False)["countable"]
-    assert tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=20, clamp_hit=False)["countable"]
-    c = tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=20, clamp_hit=True)
+    assert tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False, env=PARITY)["countable"]
+    assert tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=20, clamp_hit=False, env=PARITY)["countable"]
+    c = tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=20, clamp_hit=True, env=PARITY)
     assert not c["countable"] and c["non_countable_reasons"] == ["G4B_CLAMP_HIT"]
-    c = tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=15, clamp_hit=False)
+    c = tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=15, clamp_hit=False, env=PARITY)
     assert c["non_countable_reasons"] == ["G4C_L_LE_15BP"] and c["liq_model"] == "NONE_NOT_ESTIMATED"
     assert "G4_NO_REAL_L" in tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=None,
-                                             clamp_hit=False)["non_countable_reasons"]
+                                             clamp_hit=False, env=PARITY)["non_countable_reasons"]
 
 
 def test_t6_time_exit_with_pool_n_below_10_is_non_countable():
@@ -217,15 +219,15 @@ def test_t6_time_exit_with_pool_n_below_10_is_non_countable():
     assert not tf.pool_ready(entry, exit_)
     assert tf.pool_ready(entry, {"delay_source_kind": "resident", "pool_n": None})
     row = {**CLOSE_OK, "exit_reason": "TIME_EXIT", "pool_ready_at_write": tf.pool_ready(entry, exit_)}
-    c = tf.countability(row, a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False)
+    c = tf.countability(row, a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False, env=PARITY)
     assert not c["countable"] and "WRITTEN_BEFORE_POOL_N10" in c["non_countable_reasons"]
 
 
 def test_no_back_stamp():
     early = {**CLOSE_OK, "pool_ready_at_write": False}
-    for r in tf.recount([early, {"event": "OPEN"}], a5_verified_now=True, latest_real_l_bp=40, clamp_hit=False):
+    for r in tf.recount([early, {"event": "OPEN"}], a5_verified_now=True, latest_real_l_bp=40, clamp_hit=False, env=PARITY):
         assert r["pool_ready_at_write"] is False and not r["countable"]
-    assert len(tf.recount([early, {"event": "OPEN"}], a5_verified_now=True, latest_real_l_bp=40, clamp_hit=False)) == 1
+    assert len(tf.recount([early, {"event": "OPEN"}], a5_verified_now=True, latest_real_l_bp=40, clamp_hit=False, env=PARITY)) == 1
 
 
 def test_a5_verification_needs_marker_and_five_trades():
@@ -233,7 +235,7 @@ def test_a5_verification_needs_marker_and_five_trades():
     assert not tf.a5_verified(4, {tf.A5_VERIFIED_ENV: "VERIFIED:x"})
     assert tf.a5_verified(5, {tf.A5_VERIFIED_ENV: "VERIFIED:x"})
     assert "A5_NOT_VERIFIED" in tf.countability(CLOSE_OK, a5_verified_now=False, latest_real_l_bp=30,
-                                                clamp_hit=False)["non_countable_reasons"]
+                                                clamp_hit=False, env=PARITY)["non_countable_reasons"]
 
 
 def test_dashboard_label():
@@ -420,3 +422,61 @@ def test_gf3_route_is_census_fixtured_and_monitored():
     assert "@app.route('/api/monitor/tiles/gf3'" in src and '"/api/monitor/tiles/gf3"' in src
     assert 'target=gf3_paper_thread, name="gf3-paper"' in src
     assert tf.read_ledger("/nonexistent/gf3.jsonl") == []
+
+
+# ------------------------------------------------------------------ HM #877 R2 pins
+def test_b1_e8_real_parity_unproven_blocks_every_row():
+    for env in ({}, {tf.E8_REAL_PARITY_ENV: ""}, {tf.E8_REAL_PARITY_ENV: "PASS:"}, {tf.E8_REAL_PARITY_ENV: "FAIL:x"}):
+        c = tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False, env=env)
+        assert not c["countable"] and c["non_countable_reasons"] == ["E8_REAL_PARITY_UNPROVEN"]
+    assert all("E8_REAL_PARITY_UNPROVEN" in r["non_countable_reasons"]
+               for r in tf.recount([CLOSE_OK], a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False, env={}))
+    assert tf.countability(CLOSE_OK, a5_verified_now=True, latest_real_l_bp=30, clamp_hit=False, env=PARITY)["countable"]
+
+
+def test_b2_bot_arm_block_refuses_gf3_with_hm_gate_and_first_l_a(monkeypatch):
+    import os as _os
+    src = (HERE / "bot.py").read_text()
+    a = src.index("def _live_guardian_tile_arm_block")
+    b = src.index("\ndef ", a + 10)
+    monkeypatch.setenv("LIVE_HM_GATE_FADE3", "PASS:x")
+    ns = {"os": _os, "_LIVE_GUARDIAN_STATE": {"g4_first_l": {"outcome": ltg.G4_A}}}
+    exec(src[a:b], ns)
+    assert ns["_live_guardian_tile_arm_block"]("FAMILY_GS_FADE3_TP30") == ltg.DENY_PAPER_ONLY_TILE
+
+
+def test_b3_rest_trades_count_only_filled_and_survive_restart():
+    h = Harness(ioc_frac=0.5, rest_status="NO_FILL")
+    h.eng.step(1000.0)
+    h.eng.step(1000.0 + 1.5 + paper_fill.REST_TTL_S + 1.0)
+    assert any(r.get("rest_fill") for r in h.rows) and h.eng.rest_trades_n == 0
+    assert tf.rest_fill_count(h.rows) == 0
+    h2 = Harness(ioc_frac=0.5)
+    h2.eng.step(1000.0)
+    h2.eng.step(1000.0 + 1.5 + paper_fill.REST_TTL_S + 1.0)
+    assert h2.eng.rest_trades_n == 1 == tf.rest_fill_count(h2.rows)
+    ledger = h.rows + h2.rows + [{"event": "OPEN", "rest_fill": {"status": "PARTIAL"}}]
+    eng = tf.Fade3PaperEngine(features_fn=lambda now: (None, None, None), delay_fn=lambda leg: (1.5, "x"),
+                              write_fn=lambda r: None, ledger_rows=ledger)
+    assert eng.rest_trades_n == 2 and eng.status(env={})["a5_rest_trades_n"] == 2
+
+
+def test_pool_ready_threshold_pinned_at_n10_independent_of_unverified():
+    entry = {"delay_source_kind": "live_ack", "pool_n": 12, "delay_unverified": False}
+    assert not tf.pool_ready(entry, {"delay_source_kind": "live_ack", "pool_n": 9, "delay_unverified": False})
+    assert tf.pool_ready(entry, {"delay_source_kind": "live_ack", "pool_n": 10, "delay_unverified": False})
+
+
+def test_feature_step_cpu_within_budget_on_full_window(tmp_path):
+    import time as _time
+    s0 = _feed_files(tmp_path, int(tf.HISTORY_S) + 60)
+    feed = tf.LiveFeatureFeed(str(tmp_path))
+    end = s0 + int(tf.HISTORY_S) + 1.5
+    feed(end - 5)  # first call ingests the files (one-off)
+    worst = 0.0
+    for k in range(5):
+        t0 = _time.process_time()
+        feed(end - 4 + k)
+        worst = max(worst, _time.process_time() - t0)
+    assert worst < tf.STEP_CPU_BUDGET_S, worst
+    assert "STEP_CPU_BUDGET_S" in (HERE / "bot.py").read_text()

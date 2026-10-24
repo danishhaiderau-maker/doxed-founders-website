@@ -115,7 +115,7 @@ MID_EPOCH_ADDITIONS = (
      "spec": "grok-strategist/reports/DEEP-SEARCH-TILES-20261011.md §6 C3",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
     # Tile 6 · GS-FADE3-TP30 (gf3; owner 25 Oct; RK PASS 06:24 AEDT; paper only, live refused, self-simulated).
-    {"lane": "FAMILY_GS_FADE3_TP30", "tile_number": 15, "hypothesis_id": "GS-20261025-FADE3-TP30",
+    {"lane": "FAMILY_GS_FADE3_TP30", "tile_number": 6, "hypothesis_id": "GS-20261025-FADE3-TP30",
      "approved_by": "Danish (owner), 2026-10-25: build GS-FADE3-TP30 as the slot-6 PAPER tile (PR #877)",
      "spec": "sim E8 FADE ALL W=3 (tile_fade3 fixtures/fade3_sim) + RK PASS 25 Oct 06:24 AEDT",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},

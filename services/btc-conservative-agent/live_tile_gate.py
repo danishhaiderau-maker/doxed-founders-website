@@ -568,8 +568,8 @@ def g4_outcome(stop_liq_bp: float | None) -> str | None:
 
 
 def paper_only_arm_block(lane: str | None = None, tile_key: str | None = None) -> str | None:
-    """Fail-closed live refusal for a paper-only tile (gf3), by lane name OR tile key (the gf3 lane is not in the
-    active registry, so tile_key_for_lane() cannot be relied on to name it)."""
+    """Fail-closed live refusal for a paper-only tile (gf3), by lane name OR tile key: refused before any other arm gate,
+    so LIVE_HM_GATE_FADE3 or a first L can never arm it."""
     if str(lane or "").upper() in PAPER_ONLY_LANES or str(tile_key or "").lower() in PAPER_ONLY_TILE_KEYS:
         return DENY_PAPER_ONLY_TILE
     return None

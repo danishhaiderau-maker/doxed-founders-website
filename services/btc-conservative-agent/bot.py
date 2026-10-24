@@ -34271,6 +34271,7 @@ def _gf3_get_engine():
                 features_fn=_tile_fade3.LiveFeatureFeed(str(_data_sync_runtime_root())),
                 delay_fn=lambda leg: _disloc_delay(lane, leg, pool_key=_GF3_POOL_KEYS.get(leg)),
                 write_fn=_tile_fade3.append_jsonl(_gf3_ledger_path()),
+                ledger_rows=_tile_fade3.read_ledger(_gf3_ledger_path()),
             )
         return _gf3_engine
 
@@ -34282,7 +34283,11 @@ def gf3_paper_thread():
         try:
             engine = _gf3_get_engine()
             if is_research_lane_enabled(_tile_fade3.LANE) or engine.pos is not None or engine.pending is not None:
+                t_cpu = time.process_time()
                 engine.step(time.time())
+                cpu = time.process_time() - t_cpu
+                if cpu > _tile_fade3.STEP_CPU_BUDGET_S:
+                    logger.warning(f"[GF3 PAPER] step CPU {cpu:.3f}s > budget {_tile_fade3.STEP_CPU_BUDGET_S}s")
         except Exception as exc:  # noqa: BLE001 - one bad second never kills the tile
             logger.warning(f"[GF3 PAPER] step failed: {type(exc).__name__}: {exc}")
         _worker_beat("gf3_paper_thread")
@@ -48852,7 +48857,7 @@ def monitor_tiles_gf3():
             raise monitor_tiles.BadRequest("limit must be an integer")
         engine = _gf3_get_engine()
         rows = _tile_fade3.read_ledger(_gf3_ledger_path())
-        a5_now = _tile_fade3.a5_verified(engine.rest_trades_n)
+        a5_now = _tile_fade3.a5_verified(_tile_fade3.rest_fill_count(rows))
         closed = _tile_fade3.recount(rows, a5_verified_now=a5_now, latest_real_l_bp=None, clamp_hit=False)
         return {"schema": "monitor_tile_gf3_v1", **_monitor_tiles_common(now),
                 "toggle_on": bool(is_research_lane_enabled(_tile_fade3.LANE)),

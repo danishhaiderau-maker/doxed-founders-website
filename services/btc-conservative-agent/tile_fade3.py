@@ -41,11 +41,9 @@ DISPLAY_SLOT = 6
 LANE = "FAMILY_GS_FADE3_TP30"
 # Registry identity (combo_pathway_config spec raw_policy_id; bot._load_tile_policy_modules checks it at boot).
 POLICY_ID = "GS_FADE3_E8_FADE_ALL_W3_Z2P5_MOM2ATR_IMB0P2_BZ2|TP30_HARD25_XSTOP35_TIME1200_CAP1"
-SELF_SIMULATED = True
 LEDGER_FILE = "gf3_paper_ledger.jsonl"
 TILE_NAME = "GS-FADE3-TP30"
 SIGNAL_ID = "E8-FADE-ALL-W3"
-PAPER_ONLY = True
 
 Z_ENTRY = 2.5
 MOM_ATR_MULT = 2.0
@@ -65,7 +63,6 @@ FEE_MODEL = "NO_TRADING_FEE"
 FUNDING_MODEL = "IGNORED"
 MARGIN_BP_NOTE = "18 bp margin unchanged; E10 is a process rule, no code path here alters it (T23)"
 PRICE_SOURCES = ("bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "bfx_deriv_status_1s.jsonl")
-FORBIDDEN_PRICE_SOURCES = ("ticker", "candles", "book_tape_1s", "microstructure_1s")
 HISTORY_S = 6 * 3600 + 15 * 60  # 6 h minute-z window + 31 completed minutes of ATR, with margin
 
 MIN_POOL_N = paper_fill.MIN_POOL_N if hasattr(paper_fill, "MIN_POOL_N") else 10
@@ -196,6 +193,24 @@ def pool_ready(*legs: Mapping[str, Any]) -> bool:
     return True
 
 
+E8_REAL_PARITY_ENV = "GF3_E8_REAL_PARITY"  # PASS:<ref> only after E8 real-data parity passes; unset = no row counts
+REST_COUNTED_STATUSES = ("FILLED", "PARTIAL")
+STEP_CPU_BUDGET_S = 0.5  # measured per-step feature CPU budget (synthetic full 6 h window ~0.1 s/step); test-pinned
+
+
+def e8_real_parity_passed(env: Optional[Mapping[str, str]] = None) -> bool:
+    e = os.environ if env is None else env
+    v = str(e.get(E8_REAL_PARITY_ENV, "")).strip()
+    return v.startswith("PASS:") and len(v) > len("PASS:")
+
+
+def rest_fill_count(rows: Iterable[Mapping[str, Any]]) -> int:
+    """A5 rest trades = ledger entry rows whose rest leg actually FILLED/PARTIAL (NO_FILL_REST_TTL attempts excluded);
+    derived from the ledger so it survives a restart."""
+    return sum(1 for r in rows if r.get("event") in ("OPEN", "ENTRY_NO_FILL")
+               and str((r.get("rest_fill") or {}).get("status") or "") in REST_COUNTED_STATUSES)
+
+
 def a5_verified(n_rest_trades: int, env: Optional[Mapping[str, str]] = None) -> bool:
     e = os.environ if env is None else env
     return bool(str(e.get(A5_VERIFIED_ENV, "")).strip()) and int(n_rest_trades or 0) >= A5_VERIFIED_MIN_TRADES
@@ -209,10 +224,12 @@ def g4_band(latest_real_l_bp: Optional[float]) -> Optional[str]:
 
 
 def countability(row: Mapping[str, Any], *, a5_verified_now: bool, latest_real_l_bp: Optional[float],
-                 clamp_hit: bool) -> dict:
+                 clamp_hit: bool, env: Optional[Mapping[str, str]] = None) -> dict:
     """Reasons a closed gf3 row is NON-COUNTABLE. ``pool_ready_at_write`` is frozen on the row when it is written and
     is never recomputed: a row written while any pool was n<10 stays non-countable forever (no back-stamp)."""
     why = []
+    if not e8_real_parity_passed(env):
+        why.append("E8_REAL_PARITY_UNPROVEN")  # paper may run; nothing counts until E8 real-data parity passes
     if row.get("pool_ready_at_write") is not True:
         why.append("WRITTEN_BEFORE_POOL_N10")  # T6: includes a time exit priced with pool_n < 10
     if not a5_verified_now:
@@ -265,7 +282,8 @@ class Fade3PaperEngine:
                  book_rows_fn: Optional[Callable] = None, trades_fn: Optional[Callable] = None,
                  entry_fill_fn: Callable = tile_fill.entry_fill, rest_fill_fn: Callable = tile_fill.price_entry_rest,
                  exit_fill_fn: Callable = tile_fill.exit_fill, resident_fill_fn: Callable = tile_fill.exit_resident_fill,
-                 forced_fill_fn: Callable = tile_fill.exit_forced_fill, stamp_fn: Callable = paper_fill.delay_stamp):
+                 forced_fill_fn: Callable = tile_fill.exit_forced_fill, stamp_fn: Callable = paper_fill.delay_stamp,
+                 ledger_rows: Iterable[Mapping[str, Any]] = ()):
         self.features_fn, self.delay_fn, self.write_fn = features_fn, delay_fn, write_fn
         self.book_rows_fn = book_rows_fn or (lambda t0, t1: quote_trigger.book_rows_between(t0, t1, paper_fill.book10l_at))
         self.trades_fn = trades_fn or quote_trigger.trades_between
@@ -277,7 +295,7 @@ class Fade3PaperEngine:
         self.pending_exit: Optional[dict] = None
         self.cooldown_until = 0.0
         self.last_decision_ts: Optional[float] = None
-        self.rest_trades_n = 0
+        self.rest_trades_n = rest_fill_count(ledger_rows)  # seeded from the ledger: survives a restart
         self.pool_n_by_leg: dict = {}   # latest pool_n per delay key (entry / exit); None = unverified
         self._lock = threading.Lock()
 
@@ -338,7 +356,8 @@ class Fade3PaperEngine:
                 return []
             rest = self.rest_fill_fn({"side": p["side"], "qty_remaining": rem, "limit_px": p["limit_px"],
                                       "t_start": p["t_start"]})
-            self.rest_trades_n += 1
+            if str((rest or {}).get("status") or "") in REST_COUNTED_STATUSES:
+                self.rest_trades_n += 1
         self.pending = None
         legs = [(p["ioc_filled"], p["ioc"].get("price"), p["ioc"].get("fill_ts"))]
         if _filled(rest):
