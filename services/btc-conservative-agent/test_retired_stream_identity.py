@@ -186,3 +186,110 @@ def test_boot_recover_and_snapshot_delete_with_stale_retired_pointer(tmp_path, m
     ms = json.dumps({"stream": "v3/ledgers/market_segment.jsonl", "row_sha256": "0" * 64}) + "\n"
     with pytest.raises((lds.DeleteRefused, ValueError)):  # retired stream serves no rows
         lds.delete_ledger_rows_by_sha(fresh, ms, lds.list_sha256(ms), dry_run=True)
+
+
+# ---- HM conditions (25 Oct 2026) ----
+
+def _ready(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    path = _pin(monkeypatch, tmp_path)
+    _stale(tmp_path, "market_segment")
+    return s, path
+
+
+def test_tile_config_differs_conflicts(tmp_path, monkeypatch):
+    _store(tmp_path)
+    _pin(monkeypatch, tmp_path)
+    _stale(tmp_path, "market_segment", tile_config_signature="f" * 64, deployed_revision=STALE)
+    with pytest.raises(ValueError, match="TILE_CONFIG"):
+        V3EvidenceStore.open_read_only(tmp_path)
+
+
+def test_signature_mismatch_subsecond_mtime_conflicts(tmp_path, monkeypatch):
+    _, path = _ready(tmp_path, monkeypatch)
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns - st.st_mtime_ns % 10**9 + (st.st_mtime_ns + 1) % 10**9))
+    with pytest.raises(ValueError, match="identity conflict"):
+        V3EvidenceStore.open_read_only(tmp_path)
+
+
+def test_tail_anchor_invalid_conflicts(tmp_path, monkeypatch):
+    _, path = _ready(tmp_path, monkeypatch)
+    p = tmp_path / "v3" / "receipts" / "emergency_record_idempotency_v1" / "market_segment" / "complete.json"
+    row = json.loads(p.read_text())
+    row["tail_anchor"] = {**row["tail_anchor"], "sha256": "0" * 64}
+    p.write_text(json.dumps(row))
+    with pytest.raises(ValueError, match="TAIL_ANCHOR"):
+        V3EvidenceStore.open_read_only(tmp_path)
+
+
+def test_generation_pointer_conflicts(tmp_path, monkeypatch):
+    _ready(tmp_path, monkeypatch)
+    d = tmp_path / "v3" / "receipts" / "ledger_generations_v1" / "market_segment"
+    d.mkdir(parents=True)
+    (d / "ACTIVE.json").write_text(json.dumps({"no_identity": True}))
+    with pytest.raises(ValueError, match="GENERATION_POINTER"):
+        V3EvidenceStore.open_read_only(tmp_path)
+
+
+def test_wal_entry_for_retired_stream_conflicts(tmp_path, monkeypatch):
+    _ready(tmp_path, monkeypatch)
+    import research_v3_store as rvs
+    import emergency_evidence_wal as ew
+
+    def fake_headers(self, handle):
+        return [None, {"ledger": "market_segment", "record_id": "x"}]
+    wal = tmp_path / "v3" / "emergency_evidence_wal_v2"
+    wal.mkdir(parents=True, exist_ok=True)
+    (wal / "mandatory-reserve.headers").write_bytes(b"\0" * ew.HEADER_BYTES * 2)
+    monkeypatch.setattr(ew.EmergencyEvidenceWal, "_read_headers", fake_headers)
+    with pytest.raises(ValueError, match="WAL_ENTRIES"):
+        rvs.V3EvidenceStore.open_read_only(tmp_path)
+    monkeypatch.setattr(ew.EmergencyEvidenceWal, "_read_headers", lambda self, h: [None, None])
+    assert rvs.V3EvidenceStore.open_read_only(tmp_path)._retired_excluded
+
+
+def test_exempt_identity_never_adopted_and_others_exact(tmp_path, monkeypatch):
+    _ready(tmp_path, monkeypatch)
+    ro = V3EvidenceStore.open_read_only(tmp_path)
+    assert ro._identity_binding()["deployed_revision"] == "NOT_DEPLOYED_LOCAL"
+    # only the retired authority left (and it is stale vs nothing): nothing to exempt against -> no exemption
+    d = tmp_path / "v3" / "receipts" / "emergency_record_idempotency_v1"
+    for led in ("decision", "lifecycle"):
+        (d / led / "complete.json").unlink()
+    others = [p for p in d.glob("*/complete.json") if p.parent.name != "market_segment"]
+    for p in others:
+        p.unlink()
+    ro2 = V3EvidenceStore.open_read_only(tmp_path)
+    assert ro2._retired_excluded == {}  # legacy single-authority behaviour, nothing exempted
+
+
+def test_appends_to_retired_stream_refused(tmp_path, monkeypatch):
+    s, path = _ready(tmp_path, monkeypatch)
+    before = path.read_bytes()
+    ro = V3EvidenceStore.open_read_only(tmp_path)
+    with pytest.raises(ValueError):
+        ro.append("market_segment", {"record_id": "late"})
+    import research_v3_bridge
+    assert research_v3_bridge.MARKET_SEGMENT_WRITES_RETIRED is True
+    assert path.read_bytes() == before
+
+
+def test_exemption_is_logged_with_both_identities(tmp_path, monkeypatch, caplog):
+    _ready(tmp_path, monkeypatch)
+    with caplog.at_level("WARNING"):
+        V3EvidenceStore.open_read_only(tmp_path)
+    msg = [r.getMessage() for r in caplog.records if "V3-RETIRED-STREAM-EXEMPT" in r.getMessage()]
+    assert len(msg) == 1 and "ledger=market_segment" in msg[0]
+    assert STALE in msg[0] and "NOT_DEPLOYED_LOCAL" in msg[0]
+
+
+def test_analyzer_path_reads_active_and_not_retired(tmp_path, monkeypatch):
+    _, path = _ready(tmp_path, monkeypatch)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    import analyzer_research_engine_v62 as eng
+    assert len(eng._v3_ledger_rows("decision")) == 4
+    assert eng._v3_ledger_rows("market_segment") == []
+    with open(path, "ab") as fh:  # grown retired file -> conflict -> analyzer gets nothing (fail closed)
+        fh.write(b'{"record_id":"late"}\n')
+    assert eng._v3_ledger_rows("decision") == []
