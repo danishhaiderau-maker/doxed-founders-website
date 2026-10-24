@@ -583,7 +583,8 @@ def test_hm5r2_latch_red_never_replaces_an_ack_only_code():
     st = {"red_alert": {"ts": 1, "code": "UNTAGGED_ORDER"}}
     g.latch_red(st, {"ts": 2, "code": "FORCE_FLAT_UNCONFIRMED"})
     assert st["red_alert"]["codes"] == ["FORCE_FLAT_UNCONFIRMED", "UNTAGGED_ORDER"] and not g.red_ack_only(st["red_alert"])
-    assert g.ACK_ONLY_RED_CODES == (frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"}) | g.LIVE_TOTAL_LOSS_RED_CODES
+    assert g.red_ack_only({"code": "GUARDIAN_STATE_UNREADABLE"})   # HM R4 nit: unreadable state file fails closed
+    assert g.ACK_ONLY_RED_CODES == (frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED", "GUARDIAN_STATE_UNREADABLE"}) | g.LIVE_TOTAL_LOSS_RED_CODES
                                     | g.DAILY_CAP_DISARM_CODES)   # HM R3 B1 (#876): R20 cap REDs are ack-only
 
 

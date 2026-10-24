@@ -99,7 +99,9 @@ def total_loss_arm_block(chains) -> str | None:
 # HM R3 B1 (#876): the R20 cap REDs (total, its evaluation error, and the daily cap codes) are ack-only too, so a FLAT
 # reading after the forced flatten never self-clears them; and the arm paths + admit_entry independently refuse while
 # total_live_loss_violations() is non-empty (total_loss_arm_block), so even an acked latch cannot re-arm over the cap.
-ACK_ONLY_RED_CODES = frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"}) | LIVE_TOTAL_LOSS_RED_CODES | DAILY_CAP_DISARM_CODES
+# HM R4 nit: GUARDIAN_STATE_UNREADABLE is ack-only too -- an unreadable/missing state file may have held a daily/total cap
+# latch, so it must not self-clear on FLAT (fail closed). Daily-cap REDs need an operator red-ack every time (intended).
+ACK_ONLY_RED_CODES = frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED", "GUARDIAN_STATE_UNREADABLE"}) | LIVE_TOTAL_LOSS_RED_CODES | DAILY_CAP_DISARM_CODES
 RED_ALSO_MAX = 10
 
 
