@@ -1389,8 +1389,11 @@ def _write_tile_realism_artifact(manifest):
     try:
         import monitor_tiles as _mt
         restore = lambda r: {**r, **{k: _mt._restore_pricing_value(k, r.get(k)) for k in _mt.PRICING_KEYS}}
-    except Exception:
+        restore_warning = None
+    except Exception as exc:  # HM #865 nit 1: never skip the price clean-up silently
         restore = dict
+        restore_warning = f"PRICING_RESTORE_UNAVAILABLE: {type(exc).__name__}: {exc}"[:300]
+        print(f"[TILE REALISM] WARNING {restore_warning}; pricing columns not restored", flush=True)
     try:
         rows = []
         if os.path.exists(TRADES_FILE):
@@ -1401,6 +1404,8 @@ def _write_tile_realism_artifact(manifest):
             json.dump(table, fh, indent=1, default=str)
         manifest["tile_realism_table"] = {"file": TILE_REALISM_FILE, "tiles": len(table.get("tiles") or {}),
                                           "r17_excluded_rows": table.get("r17_excluded_rows")}
+        if restore_warning:
+            manifest["tile_realism_table"]["warning"] = restore_warning
     except Exception as exc:
         manifest["tile_realism_table"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
     artifacts = manifest.setdefault("text_artifacts", [])

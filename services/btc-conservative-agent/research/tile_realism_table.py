@@ -19,6 +19,7 @@ import r17_exclusion
 SCHEMA = "tile_realism_table_v1"
 EXPECTED_DATA_EPOCH_ID = "ce-20261004-v31-freeze21b"
 REASON_EPOCH = "NOT_CURRENT_DATA_EPOCH"
+REASON_EPOCH_MISSING = "DATA_EPOCH_STAMP_MISSING"
 REASON_BP_MISSING = "NET_BP_MISSING"
 CLUSTER_SEC = 3600
 _TILE_KEYS = ("tile_short", "tile_id", "tile", "research_lane", "lane")
@@ -58,7 +59,9 @@ def realism_stamps(row: Mapping[str, Any]) -> dict[str, Any]:
 def row_exclusion(row: Mapping[str, Any], *, expected_epoch_id: str = EXPECTED_DATA_EPOCH_ID,
                   ids=None, load_errors=None) -> str | None:
     epoch = row.get("data_epoch_id")
-    if epoch not in (None, "") and str(epoch) != expected_epoch_id:
+    if epoch in (None, ""):
+        return REASON_EPOCH_MISSING  # HM #865 nit 2: no stamp never passes the epoch check
+    if str(epoch) != expected_epoch_id:
         return REASON_EPOCH
     reason = r17_exclusion.non_countable_reason(dict(row), ids=ids, load_errors=load_errors)
     if reason:
