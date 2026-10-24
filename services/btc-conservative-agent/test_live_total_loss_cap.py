@@ -95,3 +95,61 @@ def test_cap_response_has_no_setter():
     for p in HERE.glob("*.py"):
         if not p.name.startswith("test_"):
             assert not re.search(r"cap_breach_response\s*=|setattr\([^)]*cap_breach_response", p.read_text(errors="ignore")), p.name
+
+
+# ---- HM R3 B1 (#876): the R20 latch never self-clears; arm + admit_entry re-check the all-time cap (fail closed) ----
+import test_live_protection as tlp
+import test_live_tile_gate as tltg
+
+_R20_CODES = sorted(lg.LIVE_TOTAL_LOSS_RED_CODES | lg.DAILY_CAP_DISARM_CODES)
+
+
+def test_r20_cap_hit_then_flat_latch_still_held():
+    for code in _R20_CODES:
+        assert code in lg.ACK_ONLY_RED_CODES
+        ns = tlp._red_clear_ns({"ts": tlp.NOW - 100, "code": code})
+        for _ in range(3):   # fresh FLAT_NO_STOPS after the forced flatten
+            assert ns["_live_guardian_red_clear_if_flat"](tlp.NOW) is False, code
+        st = ns["_LIVE_GUARDIAN_STATE"]
+        assert st["red_alert"]["code"] == code and "red_alert_cleared" not in st
+
+
+def _arm_ns(chains):
+    src = tlp._SRC
+    a, b = src.index("def _live_total_loss_chains_strict"), src.index("def _live_fences_arm_block")
+    import collections
+    ns = {"_LIVE_GUARDIAN_STATE": {}, "_LIVE_GUARDIAN_FORCE_FLAT_LOG": collections.deque(),
+          "_live_fences_arm_block": lambda: None}
+    exec(src[a:b], ns)
+    ns["_live_total_loss_chains_strict"] = lambda now=None: chains
+    return ns
+
+
+def test_r20_rearm_refused_while_total_breached_or_unreadable(monkeypatch):
+    _patch(monkeypatch)
+    assert _arm_ns([_c(-0.11)])["_live_guardian_arm_block"]() == lg.VIOL_LIVE_TOTAL_LOSS_CAP   # red already acked/cleared
+    assert _arm_ns(None)["_live_guardian_arm_block"]() == lg.VIOL_LIVE_TOTAL_LOSS_UNREADABLE   # source unreadable
+    assert _arm_ns([_c(None)])["_live_guardian_arm_block"]() == lg.VIOL_LIVE_TOTAL_LOSS_UNREADABLE
+    assert _arm_ns([_c(-0.05)])["_live_guardian_arm_block"]() is None
+    ns = _arm_ns([])
+    ns["_live_total_loss_chains_strict"] = lambda now=None: (_ for _ in ()).throw(RuntimeError("x"))
+    assert ns["_live_guardian_arm_block"]().startswith(lg.VIOL_LIVE_TOTAL_LOSS_CAP_ERROR)
+    # admit_entry refuses too
+    ok, reasons, _ = tltg.admit(chains=[_c(-0.11)])
+    assert not ok and lg.VIOL_LIVE_TOTAL_LOSS_CAP in reasons
+    monkeypatch.setattr(lg, "total_live_loss_violations", lambda ch: 1 / 0)
+    ok, reasons, _ = tltg.admit()
+    assert not ok and lg.VIOL_LIVE_TOTAL_LOSS_CAP_ERROR in reasons
+
+
+def test_r20_latch_survives_restart(tmp_path):
+    for code in (lg.VIOL_LIVE_TOTAL_LOSS_CAP, "DAILY_LOSS_CAP"):
+        ns = tlp._persist_ns(tmp_path)
+        ns["_LIVE_GUARDIAN_STATE"].update(red_alert={"ts": tlp.NOW, "code": code})
+        assert ns["_live_guardian_persist"]()
+        ns2 = tlp._persist_ns(tmp_path)
+        ns2["_live_guardian_restore"](tlp.NOW + 30)
+        red = ns2["_LIVE_GUARDIAN_STATE"]["red_alert"]
+        assert red["code"] == code
+        c = tlp._red_clear_ns(dict(red), fetched=tlp.NOW + 60)
+        assert c["_live_guardian_red_clear_if_flat"](tlp.NOW + 60) is False and c["_LIVE_GUARDIAN_STATE"]["red_alert"]["code"] == code

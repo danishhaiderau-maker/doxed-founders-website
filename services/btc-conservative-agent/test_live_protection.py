@@ -435,6 +435,7 @@ def test_rk1_restart_reconciles_to_the_exchange_before_any_state_change(tmp_path
     for fn in ("_live_guardian_arm_block", "_live_flatten_entry_fence"):
         exec(_fn_src(fn), ns2)
     ns2["_live_fences_arm_block"] = lambda: None   # live_fences health: test_live_fences_health.py
+    ns2["_live_total_loss_arm_block"] = lambda: None
     ns2["_live_guardian_restore"](NOW + 30)
     st = ns2["_LIVE_GUARDIAN_STATE"]
     # before the reconcile: arming AND live entries are refused, the latch stays
@@ -582,7 +583,8 @@ def test_hm5r2_latch_red_never_replaces_an_ack_only_code():
     st = {"red_alert": {"ts": 1, "code": "UNTAGGED_ORDER"}}
     g.latch_red(st, {"ts": 2, "code": "FORCE_FLAT_UNCONFIRMED"})
     assert st["red_alert"]["codes"] == ["FORCE_FLAT_UNCONFIRMED", "UNTAGGED_ORDER"] and not g.red_ack_only(st["red_alert"])
-    assert g.ACK_ONLY_RED_CODES == frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
+    assert g.ACK_ONLY_RED_CODES == (frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"}) | g.LIVE_TOTAL_LOSS_RED_CODES
+                                    | g.DAILY_CAP_DISARM_CODES)   # HM R3 B1 (#876): R20 cap REDs are ack-only
 
 
 def test_hm5r2_force_flat_not_started_after_liq_clamp_red_records_both_codes():
@@ -1020,7 +1022,7 @@ def _route_ns(route, state, extra=None, body=None, amendment=None):
           "jsonify": lambda *a, **k: dict(*a, **k), "_admin_authed_strict": lambda: True,
           "_strict_json_boolean": lambda d, k: d.get(k) if isinstance(d.get(k), bool) else None,
           "_live_guardian_heartbeat_stale": lambda: False, "_live_guardian_arm_block": lambda: None,
-          "_live_fences_arm_block": lambda: None, "CALLS": calls}
+          "_live_fences_arm_block": lambda: None, "_live_total_loss_arm_block": lambda: None, "CALLS": calls}
     ns.update(extra or {})
     sa = _SRC.index("LIVE_ARM_GATE_SCHEMA = ")
     exec(_SRC[sa:_SRC.index("\n", sa)], ns)
@@ -1101,7 +1103,7 @@ def test_852_l27_fly_arm_gate_endpoint_serves_the_shared_helper_verdict_for_the_
     assert ns["api_live_copy_arm_gate"]()["l27_block"] is None
     assert "LIVE_ARM_GATE_SCHEMA = \"fly_live_arm_gate_v1\"" in _SRC
     assert ns["api_live_copy_arm_gate"]()["live_fences_block"] is None
-    ns, _ = _route_ns("/api/live-copy/arm-gate", {}, {"_live_fences_arm_block": lambda: "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE"})
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {}, {"_live_fences_arm_block": lambda: "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE", "_live_total_loss_arm_block": lambda: None})
     assert ns["api_live_copy_arm_gate"]()["live_fences_block"] == "LIVE_FENCES_UNREADABLE:acct-b=LIVE_FENCES_OK_FALSE"
 
 

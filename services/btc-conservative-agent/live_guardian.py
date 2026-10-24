@@ -35,12 +35,15 @@ LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only l
 # flatten (disarm ALL + force-flat, as every disarming violation) AND RED.
 STOP_ORDER_ID_NOT_RESIDENT = "STOP_ORDER_ID_NOT_RESIDENT"
 STOP_UNPROTECTED_RED_CODES = frozenset({"STOP_MISSING_GT_5S", "STOP_PLACEMENT_FAILED", STOP_ORDER_ID_NOT_RESIDENT})
-# R20 (Danish 25 Oct 06:21): a hard TOTAL (cumulative, all-time, all live tiles) live realised-loss limit. Hitting it (or
+# R20 rule (Danish 25 Oct 06:21): a hard TOTAL (cumulative, all-time, all live tiles) live realised-loss limit. Hitting it (or
 # failing to evaluate it) disarms ALL live tiles + force-flats (RED, latched: arming is refused until FLAT_NO_STOPS read-back
 # and a human clears it). FROZEN constant: no env override, no bot/admin route reads or writes it; Danish sets the amount
 # in code review. The amount changes ONLY by a code PR that carries Danish's own words (quoted verbatim). Pending Danish it equals the D3 daily total cap (live_tile_gate.DAILY_LOSS_CAP_TOTAL_USD = $0.10).
 LIVE_TOTAL_LOSS_CAP_USD = 0.10
-LIVE_TOTAL_LOSS_CAP_SOURCE = "R20 (Danish 25 Oct 06:21 AEDT); amount = D3 daily total cap pending Danish"
+# Amount source: NOT Danish's figure - AMEND3 D3 ($0.10 total per UTC day) reused via RK 06:29, pending Danish.
+# Scope (HM R3 nit): CLOSED chains' realised P&L only; an open position is NOT marked to the book here. The open leg is
+# bounded by the daily D3 path (open mark, row age <= 2 s, else entry block) and, at $0.25 margin, a -35 bp stop ~ $0.0009.
+LIVE_TOTAL_LOSS_CAP_SOURCE = "rule: R20 (Danish 25 Oct 06:21 AEDT); amount: AMEND3 D3 via RK 06:29, pending Danish"
 VIOL_LIVE_TOTAL_LOSS_CAP = "LIVE_TOTAL_LOSS_CAP"
 VIOL_LIVE_TOTAL_LOSS_CAP_ERROR = "LIVE_TOTAL_LOSS_CAP_ERROR"
 VIOL_LIVE_TOTAL_LOSS_UNREADABLE = "LIVE_TOTAL_LOSS_UNREADABLE"
@@ -79,9 +82,24 @@ def total_live_loss_violations(chains: Iterable[Mapping[str, Any]]) -> list:
         return out
     except Exception as exc:  # noqa: BLE001 - fail closed: RED
         return [{"code": VIOL_LIVE_TOTAL_LOSS_CAP_ERROR, "tile": None, "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}]
+def total_loss_arm_block(chains) -> str | None:
+    """HM R3 B1: arm / entry refusal while the all-time cap is breached or cannot be read (fail closed). ``chains`` None
+    (source unreadable) refuses."""
+    if chains is None:
+        return VIOL_LIVE_TOTAL_LOSS_UNREADABLE
+    try:
+        v = total_live_loss_violations(chains)
+    except Exception:  # noqa: BLE001
+        return VIOL_LIVE_TOTAL_LOSS_CAP_ERROR
+    return v[0]["code"] if v else None
+
+
 # HM5 (24 Oct, #852): REDs that fresh exchange evidence FLAT_NO_STOPS does NOT clear. They clear only through the stamped
 # operator ack route (bot POST /api/live-copy/guardian/red-ack), and no later RED replaces their code (latch_red).
-ACK_ONLY_RED_CODES = frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
+# HM R3 B1 (#876): the R20 cap REDs (total, its evaluation error, and the daily cap codes) are ack-only too, so a FLAT
+# reading after the forced flatten never self-clears them; and the arm paths + admit_entry independently refuse while
+# total_live_loss_violations() is non-empty (total_loss_arm_block), so even an acked latch cannot re-arm over the cap.
+ACK_ONLY_RED_CODES = frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"}) | LIVE_TOTAL_LOSS_RED_CODES | DAILY_CAP_DISARM_CODES
 RED_ALSO_MAX = 10
 
 

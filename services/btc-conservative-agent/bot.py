@@ -62805,11 +62805,38 @@ def _live_l27_amendment_pass_set(actor, sha, now=None, auth_method: str = "") ->
     return 200, {"ok": True, "l27_amendment_pass": rec, "l27_block": _live_l27_arm_block()}
 
 
+def _live_total_loss_chains_strict(now=None):
+    """The guardian's live chains, but None (not []) when the source is missing or errors, so the R20 arm check fails closed."""
+    try:
+        import live_copy_monitor as _lcm
+        import live_copy_monitor_api as _lcma
+        provider = _lcma._CTX.get("provider")
+        ctx = provider() if provider else None
+        if not isinstance(ctx, dict):
+            return None
+        chains = _lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
+        return list(chains["accounts"].values())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _live_total_loss_arm_block() -> str | None:
+    """HM R3 B1: refuse arming while live_guardian.total_live_loss_violations shows a breach or cannot be read."""
+    try:
+        import live_guardian as _lgm
+        return _lgm.total_loss_arm_block(_live_total_loss_chains_strict())
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        return f"LIVE_TOTAL_LOSS_CAP_ERROR:{type(exc).__name__}"
+
+
 def _live_guardian_arm_block() -> str | None:
     """Arm refusal while a force-flat is unconfirmed (RED) or still running, or (RK (1)) after a crash/restart until the
     guardian has reconciled to the exchange (boot_rederive_pending)."""
     if _LIVE_GUARDIAN_STATE.get("red_alert"):
         return "LIVE_GUARDIAN_FORCE_FLAT_RED"
+    _total = _live_total_loss_arm_block()   # HM R3 B1: R20 all-time cap re-checked at arm time (fail closed)
+    if _total:
+        return _total
     if _LIVE_GUARDIAN_STATE.get("boot_rederive_pending"):
         return "LIVE_GUARDIAN_BOOT_RECONCILE_PENDING"
     if any(r.get("requested") and not r.get("done_ts") for r in list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)):

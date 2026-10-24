@@ -392,6 +392,12 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         info["daily_cap"] = cap_info
         if blocks:
             reasons.append(SKIP_DAILY_CAP)
+        # 7. HM R3 B1: the R20 all-time cap is re-checked on every entry (breach or unreadable => refuse; fail closed)
+        import live_guardian as _lg
+        _tb = _lg.total_loss_arm_block(chains)
+        info["total_loss_block"] = _tb
+        if _tb:
+            reasons.append(_tb)
         return (not reasons), reasons, info
     except Exception as exc:  # noqa: BLE001 - any error refuses the live entry (paper unaffected)
         return False, [f"{DENY_GATE_ERROR}:{type(exc).__name__}"], {}

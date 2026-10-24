@@ -554,6 +554,7 @@ def _ff_ns():
           "_live_guardian_persist": lambda: True, "_disarm_live_control": lambda reason: None}
     exec(src, ns)
     ns["_live_fences_arm_block"] = lambda: None   # live_fences health: test_live_fences_health.py
+    ns["_live_total_loss_arm_block"] = lambda: None   # R20 total cap at arm: test_live_total_loss_cap.py
     return ns
 
 
