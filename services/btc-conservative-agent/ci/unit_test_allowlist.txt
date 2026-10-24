@@ -656,3 +656,6 @@ test_booktail_incremental.py
 test_exit_lag_regression.py
 test_exit_scan_stamps.py
 test_trigger_receive_stamp.py
+test_retired_stream_identity.py
+test_retired_stream_identity_bot.py
+test_monitor_trade_count_and_force_paper.py
