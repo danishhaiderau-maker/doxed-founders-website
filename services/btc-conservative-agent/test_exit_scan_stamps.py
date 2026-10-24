@@ -35,7 +35,8 @@ def test_stamp_inside_scan_has_every_field():
     time.sleep(0.01)
     st = ns["_exit_scan_stamp"]("PROTECTIVE_EXIT_WORKER")
     ns["_exit_scan_end"]()
-    assert set(st) == set(ns["EXIT_SCAN_STAMP_KEYS"])
+    import exit_lag_regression as _elr  # receive keys are stamped by _stamp_trigger_basis, persisted via the same list
+    assert set(st) == set(ns["EXIT_SCAN_STAMP_KEYS"]) - set(_elr.RECEIVE_KEYS)
     assert st["exit_source"] == "PROTECTIVE_EXIT_WORKER" and st["exit_scan_source"] == "PROTECTIVE_EXIT_WORKER"
     assert st["exit_scan_duration_ms"] >= 10.0
     assert 0.0 <= st["exit_worker_loop_lag_ms"] < 250.0  # slept 0.30 s vs a 0.25 s period -> ~50 ms late

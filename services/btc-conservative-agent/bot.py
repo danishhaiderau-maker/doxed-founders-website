@@ -5537,6 +5537,38 @@ def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: fl
     if m.get("quote_stale"):
         pos["exit_trigger_flag"] = _qt.STALE_BOOK
     pos.setdefault("trigger_price_source", _qt.DEFAULT_SOURCE)
+    pos.update(_trigger_receive_stamp(m))
+
+
+def _trigger_receive_stamp(meta: dict) -> dict:
+    """RK ruling 22:32 AEDT: the trigger book row's OWN collector receive_ts (WS_FRAME, Fly clock) - the only trigger
+    time the EXIT_LAG measure uses. Trade-tape triggers (no book row) and rows without a WS_FRAME receive_ts stamp
+    None -> EXIT_LAG_UNMEASURED (never the whole-second s, never the wall-clock trigger stamp)."""
+    m = meta or {}
+    out = {"exit_trigger_row_s": None, "exit_trigger_receive_ts": None, "exit_trigger_receive_ts_source": None}
+    row_s = m.get("trigger_event_book_s")
+    if row_s is None and m.get("trigger_trade_id") is None:  # a trade-tape trigger has no book row
+        row_s = m.get("book_s")
+    if row_s is None:
+        return out
+    try:
+        row_s = int(row_s)
+        import paper_fill as _pf
+        rows = [r for r in (_pf._book10l_rows_between(row_s, row_s) or ()) if int(r.get("s", -1)) == row_s]
+    except Exception:  # noqa: BLE001
+        return out
+    out["exit_trigger_row_s"] = row_s
+    r = rows[-1] if rows else {}
+    src = r.get("receive_ts_source")
+    try:
+        rx = float(r.get("receive_ts")) if r.get("receive_ts") is not None else None
+    except (TypeError, ValueError):
+        rx = None
+    if rx is not None and src == "WS_FRAME":
+        out.update(exit_trigger_receive_ts=rx, exit_trigger_receive_ts_source=src)
+    else:
+        out["exit_trigger_receive_ts_source"] = src
+    return out
 
 
 def _exchange_stop_fields(pos: dict) -> dict:
@@ -8238,8 +8270,9 @@ def _non_countable_reasons(pos: dict, exit_reason) -> list:
         if lf:
             out.append(lf)
     import exit_lag_regression as _elr
-    if _elr.is_regression(pos):  # RK PASS (7): trigger->decision lag above the pre-346ef2bf p95 (all lanes)
-        out.append(_elr.REASON)
+    # RK PASS (7) + RK ruling 22:32: decision - trigger-row WS_FRAME receive_ts above the pre-346ef2bf p95
+    # (EXIT_LAG_REGRESSION) or not measurable (EXIT_LAG_UNMEASURED), all lanes.
+    out.extend(_elr.reasons(pos))
     return out
 
 
@@ -28340,7 +28373,9 @@ def _exit_scan_stamp(exit_source=None) -> dict:
 EXIT_SCAN_STAMP_KEYS = ("exit_stamp_schema", "exit_source", "exit_scan_source", "exit_scan_started_ts",
                         "exit_scan_duration_ms", "exit_worker_loop_lag_ms", "exit_scheduler_lag_ms",
                         "exit_book_refresh_ms", "exit_book_refreshes_in_scan", "exit_trigger_wall_ts",
-                        "exit_thread_name", "exit_thread_native_id")
+                        "exit_thread_name", "exit_thread_native_id",
+                        # RK ruling 22:32: the trigger row's own collector receive stamp (EXIT_LAG measure basis)
+                        "exit_trigger_row_s", "exit_trigger_receive_ts", "exit_trigger_receive_ts_source")
 
 
 def protective_exit_scan(now: float = None) -> int:
