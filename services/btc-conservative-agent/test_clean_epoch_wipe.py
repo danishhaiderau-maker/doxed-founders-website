@@ -330,3 +330,52 @@ def test_read_only_archive_files_are_deleted(tmp_path):
     os.chmod(path, stat.S_IREAD)
     wipe._unlink(str(path))
     assert not path.exists()
+
+
+# ------------------------------------------------------------------ RK C4c: report history at the laptop reset
+def test_c4c_laptop_plan_never_lists_puller_backups_or_gs_export_files(tmp_path):
+    archive = tmp_path / "analysis-archive"
+    old = 30 * DAY
+    _write(archive / "report-history" / "20261001T000000Z_gen-1" / "manifest.json", "{}", age_sec=old)
+    _write(archive / "report-history" / "index.jsonl", "{}\n", age_sec=old)
+    _write(archive / ".puller-backup-20261001T000000" / "report-history" / "index.jsonl", "{}\n", age_sec=old)
+    _write(archive / "gs-export-20261001.csv", "a\n", age_sec=old)
+    plan = wipe.Plan("laptop", EPOCH, time.time() - DAY, simulated=False)
+    wipe.plan_laptop(plan, {"analysis_archive": {"path": str(archive), "kind": "all"}})
+    rels = {c["rel"] for c in plan.candidates}
+    assert rels == {"report-history/20261001T000000Z_gen-1/manifest.json", "report-history/index.jsonl"}
+    assert plan.kept["NEVER_TOUCH_PULLER_BACKUP"]["files"] == 1
+    assert plan.kept["NEVER_TOUCH_GS_EXPORT_TEMP"]["files"] == 1
+
+
+def test_c4c_laptop_plan_refuses_a_root_in_user_temp(tmp_path):
+    temp = tmp_path / "Users" / "danis" / "AppData" / "Local" / "Temp"
+    _write(temp / "gs-export-1.csv", "a\n", age_sec=30 * DAY)
+    plan = wipe.Plan("laptop", EPOCH, time.time() - DAY, simulated=False)
+    with pytest.raises(SystemExit, match="never-touch"):
+        wipe.plan_laptop(plan, {"temp": {"path": str(temp), "kind": "all"}})
+    assert plan.candidates == [] and (temp / "gs-export-1.csv").exists()
+
+
+def test_c4c_relocated_report_history_is_planned_owned_entries_only(tmp_path, monkeypatch):
+    history = tmp_path / "elsewhere" / "report-history"
+    monkeypatch.setenv("DOXXED_REPORT_HISTORY_DIR", str(history))
+    monkeypatch.setattr(wipe, "LAPTOP_ROOTS", {})
+    roots = wipe.default_laptop_roots()
+    assert roots == {"report_history": {"path": str(history), "kind": "report_history"}}
+    old = 30 * DAY
+    for rel in ("20261001T000000Z_gen-1/manifest.json", "index.jsonl", "event_study_ledger.jsonl",
+                ".staging-20261001T000000Z_gen-2/a.json", ".puller-backup-1/index.jsonl", "gs-export-1.csv",
+                "operator_notes.txt"):
+        _write(history / rel, "{}\n", age_sec=old)
+    plan = wipe.Plan("laptop", EPOCH, time.time() - DAY, simulated=False)
+    wipe.plan_laptop(plan)
+    assert {c["rel"] for c in plan.candidates} == {
+        "20261001T000000Z_gen-1/manifest.json", "index.jsonl", "event_study_ledger.jsonl",
+        ".staging-20261001T000000Z_gen-2/a.json"}
+    assert {c["reason"] for c in plan.candidates} == {"PRE_EPOCH_REPORT_HISTORY"}
+    assert plan.kept["NOT_REPORT_HISTORY_OWNED"]["files"] == 1
+    monkeypatch.setenv("DOXXED_REPORT_HISTORY_DIR", r"C:\DoxxedCrypto\analysis-archive\report-history")
+    monkeypatch.setattr(wipe, "LAPTOP_ROOTS", {"analysis_archive": {"path": r"C:\DoxxedCrypto\analysis-archive",
+                                                                   "kind": "all"}})
+    assert "report_history" not in wipe.default_laptop_roots()

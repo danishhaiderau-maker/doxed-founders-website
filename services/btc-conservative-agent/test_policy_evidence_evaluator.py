@@ -929,3 +929,14 @@ def test_missing_opportunity_identity_remains_unknown_in_artifact_and_is_explici
     assert row["comparison_cohort_key"] is None
     assert row["classification"] == "UNKNOWN"
     assert "UNKNOWN_CAUSAL_IDENTITY_INCOMPLETE" in row["unknown_reason_codes"]
+
+
+import pytest as _pytest_r17
+from research import r3_quarantine as _r3q_r17
+
+
+@_pytest_r17.fixture(autouse=True)
+def _legacy_limit_fill_1s_unquarantined(monkeypatch):
+    # These tests pin the legacy 1 s limit-fill math; production has LIMIT_FILL_1S retired (R17, RK #847 cond 4),
+    # covered by test_r17_retired_sources.py.  Kept (not deleted) pending the book_limit_entry rebuild.
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"LIMIT_FILL_1S"})

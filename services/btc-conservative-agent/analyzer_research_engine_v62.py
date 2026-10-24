@@ -84,10 +84,21 @@ from research.shadow_outcome_reconstruction import (
     reconstruct_row as _reconstruct_research_row,
 )
 from research.conservative_limit_fill import evaluate_limit_fill as _evaluate_conservative_limit_fill
+from research.r3_quarantine import retired as _r3q_retired
 from research.quantity_execution import (
     validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
 from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
+
+
+class _R3RetiredSection(Exception):
+    """Control flow only: a retired (R17) producer returned its disabled payload; the section writes nothing."""
+
+    def __init__(self, payload):
+        super().__init__(payload.get("label"))
+        self.payload = payload
+
+
 ADX_RESEARCH_LOW_MAX = 18.0
 ADX_RESEARCH_MID_MAX = 30.0
 
@@ -361,6 +372,11 @@ def _restore_analyzer_output(tee, log_handle):
 
 
 def _load_json_report(path, default=None):
+    from research.r3_quarantine import quarantined_file as _r3_quarantined
+
+    if _r3_quarantined(path):
+        # R3/R17: a retired producer's stale output is never read (left on disk, not loaded).
+        return default if default is not None else {}
     candidates = [path]
     if not os.path.dirname(str(path)):
         alt = analyzer_report_path(path)
@@ -1164,6 +1180,37 @@ def _epoch_guard():
         _EPOCH_GUARD = guard
         set_process_guard(guard)
     return _EPOCH_GUARD
+
+
+def _report_history_epoch_id():
+    """Epoch the laptop report history is stamped and capped to; None (history refuses) when unknown.
+
+    Source: the synced data_epoch.json found by ``_epoch_guard`` (BTC_DATA_EPOCH_DIR, the agent data dir or
+    the laptop mirror tree), else ``DATA_EPOCH_ID``. Both present but different -> None (fail closed).
+    """
+    import data_epoch as de
+
+    try:
+        guard = _epoch_guard()
+        manifest_epoch = guard.manifest["epoch_id"] if guard.declared else None
+    except Exception:
+        manifest_epoch = None
+    env_epoch = (os.getenv("DATA_EPOCH_ID") or "").strip() or None
+    if manifest_epoch and env_epoch and manifest_epoch != env_epoch:
+        return None
+    epoch = manifest_epoch or env_epoch
+    return epoch if de.valid_epoch_id(epoch) else None
+
+
+def _snapshot_report_history():
+    """Snapshot this generation's report set into the laptop history, capped to the current epoch (RK C4c)."""
+    from research.report_history import snapshot_report_set
+
+    return snapshot_report_set(
+        os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE)),
+        generation_id=(_load_json_report(REPORT_MANIFEST_FILE) or {}).get("generation_id"),
+        epoch_id=_report_history_epoch_id(),
+    )
 
 
 def _epoch_scoped(relpath):
@@ -4125,6 +4172,7 @@ def _replay_entry_price(replay: dict):
     return replay.get("start_price")
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def stop_thesis_wide_sweep_all_replays(trades_df=None):
     """
     Sweep thesis fast-cut / stop placement on ALL signal_replay.jsonl paths
@@ -4322,6 +4370,7 @@ def _build_ladder_with_first_rung(trig, lock):
     return [(trig, lock)] + [(t, l) for t, l in TRAIL_LADDER if t > trig]
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def stop_ladder_2d_grid_sweep_all_replays(trades_df=None, top_n=10):
     """
     2D grid: thesis stop margin % × ladder first rung (trigger→lock) on all replays.
@@ -4483,6 +4532,7 @@ def stop_ladder_2d_grid_sweep_all_replays(trades_df=None, top_n=10):
     }
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
     """
     3D grid: thesis stop × ladder first rung × MFE protect floor.
@@ -4617,6 +4667,7 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
     return float(best["sum_pnl_usd"])
 
 
+@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def qualified_exit_policy_grid_report():
     """Costed, chronological, real-copy-only thesis/ladder/MFE grid.
 
@@ -5265,6 +5316,7 @@ def _cohort_passes_spread(row, min_spread):
     return int(row.get("directional_spread") or 0) >= min_spread
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def _aggregate_cohort_replay_pnl(cohort_rows, stop_pct=None):
     total = 0.0
     n = wins = 0
@@ -5284,6 +5336,7 @@ def _aggregate_cohort_replay_pnl(cohort_rows, stop_pct=None):
     return {"n": n, "sum_pnl_usd": round(total, 2), "avg_pnl_usd": round(total / n, 2) if n else 0.0, "win_rate_pct": wr}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def entry_gate_replay_sweeps(blocked_df=None):
     """
     Sweep entry gate parameters on frozen APPROVE snapshots + tick replay exit PnL.
@@ -5534,6 +5587,7 @@ def _sim_replay_pnl_at_fill(replay: dict, entry: float, fill_t: float, stop_pct=
     return float(sim_usd), exit_reason
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def pullback_replay_fill_sweep(blocked_df=None):
     """
     Counterfactual entry pullback on APPROVE tick replays:
@@ -5631,6 +5685,7 @@ def pullback_replay_fill_sweep(blocked_df=None):
     return {"best_pullback_pct": float(best["pullback_%"]) / 100.0}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def entry_gate_mtf_chop_sweet_spot_sweep(blocked_df=None):
     """
     MTF rule × chop × ADX grid on frozen APPROVE cohort + tick replay PnL.
@@ -5755,6 +5810,7 @@ def entry_gate_mtf_chop_sweet_spot_sweep(blocked_df=None):
     return {"live_stack_pnl": live_agg["sum_pnl_usd"], "best_combo": best.to_dict() if best is not None else None}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def gate_margin_sweet_spot_analysis(blocked_df=None):
     """
     Distance-to-pass margins (adx/chop/edge/spread) — find minimal relaxation per gate.
@@ -5886,6 +5942,7 @@ def post_block_quality_analysis(blocked_df=None):
     return df
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def regime_segment_analysis(blocked_df=None):
     """Segment APPROVE replay PnL by session, funding, volatility, 4h ranging."""
     print("\n=== REGIME SEGMENT ANALYSIS (session / funding / vol / 4h) ===")
@@ -5946,6 +6003,7 @@ def regime_segment_analysis(blocked_df=None):
     return df
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def margin_size_sweep_analysis(df, blocked_df=None):
     """
     Did conviction/regime/ADX margin scaling help or hurt?
@@ -6125,6 +6183,7 @@ def margin_size_sweep_analysis(df, blocked_df=None):
     return {"best_flat_margin_usd": float(cf_df.iloc[0]["margin_usd"]) if df is not None and not df.empty else None}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def thesis_fast_cut_optimization(df):
     """Sweep THESIS_FAST_EXIT_UNREAL_PCT to find sweet spot (max sum PnL / win rate)."""
     print("\n=== THESIS FAST-CUT SWEET SPOT (THESIS_FAST_EXIT_UNREAL_PCT) ===")
@@ -13967,6 +14026,17 @@ def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
     }
 
 
+def _retired_chase_tape_evidence(*_args, **_kwargs):
+    """HM #850 R2 C2: labelled "no evidence" for a retired LIMIT_FILL_1S join, so missed-opportunity proof rows
+    reject as SOURCE_RETIRED_R17 (coverage tape_status "source retired (R17)") instead of an unlabelled
+    TAPE_OR_EXECUTION_EVIDENCE_INCOMPLETE.  Still fail-closed: never COMPLETE, never a fill."""
+    from research import r3_quarantine as _r3q
+    return {"outcome_code": "SOURCE_RETIRED_R17", "coverage_status": _r3q.RETIRED_LABEL,
+            "fill_status": "UNKNOWN", "conservative_execution_supported": False,
+            "quarantine": "LIMIT_FILL_1S", "label": _r3q.RETIRED_LABEL, "countable": False}
+
+
+@_r3q_retired("LIMIT_FILL_1S", returns=_retired_chase_tape_evidence, print_once=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tape_by_bucket):
     """Replay the signed virtual limit over the complete one-second path.
 
@@ -17205,6 +17275,7 @@ def horizon_profitability_report(trades=None, session=None):
     return payload
 
 
+@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def fast_cut_survivor_report(trades=None, session=None):
     """
     THESIS_FAST_CUT survivor analysis — would trades recover / hit ladder if Scenario C stayed alive?
@@ -20066,6 +20137,7 @@ def benchmark_contribution_report(trades=None, session=None, benchmark_report=No
     return payload
 
 
+@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def fast_cut_sweep_report(trades=None, session=None):
     """Replay sweep at -6/-8/-10/-12 vs current booked PnL (executed trades)."""
     if session is None:
@@ -21126,6 +21198,7 @@ def _stamp_policy_evaluator_status(path, status):
             "relative_path", "artifact_sha256", "artifact_size_bytes",
             "cache_rows_ingested", "cache_rows_skipped_missing_identity",
             "cache_skip_reason_counts", "regime_feature_coverage",
+            "status", "label", "quarantine", "files_not_written",
         )
     }
     temporary = target.with_name(
@@ -22098,6 +22171,11 @@ def write_report_manifest(
             policy_data_dir, incident_input=incident_input,
             generation=baseline_generation, canonical_manifest=baseline_manifest,
         )
+        from research.r3_quarantine import is_retired_payload as _r3q_is_retired
+
+        if _r3q_is_retired(baseline_replay):
+            # RK #847 cond 4: priced on market_microstructure_1s -> source retired (R17); no report, no sidecar.
+            raise _R3RetiredSection(baseline_replay)
         if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
             raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
         baseline_replay["generation"] = baseline_generation
@@ -22127,6 +22205,10 @@ def write_report_manifest(
             "health": baseline_replay["health"],
             "episode_receipts_sidecar": replay_sidecar,
         })
+    except _R3RetiredSection as retired_section:
+        baseline_replay = None
+        print(f"  Same-Opportunity Entry Baseline Replay: {retired_section.payload['label']} "
+              f"({retired_section.payload['status']} {retired_section.payload['quarantine']}) — not written")
     except Exception as exc:
         baseline_replay_error = f"{type(exc).__name__}: {exc}"
     try:
@@ -23859,12 +23941,7 @@ def finalize_analyzer_outputs(
     snap = _save_rolling_snapshot()
     if _laptop_artifacts_enabled():
         try:
-            from research.report_history import snapshot_report_set
-
-            history = snapshot_report_set(
-                os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE)),
-                generation_id=(_load_json_report(REPORT_MANIFEST_FILE) or {}).get("generation_id"),
-            )
+            history = _snapshot_report_history()
             print(f"  Report history: {history.get('status')} {history.get('path') or history.get('error') or ''} "
                   f"{PIPELINE_ENFORCEMENT_TAG}")
         except Exception as exc:

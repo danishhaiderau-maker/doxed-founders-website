@@ -1,5 +1,9 @@
 """Walk-forward variant scorer over the per-signal research table (PR-D; PAPER / analysis only).
 
+RETIRED (R17, HM #850 R2 C1): this scorer prices on the 1 s tape, which R3 forbids.  ``r3_quarantine``
+key WALK_FORWARD_1S stops it: simulate / run write nothing and print ``source retired (R17)`` until it is
+rebuilt on paper_fill + quote_trigger (R4).
+
 Every variant = side rule (which signals, which side) x entry (taker / maker) x exit (time, stop, break-even,
 trailing, early cut; first trigger wins). Each (signal, variant) is simulated on the bot's own 1 s tape with the
 repo's REALISTIC_V1 fill model (``research/fill_model.py``) and Bitfinex fee profile (``bitfinex_cost_profile``):
@@ -39,10 +43,12 @@ import numpy as np
 
 try:
     from research import fill_model as fm
+    from research import r3_quarantine
     from research import signal_research_table as srt
 except ImportError:  # pragma: no cover
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from research import fill_model as fm
+    from research import r3_quarantine
     from research import signal_research_table as srt
 
 SCORER_SCHEMA = "walk_forward_variant_scores_v1"
@@ -154,6 +160,11 @@ def _fee_bp(liquidity: str) -> float:
     return float(f["maker_fee_rate"] if liquidity == "MAKER" else f["taker_fee_rate"]) * 1e4
 
 
+def _retired_leg(*_a: Any, **_k: Any) -> dict[str, Any]:
+    return {"status": "SOURCE_RETIRED_R17", "label": r3_quarantine.RETIRED_LABEL, "countable": False}
+
+
+@r3_quarantine.retired("WALK_FORWARD_1S", returns=_retired_leg, print_once=True)
 def simulate_entry(tape: srt.Tape, rows: Mapping[int, Mapping[str, Any]], row: Mapping[str, Any], side: str,
                    entry: Entry, latency_sec: float) -> dict[str, Any]:
     """REALISTIC_V1 entry for one signal. Returns ``status`` FILLED / NO_FILL / NO_FRESH_BBO with fill fields."""
@@ -198,6 +209,7 @@ def simulate_entry(tape: srt.Tape, rows: Mapping[int, Mapping[str, Any]], row: M
     return res
 
 
+@r3_quarantine.retired("WALK_FORWARD_1S", returns=_retired_leg, print_once=True)
 def simulate_exit(tape: srt.Tape, side: str, fill_ts: int, entry_price: float, exit_: Exit) -> dict[str, Any]:
     """First-trigger-wins exit on the executable-side margin path (bp). Returns gross bp, reason, hold."""
     sign = 1.0 if side == "LONG" else -1.0
@@ -255,6 +267,7 @@ def simulate_exit(tape: srt.Tape, side: str, fill_ts: int, entry_price: float, e
             "mfe_bp": float(mfe[bidx]), "mae_bp": float(min(0.0, np.nanmin(cur[:bidx + 1])))}
 
 
+@r3_quarantine.retired("WALK_FORWARD_1S", returns=lambda *a, **k: [])
 def simulate(table: Sequence[Mapping[str, Any]], tape: srt.Tape, *, latency_sec: float,
              side_rules: Sequence[SideRule] = SIDE_RULES, entries: Sequence[Entry] = ENTRIES,
              exits: Sequence[Exit] = EXITS) -> list[dict[str, Any]]:
@@ -464,6 +477,7 @@ def markdown_report(res: Mapping[str, Any], top: int = 25) -> str:
     return "\n".join(lines) + "\n"
 
 
+@r3_quarantine.retired("WALK_FORWARD_1S", writes_report=True)
 def run(table_path: Path, tape_dir: Path, out_dir: Path, *, latency: Mapping[str, Any] | None = None,
         kinds: Iterable[str] | None = None, since_utc: str | None = None) -> dict[str, Any]:
     table = srt.read_table(table_path)
@@ -505,6 +519,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     lat = {"source": "CLI_OVERRIDE", "latency_sec": args.latency_sec} if args.latency_sec is not None else None
     res = run(args.table, args.data_dir, args.out_dir, latency=lat, kinds=args.kinds, since_utc=args.since_utc)
+    if r3_quarantine.is_retired_payload(res):
+        return 0  # retired (R17): label already printed, nothing written
     print(markdown_report(res))
     return 0
 

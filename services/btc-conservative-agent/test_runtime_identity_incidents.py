@@ -423,6 +423,8 @@ def test_legacy_optimizer_shared_eligibility_keeps_clean_trade_and_blocks_ambigu
 def test_legacy_exit_grid_requires_absolute_replay_timing(tmp_path, monkeypatch):
     from test_analyzer_atomic_publication import _load, AGENT
     analyzer = _load("incident_exit_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    # legacy tick-sim grid math; production has TICK_SIM retired (R17), covered by test_r17_retired_sources.py
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"TICK_SIM", "LIMIT_FILL_1S"})
     path, digest = _receipt(tmp_path)
     monkeypatch.setenv(PATH_ENV, str(path))
     monkeypatch.setenv(HASH_ENV, digest)
@@ -435,3 +437,14 @@ def test_legacy_exit_grid_requires_absolute_replay_timing(tmp_path, monkeypatch)
     assert report["qualified_costed_replays"] == 0
     assert report["live_policy_change_allowed"] is False
     assert report["runtime_identity_incident_input"]["receipt_sha256"] == digest
+
+
+import pytest as _pytest_r17
+from research import r3_quarantine as _r3q_r17
+
+
+@_pytest_r17.fixture(autouse=True)
+def _legacy_limit_fill_1s_unquarantined(monkeypatch):
+    # These tests pin the legacy 1 s limit-fill math; production has LIMIT_FILL_1S retired (R17, RK #847 cond 4),
+    # covered by test_r17_retired_sources.py.  Kept (not deleted) pending the book_limit_entry rebuild.
+    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"LIMIT_FILL_1S"})

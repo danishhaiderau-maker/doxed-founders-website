@@ -2,7 +2,16 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 import analyzer_research_engine_v62 as analyzer
+from research import r3_quarantine
+
+
+@pytest.fixture(autouse=True)
+def _legacy_tick_sim_unquarantined(monkeypatch):
+    # These tests pin the legacy tick-sim math; production has TICK_SIM retired (R17, RK #847 cond 4).
+    monkeypatch.setattr(r3_quarantine, "ACTIVE", set(r3_quarantine.ACTIVE) - {"TICK_SIM"})
 
 
 def test_physical_hard_stop_cannot_be_suppressed_by_mfe_guard():
