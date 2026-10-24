@@ -611,7 +611,7 @@ test_funding_raw_fields.py
 test_nonaccum_execute.py
 test_live_vs_paper.py
 test_entry_fidelity_after_disloc_removal.py
-test_tile67_byte_identity.py
+test_shared_pricing_byte_identity.py
 test_tile_display_vs_key_contract.py
 test_r17_exclusion.py
 test_trigger_measure.py

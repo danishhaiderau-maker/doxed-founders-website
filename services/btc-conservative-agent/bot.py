@@ -44,7 +44,6 @@ import subprocess
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
 from flask import Flask, jsonify, render_template_string, request, send_file, make_response
 from runtime_incident_history import build_runtime_incident_history
@@ -164,7 +163,6 @@ from combo_pathway_config import (
     COMBO_EXECUTION_LANES,
     COMBO_LANE_LABELS,
     COMBO_LANE_SPECS,
-    COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION as COMBO_EXECUTION_FIX_VERSION,
     ACTIVE_TILE_COUNT as COMBO_ACTIVE_TILE_COUNT,
     BOT_VERSION_LABEL as COMBO_BOT_VERSION_LABEL,
@@ -173,38 +171,26 @@ from combo_pathway_config import (
     SCORE_LED_PAPER_RESEARCH_ENABLED,
     EXPECTED_EXCHANGE,
     PRIMARY_PRODUCTION_LANE,
-    PRIMARY_PRODUCTION_ROLE,
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
     RETIRED_TILE_LANES,
     tile_max_active_signals,
-    tile_shadow_exit_set,
-    tile_lane_for_trade_id,
-    any_combo_execution_enabled,
     active_tile_lifecycle_manifest,
     active_tile_registry_signature,
     tile_pre_registration_summary,
-    combo_entry_mode,
     combo_lane_match_detail,
-    combo_lane_matches,
     combo_toggle_defaults,
     is_ai_scan_lane,
-    is_benchmark_lane as is_combo_benchmark_lane,
-    is_chase_3plus_entry_lane,
     is_combo_execution_lane,
     is_deterministic_bracket_lane,
     is_immediate_entry_lane,
     is_independent_ai_lane,
     is_shared_ai_direction_lane,
-    is_cross_venue_clock_lane,
-    cross_venue_clock_lanes,
     is_evaluator_clock_lane,
     evaluator_loop_lanes,
     BAR_CLOSE_SIGNAL_CLOCK,
-    is_research_candidate_lane,
     is_shadow_only_lane,
-    is_static_bracket_lane,
     get_lane_ladder_override,
     is_virtual_chase_entry_lane,
     resolve_lane_size_multiplier,
@@ -218,7 +204,6 @@ import shadow_chase_buckets
 import rotation_cap
 import disk_alert
 from normalized_market_indicators import (
-    INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
 )
 from path_replay_v1 import (
@@ -228,7 +213,6 @@ from path_replay_v1 import (
     FILL_MODEL_IDEAL_TOUCH,
     PATH_REPLAY_FILE,
     PATH_REPLAY_POLICY_TAG,
-    PATH_REPLAY_SCHEMA,
     PATH_SCHEMA_VERSION,
     REPLAY_VERSION,
     build_path_sample,
@@ -239,7 +223,6 @@ from microstructure_tape import (
     build_bucket as build_microstructure_bucket,
 )
 from tape_minute_bars import (
-    RETRYABLE_WINDOW_STATES as TAPE_RETRYABLE_WINDOW_STATES,
     SOURCE_LABEL as TAPE_MINUTE_BAR_SOURCE,
     TapeMinuteBarStore,
     merge_path_candles,
@@ -248,7 +231,6 @@ from multiverse_entry_grid import (
     GRID_FILE as ORDER_MULTIVERSE_ENTRY_GRID_FILE,
     anchor_is_valid as entry_grid_anchor_is_valid,
     make_anchor as make_entry_grid_anchor,
-    split_entry_grid,
 )
 import execution_markouts
 from research_order_schedule import (
@@ -263,7 +245,6 @@ from cycle_3m_indicators import (
     UNIVERSE_POLICY_TAG as CYCLE_3M_UNIVERSE_TAG,
     UNIVERSE_SCHEMA as CYCLE_3M_UNIVERSE_SCHEMA,
     WOULD_BLOCK_SHORT_REASON as WOULD_BLOCK_SHORT_3M_REASON,
-    compute_3m_exhaustion_snapshot,
     compute_3m_universe_snapshot,
     cycle_bucket_3m,
 )
@@ -284,14 +265,10 @@ from order_multiverse import (
     ORDER_MULTIVERSE_FILE,
     POST_TTL_LOOKAHEAD_SEC,
     TERMINAL_LIFECYCLES,
-    build_order_multiverse,
     paper_multiverse_trade_id,
 )
 from opportunity_capture_v21 import (
     OPPORTUNITY_CAPTURE_FILE,
-    build_decision_tree,
-    build_rejected_capture,
-    filter_node,
 )
 from collector_v22_schema import (
     COLLECTOR_VERSION as COLLECTOR_V22_VERSION,
@@ -334,7 +311,6 @@ from collector_v22_provisional import (
 )
 from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
 from regime_tag import classify_regime, REGIME_QUIET
-from opportunity_capture_v22 import analyze_v22_events
 from research_completeness import (
     closed_lifecycle_completeness,
     completeness_projection,
@@ -356,7 +332,6 @@ from research.platform_relay_evidence import (
 from research.source_market_evidence import (
     append_market_observation as _append_source_market_observation,
     evidence_summary as _source_market_evidence_summary,
-    load_market_evidence_index as _load_source_market_evidence_index,
     sync_canonical_pending_order as _sync_canonical_source_pending_order,
     update_canonical_extrema as _update_canonical_source_extrema,
 )
@@ -723,16 +698,6 @@ def safe_float(x, default=None):
         return float(x)
     except:
         logger.debug(f"[SAFE FLOAT] conversion failed - propagating None [PIPELINE ENFORCEMENT]")
-        return None
-
-def safe_num(x):
-    if x is None:
-        logger.debug("[SAFE NUM] input None - returning None [PIPELINE ENFORCEMENT]")
-        return None
-    try:
-        return round(float(x), 2)
-    except:
-        logger.debug("[SAFE NUM] conversion failed - returning None [PIPELINE ENFORCEMENT]")
         return None
 
 def _ascii_fold_csv_text(s: str) -> str:
@@ -3326,10 +3291,6 @@ def guard_retired_lane_execution(lane: str, context: str, trade_id: str = None) 
     return False
 
 
-def is_data_retired_lane(lane: str) -> bool:
-    return get_pathway_lane_status(lane) == "DATA_RETIRED"
-
-
 def lane_pipeline_allowed(lane: str = None) -> bool:
     lane = str(lane or RESEARCH_LANE_AI_SCAN).upper()
     if is_ai_scan_lane(lane):
@@ -3370,11 +3331,6 @@ def csv_lane_meta(signal: dict = None) -> dict:
         "research_schema": "shared_direction_two_lane_v1",
         "research_collection_id": _collector_v22_epoch_id(),
     }
-
-def _signal_lane_from_ref(signal_ref: dict) -> str:
-    if not signal_ref:
-        return ""
-    return signal_ref.get("research_lane") or ""
 
 def get_active_signal_count(lane: str = None):
     purge_dead_pending_orders()
@@ -4131,21 +4087,6 @@ def lane_register_open_position(pos: dict):
     persist = globals().get("save_paper_lifecycle")
     if callable(persist):
         persist(reason="position_registered")
-
-
-def lane_unregister_open_position(pos: dict):
-    if not pos:
-        return
-    ln = _normalize_lane_key(pos)
-    with trade_lock:
-        if pos in open_positions:
-            open_positions.remove(pos)
-        lst = lane_open_positions.get(ln, [])
-        if pos in lst:
-            lst.remove(pos)
-    persist = globals().get("save_paper_lifecycle")
-    if callable(persist):
-        persist(reason="position_unregistered")
 
 
 def get_lane_open_positions(lane: str) -> List[Dict]:
@@ -4947,26 +4888,6 @@ def evaluate_golden_stack_filter(
         if funding_bucket == "HIGH_POS":
             return True, f"FUNDING_{funding_bucket}"
     return False, None
-
-def _golden_stack_gate_exit(signal, ai, reason: str, edge_score: float) -> bool:
-    """Golden-stack eval is log-only — never blocks benchmark/spawn lanes."""
-    trade_id = signal.get("trade_id")
-    tag = f"GOLDEN_STACK_{reason}"
-    gs_eval = signal.get("golden_stack_eval") or {}
-    log_golden_stack_rejection(signal, ai, gs_eval, edge_score, block_reason=reason)
-    if is_research_data_collection():
-        _research_log_would_block(signal, ai, tag, edge_score)
-        return False
-    logger.info(f"[GOLDEN_STACK] BLOCK {reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-    log_blocked_signal(signal, ai, tag)
-    log_pipeline_event("POST_AI", "BLOCKED", tag, trade_id, edge_score, force=True)
-    exit_pipeline(signal, ai, tag)
-    with state_lock:
-        state["debug_state"]["last_block_reason"] = tag
-        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-        state["debug_state"]["skip_reason"] = tag
-    update_debug_state_always(tag, {"edge": edge_score, "golden_stack": True})
-    return True
 
 def _rollover_daily_pnl_if_new_utc_day() -> tuple:
     """Reset daily PnL / loss-streak counters at UTC midnight.
@@ -6700,10 +6621,6 @@ def get_sum(arr):
     logger.debug(f"[AGGREGATION] computed sum over last {WINDOW_SIZE} = {val} [PIPELINE ENFORCEMENT]")
     return val
 
-def reset_orderflow():
-    global orderflow
-    orderflow = {"buy_volume": 0.0, "sell_volume": 0.0, "delta": 0.0, "imbalance": 0.0, "last_update": 0.0, "prev_delta": 0.0}
-
 def compute_exposure():
     total = 0.0
     for pos in open_positions:
@@ -7150,34 +7067,6 @@ def refresh_bbo_state(force: bool = False):
                     state["bbo_refresh_inflight_age_sec"] = 0.0
 
 
-def fetch_bitfinex_book_rest(symbol: str = BITFINEX_WS_SYMBOL, precision: str = "P0") -> dict:
-    """Bitfinex v2 book: rows are [PRICE, COUNT, AMOUNT]; amount>0 bid, amount<0 ask."""
-    url = f"{BITFINEX_REST_BASE}/book/{symbol}/{precision}"
-    resp = _http_get_with_retry(url, timeout=12, label="BOOK")
-    rows = resp.json()
-    if not isinstance(rows, list):
-        raise ValueError(f"unexpected book response: {rows!r}")
-    bids, asks = [], []
-    for row in rows:
-        if not isinstance(row, (list, tuple)) or len(row) < 3:
-            continue
-        price = float(row[0])
-        count = int(row[1])
-        amount = float(row[2])
-        if amount > 0:
-            bids.append([price, count, amount])
-        elif amount < 0:
-            asks.append([price, count, abs(amount)])
-    bids.sort(key=lambda x: -x[0])
-    asks.sort(key=lambda x: x[0])
-    # Cap depth — top-of-book is all sim fills ever walk; storing the full raw
-    # P0 book (1000+ levels) wastes CPU and memory under the state_lock.
-    if MAX_BOOK_LEVELS > 0:
-        bids = bids[:MAX_BOOK_LEVELS]
-        asks = asks[:MAX_BOOK_LEVELS]
-    return {"bids": bids, "asks": asks, "level_count": len(bids) + len(asks)}
-
-
 def _fetch_bitfinex_book_rest_hot() -> dict:
     """One bounded depth attempt isolated from unrelated REST sessions."""
     url = f"{BITFINEX_REST_BASE}/book/{BITFINEX_WS_SYMBOL}/P0"
@@ -7603,7 +7492,7 @@ def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
         return cached
     lane = str(order.get("research_lane") or "").upper()
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or now)
-    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+    delay_s, delay_source = _paper_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
                                           own_signal_to_send_s=_paper_own_s2s_entry(order))
     if not force and now < signal_ts + float(delay_s):
         return None
@@ -7777,7 +7666,7 @@ def _paper_entry_rest_drop(order: dict, why: str) -> bool:
     if not st.get("fills"):
         return False
     lane = str(order.get("research_lane") or "").upper()
-    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+    delay_s, delay_source = _paper_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
                                           own_signal_to_send_s=_paper_own_s2s_entry(order))
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or 0)
@@ -7871,7 +7760,7 @@ def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction:
     pend = source_pos.get("_tp1_pending")
     if not (isinstance(pend, dict) and pend.get("key") == key):
         # RK (2): the gate is this leg's send code point; own trigger -> send measured per row, pooled EXIT_RO_MKT
-        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+        delay_s, delay_source = _paper_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
                                               own_signal_to_send_s=_paper_own_s2s_exit(now, time.time()))
         marker = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s), "delay_s": float(delay_s),
                   "delay_source": delay_source, "close_fraction": float(close_fraction), "attempts": 0}
@@ -7961,7 +7850,7 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
     # RK (2): own trigger -> send code point (exit_sent_ts), never now - t0 (pricing lag); missing -> fail closed
-    delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+    delay_s, delay_source = _paper_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
                                           own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
     _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
@@ -8066,7 +7955,7 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
     else:
         # RK (2): own trigger -> send code point (exit_sent_ts, stamped by close_position before pricing); never
         # now - t0 (pricing lag: the thread waits for the book row). Pooled send->ack by order type (EXIT_RO_MKT).
-        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
+        delay_s, delay_source = _paper_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
                                               own_signal_to_send_s=_paper_own_s2s_exit(t0, pos.get("exit_sent_ts")))
         _paper_note_exit_trigger(pos, t0)
         price_fn = lambda: _paper_stamp_pool(  # noqa: E731
@@ -8994,17 +8883,6 @@ def apply_ema_hybrid_entry_offset(direction: str, hybrid_base: float) -> float:
         return float(hybrid_base) - off
     return float(hybrid_base)
 
-def _micro_structure_market_snapshot() -> dict:
-    update_market_context()
-    with state_lock:
-        mc = copy.deepcopy(state.get("market_context") or {})
-        candles = copy.deepcopy(latest_candles)
-    ms = mc.get("market_structure") or {}
-    if (not ms.get("last_swing_high") or not ms.get("last_swing_low")) and candles:
-        ms = compute_market_structure(candles)
-    return ms
-
-
 def build_micro_sr_levels(candles=None, max_pivots: int = None) -> dict:
     """Detect last N swing pivots and derive micro support / resistance levels."""
     max_pivots = int(max_pivots or MICRO_SR_PIVOT_LOOKBACK)
@@ -9399,30 +9277,6 @@ def resolve_local_structural_limit(
             advisory["local_resistance_available"] = False
 
     return limit, source, advisory
-
-
-def resolve_ai_direct_limit(
-    direction: str,
-    price: float,
-    trade_planner: dict,
-    market_structure: dict = None,
-    support_resistance: dict = None,
-) -> tuple:
-    """Resolve direction-only executable anchor — deterministic 0.1% offset.
-
-    Returns ``(limit, source)`` for backward compatibility with existing
-    callers/tests. The deterministic anchor is always available when direction
-    + price are valid, so this no longer fails closed on missing micro S/R.
-    ``resolve_local_structural_limit`` is the canonical 3-tuple entrypoint.
-    """
-    _ = trade_planner  # retained only for old call/schema compatibility
-    limit, source, _advisory = resolve_local_structural_limit(
-        direction,
-        price,
-        market_structure=market_structure,
-        support_resistance=support_resistance,
-    )
-    return limit, source
 
 
 def compute_continuous_ai_direct_entry(signal: dict) -> dict:
@@ -10075,51 +9929,6 @@ THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # thesis stop (margin unreal) — active on
 THESIS_MFE_PROTECT_PCT = 5.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 5% margin
 
 
-def should_skip_fast_cut_for_mfe_protection(
-    unreal_pct: float,
-    peak_mfe_pct: float,
-    mfe_protect_pct: float = None,
-    fast_cut_pct: float = None,
-) -> bool:
-    """Section 5: SINGLE source of truth for the MFE fast-cut skip decision.
-
-    Both the live position exit path (check_thesis_invalidation) and the LAB
-    replay simulator (simulate_replay_outcome) MUST call this function so the
-    MFE protection is applied identically in both.
-
-    Historical bug: simulate_replay_outcome checked
-        `unreal >= mfe_protect`
-    instead of
-        `peak_mfe >= mfe_protect`
-    Given that the fast-cut branch only fires when `unreal <= fast_cut`
-    (i.e. unreal <= -12), the condition `unreal >= 2` was unreachable, so
-    MFE protection NEVER fired in replay. Of the 69 historical fast cuts,
-    29 had previously reached >= +2% MFE -- their replay PnL is therefore
-    not trustworthy under the displayed policy.
-
-    The frozen Tile 2 policy keeps the threshold unchanged (-12% fast cut,
-    >= +2% MFE skip); this function fixes the SEMANTICS only.
-
-    Returns True iff the fast cut should be SKIPPED because the position
-    previously reached the MFE protection floor.
-    """
-    mp = float(THESIS_MFE_PROTECT_PCT if mfe_protect_pct is None else mfe_protect_pct)
-    fc = float(THESIS_FAST_EXIT_UNREAL_PCT if fast_cut_pct is None else fast_cut_pct)
-    try:
-        u = float(unreal_pct or 0.0)
-        p = float(peak_mfe_pct or 0.0)
-    except (TypeError, ValueError):
-        return False
-    # Fast cut only applies when unreal has breached the fast-cut threshold.
-    if u > fc:
-        return False
-    # MFE protection only applies when the protect floor is positive.
-    if mp <= 0:
-        return False
-    # Correct check: was the peak MFE ever >= the protect floor?
-    return p >= mp
-
-
 ADX_BLOCK_NEW_ENTRY = 15.0
 RESEARCH_ADX_MIN = 12.0  # v93: logging reference in sole research (live block still ADX_BLOCK_NEW_ENTRY)
 ADX_HALF_SIZE_BELOW = 18.0
@@ -10198,28 +10007,6 @@ def _save_spread_gate_config(disabled: set) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     os.replace(tmp, SPREAD_GATE_CONFIG_FILE)
-
-
-def _set_disabled_spread_buckets(buckets) -> list:
-    """Replace the in-memory disabled set + persist to spread-gate.json. Returns sorted list."""
-    cleaned: set = set()
-    for b in buckets or []:
-        try:
-            cleaned.add(int(b))
-        except (TypeError, ValueError):
-            continue
-    with _spread_gate_lock:
-        _disabled_spread_buckets = cleaned
-    try:
-        _save_spread_gate_config(cleaned)
-    except OSError as exc:
-        logger.warning(f"[SPREAD GATE] persist failed: {exc} [PIPELINE ENFORCEMENT]")
-    return sorted(cleaned)
-
-
-def _disabled_spread_buckets_snapshot() -> set:
-    with _spread_gate_lock:
-        return set(_disabled_spread_buckets)
 
 
 def _spread_gate_blocks_signal(signal: dict):
@@ -12588,13 +12375,6 @@ def _defer_signal_min_age(signal: dict) -> bool:
 
 
 
-def _chase_3plus_signal_distance_pct(signal: dict, market_price: float) -> float:
-    ref = float(signal.get("chase_3plus_signal_price") or signal.get("signal_price") or 0)
-    if ref <= 0 or market_price <= 0:
-        return 0.0
-    return abs(market_price - ref) / ref
-
-
 def _init_chase_3plus_virtual_state(signal: dict, market_price: float) -> None:
     """Seed virtual chase from benchmark-equivalent planned limit (CONTINUOUS chase step)."""
     if not signal.get("entry_path"):
@@ -12675,10 +12455,6 @@ def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: floa
     return target
 
 
-
-
-def _defer_signal_chase_3plus(signal: dict) -> bool:
-    return _defer_dashboard_virtual_chase(signal)
 
 
 def _defer_dashboard_virtual_chase(signal: dict) -> bool:
@@ -12984,18 +12760,6 @@ def _record_virtual_chase_execution_metrics(signal: dict, order: dict = None) ->
     if order:
         payload["order_id"] = order.get("order_id") or order.get("id")
     _emit_genome_execution_event("VIRTUAL_CHASE_METRICS", payload)
-
-
-def _sync_virtual_chase_signal_order(signal: dict, order: dict = None, **fields) -> None:
-    if not isinstance(signal, dict):
-        return
-    for k, v in fields.items():
-        signal[k] = v
-    if order:
-        for k, v in fields.items():
-            if k in ("limit_price", "limit_chase_count", "last_chase_ts", "fill_phase",
-                     "virtual_chase_state", "virtual_chase_6_wait_until", "market_conversion"):
-                order[k] = v
 
 
 def _pull_order_to_virtual_chase(signal: dict, order: dict, new_limit: float, chase_count: int, now: float) -> bool:
@@ -14565,11 +14329,6 @@ def enforce_immutable(signal: dict):
             signal[f] = copy.deepcopy(signal[f])
     signal["_frozen"] = True
     logger.debug(f"[IMMUTABILITY GUARD] Applied to trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
-
-def assert_not_mutated(signal: dict, field: str, new_value=None):
-    if signal.get("_frozen") and field in ["features", "controls", "indicators", "edge_score_at_entry", "edge_threshold_at_entry", "counterfactuals"]:
-        logger.critical(f"IMMUTATION VIOLATION: {field} on frozen trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
-        raise RuntimeError(f"IMMUTATION VIOLATION: {field} on frozen trade_id={signal.get('trade_id')}")
 
 def finalize_signal(signal: dict, ai: dict = None, status: str = None):
     if signal.get("_finalized"):
@@ -21182,20 +20941,6 @@ def _restore_shared_ai_lane_verdicts_from_journal() -> dict:
     return {"restored_rows": 0, "unique_verdicts": 0, "lanes": {}}
 
 
-def _merged_ai_history(in_memory: list, limit: int = 5) -> list:
-    if RESEARCH_AI_SOLE_AUTHORITY or is_research_data_collection():
-        return _session_ai_history(in_memory, limit)
-    csv_rows = _load_recent_ai_history_from_csv(limit * 2)
-    combined = (in_memory or []) + csv_rows
-    by_trade = {}
-    for row in combined:
-        tid = row.get("trade_id") or ""
-        prev = by_trade.get(tid)
-        if not prev or (row.get("time") or "") >= (prev.get("time") or ""):
-            by_trade[tid] = row
-    deduped = sorted(by_trade.values(), key=lambda r: r.get("time") or "")
-    return deduped[-limit:]
-
 def _pick_dashboard_last_ai(snapshot: dict, ai_history: list) -> dict:
     """Prefer latest non-error AI row (fixes dashboard stuck on MISSING_API_KEY from an old cycle)."""
     la = copy.deepcopy(snapshot.get("last_ai") or {})
@@ -21853,23 +21598,6 @@ def relay_publishes_approve_outcome(research_lane: str) -> bool:
 
 
 
-def _golden_stack_pass_for_spawn(final_direction, ctx, ai, features, edge_score, signal_stub=None) -> tuple:
-    probe = signal_stub or {
-        "final_direction": final_direction,
-        "signal_price": nz(state.get("price")),
-        "trade_id": f"gs-probe-{uuid.uuid4().hex[:8]}",
-        "features": features or {},
-        "context": ctx,
-        "trade_planner": copy.deepcopy((ai or {}).get("trade_planner") or {}),
-    }
-    if not probe.get("entry_mode"):
-        compute_continuous_ai_direct_entry(probe)
-    blocked, reason = evaluate_golden_stack_filter(
-        final_direction, ctx, ai, features, edge_score, probe,
-    )
-    return not blocked, reason
-
-
 def _enrich_combo_lane_features(features: dict = None, ctx: dict = None) -> dict:
     """Ensure ADX / session / structure fields exist for combo extra_filters + sizing.
 
@@ -22341,61 +22069,6 @@ def _spawn_lab_combo_shadow(
         f"margin=${margin_usdt:.2f} size_mult={size_mult:.2f} session={enriched.get('session_bucket')} "
         f"— simulating policy shadow path, no paper or real orders [PIPELINE ENFORCEMENT]"
     )
-
-
-def _open_bracket_lab_shadow_for_side(target_lane: str, side: str):
-    """Return (trade_id, buf) for an open unfilled LAB shadow on lane+side, else None."""
-    lane_u = str(target_lane or "").upper()
-    side_u = str(side or "").upper()
-    with replay_lock:
-        for tid, buf in replay_buffers.items():
-            if buf.get("closed"):
-                continue
-            if str(buf.get("research_lane") or "").upper() != lane_u:
-                continue
-            if str(buf.get("collection_mode") or "") not in ("LAB", "ADMIN_PAUSED_SHADOW"):
-                continue
-            if buf.get("virtual_entry"):
-                continue
-            if str(buf.get("direction") or "").upper() != side_u:
-                continue
-            return tid, buf
-    return None
-
-
-def _cancel_open_bracket_lab_shadows(
-    target_lane: str,
-    side: str = None,
-    reason: str = "CANCELLED",
-):
-    """Finalize open LAB bracket shadows for a lane (optionally one side) as CANCELLED."""
-    lane_u = str(target_lane or "").upper()
-    side_u = str(side or "").upper() or None
-    to_finalize = []
-    with replay_lock:
-        for tid, buf in list(replay_buffers.items()):
-            if buf.get("closed"):
-                continue
-            if str(buf.get("research_lane") or "").upper() != lane_u:
-                continue
-            if str(buf.get("collection_mode") or "") not in ("LAB", "ADMIN_PAUSED_SHADOW"):
-                continue
-            if buf.get("virtual_entry"):
-                continue  # already filled — leave Scenario C exit alone
-            if side_u and str(buf.get("direction") or "").upper() != side_u:
-                continue
-            buf["exit_outcome"] = reason
-            buf["block_reason"] = reason
-            to_finalize.append((tid, {**buf, "ticks": list(buf.get("ticks", []))}))
-    for tid, buf_copy in to_finalize:
-        try:
-            finalize_shadow_lane_collecting(tid, buf_copy)
-            logger.info(
-                f"[{lane_u}] cancelled open LAB shadow study_id={tid} "
-                f"reason={reason} [PIPELINE ENFORCEMENT]"
-            )
-        except Exception as e:
-            logger.error(f"[{lane_u}] cancel shadow failed study_id={tid}: {e}")
 
 
 
@@ -23073,7 +22746,7 @@ def evaluate_signal_with_ai(
         if not trigger_reason:
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
         if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
-            from demo_mode import cassette_lookup, cassette_record
+            from demo_mode import cassette_lookup
             cassette_resp = cassette_lookup(_deepseek_model(), temperature, prompt[:256])
             if cassette_resp:
                 response_data = cassette_resp.get("response", cassette_resp.get("body", {}))
@@ -23317,23 +22990,6 @@ def set_ai_threshold(value):
         logger.info(f"[SET] AI threshold locked to {state['ai_threshold']} [PIPELINE ENFORCEMENT]")
 
 
-def _ai_bands_from_legacy_threshold(threshold: float) -> dict:
-    """Map old single min-threshold to band checkboxes (bands with any prob >= threshold)."""
-    try:
-        thr = float(threshold)
-    except (TypeError, ValueError):
-        thr = RESEARCH_AI_THRESHOLD_DEFAULT
-    out = {band_id: False for band_id, _, _ in AI_EXECUTION_BAND_DEFS}
-    for band_id, lo, hi in AI_EXECUTION_BAND_DEFS:
-        if band_id == "65+":
-            out[band_id] = thr <= 65
-        elif band_id == "60-66":
-            out[band_id] = thr <= 66
-        else:
-            out[band_id] = hi > thr
-    return out
-
-
 def _default_chase_execution_buckets() -> dict:
     """All OFF until admin ticks buckets on the dashboard — no implicit immediate placement."""
     return {k: False for k in CHASE_EXECUTION_BUCKET_ORDER}
@@ -23389,14 +23045,6 @@ def set_ai_execution_bands(bands: dict):
         state["ai_verdict"] = _ai_execution_verdict_text()
         save_persistent_config()
     logger.info(f"[SET] AI execution bands={enabled} [PIPELINE ENFORCEMENT]")
-
-
-def _ai_prob_in_band(prob: float, band_id: str, lo: float, hi: float) -> bool:
-    if band_id == "65+":
-        return prob >= 65
-    if band_id == "60-66":
-        return 60 <= prob <= 66
-    return lo <= prob < hi
 
 
 def ai_win_prob_in_execution_bands(prob) -> bool:
@@ -23695,11 +23343,6 @@ def _signal_spread_gate_blocked(signal: dict, ai: dict) -> tuple:
     spread = _signal_directional_spread(signal, ai or {})
     bucket = _spread_gate_bucket(spread)
     return (not spread_gate_allows(spread)), bucket, spread
-
-
-def dashboard_chase_bucket_blocks(chase_count) -> bool:
-    """Hard dashboard gate — blocks limit submit, chase steps, and fills for this chase count."""
-    return not chase_bucket_allowed(chase_count)
 
 
 def min_enabled_chase_count() -> Optional[int]:
@@ -24147,17 +23790,6 @@ def _load_spread_analytics_snapshot() -> dict:
         "source": "chase_efficiency_matrix exact chase|spread cells",
         "definition": "normalized directional score gap = abs(LONG score - SHORT score) // 10",
     }
-
-def hash_context(ctx):
-    try:
-        return hash((
-            round(safe_float(ctx.get("price")), 2),
-            safe_float(ctx.get("volume_ratio")),
-            safe_float(ctx.get("delta")),
-            safe_float(ctx.get("delta_change"))
-        ))
-    except:
-        return hash(str(ctx))
 
 def log_setup(signal):
     try:
@@ -24987,25 +24619,11 @@ def is_system_ready():
     # about quote freshness. Execution pauses are checked by its callers.
     return bool(_recompute_system_readiness()["system_ready"])
 
-def pipeline_guard(stage: str, signal: dict) -> bool:
-    if not signal or not signal.get("trade_id"):
-        logger.error(f"[PIPELINE GUARD] Missing signal at stage {stage} [PIPELINE ENFORCEMENT]")
-        full_pipeline_trace("[GUARD]", f"FAIL_{stage}", None)
-        return False
-    if not signal.get("trade_id"):
-        logger.error(f"[PIPELINE GUARD] INVALID SIGNAL - no id at stage {stage} [PIPELINE ENFORCEMENT]")
-        return False
-    return True
-
 def update_signal_pull_metrics(price):
     return
 
 def is_data_stale():
     return not _genuine_ws_transport_ready()
-
-def is_data_consistent():
-    return (len(latest_candles) >= MIN_CANDLES and state.get("price") is not None and not is_data_stale())
-
 
 def can_open_live_entry(
     *,
@@ -25196,19 +24814,6 @@ def ensure_signal_capacity() -> bool:
     max_active = get_effective_max_active_signals()
     return not _is_at_signal_capacity(max_active)
 
-def apply_research_instant_fill(signal: dict):
-    """Research data collection: market-fill at signal price instead of waiting on micro/EMA limits."""
-    if not (is_research_data_collection() and RESEARCH_INSTANT_FILL):
-        return
-    signal["pullback_pct"] = 0.0
-    signal["await_micro_confirm"] = False
-    signal.pop("await_confirm", None)
-    logger.info(
-        f"[RESEARCH FILL] instant market fill trade_id={signal.get('trade_id')} "
-        f"mode={signal.get('entry_mode')} [PIPELINE ENFORCEMENT]"
-    )
-
-
 def _resolve_awaiting_micro_limit(signal: dict) -> tuple:
     """Return (limit_price, entry_mode, confirmed) for a deferred micro-confirm entry."""
     direction = str(signal.get("final_direction") or "").upper()
@@ -25266,22 +24871,6 @@ def _apply_lane_limit_offset(limit: float, lane: str, direction: str) -> float:
     if direction == "SHORT":
         return round(float(limit) - offset, 2)
     return round(float(limit), 2)
-
-
-def _limit_prices_near(a: float, b: float, lane: str = None, tolerance: float = None) -> bool:
-    if a is None or b is None:
-        return False
-    try:
-        fa, fb = float(a), float(b)
-    except (TypeError, ValueError):
-        return False
-    if fa <= 0 or fb <= 0:
-        return False
-    tol = float(tolerance) if tolerance is not None else _lane_duplicate_tolerance(lane)
-    if abs(fa - fb) <= tol:
-        return True
-    ref = max(fa, fb, 1.0)
-    return abs(fa - fb) / ref < CLUSTER_MIN_DIST_PCT
 
 
 def _signal_direction(sig: dict) -> str:
@@ -26834,106 +26423,6 @@ def _compute_limit_chase_target(
     if abs(new_limit - current_limit) < 0.01:
         return current_limit, "NO_MOVE"
     return round(new_limit, 2), "LIMIT_CHASE"
-
-
-def _commit_relay_limit_chase_legacy(
-    order: dict,
-    signal: dict,
-    *,
-    direction: str,
-    old_limit: float,
-    new_limit: float,
-    chase_count: int,
-    now: float,
-    tier: str = None,
-    urgent_marketable: bool = False,
-    reference_price: float = None,
-) -> dict | None:
-    """Atomically commit a still-pending chase and snapshot its causal event.
-
-    A fill may win after a chase decision is calculated but before the
-    fire-and-forget relay POST is built.  Do not mutate or emit a LIMIT_UPDATED
-    in that case.  If the chase wins, capture its source timestamp while the
-    pending generation is still current so an asynchronously delivered update
-    can never claim to be newer than a later POSITION_OPENED.
-    """
-    with trade_lock:
-        trade_id = order.get("trade_id")
-        if (
-            order not in pending_orders
-            or order.get("status") != "PENDING"
-            or not trade_id
-            or abs(float(order.get("limit_price") or 0) - old_limit) >= 0.005
-            or int(order.get("limit_chase_count") or 0) != chase_count - 1
-            or any(
-                p.get("trade_id") == trade_id and p.get("status") != "CLOSED"
-                for p in open_positions
-            )
-        ):
-            return None
-        order["limit_price"] = new_limit
-        order["limit_chase_count"] = chase_count
-        order["last_chase_ts"] = now
-        if tier:
-            order["urgent_chase_tier"] = tier
-        if urgent_marketable:
-            order["urgent_marketable_chase"] = True
-        order["fill_model"] = _resolve_fill_model(signal, order)
-        if signal:
-            signal["limit_price"] = new_limit
-            signal["limit_chase_count"] = chase_count
-            signal["submitted_order_event_seq"] = chase_count
-            signal["submitted_order_limit_price"] = new_limit
-            signal["last_chase_ts"] = now
-            if tier:
-                signal["urgent_chase_tier"] = tier
-            signal["fill_model"] = order["fill_model"]
-        # Canonical pending-order identity: fill gate + market evidence share
-        # this generation only after chase ACK mutated the live order.
-        sync_pending = globals().get("_sync_canonical_source_pending_order")
-        store = globals().get("_canonical_source_order_market_evidence")
-        summary_builder = globals().get("_source_market_evidence_summary")
-        if callable(sync_pending) and isinstance(store, dict):
-            if order.get("original_limit_price") is None and old_limit:
-                order["original_limit_price"] = float(old_limit)
-            canonical = sync_pending(store, order, chase_acked=True, observed_ts=now)
-            if callable(summary_builder) and canonical:
-                summary = summary_builder(canonical)
-                order["source_order_market_evidence"] = summary
-                master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
-                if isinstance(master, dict):
-                    master["source_order_market_evidence"] = copy.deepcopy(summary)
-                    master["limit_price"] = new_limit
-                    master["limit_chase_count"] = chase_count
-        result = {
-            "ts": utc_iso(),
-            "limit_price": new_limit,
-            "qty": float(order.get("qty") or 0),
-            "direction": direction,
-            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
-            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
-            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-            "event_seq": chase_count,
-            "executable": True,
-        }
-    # Research persistence may write several JSONL/provisional files. It must
-    # never run while trade_lock is held: a slow volume write previously
-    # starved relay snapshots, cancellation, and the strategy watchdog.
-    schedule_reprice = globals().get("append_research_reprice_interval")
-    if callable(schedule_reprice):
-        schedule_reprice(
-            order,
-            signal if isinstance(signal, dict) else None,
-            now=now,
-            chase_step_index=chase_count,
-            reference_price=reference_price or old_limit,
-            limit_price=new_limit,
-            reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
-        )
-    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-    if callable(collector_refresh):
-        collector_refresh(order, signal if isinstance(signal, dict) else None)
-    return result
 
 
 def _commit_relay_limit_chase(
@@ -28505,27 +27994,6 @@ def process_positions():
         globals().get("_exit_scan_end", lambda: None)()
         position_evaluation_lock.release()
 
-def place_postonly_tp(pos, target_pct):
-    entry = pos.get("entry", 0)
-    lev = pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
-    direction = pos.get("dir")
-    tp_price = compute_tp(entry, direction, target_pct, lev)
-    order = {
-        "trade_id": pos["trade_id"],
-        "research_lane": pos.get("research_lane"),
-        "side": "sell" if direction == "LONG" else "buy",
-        "limit_price": tp_price,
-        "qty": pos.get("qty", 0),
-        "status": "PENDING",
-        "created_ts": time.time(),
-        "entry_type": "POSTONLY_TP",
-        "signal_price": pos.get("signal_price"),
-        "fee_type": "MAKER"
-    }
-    with trade_lock:
-        lane_register_pending_order(order)
-    logger.info(f"[POSTONLY TP] Placed at {fmt(tp_price)} for {target_pct}% trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
-
 def classify_setup(features):
     if features.get("velocity", 0) > 0 and features.get("delta", 0) > 0:
         return "MOMENTUM_LONG"
@@ -28566,43 +28034,6 @@ def atomic_freeze_signal(signal, edge_score, pipeline_eff_thr=None):
     signal["setup_type"] = classify_setup(signal["features"])
     signal["_frozen"] = True
     logger.info(f"[ATOMIC FREEZE SUCCESS] trade_id={signal.get('trade_id')} edge={round(edge_score,1):.1f} frozen=True [PIPELINE ENFORCEMENT]")
-
-def log_edge_census(edge_score: float, stage: str, reason: str, features: dict = None, trade_id: str = None):
-    """Log edge observations blocked before AI — full distribution for uncensored analyzer sweeps."""
-    try:
-        features = features or {}
-        edge_score = round(float(edge_score or 0), 2)
-        row = {
-            "schema": "edge_census_v1",
-            "ts": utc_iso(),
-            "ts_epoch": time.time(),
-            "stage": stage,
-            "reason": reason,
-            "trade_id": trade_id,
-            "edge_score": edge_score,
-            "edge_score_bucket": _edge_score_bucket(edge_score),
-            "edge_threshold_min": get_edge_threshold(),
-            "edge_threshold_max": get_edge_threshold_max(),
-            "edge_range_preset": state.get("edge_range_preset"),
-            "effective_threshold": get_effective_edge_threshold(),
-            "in_range": edge_range_allows(edge_score)[0],
-            "price": nz(state.get("price")),
-            "regime": state.get("regime"),
-            "sr_state": (state.get("support_resistance") or {}).get("sr_state"),
-            "support_resistance_bucket": _sr_location_bucket(
-                (state.get("support_resistance") or {}).get("sr_state")
-            ),
-            "session_bucket": _research_session_bucket(),
-            "volume_ratio": nz(features.get("volume_ratio")),
-            "delta": nz(features.get("delta")),
-            "velocity": nz(features.get("velocity")),
-            "bot_version": EXECUTION_FIX_VERSION,
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-        }
-        _safe_append_jsonl(EDGE_CENSUS_FILE, row, label="EDGE_CENSUS")
-    except Exception as e:
-        logger.error(f"[EDGE_CENSUS] log failed: {e} [PIPELINE ENFORCEMENT]")
-
 
 def log_near_edge(candidate, edge_score):
     try:
@@ -31264,27 +30695,6 @@ def order_book_refresh_loop():
             )
         elapsed = max(0.0, time.monotonic() - started)
         shutdown_event.wait(max(0.05, BOOK_REFRESH_SEC - elapsed))
-
-def build_signal(signal: dict, context: dict, ai: dict) -> dict:
-    signal.update(context)
-    signal["final_direction"] = ai.get("direction")
-    signal["direction"] = ai.get("direction")
-    signal["status"] = "CREATED"
-    signal["ai"] = ai
-    signal["ai_win_prob"] = ai.get("win_prob")
-    signal["ai_decision"] = ai.get("decision")
-    signal["ai_source"] = ai.get("source")
-    signal["ai_served_model"] = ai.get("deepseek_served_model")
-    signal["ai_system_fingerprint"] = ai.get("deepseek_system_fingerprint")
-    if "features" not in signal:
-        signal["features"] = {}
-    if "context" not in signal:
-        signal["context"] = {}
-    if "controls" not in signal:
-        signal["controls"] = {}
-    if "decision" not in signal:
-        signal["decision"] = {}
-    return signal
 
 def execute_order(signal, ai=None):
     if _manual_pause_block_entry(signal, "EXECUTE_ORDER"):
@@ -34166,7 +33576,7 @@ def _xvl_wait_anchor_ready(deadline: float):
     return time.time(), None, False
 
 
-_DISLOC_DELAYS = None
+_PAPER_DELAYS = None
 PAPER_DELAY_POOL_FILE = "paper_delay_pool.json"  # F1 live-ack pool, persisted per DATA_EPOCH_ID (capped per lane/leg)
 _PAPER_DELAY_POOL_LOCK = threading.Lock()
 
@@ -34178,9 +33588,9 @@ def _paper_delay_pool_path():
 def _paper_delay_sampler():
     """The process-wide F1 DelaySampler, restored from the per-epoch pool file on first use (a file from another
     DATA epoch is ignored, so a new epoch starts with an empty pool)."""
-    global _DISLOC_DELAYS
+    global _PAPER_DELAYS
     import paper_fill as _pf
-    if _DISLOC_DELAYS is None:
+    if _PAPER_DELAYS is None:
         sampler = _pf.DELAYS or _pf.DelaySampler()
         try:
             path = _paper_delay_pool_path()
@@ -34191,9 +33601,9 @@ def _paper_delay_sampler():
                     _cross_lane_pool().load(payload.get(_live_ack_pool.POOL_KEY), globals().get("DATA_EPOCH_ID"))
         except Exception as exc:  # noqa: BLE001 - an unreadable pool is an empty pool (default delay, UNVERIFIED)
             logger.warning(f"[F1 DELAY POOL] load failed: {type(exc).__name__}")
-        _DISLOC_DELAYS = sampler
-        _pf.DELAYS = _DISLOC_DELAYS
-    return _DISLOC_DELAYS
+        _PAPER_DELAYS = sampler
+        _pf.DELAYS = _PAPER_DELAYS
+    return _PAPER_DELAYS
 
 
 def _paper_delay_pool_persist() -> bool:
@@ -34230,7 +33640,7 @@ def _cross_lane_pool():
     return _CROSS_LANE_POOL
 
 
-def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
+def _paper_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
     """The paper delay for one lane/leg: the row's own signal->send + the pooled send->ack/fill of the shared
     live_ack_pool (one definition: per order-type key, skew/boot/leg checks, n<10 fail closed, MAX at 10-19, q0.90 at
     n>=20).  HM 02:55 N1: the old per-lane B1 DelaySampler is stamps-only and never prices a row (it is not split by
@@ -36302,20 +35712,6 @@ def research_wipe_file_paths():
     return paths
 
 
-def _fresh_collection_derived_history_paths() -> list:
-    """Redundant histories superseded by the compact Past Analysis bundle."""
-    found = []
-    for parent in (
-        "research_session_archives",
-        os.path.join("research_retention", "daily"),
-    ):
-        if not os.path.isdir(parent):
-            continue
-        for root, _, files in os.walk(parent):
-            found.extend(os.path.join(root, name) for name in files)
-    return found
-
-
 def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
@@ -37115,7 +36511,6 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     from research_reset_execution import execute_research_reset
     from research_reset_inventory import _managed_fly_alias
     from research_reset_preflight_diagnostics import write_reset_preflight_diagnostic
-    from research_reset_progress import make_reset_progress_callback
     from uuid import uuid4
     import full_reset_job
 
@@ -37518,33 +36913,6 @@ def _pathway_lanes_live() -> dict:
     return live
 
 
-def _scenario_c_exit_spec(research_lane: str = None):
-    _, ladder_label, _ = get_lane_ladder(research_lane)
-    return {
-        "profile": "Scenario C",
-        "ladder": ladder_label,
-        "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
-        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
-        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
-        "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
-        "type_a_stall": "OFF",
-        "fixed_time_exit": "2h global (7200s)",
-    }
-
-
-def _runner_exit_spec():
-    return {
-        "profile": "Scenario C Runner Variant",
-        "ladder": "18→14, 25→18, 40→28, 55→38",
-        "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
-        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
-        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
-        "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
-        "type_a_stall": "OFF",
-        "fixed_time_exit": "2h global (7200s)",
-    }
-
-
 
 
 def _pathway_shared_execution_spec() -> dict:
@@ -37677,26 +37045,6 @@ def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
     if block == "SHADOW_ONLY_LANE":
         return "LAB SHADOW — no new orders (shadow-collecting lane)"
     return "LAB SHADOW — no new orders"
-
-
-def _shared_lane_gate_runtime_summary(lane: str) -> str:
-    """Compact live acceptance funnel for the tile transparency block."""
-    with state_lock:
-        bucket = copy.deepcopy(
-            (state.get("shared_ai_lane_counters") or {}).get(lane) or {}
-        )
-    evaluated = int(bucket.get("evaluated") or 0)
-    accepted = int(bucket.get("accepted") or 0)
-    rejected = int(bucket.get("rejected") or 0)
-    reasons = bucket.get("reasons") if isinstance(bucket.get("reasons"), dict) else {}
-    top_reason = "none yet"
-    if reasons:
-        reason, count = max(reasons.items(), key=lambda item: int(item[1] or 0))
-        top_reason = f"{reason} ({int(count or 0)})"
-    return (
-        f"Live gate funnel: evaluated {evaluated}; accepted {accepted}; "
-        f"rejected {rejected}; top result {top_reason}"
-    )
 
 
 def _retired_tiles_note() -> str:
@@ -39903,26 +39251,6 @@ def pipeline_heartbeat():
         state["last_heartbeat"] = now
     last_heartbeat = now
     logger.debug("[HEARTBEAT] Pipeline alive")
-
-def log_event_rejection(event):
-    logger.info(f"[PIPELINE BLOCKED] edge={event.get('edge',0)} < threshold={event.get('threshold',2.9)} [PIPELINE ENFORCEMENT]")
-    try:
-        row = {"ts": utc_iso(), "type": "REJECTED_SIGNAL", "edge": event.get("edge",0), "threshold": event.get("threshold",2.9), "reason": "EDGE_BELOW_THRESHOLD"}
-        dynamic_csv_writer(CSV_BLOCKS, row)
-        persist_rejected_opportunity(
-            {
-                "trade_id": event.get("trade_id") or f"edge-{int(time.time())}",
-                "price": event.get("price") or state.get("price"),
-                "signal_price": event.get("price") or state.get("price"),
-                "final_direction": event.get("direction") or event.get("dir"),
-                "edge_score_at_entry": event.get("edge"),
-                "created_ts_ts": time.time(),
-            },
-            {"decision": "REJECT"},
-            "EDGE_BELOW_THRESHOLD",
-        )
-    except:
-        pass
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -56200,16 +55528,6 @@ def update_support_resistance():
         state.update({"pivot_structural": pivot_struct})
         state.update({"pivot_active": pivot_active})
 
-def compute_regime_pressure():
-    if len(tick_prices) < 10:
-        return 0.0
-    diffs = [tick_prices[i+1] - tick_prices[i] for i in range(len(tick_prices)-1)]
-    up = sum(1 for d in diffs if d > 0)
-    down = sum(1 for d in diffs if d < 0)
-    persistence = (up - down) / len(diffs) if len(diffs) else 0
-    velocity = (tick_prices[-1] - tick_prices[0]) / tick_prices[0] if tick_prices[0] else 0
-    return max(-1.0, min(1.0, 0.7 * persistence + 0.3 * velocity))
-
 def validate_market_data():
     """Validate the one central readiness contract without promoting REST to WS."""
     runtime = _recompute_system_readiness()
@@ -56836,46 +56154,6 @@ def validate_state():
         open_positions[:] = [p for p in open_positions if isinstance(p, dict) and p.get("entry", 0) > 0]
     return True
 
-def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime, event_id):
-    with state_lock:
-        now_iso = utc_iso()
-        state["ai_history"].append({
-            "ts": now_iso,
-            "time": now_iso,
-            "melbourne_time": _format_melbourne_hm(now_iso),
-            "session_ts": bot_start_time,
-            "trade_id": trade_id,
-            "dir": dir_,
-            "decision": "APPROVE" if approved else "REJECT",
-            "approved": approved,
-            "win_prob": win_prob,
-            "comment": comment,
-            "reason": (
-                f"{'APPROVE' if approved else 'REJECT'} | {comment}"
-                if comment else ("APPROVE" if approved else "REJECT")
-            )[:500],
-            "event_id": event_id,
-        })
-        hist_limit = 50
-        if len(state["ai_history"]) > hist_limit:
-            state["ai_history"] = state["ai_history"][-hist_limit:]
-        state["ai_decision"] = "APPROVED" if approved else "REJECTED"
-        state["final_decision"] = "APPROVED" if approved else "AI_REJECTED"
-        state["last_ai"].update({"win_prob": win_prob,"direction": dir_,"trade_id": trade_id,"comment": comment,"ai_error": None})
-        state["last_engine_error"] = "" if approved else "AI rejected"
-    bridge = get_genome_bridge()
-    if bridge:
-        try:
-            bridge.on_ai_decision(
-                approved,
-                trade_id=str(trade_id or ""),
-                ai_confidence=int(win_prob or 0),
-                direction=str(dir_ or ""),
-                block_reason="" if approved else str(comment or "AI_REJECTED"),
-            )
-        except Exception as exc:
-            logger.warning(f"[GENOME] ai decision record failed: {exc}")
-
 REPLAY_TICK_MIN_INTERVAL_SEC = 1.0
 
 
@@ -57009,15 +56287,6 @@ def counterfactual_join_fields(trade_id, snapshot: dict, replay: dict) -> dict:
     }
     out["join_keys_missing"] = [k for k in ("signal_ts", "shared_ai_call_id", "epoch_id") if not out.get(k)]
     return out
-
-
-def _counterfactual_snapshot_with_join_keys(trade_id, snapshot: dict, replay: dict) -> dict:
-    joined = counterfactual_join_fields(trade_id, snapshot, replay)
-    enriched = dict(snapshot or {})
-    for key in ("shared_ai_call_id", "epoch_id"):
-        if not enriched.get(key) and joined.get(key):
-            enriched[key] = joined[key]
-    return enriched
 
 
 def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
@@ -58257,59 +57526,6 @@ def _path_gap_census(ticks, window_sec=7200):
     }
 
 
-def _compact_market_path_ref(replay, snapshot, extra=None):
-    ticks = (replay or {}).get("ticks") or []
-    evidence = (snapshot or {}).get("source_order_market_evidence") or {}
-    obs = evidence.get("observations") if isinstance(evidence, dict) else []
-    obs = obs if isinstance(obs, list) else []
-    generations = sorted({
-        int(item.get("limit_generation") or 0)
-        for item in obs if isinstance(item, dict)
-    })
-    chase_count = max(generations) if generations else int((snapshot or {}).get("limit_chase_count") or (replay or {}).get("limit_chase_count") or 0)
-    payload = {
-        "trade_id": (snapshot or {}).get("trade_id") or (replay or {}).get("trade_id"),
-        "tick_count": len(ticks),
-        "obs_count": len(obs),
-        "chase_count": chase_count,
-        "t_start": (ticks[0] or {}).get("t") if ticks else None,
-        "t_end": (ticks[-1] or {}).get("t") if ticks else None,
-    }
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    digest = hashlib.sha256(blob).hexdigest()
-    ref = {
-        "schema": "content_addressed_evidence_ref_v1",
-        "evidence_schema": "market_path_v1",
-        "sha256": digest,
-        "bytes": len(blob),
-        "object_id": f"market_path_v1:{digest[:16]}",
-        "tick_count": len(ticks),
-        "observation_count": len(obs),
-        "start_offset": 0,
-        "end_offset": max(0, len(ticks) - 1),
-        "time_range": {"start_t": payload["t_start"], "end_t": payload["t_end"]},
-        "chase_count": chase_count,
-        "limit_generations": generations,
-    }
-    if extra:
-        ref.update(extra)
-    return ref
-
-
-def _compact_source_market_evidence(evidence):
-    if not isinstance(evidence, dict):
-        return {}
-    obs = evidence.get("observations") if isinstance(evidence.get("observations"), list) else []
-    compact = {key: value for key, value in evidence.items() if key != "observations"}
-    compact["observation_count"] = len(obs)
-    compact["observations_elided"] = True
-    compact["limit_generation"] = max(
-        (int(item.get("limit_generation") or 0) for item in obs if isinstance(item, dict)),
-        default=int(evidence.get("limit_generation") or 0),
-    )
-    return compact
-
-
 def close_replay_buffer(trade_id):
     buf = None
     with replay_lock:
@@ -58438,22 +57654,6 @@ def load_policy():
     except Exception as e:
         logger.error(f"Policy load failed: {e} - using defaults")
 
-def policy_allows_invert(regime: str) -> bool:
-    with state_lock:
-        p = state.get("_policy", {})
-        rules = p.get("rules", {})
-        if "invert_signal_only_in" in rules:
-            return regime in rules["invert_signal_only_in"]
-        return state.get("invert_signal", False)
-
-def policy_allows_early_fail(strategy: str) -> bool:
-    with state_lock:
-        p = state.get("_policy", {})
-        rules = p.get("rules", {})
-        if "disable_early_fail_in" in rules:
-            return strategy not in rules["disable_early_fail_in"]
-        return state.get("early_fail_enabled", True)
-
 def safe_event_put(event):
     try:
         if event_queue.qsize() > MAX_EVENT_QUEUE * 0.7:
@@ -58472,22 +57672,6 @@ def safe_event_put(event):
                 _QUEUE_COUNTERS.dropped("event_queue")
     except Exception as e:
         logger.error(f"safe_event_put failed: {e}")
-
-def drain_stale_events():
-    now = time.time()
-    drained = 0
-    temp = []
-    while not event_queue.empty():
-        ev = event_queue.get_nowait()
-        if now - ev.get("ts", 0) <= 5:
-            temp.append(ev)
-        else:
-            drained += 1
-    for ev in temp:
-        event_queue.put_nowait(ev)
-    if drained > 0:
-        _QUEUE_COUNTERS.dropped("event_queue_stale", drained)
-        logger.info(f"Drained {drained} stale events")
 
 def reconcile_state():
     with state_lock:
