@@ -82,6 +82,8 @@
     ["POST", "/api/research/repair-execution-funnel", "api_repair_execution_funnel_jsonl"],
     ["POST", "/api/admin/trades/delete-by-id", "api_admin_trades_delete_by_id"],
     ["POST", "/api/admin/trades/delete-rollback-snapshot", "api_admin_trades_delete_rollback_snapshot"],
+    ["POST", "/api/admin/ledgers/delete-by-sha", "api_admin_ledgers_delete_by_sha"],
+    ["POST", "/api/admin/ledgers/delete-rollback-snapshot", "api_admin_ledgers_delete_rollback_snapshot"],
     ["POST", "/api/admin/emergency-wal/clear-alarms", "api_emergency_wal_clear_alarms"],
     ["POST", "/api/reset", "api_reset_showcase"],
     ["POST", "/api/toggle_fresh_collection", "toggle_fresh_collection"],

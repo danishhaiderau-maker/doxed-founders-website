@@ -52151,6 +52151,81 @@ def api_admin_trades_delete_rollback_snapshot():
     return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
 
 
+def _ledger_delete_boot_recover() -> None:
+    """HM R2: restore any ledger left mid-write by a process death during ledgers/delete-by-sha."""
+    try:
+        import ledger_delete_by_sha as _lds
+        from research_v3_store import V3EvidenceStore
+        root = _data_sync_runtime_root()
+        if not (Path(root) / "v3" / _lds.SNAPSHOT_DIRNAME).is_dir():
+            return
+        for row in _lds.restore_incomplete_deletes(V3EvidenceStore.open_read_only(root)):
+            logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot restored interrupted delete {row} [PIPELINE ENFORCEMENT]")
+    except Exception as exc:
+        logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot recovery failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+@app.route('/api/admin/ledgers/delete-by-sha', methods=['POST'])
+def api_admin_ledgers_delete_by_sha():
+    """RK PASS 24 Oct (R17): delete V3 ledger rows (decision/lifecycle/market_segment/order_intent) by row sha256.
+
+    Body: {"list_jsonl": "<RK list file text>", "list_sha256": "<sha256 of list_jsonl>", "dry_run": true (default),
+    "actor", "reason"}.  All validation, locking, snapshot, receipt/index rebase and tombstones live in
+    ledger_delete_by_sha.  Paths come from V3EvidenceStore only.  Never echoes a token.
+    """
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import ledger_delete_by_sha as _lds
+    from research_v3_store import V3EvidenceStore
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    dry_run = body.get("dry_run", True) is not False
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+    try:
+        with research_gate:
+            store = V3EvidenceStore.open_read_only(_data_sync_runtime_root())
+            out = _lds.delete_ledger_rows_by_sha(store, body.get("list_jsonl"), body.get("list_sha256"),
+                                                 dry_run=dry_run)
+    except _lds.DeleteRefused as e:
+        logger.warning(f"[LEDGER-DELETE-BY-SHA] refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": False, "refused": e.code, "detail": e.detail}), 409
+    logger.warning(
+        f"[LEDGER-DELETE-BY-SHA] actor={actor} reason={reason[:120]!r} dry_run={out['dry_run']} "
+        f"removed={out['removed_total']} files={json.dumps(out['files'], sort_keys=True)[:600]} "
+        f"list_sha={out['list_sha256']} snapshot={out['snapshot_path']} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": True, **out})
+
+
+@app.route('/api/admin/ledgers/delete-rollback-snapshot', methods=['POST'])
+def api_admin_ledgers_delete_rollback_snapshot():
+    """Delete the temporary rollback snapshot from ledgers/delete-by-sha and read back that it is gone."""
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import ledger_delete_by_sha as _lds
+    from research_v3_store import V3EvidenceStore
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    try:
+        store = V3EvidenceStore.open_read_only(_data_sync_runtime_root())
+        out = _lds.delete_rollback_snapshot(store, body.get("snapshot_path"))
+    except _lds.DeleteRefused as e:
+        logger.warning(f"[LEDGER-DELETE-BY-SHA] rollback snapshot delete refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": False, "refused": e.code}), 409
+    logger.warning(f"[LEDGER-DELETE-BY-SHA] rollback snapshot deleted={out['deleted']} path={out['snapshot_path']} "
+                   f"actor={actor} reason={reason[:120]!r} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
+
+
 @app.route('/api/admin/emergency-wal/clear-alarms', methods=['POST'])
 def api_emergency_wal_clear_alarms():
     """Clear latched emergency-WAL alarms whose condition is re-proven resolved.
@@ -61128,6 +61203,9 @@ def main():
     from crash_journal_repair import repair_known_incident_at_startup
     journal_repair_status = repair_known_incident_at_startup(Path.cwd())
     logger.info("[STARTUP] crash journal repair: %s", journal_repair_status)
+    # HM R2 blocker: restore any ledger left half-applied by ledgers/delete-by-sha BEFORE any thread
+    # (Flask, heartbeat, live-guardian, lifecycle pipeline, collectors) can read or append to it.
+    _ledger_delete_boot_recover()
     BOT_INSTANCE_ID = (
         f"dashboard-{DASHBOARD_PORT}-pid-{os.getpid()}-{uuid.uuid4().hex[:12]}"
     )
