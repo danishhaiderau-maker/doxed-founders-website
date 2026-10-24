@@ -32,7 +32,7 @@ TILE_KEY_CODES: dict = {
     "gb1": 3,   # FAMILY_GSB1_CVD_DIV_REGIME
     "gb2": 4,   # FAMILY_GSB2_REGIME_SWITCHER
     "gs6": 5,   # FAMILY_GS06_COMMITTED_FADE_ATR_TP
-    "gf3": 8,   # FAMILY_GSF3_FADE3_TP30 (GS-FADE3-TP30; paper only, see PAPER_ONLY_TILE_KEYS)
+    "gf3": 8,   # FAMILY_GS_FADE3_TP30 (GS-FADE3-TP30; paper only, see PAPER_ONLY_TILE_KEYS)
 }
 # Retired tiles keep their codes reserved forever (never reissued): dsl=6, dsf=7.
 RESERVED_TILE_KEY_CODES = {"dsl": 6, "dsf": 7}
@@ -133,7 +133,7 @@ DENY_G6_HM_GATE = "LIVE_G6_HM_GATE_NOT_PASSED"
 # GS-FADE3-TP30 PAPER tile PR (RK PASS 25 Oct 06:24 AEDT): gf3 ships PAPER ONLY. Every arm path refuses it, whatever
 # LIVE_HM_GATE_FADE3 says, until a later reviewed PR removes it from this set (the env stays unset in this PR).
 PAPER_ONLY_TILE_KEYS = frozenset({"gf3"})
-PAPER_ONLY_LANES = frozenset({"FAMILY_GSF3_FADE3_TP30"})
+PAPER_ONLY_LANES = frozenset({"FAMILY_GS_FADE3_TP30"})
 DENY_PAPER_ONLY_TILE = "LIVE_TILE_PAPER_ONLY"
 # RK ruling (24 Oct) L27: no pre-entry liq ESTIMATE path (G5 bans estimates). Instead the arm gate refuses while the latest
 # RECORDED real L (Bitfinex, persisted across restarts) is <= 15 bp past the stop, until a NEW stop amendment has passed
@@ -325,6 +325,9 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         caps = load_caps() if caps is None else caps
         key = tile_key_for_lane(lane, registry)
         info: dict = {"tile_key": key, "day_basis": DAY_BASIS}
+        po = paper_only_arm_block(lane, key) or paper_only_arm_block(None, tile_key_for_trade_id(trade_id))
+        if po:
+            return False, [po], info   # gf3 PAPER ONLY: refused before any other check
         if key is None or tile_key_for_trade_id(trade_id) != key:
             return False, [DENY_TILE_KEY_UNKNOWN], info
         reasons: list = []

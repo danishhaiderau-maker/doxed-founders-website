@@ -539,6 +539,7 @@ test_three_tier_strategy_leaders.py
 test_tile_ai_attribution.py
 test_tile_card_epoch_truth.py
 test_tile_evidence_points.py
+test_tile_fade3.py
 test_tile_fill_migration.py
 test_tile_live_single_button.py
 test_tile_no_fill_lifecycle_terminal.py
