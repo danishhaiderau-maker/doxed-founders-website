@@ -39,7 +39,7 @@ def _reverse_lines(path: Path, max_bytes: int) -> Iterator[tuple[bytes, bool]]:
             if read >= max_bytes:
                 yield b"", True
                 return
-            step = min(_CHUNK, pos)
+            step = min(_CHUNK, pos, max(1, max_bytes - read))
             pos -= step
             fh.seek(pos)
             buf = fh.read(step) + buf
