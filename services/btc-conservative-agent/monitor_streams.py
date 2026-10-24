@@ -38,12 +38,14 @@ STREAMS = {
     "venue_bbo_lighter_paradex": "venue_bbo_1m.jsonl",     # Lighter + Paradex BTC bid/ask, 1 s in 1 m rows
     # DATA-GAPS-20261012 (Strategist c, g)
     "bfx_deriv_status_1s": "bfx_deriv_status_1s.jsonl",    # Bitfinex funding / mark / OI, 1 s
+    "bfx_ws_events": "bfx_ws_events.jsonl",                # Bitfinex WS events + heartbeats (incl. trades hb), recv time r
     "xvp_shadow_signals": "xvp_shadow_signals.jsonl",      # cross-venue premium shadow triggers/outcomes
 }
 
 # Row timestamp keys tried in order (seconds, epoch UTC) for since/until filtering.
 TS_KEYS = ("ts", "bucket_ts", "minute_ts", "s", "m", "evaluated_ts", "exit_ts", "signal_ts",
-           "anchor_bucket_ts", "fill_ts", "order_ts", "decision_ts", "created_ts")
+           "anchor_bucket_ts", "fill_ts", "order_ts", "decision_ts", "created_ts",
+           "r")  # r: bfx_ws_events receive time (last, so it never shadows another stream's key)
 # Key fields whose null rate /api/monitor/streams/health reports (sampled tail rows).
 KEY_FIELDS = {
     "market_context": ("minute_ts", "spot", "funding", "oi"),
@@ -53,6 +55,7 @@ KEY_FIELDS = {
     "bfx_trades": ("s", "tr"),
     "venue_bbo_lighter_paradex": ("m", "lighter", "paradex"),
     "bfx_deriv_status_1s": ("s", "mark", "fund_cur", "oi"),
+    "bfx_ws_events": ("r", "ev"),
     "xvp_shadow_signals": ("evaluated_ts", "side", "premium_dev_bp"),
     "liquidations": ("ts", "venue", "liq_side"),
     "runtime_telemetry": ("ts",),
@@ -61,6 +64,7 @@ KEY_FIELDS = {
 # Continuous streams only; event streams (xvp, liquidations, ledgers) may be quiet legitimately.
 STALE_AFTER_SEC = {"market_context": 300, "book_tape_1s": 30, "cross_venue_tape": 300, "bfx_book_10l": 30,
                    "bfx_trades": 600, "venue_bbo_lighter_paradex": 300, "bfx_deriv_status_1s": 30,
+                   "bfx_ws_events": 60,  # Bitfinex heartbeats every <=15 s per channel
                    "runtime_telemetry": 300, "dyn_regime_minutes": 300}
 ARCHIVE_NOTE = {
     "local_rotations": "<data>/runtime/<file>.N (N ascending = newer), served by ?part=N and ?since=",
