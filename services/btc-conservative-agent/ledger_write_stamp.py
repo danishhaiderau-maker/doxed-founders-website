@@ -28,7 +28,20 @@ import data_epoch as de
 
 SCHEMA = "v3_ledger_write_stamp_v1"
 STAMP_KEY = "write_stamp"
-EXPECTED_DATA_EPOCH_ID = "ce-20261004-v31-freeze21b"
+import research_freeze as _rf
+
+# ONE configured epoch (R6): the research-freeze pin. No literal here; DATA_EPOCH_ID (env) must name the same epoch
+# or every stamp is non-countable (hard rejection of every other epoch). Reading the config never starts, resets or
+# rolls an epoch.
+EXPECTED_DATA_EPOCH_ID = _rf.FREEZE_DATA_EPOCH_ID
+
+
+def configured_epoch_id() -> str | None:
+    """The configured DATA_EPOCH_ID, or None when the env names a different epoch than the freeze pin (fail closed)."""
+    env = (os.getenv("DATA_EPOCH_ID") or "").strip()
+    if env and env != EXPECTED_DATA_EPOCH_ID:
+        return None
+    return EXPECTED_DATA_EPOCH_ID
 FRESH_START_FILE = "fresh_start_epoch.json"
 
 REASON_NO_EPOCH = "WRITE_STAMP_NO_ACTIVE_DATA_EPOCH"
@@ -81,7 +94,7 @@ def build_write_stamp(*, data_epoch_id: str | None, floor_ts: float | None, now:
     reason = None
     if not data_epoch_id:
         reason = REASON_NO_EPOCH
-    elif data_epoch_id != EXPECTED_DATA_EPOCH_ID:
+    elif data_epoch_id != configured_epoch_id():
         reason = REASON_WRONG_EPOCH
     elif not floor_ts:
         reason = REASON_NO_FLOOR
