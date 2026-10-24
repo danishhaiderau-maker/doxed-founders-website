@@ -33,6 +33,7 @@ from transactional_receipt_store import (
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, set[str]]] = {}
+_tombstone_cache: dict[str, tuple[tuple[int, int, int, int], frozenset[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _provenance_cache: dict[str, str] | None = None
 _config_signature_provider = None
@@ -2326,6 +2327,21 @@ class V3EvidenceStore:
         """Count exact durable IDs without copying a warm cache."""
         return len(cls._cached_ids(path))
 
+    def _row_tombstoned(self, ledger: str, line: str) -> bool:
+        """True when this exact line (sans terminator) was deleted via ledger_delete_by_sha."""
+        tomb = self.receipt_dir / "deleted_row_tombstones_v1" / f"{ledger}.json"
+        signature = _path_signature(tomb)
+        if signature is None:
+            return False
+        key = str(tomb)
+        cached = _tombstone_cache.get(key)
+        if cached is None or cached[0] != signature:
+            from ledger_delete_by_sha import load_tombstones
+            cached = (signature, load_tombstones(self.root, ledger))
+            _tombstone_cache[key] = cached
+        digest = hashlib.sha256(line.rstrip("\r\n").encode("utf-8")).hexdigest()
+        return digest in cached[1]
+
     def append(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
         path = self.ledger_path(ledger)
         record_id = str(row.get("record_id") or "")
@@ -2355,6 +2371,13 @@ class V3EvidenceStore:
             material['research_timing_capture_status'] = timing
             material['research_timing_declarations'] = timing['declarations']
         line = canonical_json(material) + "\n"
+        if self._row_tombstoned(ledger, line):
+            # R17 no-resurrect: a row deleted by ledger_delete_by_sha never comes back.
+            return {
+                "written": False, "duplicate": False, "blocked": True,
+                "record_id": record_id, "ledger": ledger,
+                "reason": "DELETED_ROW_TOMBSTONED",
+            }
         if not storage_blocks_new_nonessential_research(str(self.root)):
             # Empty-ledger completeness is constant work and is required so a
             # later emergency can safely continue an already-open lifecycle.
