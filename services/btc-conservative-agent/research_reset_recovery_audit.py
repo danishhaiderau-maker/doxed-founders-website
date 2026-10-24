@@ -271,7 +271,7 @@ def audit_research_reset_recovery(runtime_root, *, expected_identity,
 
     heads = root / "v3/receipts/emergency_record_idempotency_v1/append_heads"
     for path in entries(heads):
-        if path.name not in {n + ".json" for n in LEDGER_NAMES}:
+        if path.name not in {n + ".json" for n in LEDGER_NAMES}:  # R3-NON-INPUT: recovery audit filename check, no read
             block("UNKNOWN_APPEND_HEAD_PATH", path)
             retained.append({"path": path.relative_to(root).as_posix(), "reason": "UNKNOWN_RECOVERY_RETAINED"})
             continue

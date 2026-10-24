@@ -36944,7 +36944,7 @@ def _fresh_research_reset_boundary(reset_anchor: float) -> dict:
            or row["pending_or_unknown_count"] != 0 for row in auxiliary):
         raise RuntimeError("RESET_AUXILIARY_RECOVERY_NOT_PROVEN_CLEAR")
     pointers = []
-    for ledger in LEDGER_NAMES:
+    for ledger in LEDGER_NAMES:  # R3-NON-INPUT: orphan probe hashes generation pointers only, never evidence
         pointer = store._generation_root(ledger) / "ACTIVE.json"
         if pointer.exists():
             _checked_path(pointer, root)

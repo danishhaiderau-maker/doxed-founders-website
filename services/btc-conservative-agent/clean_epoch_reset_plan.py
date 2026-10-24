@@ -273,7 +273,7 @@ def verify(runtime_root: str, epoch_id: str, expect_present: list[str] | None = 
         failures.append("DATA_EPOCH_MANIFEST_MISMATCH")
     started = float((manifest or {}).get("started_at_ts") or 0)
     heads = {}
-    for ledger in V3_LEDGERS:
+    for ledger in V3_LEDGERS:  # R3-NON-INPUT: reset verify reads head first-row ts/bytes only, never evidence
         decision, ts, size = head_decision(root / "v3" / "ledgers" / f"{ledger}.jsonl", started)
         heads[ledger] = {"head_decision": decision, "head_first_row_ts": ts, "head_bytes": size}
         if decision in {"PRE_EPOCH_HEAD", "UNDATED_HEAD"}:
