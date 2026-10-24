@@ -656,3 +656,6 @@ test_booktail_incremental.py
 test_exit_lag_regression.py
 test_exit_scan_stamps.py
 test_trigger_receive_stamp.py
+test_delete_by_id_reload.py
+test_delete_by_id_route_r2c.py
+test_delete_by_id_r2d.py
