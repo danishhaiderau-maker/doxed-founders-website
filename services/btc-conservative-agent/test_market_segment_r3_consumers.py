@@ -32,8 +32,22 @@ def no_segment_reads(monkeypatch):
         guard(self)
         return real_read_bytes(self)
 
+    real_read_text = Path.read_text
+    real_path_open = Path.open
+
+    def fake_read_text(self, *a, **k):
+        guard(self)
+        return real_read_text(self, *a, **k)
+
+    def fake_path_open(self, mode="r", *a, **k):
+        if not set(str(mode)) & set("wax+"):  # writes set up the poison; reads fail
+            guard(self)
+        return real_path_open(self, mode, *a, **k)
+
     monkeypatch.setattr(builtins, "open", fake_open)
     monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    monkeypatch.setattr(Path, "open", fake_path_open)
 
 
 def _poison(root: Path) -> Path:
@@ -48,8 +62,11 @@ def _poison(root: Path) -> Path:
     return v3
 
 
+_REAL_READ_TEXT = Path.read_text
+
+
 def _src(rel: str) -> str:
-    return (HERE / rel).read_text()
+    return _REAL_READ_TEXT(HERE / rel)
 
 
 # --- the gate itself -------------------------------------------------------
@@ -547,3 +564,44 @@ def test_every_consumer_imports_gate():
     ]
     for rel in consumers:
         assert "import market_segment_r3 as _msr3" in _src(rel), rel
+
+
+# --- HM R3 B2: each production gate has a behavioural test that fails if removed ---
+
+_SEG_ID = {"collection_epoch_id": "epoch-1", "epoch_id": "epoch-1", "episode_id": "episode-1",
+           "policy_signature": "policy-1", "research_lane": "CONTINUOUS"}
+
+
+def test_lifecycle_bundles_collect_skips_segment_ledger(tmp_path, no_segment_reads):
+    """Gate: lifecycle_bundles.collect_lifecycle_rows `if ledger == "market_segment" ... continue`."""
+    import json as _json
+    from lifecycle_bundles import collect_lifecycle_rows
+    v3 = _poison(tmp_path)
+    (v3 / "ledgers" / "market_segment.jsonl").write_bytes(
+        (_json.dumps({"ledger": "market_segment", **_SEG_ID}) + "\n").encode())
+    grouped = collect_lifecycle_rows(tmp_path)
+    assert not any(r.get("ledger") == "market_segment" for rows in grouped.values() for r in rows)
+
+
+def test_lifecycle_completion_reconciler_reports_dropped_segment():
+    """Gate: evaluate_lifecycle_completion adds _msr3.REASON for a dropped segment row."""
+    from lifecycle_bundles import LifecycleKey
+    from lifecycle_completion_reconciler import evaluate_lifecycle_completion
+    key = LifecycleKey("epoch-1", "episode-1", "policy-1", "CONTINUOUS")
+    row = {"ledger": "market_segment", "context_role": "FULL_LIFECYCLE", **_SEG_ID}
+    out = evaluate_lifecycle_completion(key, [row], now=10_000.0)
+    assert REASON in out["blockers"]
+    assert out["ready"] is False
+    assert out["market_segment_input"]["reason"] == REASON
+    clean = evaluate_lifecycle_completion(key, [], now=10_000.0)
+    assert REASON not in clean["blockers"] and "market_segment_input" not in clean
+
+
+def test_candidates_load_segment_ignores_valid_envelope_with_rows(tmp_path, no_segment_reads):
+    """Gate: research_v3_candidates._load_segment `if not _msr3.INPUT_ALLOWED: return []`."""
+    from research_v3_candidates import _load_segment
+    rel = "v3/market_segments/ab/" + "ab" * 32 + ".json"
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'{"schema":"market_segment_v3","rows":[{"ts":1,"mid":100.0},{"ts":2,"mid":101.0}]}')
+    assert _load_segment(tmp_path, {"relative_path": rel, "sha256": "ab" * 32}) == []
