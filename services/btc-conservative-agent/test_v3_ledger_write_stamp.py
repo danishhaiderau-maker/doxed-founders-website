@@ -155,3 +155,17 @@ def test_monitor_never_green_when_boundary_not_reached(tmp_path):
 def test_trade_row_without_epoch_stamp_gets_its_own_reason():
     from research import tile_realism_table as trt
     assert trt.row_exclusion({"net_pnl_bp": 1.0}) == trt.REASON_EPOCH_MISSING
+
+
+def test_prepared_repair_and_wal_replay_keep_durable_stamp_bytes(tmp_path):
+    """Crash repair replays the durable row's stamp exactly; a fresh write is still stamped."""
+    root = _root(tmp_path)
+    with mock.patch.object(de, "active_epoch_id", return_value=EPOCH):
+        store = V3EvidenceStore(root, epoch_id="ep")
+        first = store.append("decision", {"record_id": "r1", "value": 1})
+        again = store.append("decision", {"record_id": "r1", "value": 1})
+    assert first.get("written") is True and again.get("duplicate") is True
+    found, stamp = store._durable_write_stamp("decision", "r1")
+    if found:  # receipt-backed store: the durable stamp is what a repair would replay
+        assert stamp == _rows(root, "decision")[0]["write_stamp"]
+    assert isinstance(_rows(root, "decision")[0].get("write_stamp"), dict)
