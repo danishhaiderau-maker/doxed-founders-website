@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -20,6 +21,7 @@ import {
   NotificationType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { fetchL27ArmBlock, type LiveArmPath } from './live-arm-l27-gate';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
@@ -90,6 +92,21 @@ export class TradingAgentInstancesService {
     private readonly execution: SignalSubscriberExecutionService,
   ) {}
 
+  /** RK L27 (#852): Fly's verdict of the shared arm-gate liq check; swappable in specs. */
+  liveArmL27Block: () => Promise<string | null> = () => fetchL27ArmBlock();
+
+  /**
+   * RK L27 on EVERY arm path (#852): refuse a live arm/re-arm while Fly's shared l27_arm_block refuses (latest real L
+   * <= 15 bp past the stop, no new stop amendment) or its verdict is unreadable (fail closed). Paper is not an arm.
+   */
+  async assertLiveArmL27(path: LiveArmPath, exchangeProvider: string | null | undefined): Promise<void> {
+    if (!exchangeProvider || exchangeProvider === 'paper') return;
+    const block = await this.liveArmL27Block();
+    if (!block) return;
+    this.logger.warn(`[LIVE-ARM-L27] refused path=${path} code=${block}`);
+    throw new ConflictException({ ok: false, error: block, path, message: `Live arm refused (${path}): ${block}` });
+  }
+
   async hireAgent(
     userId: string,
     agentId: string,
@@ -116,6 +133,7 @@ export class TradingAgentInstancesService {
     ) {
       return this.formatInstance(existing, agent);
     }
+    await this.assertLiveArmL27('hire', input.exchangeProvider);
 
     const connected = await this.exchanges.connectUserExchange(userId, input.exchangeProvider, {
       apiKey: input.apiKey,
@@ -736,6 +754,8 @@ export class TradingAgentInstancesService {
         );
       }
     }
+
+    if (!paused) await this.assertLiveArmL27('instance/resume', instance.exchangeProvider);
 
     let executorHealthAtArm: RelayExecutorHealthSnapshot | null = null;
     if (!paused && instance.exchangeProvider !== 'paper') {

@@ -2,10 +2,18 @@ import {
   approvalBackedStopLossMarginPct,
   approvalPermitsRelayCopy,
   evaluateLiveCopyPlacement,
+  FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC,
   LIQUIDATION_SAFETY_BP,
   liveCopyAccountArmed,
   readEnvelopeFlyApproval,
 } from './live-copy-approval';
+import {
+  decodeTileClientOrderId,
+  encodeTileClientOrderId,
+  liveEntryAdmission,
+  tileKeyForTradeId,
+  untaggedOrderRefusal,
+} from './live-tile-gate';
 import { ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
@@ -70,6 +78,12 @@ import {
   normalizeBitfinexOrderPrice,
   type BitfinexActiveOrder,
   type BitfinexFuturesPairConstraints,
+  bitfinexAuthCallsLastMinute,
+  recentBitfinexAuthRead,
+  BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN,
+  BITFINEX_AUTH_ROUTINE_CAP_PER_MIN,
+  withBitfinexReadClass,
+  withBitfinexCriticalReads,
 } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
@@ -78,6 +92,18 @@ import {
   type CancelCapableClient,
 } from '../exchanges/bitfinex-cancel.util';
 import { SignalCyclesService } from './signal-cycles.service';
+import { bootCancelPendingEntries, type BootPendingRow } from './live-boot-pending-cancel';
+import {
+  EXIT_FILL_REAL,
+  EXIT_FILL_RECONCILED_EVENT,
+  EXIT_FILL_UNREADABLE,
+  latestLiveExitEvent,
+  liveEntryFillEvidence,
+  liveExitPayloadRealFillOnly,
+  liveOrderExitFill,
+  type LiveOrderExitFill,
+  type LiveOrderExitFillInput,
+} from './live-row-countability';
 import { BotBridgeService } from './bot-bridge.service';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
@@ -3691,7 +3717,11 @@ function computeClientOrderId(
   const digest = createHash('sha256')
     .update(`${cycleId}|${participantId}|${tradeId ?? ''}`)
     .digest('hex');
-  return parseInt(digest.slice(0, 8), 16) & 0x7fffffff;
+  const hash = parseInt(digest.slice(0, 8), 16) & 0x7fffffff;
+  // Two-tile live gate: a live tile's ENTRY cid carries its stable tile key (live-tile-gate.ts), so every live order and
+  // fill maps to its tile. Reconcile always matches the PERSISTED cid, so the formula change is deploy-safe.
+  const tileKey = tileKeyForTradeId(tradeId);
+  return tileKey ? encodeTileClientOrderId(tileKey, hash) : hash;
 }
 
 function computeAccountEmergencyClientOrderId(requestId: string): number {
@@ -3838,7 +3868,307 @@ export type EntryClaimResult = {
   claimed: { id: string } | null;
   assessment: ReturnType<typeof assessCorrelatedExposureCluster>;
   evidence: Record<string, unknown> | null;
+  /** Two-tile live mutex (HM C3): other live lots counted under the account-wide lock in the claim txn. */
+  liveMutexOthers?: number;
 };
+
+/**
+ * Two-tile live gate mutex (HM R2 C3 + RK 24 Oct): ONE Bitfinex position per symbol per ACCOUNT, unconditionally (any
+ * agent, any tile). Counts this user's OTHER participants that are PENDING_ENTRY/OPEN, or INTENT claims younger than
+ * LIVE_MUTEX_INTENT_WINDOW_MS (a racing entry that has claimed but not yet submitted).
+ * HM N4: the INTENT window covers the executor's placement bound (FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC = 180 s): an INTENT
+ * can still be placed until its Fly approval is 180 s old, so it must keep counting that long.
+ * HM N5: venue-scoped to the Bitfinex account ('bitfinex'); a row with NO venue (legacy) still counts (fail closed).
+ */
+export const LIVE_MUTEX_INTENT_WINDOW_MS = FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC * 1000;
+export const LIVE_MUTEX_VENUE = 'bitfinex';
+export const liveMutexLockKey = (userId: string) => `live-mutex:${userId}`;
+export function liveMutexWhere(userId: string, excludeParticipantId: string | null | undefined, nowMs = Date.now()) {
+  return {
+    userId,
+    OR: [
+      { status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] } },
+      { status: SignalCycleStatus.INTENT, createdAt: { gte: new Date(nowMs - LIVE_MUTEX_INTENT_WINDOW_MS) } },
+    ],
+    AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
+    ...(excludeParticipantId ? { id: { not: excludeParticipantId } } : {}),
+  };
+}
+/** Take the account-wide live-mutex advisory lock (xact-scoped). Call BEFORE inserting the claim, in the same txn. */
+export async function takeLiveMutexLock(
+  tx: { $executeRawUnsafe: (q: string, ...v: unknown[]) => Promise<unknown> },
+  userId: string,
+): Promise<void> {
+  await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', liveMutexLockKey(userId));
+}
+/**
+ * HM1 (24 Oct, #852): an unexpired LiveEntryFence row (held by ops/position-flatten or ops/force-flat-disarm for the whole
+ * route) counts as one more live participant, so every hire / catch-up claim section and the pre-submit recount refuse
+ * while a flatten runs. A fence read that throws propagates (the claim fails closed).
+ */
+export async function countLiveMutexOthers(
+  tx: {
+    signalCycleParticipant: { count: (a: any) => Promise<number> };
+    liveEntryFence: { count: (a: any) => Promise<number> };
+  },
+  userId: string,
+  excludeParticipantId: string | null | undefined,
+  nowMs = Date.now(),
+): Promise<number> {
+  const others = await tx.signalCycleParticipant.count({ where: liveMutexWhere(userId, excludeParticipantId, nowMs) });
+  const fences = await tx.liveEntryFence.count({ where: liveEntryFenceActiveWhere(userId, nowMs) });
+  // HM R4 B2 (RK 08:03): until this process's boot reconcile allowed the account, it counts as one more live participant
+  // HM R6 nit 1: an exit-fill fence whose write failed blocks in-process too
+  return others + fences + (liveBootEntryBlocked(userId) ? 1 : 0) + (exitFillFenceWriteFailed(userId) ? 1 : 0);
+}
+/**
+ * HM R4 B2(a) (RK 08:03): the entry fence has NO time expiry. A fence row blocks every claim until its holder releases it, or
+ * until a relay boot reconcile (liveBootReconcileVerdict) read the account FLAT_NO_STOPS or matching the DB with every stop
+ * resident; only then are the rows of a crashed holder (acquiredAt before this process started) removed. Expiry alone never
+ * allows an entry. expiresAt is kept only because the column is required; it is never read.
+ */
+export const LIVE_ENTRY_FENCE_NO_EXPIRY = new Date('9999-12-31T00:00:00.000Z');
+/**
+ * HM R5 nit 1 (owner-scoped fence cleanup): a flatten fence id carries its holder (this process: pid + a random per-boot
+ * id) and its holder heartbeats expiresAt (lease end = now + LIVE_FENCE_LEASE_MS, every LIVE_FENCE_HEARTBEAT_MS) for as
+ * long as it holds it. expiresAt is STILL never read by the entry gate (every row blocks, B2a); it is read only by the
+ * boot cleanup, which deletes a flatten:* row of ANOTHER holder only once its heartbeat stopped (lease ended more than
+ * LIVE_FENCE_LEASE_MS ago), or a legacy no-heartbeat row (NO_EXPIRY) acquired before this process started. A still-running
+ * old worker (Railway healthcheck overlap) keeps heartbeating, so its fence is never removed. Exit-fill fences
+ * (EXIT_FILL_UNREADABLE_FENCE_PREFIX) are never touched by the cleanup.
+ */
+export const LIVE_PROCESS_ID = `${process.pid}-${randomUUID()}`;
+export const LIVE_FENCE_HEARTBEAT_MS = 10_000;
+export const LIVE_FENCE_LEASE_MS = 60_000;
+export const FLATTEN_FENCE_PREFIX = 'flatten:';
+export const flattenFenceId = (holder: string = LIVE_PROCESS_ID) => `${FLATTEN_FENCE_PREFIX}${holder}:${randomUUID()}`;
+export function staleFlattenFenceWhere(userId: string, nowMs: number, processStartMs: number, holder: string = LIVE_PROCESS_ID) {
+  return {
+    userId,
+    id: { startsWith: FLATTEN_FENCE_PREFIX },
+    NOT: { id: { startsWith: `${FLATTEN_FENCE_PREFIX}${holder}:` } },
+    OR: [
+      { expiresAt: { lt: new Date(nowMs - LIVE_FENCE_LEASE_MS) } },
+      { expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY, acquiredAt: { lt: new Date(processStartMs) } },
+    ],
+  };
+}
+/**
+ * HM R5 N2: the flatten fence is held from the flatten's START. The route waits (bounded) for the acquisition before its
+ * first exchange write; if it is not held by then the flatten still runs (safety first) but fenced=false (route ok=false,
+ * Fly RED). fenced=true therefore means: held for the whole flatten, start to release.
+ */
+export const FENCE_BEFORE_FLATTEN_MAX_WAIT_MS = 5_000;
+/**
+ * HM R5 C1 / RK 09:10: an EXIT stored as EXIT_FILL_UNREADABLE holds one durable fence row per participant (same table, so
+ * countLiveMutexOthers blocks every entry of the account) until the clearing read re-stamps it from the real fill.
+ * Boot cleanup never touches these rows (it only removes stale flatten:* fences).
+ */
+export const EXIT_FILL_UNREADABLE_FENCE_PREFIX = 'exit-fill-unreadable:';
+export const exitFillUnreadableFenceId = (participantId: string) => `${EXIT_FILL_UNREADABLE_FENCE_PREFIX}${participantId}`;
+export const EXIT_FILL_CLEAR_INTERVAL_MS = 60_000;
+/** HM R6 nit 2: at most this many per-order fill reads per clearing sweep (round-robin over fences; routine read class),
+ *  so a backlog of unreadable exits never stalls the money tick or eats the shared read budget. */
+export const EXIT_FILL_CLEAR_MAX_ORDER_READS_PER_SWEEP = 4;
+/**
+ * HM R6 nit 1: an exit-fill fence whose DB write FAILED. Fail closed in-process: the account counts one more live
+ * participant (countLiveMutexOthers) and an ALERT is logged; the clearing sweep retries the write; it is dropped only once
+ * the durable fence row is written.
+ */
+const exitFillFenceWriteFailures = new Map<string, Map<string, { reason: string; at: string; error: string }>>();
+export function exitFillFenceWriteFailed(userId: string): boolean {
+  return (exitFillFenceWriteFailures.get(userId)?.size ?? 0) > 0;
+}
+export function exitFillFenceWriteFailuresFor(userId: string): Array<{ participant_id: string; reason: string; at: string; error: string }> {
+  return [...(exitFillFenceWriteFailures.get(userId) ?? new Map()).entries()].map(([participant_id, v]) => ({ participant_id, ...v }));
+}
+/** @internal tests only */
+export function resetExitFillFenceWriteFailures(): void { exitFillFenceWriteFailures.clear(); }
+function noteExitFillFenceWriteFailure(userId: string, participantId: string, reason: string, error: string | null): void {
+  const m = exitFillFenceWriteFailures.get(userId) ?? new Map();
+  if (error == null) m.delete(participantId);
+  else m.set(participantId, { reason, at: new Date().toISOString(), error });
+  if (m.size) exitFillFenceWriteFailures.set(userId, m); else exitFillFenceWriteFailures.delete(userId);
+}
+/** HM R6 nit 3: read-only view of the account's entry fences (published in dashboardState.relayExchangeMirror.live_fences). */
+export function liveFenceView(
+  rows: Array<{ id: string; reason: string | null; acquiredAt: Date | string | null; expiresAt: Date | string | null }>,
+  writeFailures: Array<{ participant_id: string; reason: string; at: string; error: string }>,
+  bootStamp: unknown,
+) {
+  const iso = (d: Date | string | null) => (d == null ? null : new Date(d).toISOString());
+  const kindOf = (id: string) => (id.startsWith(`${EXIT_FILL_UNREADABLE_FENCE_PREFIX}cycle:`) ? 'exit_fill_cycle'
+    : id.startsWith(EXIT_FILL_UNREADABLE_FENCE_PREFIX) ? 'exit_fill' : id.startsWith('flatten:') ? 'flatten' : 'other');
+  const fences = rows.map((r) => ({
+    id: r.id, kind: kindOf(r.id), reason: r.reason, acquired_at: iso(r.acquiredAt),
+    expires_at: r.expiresAt && new Date(r.expiresAt).getTime() >= LIVE_ENTRY_FENCE_NO_EXPIRY.getTime() ? null : iso(r.expiresAt),
+  }));
+  return {
+    schema: 'relay_live_fences_v1',
+    blocked: fences.length > 0 || writeFailures.length > 0,
+    exit_fill: fences.filter((f) => f.kind === 'exit_fill'),
+    exit_fill_cycle: fences.filter((f) => f.kind === 'exit_fill_cycle'),
+    other: fences.filter((f) => f.kind !== 'exit_fill' && f.kind !== 'exit_fill_cycle'),
+    exit_fill_fence_write_failures: writeFailures,
+    boot_reconcile: bootStamp ?? null,
+  };
+}
+/**
+ * B4 (#852 R3, real Postgres): the fence waits on the account live-mutex behind every queued claim. Prisma's default 5 s
+ * interactive-transaction timeout expired under a 20-claim burst on a Neon branch (fence lost -> unfenced flatten, ok=false),
+ * so the fence transaction gets an explicit, longer bound. Still bounded: a stuck lock fails the fence (the route still
+ * flattens and reports fenced=false).
+ */
+export const LIVE_ENTRY_FENCE_TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 } as const;
+export function liveEntryFenceActiveWhere(userId: string, _nowMs = Date.now()) {
+  return { userId };   // HM R4 B2(a): every fence row counts, whatever its expiresAt
+}
+type LiveEntryFenceDb = {
+  $transaction: <T>(fn: (tx: any) => Promise<T>, opts?: { maxWait?: number; timeout?: number }) => Promise<T>;
+  liveEntryFence: {
+    update: (a: any) => Promise<unknown>;
+    deleteMany: (a: any) => Promise<unknown>;
+  };
+};
+/**
+ * HM1: acquire the account entry fence under the account-wide live-mutex advisory lock (the same lock every claim takes),
+ * so a claim either committed before the fence (and its pre-submit recount then sees the fence) or sees the fence.
+ */
+export async function acquireLiveEntryFence(
+  db: LiveEntryFenceDb,
+  userId: string,
+  fenceId: string,
+  reason: string,
+  nowMs = Date.now(),
+  expiresAt: Date = LIVE_ENTRY_FENCE_NO_EXPIRY,
+): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await takeLiveMutexLock(tx, userId);
+    await tx.liveEntryFence.create({
+      data: { id: fenceId, userId, reason: reason.slice(0, 200), acquiredAt: new Date(nowMs), expiresAt },
+    });
+  }, LIVE_ENTRY_FENCE_TX_OPTIONS);
+}
+/** HM R5 nit 1: the holder's heartbeat (lease end only; the entry gate never reads expiresAt, B2a). */
+export async function refreshLiveEntryFence(db: LiveEntryFenceDb, fenceId: string, nowMs = Date.now()): Promise<void> {
+  await db.liveEntryFence.update({ where: { id: fenceId }, data: { expiresAt: new Date(nowMs + LIVE_FENCE_LEASE_MS) } });
+}
+export async function releaseLiveEntryFence(db: LiveEntryFenceDb, fenceId: string): Promise<void> {
+  await db.liveEntryFence.deleteMany({ where: { id: fenceId } });
+}
+
+/**
+ * HM R4 B2(b-d) (RK 08:03): relay boot reconcile. On boot the money-path process (executionEnabled) blocks EVERY live entry
+ * (liveBootEntryBlocked -> countLiveMutexOthers +1) until, per account, an authenticated read of the Bitfinex position AND the
+ * active orders, SENT after this process started, is FLAT_NO_STOPS with no OPEN / PENDING_ENTRY row, or matches the DB
+ * (signed open qty == position, every OPEN row's recorded stop resident, no other active order). Anything else (mismatch,
+ * a stop not resident, a read sent before the boot, an unreadable read) blocks and is RED (mirror.boot_reconcile.red ->
+ * Fly guardian RELAY_BOOT_RECONCILE). Every attempt is stamped with its read times. A blocked account is re-read every
+ * LIVE_BOOT_RECONCILE_RETRY_MS; only a passing read opens it. Process-local: the API process (no money path) never gates.
+ */
+export const LIVE_PROCESS_START_MS = Date.now();
+export const LIVE_BOOT_RECONCILE_RETRY_MS = 30_000;
+/** HM R5 nit 4: bounded retries. After this many failed attempts the account stays BLOCKED (RED), the stamp carries
+ *  retries_exhausted=true and an ALERT is logged; only an operator restart (a new boot reconcile) re-reads it. */
+export const LIVE_BOOT_RECONCILE_MAX_ATTEMPTS = 20;
+export type LiveBootReconcileVerdict =
+  | 'FLAT_NO_STOPS' | 'MATCH_STOPS_RESIDENT' | 'PENDING_ENTRY_CANCEL_FAILED' | 'MISMATCH' | 'STOP_NOT_RESIDENT' | 'STALE_READ' | 'UNREADABLE';
+export type LiveBootReconcileStamp = {
+  verdict: LiveBootReconcileVerdict;
+  allowed: boolean;
+  red: boolean;
+  detail: string;
+  attempt: number;
+  process_start_at: string;
+  read_sent_at: string | null;
+  read_at: string | null;
+  stamped_at: string;
+  /** HM R5 nit 4: set once LIVE_BOOT_RECONCILE_MAX_ATTEMPTS failed; the account stays blocked. */
+  retries_exhausted?: boolean;
+};
+export type LiveBootDbRow = {
+  id: string; status: string; direction: 'LONG' | 'SHORT' | null; qty: number | null; stopOrderIds: number[];
+  /** HM R6 nit 5: a PENDING_ENTRY row's resting entry order (meta.bitfinexOrderId) — boot-cancelled; null = cannot be cancelled (RED). */
+  entryOrderId?: number | null;
+};
+export function liveBootReconcileVerdict(i: {
+  processStartMs: number;
+  readSentAtMs: number | null;
+  positionAmount: number | null;
+  activeOrders: Array<{ id: number }> | null;
+  dbRows: LiveBootDbRow[] | null;
+}): { verdict: LiveBootReconcileVerdict; allowed: boolean; detail: string } {
+  const no = (verdict: LiveBootReconcileVerdict, detail: string) => ({ verdict, allowed: false, detail });
+  if (i.readSentAtMs == null || i.positionAmount == null || !Number.isFinite(i.positionAmount) || i.activeOrders == null || i.dbRows == null) {
+    return no('UNREADABLE', 'position / active orders / DB rows not read');
+  }
+  if (!(i.readSentAtMs > i.processStartMs)) return no('STALE_READ', 'read sent before this process started');
+  const posSats = btcToSats(i.positionAmount);
+  const orderIds = new Set(i.activeOrders.map((o) => Number(o.id)));
+  const pending = i.dbRows.filter((r) => r.status !== 'OPEN');
+  const open = i.dbRows.filter((r) => r.status === 'OPEN');
+  // HM R6 nit 5 (RK 10:26, reverts the R5 nit 5 relaxation): a PENDING_ENTRY row is NEVER accepted as resting. The boot
+  // reconcile must first cancel + flatten it (bootCancelPendingEntries) and re-read; a pending row still here blocks.
+  if (pending.length > 0) return no('MISMATCH', `PENDING_ENTRY row ${pending[0].id} not boot-cancelled (${pending.length} pending)`);
+  const known = new Set<number>();
+  const allowedVerdict = (v: LiveBootReconcileVerdict, detail: string) => ({ verdict: v, allowed: true, detail });
+  if (posSats === 0) {
+    const unknownFlat = [...orderIds].filter((id) => !known.has(id));
+    if (unknownFlat.length === 0 && open.length === 0) return allowedVerdict('FLAT_NO_STOPS', 'flat, no unrecorded active orders, no open rows');
+    return no('MISMATCH', `exchange flat with ${unknownFlat.length} unrecorded active order(s) and ${open.length} OPEN row(s)`);
+  }
+  let dbSats = 0;
+  for (const r of open) {
+    if (!r.direction || r.qty == null || btcToSats(r.qty) === 0) return no('MISMATCH', `OPEN row ${r.id} without direction/qty`);
+    const q = Math.abs(btcToSats(r.qty));
+    dbSats += r.direction === 'LONG' ? q : -q;
+    r.stopOrderIds.forEach((id) => known.add(Number(id)));
+    if (!r.stopOrderIds.some((id) => orderIds.has(Number(id)))) return no('STOP_NOT_RESIDENT', `OPEN row ${r.id}: no recorded stop is an active order`);
+  }
+  if (dbSats !== posSats) return no('MISMATCH', `exchange ${posSats} sats vs DB ${dbSats} sats`);
+  const unknown = [...orderIds].filter((id) => !known.has(id));
+  if (unknown.length > 0) return no('MISMATCH', `${unknown.length} active order(s) not recorded on an OPEN row`);
+  return allowedVerdict('MATCH_STOPS_RESIDENT', `position ${posSats} sats == DB, ${open.length} stop(s) resident`);
+}
+const liveBootGate: {
+  phase: 'NOT_RUN' | 'PENDING' | 'DONE';
+  byUser: Map<string, LiveBootReconcileStamp>;
+  onUnstamped: ((userId: string) => void) | null;
+} = {
+  phase: 'NOT_RUN',
+  byUser: new Map(),
+  onUnstamped: null,
+};
+/** true = this process must not enter for the account (boot reconcile pending, or the last boot read did not pass).
+ *  HM R5 nit 3: an account with no stamp after the pass (instance created after boot) is BLOCKED and gets its own
+ *  boot reconcile read (onUnstamped); it opens only on a passing stamp, like every other account. */
+export function liveBootEntryBlocked(userId: string): boolean {
+  if (liveBootGate.phase === 'NOT_RUN') return false;
+  if (liveBootGate.phase === 'PENDING') return true;
+  const s = liveBootGate.byUser.get(userId);
+  if (!s) {
+    try { liveBootGate.onUnstamped?.(userId); } catch { /* the block below stands */ }
+    return true;
+  }
+  return !s.allowed;
+}
+export function liveBootGateOnUnstamped(fn: ((userId: string) => void) | null): void {
+  liveBootGate.onUnstamped = fn;
+}
+export function liveBootReconcileStampFor(userId: string): LiveBootReconcileStamp | { verdict: 'PENDING'; allowed: false; red: false } | null {
+  if (liveBootGate.phase === 'NOT_RUN') return null;
+  const s = liveBootGate.byUser.get(userId);
+  if (s) return s;
+  return { verdict: 'PENDING', allowed: false, red: false };   // nit 3: unstamped after boot = pending
+}
+/** Test / boot hooks for the process-local gate. */
+export function liveBootGateSetPhase(phase: 'NOT_RUN' | 'PENDING' | 'DONE'): void {
+  liveBootGate.phase = phase;
+  if (phase !== 'DONE') liveBootGate.byUser.clear();
+}
+export function liveBootGateRecord(userId: string, stamp: LiveBootReconcileStamp): void {
+  liveBootGate.byUser.set(userId, stamp);
+}
 export type SpeculativeEntryClaim =
   | { key: string; ok: true; result: EntryClaimResult }
   | { key: string; ok: false; error: unknown };
@@ -3970,13 +4300,18 @@ export function exchangeMirrorMayRun(input: {
   moneyTickRunning: boolean;
   lastMirrorAtMs: number;
   nowMs: number;
+  /** #852 E6: the fast exposed (stop-evidence) refresh */
+  fastExposed?: boolean;
 }): boolean {
   if (input.destroyed || input.mirrorRunning) return false;
-  // LIVE-FIX-0741: never during a money tick. Forcing it mid-tick (#559) put
-  // three authenticated reads ahead of the protective stop on the per-key
-  // nonce lane: fill->stop_placed regressed 0.4 s -> 5.6-6.5 s. Staleness is
-  // instead cured by exchangeMirrorDueAfterTick() right after each tick.
-  return !input.moneyTickRunning;
+  // LIVE-FIX-0741: never a full (3-read) mirror during a money tick. Forcing it
+  // mid-tick (#559) put three authenticated reads ahead of the protective stop
+  // on the per-key nonce lane: fill->stop_placed regressed 0.4 s -> 5.6-6.5 s.
+  // #852 E6: the fast exposed refresh may run mid-tick because it normally
+  // REUSES the tick's own orders/positions reads (no lane traffic) and at most
+  // queues <= 2 reads in the READ class, behind the stop/mutation priority
+  // classes added since (a stop waits for <= one in-flight read).
+  return !input.moneyTickRunning || input.fastExposed === true;
 }
 
 /** Pure: run the mirror immediately after a tick ends (no wake queued) when stale. */
@@ -3987,16 +4322,117 @@ export function exchangeMirrorDueAfterTick(input: {
 }): boolean {
   return !input.wakeQueued && input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_MAX_AGE_MS;
 }
+/** AMEND4 E6 (sha 7073ed25, L28) / #852 E6 timing: while the last mirror showed a
+ * position or open orders, or failed, republish stop evidence once its age
+ * (measured from the oldest read's SEND time) reaches this, so healthy evidence
+ * is always < 5 s old end to end at Fly (RK 24 Oct). 1.75 s (<= 2 s) is the
+ * tightest cadence whose worst case stays <= 4 s: see stopEvidenceWorstCaseAgeS. */
+export const EXCHANGE_MIRROR_EXPOSED_EVERY_MS = 1_750;
+/** Due-check period of the exposed cadence (adds at most this much lateness). */
+export const EXCHANGE_MIRROR_DUE_CHECK_MS = 250;
+/** A money-tick orders/positions read at most this old is reused instead of a new read. */
+export const EXCHANGE_MIRROR_REUSE_MAX_AGE_MS = 1_000;
+/** The Derivatives balance is not stop evidence: refreshed at the slow cadence only. */
+export const EXCHANGE_MIRROR_BALANCE_EVERY_MS = 15_000;
+/** #852 E6 / RK (3): the fast mirror is the ROUTINE class of the one shared Bitfinex read budget
+ * (bitfinexAuthAdmission): it issues NO new read of an endpoint already at the routine cap (54 of Bitfinex's
+ * 90 req/min/IP; a breach blocks the IP for 60 s: blind relay, stops unplaceable), keeping 18/min for the money tick
+ * and 17/min more for force-flat read-backs. Evidence then ages and the Fly guardian fails closed (flatten), never the IP. */
+export const EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN = BITFINEX_AUTH_ROUTINE_CAP_PER_MIN;
+/** RK (3): one mirror evidence read (orders / positions) times out after this; the mirror then publishes
+ * ok=false with error_code E6_READ_TIMEOUT, which Fly stamps as the STOP_FAILURE_FLATTEN cause. */
+export const EXCHANGE_MIRROR_READ_TIMEOUT_MS = 2_000;
+
+/** Pure (RK (3)): error_code for a failed mirror read. */
+export function exchangeMirrorErrorCode(message: string): 'E6_READ_TIMEOUT' | 'BITFINEX_AUTH_BUDGET' | 'EXCHANGE_READ_FAILED' {
+  if (/^BITFINEX_AUTH_BUDGET/.test(message)) return 'BITFINEX_AUTH_BUDGET';
+  if (/E6_READ_TIMEOUT|deadline exceeded|timed? ?out|TimeoutError|aborted due to timeout/i.test(message)) return 'E6_READ_TIMEOUT';
+  return 'EXCHANGE_READ_FAILED';
+}
+/** Budgets used for the worst-case evidence age (measured relay signed-read p95 0.59 s, 12-19 Oct EXECUTOR-DIAG). */
+export const STOP_EVIDENCE_TIMING = {
+  relayEveryS: EXCHANGE_MIRROR_EXPOSED_EVERY_MS / 1000,
+  dueCheckS: EXCHANGE_MIRROR_DUE_CHECK_MS / 1000,
+  /** orders + positions, serialized on the per-key nonce lane: 2 x 0.6 s p95 */
+  readS: 1.2,
+  /** one jsonb_set UPDATE (db p95 ~16 ms; generous) */
+  writeS: 0.25,
+  /** Fly re-fetches on every 1 s guardian tick (cache ttl 0.5 s < tick); fly-view HTTP budget */
+  flyHttpS: 0.5,
+} as const;
+
+/**
+ * Pure: worst-case stop-evidence age the Fly guardian can compute under normal
+ * cadence. Evidence is replaced once it is ``relayEveryS`` old (+ due-check
+ * lateness + reads + DB write); Fly's age = relay read_age_s at response +
+ * (now - fetched_at, stamped BEFORE the request) = that + HTTP time.
+ */
+export function stopEvidenceWorstCaseAgeS(t: {
+  relayEveryS: number; dueCheckS: number; readS: number; writeS: number; flyHttpS: number;
+} = STOP_EVIDENCE_TIMING): number {
+  return Math.round((t.relayEveryS + t.dueCheckS + t.readS + t.writeS + t.flyHttpS) * 1000) / 1000;
+}
+
+/** Pure: fast mirror cadence while exposed (or blind), from the evidence (read-send) time. */
+export function exchangeMirrorExposedDue(input: {
+  exposed: boolean;
+  lastMirrorAtMs: number;
+  nowMs: number;
+}): boolean {
+  return input.exposed && input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_EXPOSED_EVERY_MS;
+}
+
+export type ExchangeMirrorReadPlan = {
+  orders: 'REUSE' | 'READ' | 'SKIP';
+  positions: 'REUSE' | 'READ' | 'SKIP';
+  balance: 'REUSE' | 'READ';
+};
+
+/**
+ * Pure (#852 E6): which reads the FAST exposed mirror issues. A money-tick read
+ * <= EXCHANGE_MIRROR_REUSE_MAX_AGE_MS old is reused (0 extra Bitfinex load while
+ * ACTIVE); otherwise a new read unless that endpoint is at the budget guard
+ * (SKIP => not published; evidence ages and Fly fails closed). The balance is
+ * read only every EXCHANGE_MIRROR_BALANCE_EVERY_MS.
+ */
+export function exchangeMirrorReadPlan(input: {
+  ordersReuseAgeMs: number | null;
+  positionsReuseAgeMs: number | null;
+  balanceAgeMs: number | null;
+  callsLastMinute: Record<string, number>;
+}): ExchangeMirrorReadPlan {
+  const guard = (path: string) => (input.callsLastMinute[path] ?? 0) >= EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN;
+  const pick = (age: number | null, path: string): 'REUSE' | 'READ' | 'SKIP' =>
+    age != null && age >= 0 && age <= EXCHANGE_MIRROR_REUSE_MAX_AGE_MS ? 'REUSE' : guard(path) ? 'SKIP' : 'READ';
+  return {
+    orders: pick(input.ordersReuseAgeMs, 'v2/auth/r/orders'),
+    positions: pick(input.positionsReuseAgeMs, 'v2/auth/r/positions'),
+    balance: input.balanceAgeMs != null && input.balanceAgeMs < EXCHANGE_MIRROR_BALANCE_EVERY_MS
+      || guard('v2/auth/r/wallets') ? 'REUSE' : 'READ',
+  };
+}
+
+/** Pure: does this mirror call for the fast cadence? Failed reads and any position/order do. */
+export function exchangeMirrorShowsExposure(mirror: Record<string, unknown>): boolean {
+  if (mirror.ok !== true) return true;
+  const positions = Array.isArray(mirror.positions) ? mirror.positions : [];
+  const orders = Array.isArray(mirror.open_orders) ? mirror.open_orders : [];
+  return positions.length > 0 || orders.length > 0;
+}
 /** A position mismatch must persist this long across fresh re-reads before a pause. */
 export const MISMATCH_CONFIRM_MS = 15_000;
 
 /** Pure: exchange read -> monitoring mirror (no secrets, no ids beyond order ids). */
 export function buildExchangeMirror(input: {
   orders: Array<{ id: number; symbol: string; amount: number; amountOrig: number; price: number; status: string; orderType: string; flags?: number; cid?: number }>;
-  position: { symbol: string; amount: number; basePrice: number; pnlUsd: number; direction: 'LONG' | 'SHORT' } | null;
+  position: { symbol: string; amount: number; basePrice: number; pnlUsd: number; direction: 'LONG' | 'SHORT'; liqPrice?: number | null } | null;
   balance: number | null;
   readStartedAt: number;
   readAt: number;
+  /** #852 E6: send time of the OLDEST read used (stop-evidence time); defaults to readAt */
+  evidenceAt?: number;
+  /** send time of the positions read (liq_read_at); defaults to readAt */
+  positionReadAt?: number;
 }): Record<string, unknown> {
   const REDUCE_ONLY = 1024;
   const open_orders = input.orders.map((o) => ({
@@ -4010,6 +4446,7 @@ export function buildExchangeMirror(input: {
     reduce_only: typeof o.flags === 'number' ? (o.flags & REDUCE_ONLY) === REDUCE_ONLY : null,
     oco: typeof o.flags === 'number' ? (o.flags & 16384) === 16384 : null,
     cid: o.cid ?? null,
+    tile_key: decodeTileClientOrderId(o.cid),
   }));
   const stops = open_orders.filter((o) => /STOP/i.test(String(o.type)));
   const positions = input.position && Math.abs(input.position.amount) > 0
@@ -4020,6 +4457,10 @@ export function buildExchangeMirror(input: {
       base_price: input.position.basePrice,
       pnl_usd: input.position.pnlUsd,
       stops: stops.length,
+      // AMEND4 E5 (sha 7073ed25, L24-26): live liq with its read timestamp; null = unreadable (Fly fails closed).
+      liq_price: typeof input.position.liqPrice === 'number' && input.position.liqPrice > 0 ? input.position.liqPrice : null,
+      liq_read_at: typeof input.position.liqPrice === 'number' && input.position.liqPrice > 0
+        ? new Date(input.positionReadAt ?? input.readAt).toISOString() : null,
     }]
     : [];
   return {
@@ -4032,8 +4473,25 @@ export function buildExchangeMirror(input: {
     orphans: positions.length === 0 ? open_orders.map((o) => o.id) : [],
     balance: { derivatives_available_usd: input.balance },
     read_latency_ms: Math.max(0, input.readAt - input.readStartedAt),
-    read_at: new Date(input.readAt).toISOString(),
+    read_at: new Date(Math.min(input.evidenceAt ?? input.readAt, input.readAt)).toISOString(),
   };
+}
+
+export type ForceFlatDisarmResult = {
+  verdict: 'FLAT_NO_STOPS' | 'NOT_FLAT' | 'FLAT_WITH_ORDERS' | 'NOT_LIVE' | 'READ_FAILED';
+  flattened: number;
+  residualCloseOrderId: number | null;
+  cancelled: number;
+  positionAmount: number | null;
+  openOrders: number | null;
+  errors: string[];
+  readAt: string;
+};
+
+/** Pure: force-flat read-back verdict (RK 24 Oct). FLAT_NO_STOPS only with zero position AND zero active orders. */
+export function forceFlatReadBackVerdict(positionAmount: number, activeOrders: number): 'FLAT_NO_STOPS' | 'NOT_FLAT' | 'FLAT_WITH_ORDERS' {
+  if (!Number.isFinite(positionAmount) || btcToSats(positionAmount) !== 0) return 'NOT_FLAT';
+  return activeOrders > 0 ? 'FLAT_WITH_ORDERS' : 'FLAT_NO_STOPS';
 }
 
 /** Re-send an unchanged live-copy coordination state to Fly at least this often. */
@@ -4386,6 +4844,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         `MULTIPLE RELAY EXECUTOR REPLICAS DETECTED (count=${replicaCount}); refusing to start the money path`,
       );
     }
+    // HM R4 B2(b): block every live entry from this process until the boot reconcile read passes (per account)
+    liveBootGateSetPhase('PENDING');
+    liveBootGateOnUnstamped((uid) => this.reconcileUnstampedBootUser(uid));   // HM R5 nit 3
+    void this.runLiveBootReconcile(1);
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
         `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (${describeSignedCopyMarginCap(cap)})`,
@@ -4412,6 +4874,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
       setInterval(() => void this.persistPausedExecutorHeartbeat(), PAUSED_EXECUTOR_HEARTBEAT_MS).unref();
       setInterval(() => void this.refreshExchangeMirror(), EXCHANGE_MIRROR_EVERY_MS).unref();
+      // AMEND4 E6 / #852: stop evidence republished at 1.75 s of age (from read SEND
+      // time), checked every 250 ms, while a position/order is open or the last read failed.
+      setInterval(() => {
+        if (exchangeMirrorExposedDue({
+          exposed: this.lastExchangeMirrorExposed,
+          lastMirrorAtMs: this.lastExchangeMirrorEvidenceAtMs,
+          nowMs: Date.now(),
+        })) void this.refreshExchangeMirror({ fast: true });
+      }, EXCHANGE_MIRROR_DUE_CHECK_MS).unref();
     }
   }
 
@@ -7118,6 +7589,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         );
         exitOnly = true;
       }
+      // HM R5 C1 / RK 09:10 (3): the clearing read for exits stored EXIT_FILL_UNREADABLE (throttled, shared budget).
+      // Entries stay fenced until it re-stamps the trade from the real fill; a failure leaves the fence in place.
+      this.currentStage = 'EXIT_FILL_CLEAR';
+      await this.clearUnreadableExitFills(instance.userId, creds, Date.now())
+        .catch(this.swallowedError('clearUnreadableExitFills'));
     }
 
     this.currentStage = 'LOAD_MARGIN_CAP';
@@ -9748,7 +10224,8 @@ await this.notifications
 
       await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'NEGATIVE_EVIDENCE', {
         venue,
-        exit_price: mark || fillPrice,
+        // HM R5 C1 / RK 09:10 (1): never an exit_price from the mark (unreachable path; audit name only).
+        mark_price_audit: mark || null,
         reason: 'PARTIAL_LEDGER_EXIT_RECONCILIATION_DISABLED',
         pnl_usd: Math.round(flat.pnlUsd * 100) / 100,
         pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
@@ -10144,6 +10621,11 @@ await this.notifications
 
   private exchangeMirrorRunning = false;
   private lastExchangeMirrorAtMs = 0;
+  private lastExchangeMirrorExposed = false;
+  /** #852 E6: send time of the oldest read in the last published mirror (min over accounts) */
+  private lastExchangeMirrorEvidenceAtMs = 0;
+  private readonly exchangeMirrorBalance = new Map<string, { atMs: number; usd: number | null }>();
+  private exchangeMirrorBudgetWarnAtMs = 0;
 
   /**
    * Read-only exchange mirror for monitoring (11 Oct lifecycle audit RED 2/5):
@@ -10154,15 +10636,21 @@ await this.notifications
    * while a money tick holds the lane, and paused accounts are not polled
    * (read_age then grows, and Fly alerts only while armed).
    */
-  private async refreshExchangeMirror(): Promise<void> {
+  private async refreshExchangeMirror(opts: { fast?: boolean } = {}): Promise<void> {
+    const fast = opts.fast === true;
     if (!exchangeMirrorMayRun({
       destroyed: this.executorDestroyed,
       mirrorRunning: this.exchangeMirrorRunning,
       moneyTickRunning: this.running,
       lastMirrorAtMs: this.lastExchangeMirrorAtMs,
       nowMs: Date.now(),
+      fastExposed: fast,
     })) return;
     this.exchangeMirrorRunning = true;
+    let exposed = false;
+    let evidenceAtMs = Number.POSITIVE_INFINITY;
+    let published = 0;
+    let skipped = 0;
     try {
       for (const instance of this.relayInstanceCache.values()) {
         if (instance.exchangeProvider !== 'bitfinex') continue;
@@ -10174,20 +10662,82 @@ await this.notifications
         try {
           const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
           if (!creds) throw new Error('credentials-missing');
-          const [orders, position, balance] = await Promise.all([
-            this.bitfinex.listActiveOrders(creds),
-            this.bitfinex.getOpenPositionDetail(creds),
-            this.bitfinex.getDerivativesAvailableUsd(creds).catch(() => null),
-          ]);
-          mirror = buildExchangeMirror({ orders, position, balance, readStartedAt, readAt: Date.now() });
+          type Orders = Awaited<ReturnType<BitfinexTradingClient['listActiveOrders']>>;
+          type Position = Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
+          const reusedOrders = fast ? recentBitfinexAuthRead<Orders>(creds.apiKey, 'orders', EXCHANGE_MIRROR_REUSE_MAX_AGE_MS) : null;
+          const reusedPosition = fast ? recentBitfinexAuthRead<Position>(creds.apiKey, 'positions', EXCHANGE_MIRROR_REUSE_MAX_AGE_MS) : null;
+          const lastBalance = this.exchangeMirrorBalance.get(instance.id);
+          const calls = bitfinexAuthCallsLastMinute(readStartedAt);
+          const plan: ExchangeMirrorReadPlan = fast
+            ? exchangeMirrorReadPlan({
+              ordersReuseAgeMs: reusedOrders ? readStartedAt - reusedOrders.sentAtMs : null,
+              positionsReuseAgeMs: reusedPosition ? readStartedAt - reusedPosition.sentAtMs : null,
+              balanceAgeMs: lastBalance ? readStartedAt - lastBalance.atMs : null,
+              callsLastMinute: calls,
+            })
+            : { orders: 'READ', positions: 'READ', balance: 'READ' };
+          if (plan.orders === 'SKIP' || plan.positions === 'SKIP') {
+            skipped += 1;
+            if (readStartedAt - this.exchangeMirrorBudgetWarnAtMs > 60_000) {
+              this.exchangeMirrorBudgetWarnAtMs = readStartedAt;
+              this.logger.warn(`[EXCHANGE-MIRROR] auth read budget guard (${EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN}/min/endpoint): `
+                + `fast stop-evidence refresh skipped; calls_last_60s=${JSON.stringify(calls)}`);
+            }
+            continue;   // not published: evidence ages and the Fly guardian fails closed
+          }
+          // #852 E6 / RK (3): mirror reads are the ROUTINE class of the shared budget and time out after 2 s
+          const [orders, position, balance] = await withBitfinexReadClass('routine', () => Promise.all([
+            plan.orders === 'REUSE' && reusedOrders
+              ? reusedOrders.value
+              : this.bitfinex.listActiveOrders(creds, undefined, EXCHANGE_MIRROR_READ_TIMEOUT_MS),
+            plan.positions === 'REUSE' && reusedPosition
+              ? reusedPosition.value
+              : this.bitfinex.getOpenPositionDetail(creds, undefined, EXCHANGE_MIRROR_READ_TIMEOUT_MS),
+            plan.balance === 'REUSE' && lastBalance
+              ? lastBalance.usd
+              : this.bitfinex.getDerivativesAvailableUsd(creds).catch(() => null),
+          ]));
+          if (!(plan.balance === 'REUSE' && lastBalance)) this.exchangeMirrorBalance.set(instance.id, { atMs: readStartedAt, usd: balance });
+          const ordersAt = plan.orders === 'REUSE' && reusedOrders ? reusedOrders.sentAtMs : readStartedAt;
+          const positionAt = plan.positions === 'REUSE' && reusedPosition ? reusedPosition.sentAtMs : readStartedAt;
+          const evidenceAt = Math.min(ordersAt, positionAt);
+          mirror = {
+            ...buildExchangeMirror({
+              orders, position, balance, readStartedAt, readAt: Date.now(), evidenceAt, positionReadAt: positionAt,
+            }),
+            evidence_source: { orders: plan.orders, positions: plan.positions, balance: plan.balance },
+            auth_calls_last_60s: {
+              orders: calls['v2/auth/r/orders'] ?? 0,
+              positions: calls['v2/auth/r/positions'] ?? 0,
+              wallets: calls['v2/auth/r/wallets'] ?? 0,
+              limit_per_min: BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN,
+              guard_per_min: EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN,
+            },
+          };
+          evidenceAtMs = Math.min(evidenceAtMs, evidenceAt);
         } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
           mirror = {
             schema: 'relay_exchange_mirror_v1',
             ok: false,
-            error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+            error: message.slice(0, 160),
+            error_code: exchangeMirrorErrorCode(message),   // RK (3): E6_READ_TIMEOUT -> Fly STOP_FAILURE cause
             read_at: new Date().toISOString(),
           };
         }
+        // HM R4 B2(d): every mirror carries this process's boot reconcile stamp (red -> Fly RELAY_BOOT_RECONCILE)
+        mirror.boot_reconcile = liveBootReconcileStampFor(instance.userId);
+        // HM R6 nit 3: read-only exit-fill / cycle fence view (dashboardState.relayExchangeMirror.live_fences)
+        mirror.live_fences = await this.prisma.liveEntryFence.findMany({
+          where: { userId: instance.userId },
+          select: { id: true, reason: true, acquiredAt: true, expiresAt: true },
+        }).then(
+          (rows) => liveFenceView(rows, exitFillFenceWriteFailuresFor(instance.userId), mirror.boot_reconcile),
+          (e) => ({ schema: 'relay_live_fences_v1', ok: false, error: (e instanceof Error ? e.message : String(e)).slice(0, 160) }),
+        );
+        if (exchangeMirrorShowsExposure(mirror)) exposed = true;
+        if (mirror.ok !== true) evidenceAtMs = Math.min(evidenceAtMs, readStartedAt);
+        published += 1;
         const payload = JSON.stringify(mirror);
         await this.prisma.$executeRaw`
           UPDATE "TradingAgentInstance"
@@ -10195,7 +10745,13 @@ await this.notifications
           WHERE "id" = ${instance.id}::text AND "exchangeProvider" = 'bitfinex'
         `.catch(() => undefined);
       }
-      this.lastExchangeMirrorAtMs = Date.now();
+      if (skipped === 0) {
+        this.lastExchangeMirrorAtMs = Date.now();
+        this.lastExchangeMirrorEvidenceAtMs = Number.isFinite(evidenceAtMs) ? evidenceAtMs : this.lastExchangeMirrorAtMs;
+        this.lastExchangeMirrorExposed = exposed;
+      } else if (published > 0 && exposed) {
+        this.lastExchangeMirrorExposed = true;
+      }
     } finally {
       this.exchangeMirrorRunning = false;
     }
@@ -10268,12 +10824,16 @@ await this.notifications
     const intent = { direction: input.direction };
     return this.prisma.$transaction(async (tx) => {
         if (timing) (timing.marks ??= {}).claimTxOpen = Date.now();
+        // HM C3: the account-wide live mutex lock is taken FIRST in the claim txn (fixed lock order: live-mutex, then
+        // copy-cluster), so two racing claims serialize and the later one counts the earlier INTENT.
+        if (venue === 'bitfinex') await takeLiveMutexLock(tx, instance.userId);
         const claimed = await lockedEntryClaimInsert(tx, {
           lockKey: `copy-cluster:${instance.userId}:${agentId}`,
           cycleId, userId: instance.userId, venue,
         });
         if (timing) (timing.marks ??= {}).claimLock = Date.now();
         if (timing) (timing.marks ??= {}).claimInsert = Date.now();
+        const liveMutexOthers = venue === 'bitfinex' ? await countLiveMutexOthers(tx, instance.userId, claimed.id) : 0;
         const assessment = await this.correlatedExposureSnapshot({
           userId: instance.userId, agentId, participantId: claimed.id,
           cycleId, tradeId, direction: intent.direction, limitPrice, qty, marginUsd,
@@ -10333,7 +10893,7 @@ await this.notifications
               },
             });
             await tx.signalCycleParticipant.delete({ where: { id: claimed.id } });
-            return { claimed: null, assessment, evidence };
+            return { claimed: null, assessment, evidence, liveMutexOthers };
           }
           await tx.signalCycleEvent.create({
             data: {
@@ -10357,9 +10917,9 @@ await this.notifications
               payload: { ...evidence, event: 'CORRELATED_CLUSTER_BLOCKED' } as Prisma.InputJsonValue,
             },
           });
-          return { claimed, assessment, evidence };
+          return { claimed, assessment, evidence, liveMutexOthers };
         }
-        return { claimed, assessment, evidence: null };
+        return { claimed, assessment, evidence: null, liveMutexOthers };
       });;
   }
 
@@ -10369,6 +10929,18 @@ await this.notifications
     await this.prisma.signalCycleParticipant
       .deleteMany({ where: { id: spec.result.claimed.id, status: SignalCycleStatus.INTENT } })
       .catch(this.swallowedError('op@spec-claim-release'));
+  }
+
+  /**
+   * Two-tile live gate re-count just before submit: this ACCOUNT's other live lots (any agent, any tile; RK: account-wide
+   * unconditionally), incl. INTENT claims < 120 s. The authoritative count runs in the claim txn under the lock.
+   */
+  private async countOtherLiveParticipants(
+    userId: string,
+    _agentId: string,
+    excludeParticipantId: string | null | undefined,
+  ): Promise<number> {
+    return countLiveMutexOthers(this.prisma, userId, excludeParticipantId);
   }
 
   private async placeEntryInner(
@@ -10626,6 +11198,7 @@ await this.notifications
     // (P2002) and it bails out — preventing a DUPLICATE order on Bitfinex. The claim is
     // released (deleted) if order placement fails, so a future tick can retry.
     let cluster: ReturnType<typeof assessCorrelatedExposureCluster>;
+    let claimTxLiveMutexOthers = 0;
     try {
       if (timing) (timing.marks ??= {}).claimTx = Date.now();
       const specKey = entryClaimKey({ cycleId, direction: intent.direction, limitPrice, qty, marginUsd });
@@ -10648,6 +11221,7 @@ await this.notifications
       }
       claimParticipantId = claimedAndAssessed.claimed?.id ?? null;
       cluster = claimedAndAssessed.assessment;
+      claimTxLiveMutexOthers = claimedAndAssessed.liveMutexOthers ?? 0;
     if (timing) (timing.marks ??= {}).claimCluster = Date.now();
     } catch (err) {
       if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
@@ -10716,6 +11290,7 @@ await this.notifications
     let prePosition: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
     let latestGate: { status: TradingAgentInstanceStatus; dashboardState: unknown } | null = null;
     let latestCycle: { createdAt: Date } | null = null;
+    let otherLiveParticipants = 0;
     try {
       // A flat book proven by the authenticated fast preflight moments ago
       // is reused instead of a second ~0.3-0.6 s Bitfinex REST read (the
@@ -10724,7 +11299,7 @@ await this.notifications
       const reuseProvenFlat = fastPreflight?.exchangeBookProvenEmpty === true
         && typeof fastPreflight.provenEmptyAtMs === 'number'
         && Date.now() - fastPreflight.provenEmptyAtMs <= PROVEN_FLAT_REUSE_MAX_AGE_MS;
-      [prePosition, [latestGate, latestCycle]] = await Promise.all([
+      [prePosition, [latestGate, latestCycle], otherLiveParticipants] = await Promise.all([
         reuseProvenFlat ? Promise.resolve(null) : this.readOpenPositionDetailWithRetry(creds),
         venue === 'bitfinex'
           ? Promise.all([
@@ -10738,6 +11313,10 @@ await this.notifications
               }),
             ])
           : Promise.resolve([null, null] as const),
+        // Two-tile live gate (N1): one live position account-wide -> any OTHER pending/open lot (any tile) refuses.
+        venue === 'bitfinex'
+          ? this.countOtherLiveParticipants(instance.userId, agentId, claimParticipantId)
+          : Promise.resolve(0),
       ]);
     } catch (err) {
       if (claimParticipantId) {
@@ -10752,6 +11331,30 @@ await this.notifications
         }`,
       );
       return false;
+    }
+    // Two-tile live gate (N1 mutex + N5 per-entry net=0): refuse unless no other live lot exists and the fresh exchange
+    // read (or the proven-flat preflight moments ago) shows no position. Never waits for flat (R8): refuse and log.
+    if (venue === 'bitfinex') {
+      // the in-txn count (under the account-wide lock) is authoritative; the re-count just before submit is belt and braces
+      otherLiveParticipants = Math.max(otherLiveParticipants, claimTxLiveMutexOthers);
+      const admission = liveEntryAdmission({
+        otherLiveParticipants,
+        positionQty: prePosition ? prePosition.amount : 0,
+      });
+      if (!admission.ok) {
+        if (claimParticipantId) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: claimParticipantId } })
+            .catch(this.swallowedError('op@live-tile-gate'));
+          claimParticipantId = null;
+        }
+        this.logger.warn(
+          `[LIVE TILE GATE] Hire entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}`
+          + ` tile=${tileKeyForTradeId(tradeId) ?? 'unknown'}: ${admission.reason}`
+          + ` (other live lots=${otherLiveParticipants} pos=${prePosition ? prePosition.amount : 0})`,
+        );
+        return false;
+      }
     }
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
     const entryBbo = await entryBboPromise;
@@ -10789,6 +11392,24 @@ await this.notifications
       ? computeClientOrderId(cycleId, claimParticipantId, tradeId)
       : undefined;
     entryClientOrderId = clientOrderId;
+    // RK 02:25: a (non-reduce-only) entry must carry a tile-keyed cid; untagged => refuse before the exchange write. Not
+    // venue-gated: relay sim (bitfinex_sim) also writes to the real Bitfinex account the guardian watches.
+    {
+      const untagged = untaggedOrderRefusal({ clientOrderId, reduceOnly: false });
+      if (untagged) {
+        if (claimParticipantId) {
+          await this.prisma.signalCycleParticipant
+            .delete({ where: { id: claimParticipantId } })
+            .catch(this.swallowedError('op@live-tile-gate-untagged'));
+          claimParticipantId = null;
+        }
+        this.logger.error(
+          `[LIVE TILE GATE] Hire entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}: ${untagged}`
+          + ` (cid=${clientOrderId ?? 'none'} decodes to no live tile)`,
+        );
+        return false;
+      }
+    }
 
     // Durable request fence must exist before the exchange write. A crash or
     // transport timeout can then recover the deterministic CID instead of
@@ -11343,6 +11964,170 @@ await this.notifications
     }
   }
 
+  /**
+   * HM R5 C1 + RK 09:10 (binding): THE exit-fill read shared by every live exit path. Reads each exit order's OWN Bitfinex
+   * trades by order id (resolveExchangeTradesFillEvidence -> fetchOrderTrades, under the shared read budget; a failed or
+   * budget-refused read is null) and hands them to the pure liveOrderExitFill: exact lot qty -> the VWAP (multiple partial
+   * fills combined), fill timestamps stamped; else EXIT_FILL_UNREADABLE with exit_price null. Never a mark / ticker / entry.
+   */
+  private async readLiveExitOrderFill(
+    creds: ExchangeCredentials,
+    i: {
+      kind: 'stop' | 'close';
+      orderIds: Array<number | null | undefined>;
+      expectedQty: number | null | undefined;
+      direction: 'LONG' | 'SHORT' | null | undefined;
+      participantId: string;
+    },
+  ): Promise<LiveOrderExitFill> {
+    const ids = [...new Set(i.orderIds.filter((id): id is number => id != null && Number.isFinite(Number(id)) && Number(id) > 0))];
+    const reads: LiveOrderExitFillInput['reads'] = [];
+    for (const orderId of ids) reads.push({ orderId, read: await this.resolveExchangeTradesFillEvidence(creds, orderId) });
+    const entryFillPrice = await this.realEntryFillPrice(i.participantId).catch(() => null);
+    return liveOrderExitFill({
+      kind: i.kind,
+      expectedQty: i.expectedQty,
+      reads,
+      direction: i.direction ?? null,
+      entryFillPrice,
+      leverage: DEFAULT_SUBSCRIBER_LEVERAGE,
+    });
+  }
+
+  /** HM R5 nit 6: the entry price used by any live P&L is the entry order's own trades (FILLED fill_price_source exchange_trades). */
+  private async realEntryFillPrice(participantId: string): Promise<number | null> {
+    const filled = await this.prisma.signalCycleEvent.findFirst({
+      where: { participantId, eventType: 'FILLED' },
+      orderBy: { createdAt: 'desc' },
+      select: { payload: true },
+    });
+    return liveEntryFillEvidence(filled?.payload).price;
+  }
+
+  /**
+   * RK 09:10 (1): EVERY live EXIT is persisted through here. liveExitPayloadRealFillOnly stores exit_price only when it is a
+   * real Bitfinex fill (exchange_fill / stop_fill); anything else is stored as exit_price null + every P&L field null +
+   * EXIT_FILL_UNREADABLE, and the account's entries are blocked by a durable fence row (exit-fill-unreadable:<participant>)
+   * until the clearing read (clearUnreadableExitFills) re-stamps the trade from the real fill.
+   */
+  private async recordLiveExitEvent(
+    userId: string,
+    agentId: string,
+    cycleId: string,
+    body: Record<string, unknown>,
+  ): Promise<Awaited<ReturnType<SignalCyclesService['recordHireExecutionEvent']>>> {
+    const safe = liveExitPayloadRealFillOnly(body);
+    const res = await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', safe);
+    if (safe.exit_fill_status === EXIT_FILL_UNREADABLE && !res?.duplicateTerminal) {
+      // fail closed: no participant id back => fence on the cycle (no clearing read can match it; operator clears)
+      await this.holdExitFillUnreadableFence(userId, res?.participantId ?? `cycle:${cycleId}`, String(safe.exit_fill_unreadable_reason ?? ''));
+    }
+    return res;
+  }
+
+  private async holdExitFillUnreadableFence(userId: string, participantId: string, reason: string): Promise<boolean> {
+    const id = exitFillUnreadableFenceId(participantId);
+    try {
+      await this.prisma.liveEntryFence.upsert({
+        where: { id },
+        create: { id, userId, reason: `${EXIT_FILL_UNREADABLE}:${reason}`.slice(0, 200), acquiredAt: new Date(), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
+        update: {},
+      });
+      noteExitFillFenceWriteFailure(userId, participantId, reason, null);
+      this.logger.error(`[EXIT-FILL] ${EXIT_FILL_UNREADABLE} user=${userId} participant=${participantId} ${reason}: live entries blocked until the fill is read`);
+      return true;
+    } catch (e) {
+      // HM R6 nit 1: fail closed in-process (countLiveMutexOthers +1), ALERT, and the clearing sweep retries the write
+      const err = (e instanceof Error ? e.message : String(e)).slice(0, 160);
+      noteExitFillFenceWriteFailure(userId, participantId, reason, err);
+      this.logger.error(
+        `[EXIT-FILL] ALERT RED: fence write FAILED user=${userId} participant=${participantId} ${reason}: ${err}; `
+        + 'live entries blocked in-process, write retried each clearing sweep',
+      );
+      return false;
+    }
+  }
+
+  /**
+   * RK 09:10 (3): the clearing read. For every exit-fill-unreadable fence of the account, re-read the stamped exit order ids
+   * by order id for the exact qty (the same readLiveExitOrderFill). On a real fill: write EXIT_FILL_RECONCILED (the exit
+   * re-stamped with the real price / VWAP / fill timestamp; the reporter sends it as the latest POSITION_CLOSED, so Fly D3
+   * recomputes), correct the participant's exitPrice / pnl, then lift the fence. Still unreadable => nothing changes.
+   */
+  private readonly exitFillClearAtMs = new Map<string, number>();
+  private readonly exitFillClearCursor = new Map<string, number>();   // HM R6 nit 2
+  async clearUnreadableExitFills(userId: string, creds: ExchangeCredentials, nowMs = Date.now()): Promise<number> {
+    if (nowMs - (this.exitFillClearAtMs.get(userId) ?? 0) < EXIT_FILL_CLEAR_INTERVAL_MS) return 0;
+    this.exitFillClearAtMs.set(userId, nowMs);
+    // HM R6 nit 1: retry every fence write that failed (the in-process block stays until the durable row exists)
+    for (const w of exitFillFenceWriteFailuresFor(userId)) await this.holdExitFillUnreadableFence(userId, w.participant_id, w.reason);
+    const all = await this.prisma.liveEntryFence.findMany({
+      where: { userId, id: { startsWith: EXIT_FILL_UNREADABLE_FENCE_PREFIX } },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+    });
+    // HM R6 nit 2: round-robin start + a per-sweep cap on per-order fill reads (never stalls the tick)
+    const start = all.length ? (this.exitFillClearCursor.get(userId) ?? 0) % all.length : 0;
+    const fences = [...all.slice(start), ...all.slice(0, start)];
+    let readsLeft = EXIT_FILL_CLEAR_MAX_ORDER_READS_PER_SWEEP;
+    let visited = 0;
+    let cleared = 0;
+    for (const f of fences) {
+      visited += 1;
+      const participantId = f.id.slice(EXIT_FILL_UNREADABLE_FENCE_PREFIX.length);
+      const events = await this.prisma.signalCycleEvent.findMany({
+        where: { participantId, eventType: { in: ['EXIT', EXIT_FILL_RECONCILED_EVENT, 'FILLED'] } },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, cycleId: true, eventType: true, payload: true },
+      });
+      const exit = latestLiveExitEvent(events);
+      if (!exit) continue;
+      const pl = (exit.payload && typeof exit.payload === 'object' ? exit.payload : {}) as Record<string, unknown>;
+      if (pl.exit_fill_status === EXIT_FILL_REAL) {
+        await this.prisma.liveEntryFence.deleteMany({ where: { id: f.id } });   // re-stamped before a crash
+        cleared += 1;
+        continue;
+      }
+      const pending = Array.isArray(pl.exit_fill_pending_order_ids) ? pl.exit_fill_pending_order_ids.map(Number) : [];
+      const kind = pl.exit_fill_kind === 'close' ? 'close' : 'stop';
+      const direction = pl.exit_fill_direction === 'LONG' || pl.exit_fill_direction === 'SHORT' ? pl.exit_fill_direction : null;
+      const expectedQty = typeof pl.exit_fill_expected_qty === 'number' ? pl.exit_fill_expected_qty : null;
+      if (pending.length === 0 || expectedQty == null) continue;   // nothing to read by order id: stays blocked
+      const reads = new Set(pending.filter((id) => Number.isFinite(id) && id > 0)).size;
+      if (reads > readsLeft) { visited -= 1; break; }   // HM R6 nit 2: cap reached; this fence is first next sweep
+      readsLeft -= reads;
+      const fill = await withBitfinexReadClass('routine', () =>
+        this.readLiveExitOrderFill(creds, { kind, orderIds: pending, expectedQty, direction, participantId }));
+      if (!fill.ok) continue;
+      const participant = await this.prisma.signalCycleParticipant.findUnique({
+        where: { id: participantId },
+        select: { cycle: { select: { agentId: true } } },
+      });
+      if (!participant) continue;
+      const restamped = liveExitPayloadRealFillOnly({
+        ...pl,
+        ...fill.fields,
+        exit_fill_unreadable_reason: undefined,
+        exit_fill_pending_order_ids: undefined,
+        reconciled_from_event_id: exit.id,
+        reconciled_from_status: pl.exit_fill_status ?? null,
+        reconciled_at: new Date(nowMs).toISOString(),
+      });
+      await this.cycles.recordHireExecutionEvent(
+        userId, participant.cycle.agentId, exit.cycleId, EXIT_FILL_RECONCILED_EVENT, restamped,
+      );
+      await this.prisma.signalCycleParticipant.updateMany({
+        where: { id: participantId, status: { in: [SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED] } },
+        data: { exitPrice: fill.price, pnlUsd: fill.pnlUsd, pnlMarginPct: (fill.fields.pnl_margin_pct as number | null) ?? null },
+      });
+      await this.prisma.liveEntryFence.deleteMany({ where: { id: f.id } });
+      this.logger.warn(`[EXIT-FILL] reconciled participant=${participantId} exit=${fill.price} qty=${fill.qty}: entry fence lifted`);
+      cleared += 1;
+    }
+    this.exitFillClearCursor.set(userId, all.length ? (start + visited) % all.length : 0);
+    return cleared;
+  }
+
   /** Compatibility price-only view for existing adoption/healing paths. */
   private async resolveExchangeTradesFillPrice(
     creds: ExchangeCredentials,
@@ -11788,7 +12573,7 @@ await this.notifications
       timing_correlation_id: fillPersistenceCorrelationId,
       venue: 'bitfinex',
       fill_price: fillPrice,
-      fill_price_source: exchangeFillEvidence != null ? 'exchange_trades' : undefined,
+      fill_price_source: exchangeFillEvidence != null ? 'exchange_trades' : 'order_reference_fallback', // HM R5 nit 6: never a real entry price
       exchange_fill_first_at: exchangeFillEvidence?.firstExecutedAtMs
         ? new Date(exchangeFillEvidence.firstExecutedAtMs).toISOString()
         : undefined,
@@ -13262,6 +14047,8 @@ await this.notifications
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
+      // HM R5 nit 6: a limit / mark reference is never a real entry fill (non-countable until reconciled).
+      fill_price_source: meta.limitPrice && meta.limitPrice > 0 ? 'limit_reference_fallback' : 'mark_reference_fallback',
       qty,
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
@@ -14720,7 +15507,20 @@ await this.notifications
       );
       return;
     }
-    const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
+    // Keep the order's persisted cid (an in-place update preserves it on the exchange; a deploy that changed the cid
+    // formula must not record a different cid for an order placed before it). Fallback: the deterministic formula.
+    const persistedCid = Number(meta.clientOrderId);
+    const clientOrderId = Number.isSafeInteger(persistedCid) && persistedCid > 0
+      ? persistedCid
+      : computeClientOrderId(cycleId, participantId, opts.tradeId);
+    // RK 02:25: the replacement is a non-reduce-only entry; an untagged cid (legacy order) is never re-placed.
+    const chaseUntagged = untaggedOrderRefusal({ clientOrderId, reduceOnly: false });
+    if (chaseUntagged) {
+      this.logger.error(
+        `[LIVE TILE GATE] Hire chase ${userId} cycle=${cycleId}: ${chaseUntagged} (cid=${clientOrderId}); replacement blocked`,
+      );
+      return;
+    }
     const signedExactLimitCandidate = opts.tradeId
       ? readFreshSignedShowcaseExactLimit(opts.tradeId, intent, opts.now)
       : null;
@@ -14933,19 +15733,26 @@ await this.notifications
           source: 'hire',
           event: 'TERMINAL_PARTIAL_ALREADY_FLAT',
           fill_price: realizedPrice,
+          // HM R5 nit 6: only the entry order's own trades are a real entry price; the limit is labelled, never counted.
+          fill_price_source: tradeEvidence != null ? 'exchange_trades' : 'limit_reference_fallback',
           qty: realizedQty,
           stopOrderId: null,
           partialFillQty: null,
           partialFillStopOrderId: null,
           supersededPartialStopOrderId: null,
         });
-        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+        // HM R5 C1 + RK 09:10 (2): already flat => the stop(s)' own trades by order id for the exact realized qty.
+        const stopFill = await this.readLiveExitOrderFill(creds, {
+          kind: 'stop', orderIds: knownStopIds, expectedQty: realizedQty, direction: meta.direction, participantId,
+        });
+        await this.recordLiveExitEvent(userId, agentId, cycle.id, {
           venue: 'bitfinex',
           source: 'hire',
           event: 'TERMINAL_PARTIAL_ALREADY_FLAT',
           exit_reason: 'EXCHANGE_ALREADY_FLAT',
           qty_closed: realizedQty,
-          pnl_usd: 0,
+          ...(stopFill.ok ? residentExitLegStamps(stopFill.firstMs) : {}),
+          ...stopFill.fields,
           ...await this.authenticatedExchangeObservedTerminalProvenance(
             agentId, userId, participantId, creds, 'AUTHENTICATED_POSITION_FLAT', {
               ok: true,
@@ -15183,10 +15990,13 @@ await this.notifications
       return true;
     }
 
-    const fillPrice = meta.limitPrice ?? meta.fillPrice ?? 0;
+    // HM R5 nit 6: the entry price is the entry order's own trades; a limit reference is labelled and never counted.
+    const entryEvidence = await this.resolveExchangeTradesFillEvidence(creds, meta.bitfinexOrderId);
+    const fillPrice = entryEvidence?.price ?? meta.limitPrice ?? meta.fillPrice ?? 0;
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
+      fill_price_source: entryEvidence != null ? 'exchange_trades' : 'limit_reference_fallback',
       qty: partialQty,
       source: 'hire',
       event: 'PARTIAL_FILL_STOP_TRIGGERED',
@@ -15194,14 +16004,18 @@ await this.notifications
       partialFillQty: null,
       partialFillStopOrderId: null,
     });
-    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+    // HM R5 C1 + RK 09:10 (2): the partial stop's own trades by order id for the exact partial qty (shared helper).
+    const stopFill = await this.readLiveExitOrderFill(creds, {
+      kind: 'stop', orderIds: [stopId], expectedQty: partialQty, direction: meta.direction, participantId,
+    });
+    await this.recordLiveExitEvent(userId, agentId, cycle.id, {
       venue: 'bitfinex',
       source: 'hire',
       event: 'PARTIAL_FILL_STOP_TRIGGERED',
       exit_reason: 'EXCHANGE_STOP',
-      ...residentExitLegStamps(null),
+      ...residentExitLegStamps(stopFill.firstMs),
       qty_closed: partialQty,
-      pnl_usd: 0,
+      ...stopFill.fields,
       ...await this.authenticatedExchangeObservedTerminalProvenance(
         agentId, userId, participantId, creds, 'AUTHENTICATED_POSITION_FLAT', {
           ok: true,
@@ -17838,13 +18652,8 @@ await this.notifications
 
       let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
       let remainingLedgerAmount: number | null;
-      // Public mark is audit/PnL enrichment, not a prerequisite for a
-      // reduce-only close. Start it concurrently but never hold the exchange
-      // close submission behind it; consume it only after the close ACK (or in
-      // the already-flat accounting branch).
-      const preparedExitPricePromise = this.activeTrading
-        .getMarkPrice()
-        .catch(() => fillPrice || 0);
+      // HM R5 C1 + RK 09:10: no mark is read for the exit price any more; every exit price below is the exit order's own
+      // Bitfinex trades (readLiveExitOrderFill) or null (EXIT_FILL_UNREADABLE).
       try {
         // Once any linked entry remainder is confirmed gone, overlap the
         // independent ledger and position reads. The target path deliberately
@@ -17889,39 +18698,25 @@ await this.notifications
           );
           return false;
         }
-        const exitPrice =
-          opts?.showcaseExitPrice ??
-          await preparedExitPricePromise;
-        let pnlUsd = 0;
-        let pnlMarginPct = 0;
-        let pnlSource: 'exchange_realised' | 'reconstructed' = 'reconstructed';
-        if (meta.qty && meta.direction) {
-          const flat = await this.resolveAlreadyFlatPnl(
-            agentId,
-            userId,
-            creds,
-            participant.id,
-            meta,
-            fillPrice,
-            exitPrice || fillPrice,
-          );
-          pnlUsd = flat.pnlUsd;
-          pnlSource = flat.pnlSource;
-          pnlMarginPct =
-            fillPrice && fillPrice > 0
-              ? (pnlUsd / (fillPrice * meta.qty)) *
-                100 *
-                resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope)
-              : 0;
-        }
+        // HM R5 C1 + RK 09:10 (2): already flat => the stop already took the lot: read the stop(s)' own trades by order id
+        // for the exact lot qty (shared helper). Unreadable => exit_price null + EXIT_FILL_UNREADABLE + entries fenced.
+        const stopFill = await this.readLiveExitOrderFill(creds, {
+          kind: 'stop',
+          orderIds: ownedStopOrderIds(meta),
+          expectedQty: meta.qty,
+          direction: meta.direction,
+          participantId: participant.id,
+        });
+        const pnlUsd = stopFill.pnlUsd;
         const exitSlippageUsd =
-          opts?.showcaseExitPrice != null && exitPrice > 0 && meta.qty
-            ? Math.round(Math.abs(exitPrice - opts.showcaseExitPrice) * meta.qty * 100) / 100
+          opts?.showcaseExitPrice != null && stopFill.price != null && meta.qty
+            ? Math.round(Math.abs(stopFill.price - opts.showcaseExitPrice) * meta.qty * 100) / 100
             : undefined;
-        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+        await this.recordLiveExitEvent(userId, agentId, cycle.id, {
           venue: 'bitfinex',
-          exit_price: exitPrice || fillPrice,
           exit_reason: 'SHOWCASE_MIRROR_ALREADY_FLAT',
+          ...(stopFill.ok ? residentExitLegStamps(stopFill.firstMs) : {}),
+          ...stopFill.fields,
           showcase_exit_price: opts?.showcaseExitPrice,
           exit_slippage_usd: exitSlippageUsd,
           showcase_exit_reason: opts?.showcaseExitReason,
@@ -17935,11 +18730,6 @@ await this.notifications
           terminal_close_request_id: terminalClaim.requestId,
           terminal_close_phase: 'CONFIRMED',
           terminal_close_claim_recovered: terminalClaim.recovered,
-          pnl_usd: Math.round(pnlUsd * 100) / 100,
-          pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-          pnl_source: pnlSource,
-          actual_bitfinex_realized_pnl_usd:
-            pnlSource === 'exchange_realised' ? Math.round(pnlUsd * 100) / 100 : undefined,
           final_reconciliation: terminalFinalReconciliation(alreadyFlatTarget),
           source: 'hire',
         });
@@ -17948,7 +18738,7 @@ await this.notifications
         this.showcasePositionAbsentSince.delete(participant.id);
         this.showcaseFlatOpenSince.delete(participant.id);
         this.logger.log(
-          `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded pnl=$${pnlUsd.toFixed(2)} source=${pnlSource}`,
+          `Exit already flat ${userId} cycle=${cycle.id} — showcase mirror recorded exit_fill=${stopFill.ok ? stopFill.price : EXIT_FILL_UNREADABLE} pnl=${pnlUsd == null ? 'null' : `$${pnlUsd.toFixed(2)}`}`,
         );
         return true;
       }
@@ -18011,25 +18801,19 @@ await this.notifications
       let exitRecorded = false;
       let knownExitPrice: number | undefined;
       try {
-        const exitPrice = await preparedExitPricePromise;
-        knownExitPrice = exitPrice;
-        const closeQty = closeTarget.closeQty;
-
-        const direction = meta.direction;
-        const pnlUsd =
-          fillPrice && exitPrice
-            ? direction === 'LONG'
-              ? (exitPrice - fillPrice) * meta.qty
-              : (fillPrice - exitPrice) * meta.qty
-            : cycle.showcasePnlUsd != null
-              ? Number(cycle.showcasePnlUsd)
-              : 0;
-
-        const pnlMarginPct =
-          fillPrice && fillPrice > 0 ? (pnlUsd / (fillPrice * meta.qty)) * 100 * leverage : 0;
-
+        // HM R5 C1 + RK 09:10 (2): the close order's OWN trades by order id for the exact close qty (shared helper).
+        const closeFill = await this.readLiveExitOrderFill(creds, {
+          kind: 'close',
+          orderIds: [closeTarget.closeExchangeOrderId],
+          expectedQty: closeTarget.closeQty > 0 ? closeTarget.closeQty : meta.qty,
+          direction: meta.direction,
+          participantId: participant.id,
+        });
+        const exitPrice = closeFill.price;
+        knownExitPrice = exitPrice ?? undefined;
+        const pnlUsd = closeFill.pnlUsd;
         const exitSlippageUsd =
-          opts?.showcaseExitPrice != null && exitPrice > 0 && meta.qty
+          opts?.showcaseExitPrice != null && exitPrice != null && meta.qty
             ? Math.round(Math.abs(exitPrice - opts.showcaseExitPrice) * meta.qty * 100) / 100
             : undefined;
         const closeExchangeAckAtMs = closeTarget.closeExchangeAckAtMs;
@@ -18045,12 +18829,11 @@ await this.notifications
         });
 
         const exitPersistenceCorrelationId = randomUUID();
-        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+        await this.recordLiveExitEvent(userId, agentId, cycle.id, {
           timing_correlation_id: exitPersistenceCorrelationId,
           venue: 'bitfinex',
           fee_model: stableRelayFeeModel(),
           execution_profile: stableRelayExecutionProfile(),
-          exit_price: exitPrice,
           exit_reason: 'SHOWCASE_MIRROR',
           showcase_exit_price: opts?.showcaseExitPrice,
           exit_slippage_usd: exitSlippageUsd,
@@ -18098,10 +18881,8 @@ await this.notifications
               : undefined,
           mirror_relinked: opts?.mirrorRelinked ?? false,
           mirror_trigger: opts?.trigger,
-          pnl_usd: Math.round(pnlUsd * 100) / 100,
-          pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-          pnl_source: 'open_position',
           ...authenticatedCloseEvidence,
+          ...closeFill.fields,   // after the evidence: the exit price / pnl are ONLY the close order's own fill
           final_reconciliation: terminalFinalReconciliation(closeTarget),
           source: 'hire',
         });
@@ -18115,7 +18896,7 @@ await this.notifications
         }).catch((err) => this.logger.warn(`EXIT persistence receipt failed: ${err instanceof Error ? err.message : err}`));
 
         this.logger.log(
-          `[EXIT-TIMING] ${exitMarksSummary(participant.id)} | Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
+          `[EXIT-TIMING] ${exitMarksSummary(participant.id)} | Hire showcase mirror exit ${userId} cycle=${cycle.id} exit_fill=${exitPrice ?? EXIT_FILL_UNREADABLE} pnl=${pnlUsd == null ? 'null' : `$${pnlUsd.toFixed(2)}`} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
         );
         this.clearShowcaseExitTracking(participant.id);
         return true;
@@ -18159,6 +18940,8 @@ await this.notifications
     exitPrice?: number;
     exitRecorded: boolean;
     closePreflightStartedAtMs: number;
+    /** B1 merge: the close path's own exit reason (closeVirtualLot policy/emergency closes); default SHOWCASE_MIRROR. */
+    exitReason?: string;
     opts?: {
       showcaseExitPrice?: number;
       showcaseExitReason?: string;
@@ -18181,19 +18964,17 @@ await this.notifications
           agentId, userId, participantId, creds, meta, closeTarget,
           showcaseExitPrice: args.opts?.showcaseExitPrice,
         }).catch(() => ({} as Record<string, unknown>));
-        const fillExit = finiteDecimalLikeNumber(evidence.exit_exchange_fill_price);
-        const fillEntry = finiteDecimalLikeNumber(evidence.entry_exchange_fill_price);
-        const entry = fillEntry ?? (args.fillPrice > 0 ? args.fillPrice : null);
-        const exitPrice = fillExit ?? (args.exitPrice && args.exitPrice > 0 ? args.exitPrice : null)
-          ?? args.opts?.showcaseExitPrice ?? entry ?? 0;
-        const qty = meta.qty ?? 0;
-        const pnlUsd = entry && exitPrice && qty
-          ? (meta.direction === 'LONG' ? exitPrice - entry : entry - exitPrice) * qty
-          : 0;
-        await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
+        // HM R5 C1 + RK 09:10: the close order's own trades (shared helper); never a mark / showcase / entry price.
+        const closeFill = await this.readLiveExitOrderFill(creds, {
+          kind: 'close',
+          orderIds: [closeTarget.closeExchangeOrderId],
+          expectedQty: closeTarget.closeQty > 0 ? closeTarget.closeQty : meta.qty,
+          direction: meta.direction ?? null,
+          participantId,
+        });
+        await this.recordLiveExitEvent(userId, agentId, cycleId, {
           venue: 'bitfinex',
-          exit_price: exitPrice,
-          exit_reason: 'SHOWCASE_MIRROR',
+          exit_reason: args.exitReason ?? 'SHOWCASE_MIRROR',
           showcase_exit_price: args.opts?.showcaseExitPrice,
           showcase_exit_reason: args.opts?.showcaseExitReason,
           exit_order_class: 'BOT_SENT',
@@ -18215,9 +18996,8 @@ await this.notifications
           close_confirmed_at: safeIsoMs(closeTarget.closeConfirmedAtMs) ?? undefined,
           mirror_relinked: args.opts?.mirrorRelinked ?? false,
           mirror_trigger: args.opts?.trigger,
-          pnl_usd: Math.round(pnlUsd * 100) / 100,
-          pnl_source: fillExit != null && fillEntry != null ? 'exchange_fill' : 'reconstructed',
           ...evidence,
+          ...closeFill.fields,
           final_reconciliation: terminalFinalReconciliation(closeTarget),
           source: 'hire',
         });
@@ -18626,6 +19406,7 @@ await this.notifications
 
     let claimParticipantId: string | null = null;
     let revivedTerminal = false;
+    let catchupMutexOthers = 0;
 
     if (existingClaim) {
       // Active claim — another path owns this trade (or a concurrent replica).
@@ -18648,16 +19429,21 @@ await this.notifications
         TERMINAL_PARTICIPANT_STATUSES.has(existingClaim.status) ||
         existingClaim.status === SignalCycleStatus.INTENT
       ) {
-        await this.prisma.signalCycleParticipant.update({
-          where: { id: existingClaim.id },
-          data: {
-            status: SignalCycleStatus.INTENT,
-            fillPrice: null,
-            exitPrice: null,
-            pnlUsd: null,
-            pnlMarginPct: null,
-            stopLossConfirmedAt: null,
-          },
+        // HM C3: revive + live-mutex count in ONE txn under the account-wide lock (taken first)
+        catchupMutexOthers = await this.prisma.$transaction(async (tx) => {
+          await takeLiveMutexLock(tx, instance.userId);
+          await tx.signalCycleParticipant.update({
+            where: { id: existingClaim.id },
+            data: {
+              status: SignalCycleStatus.INTENT,
+              fillPrice: null,
+              exitPrice: null,
+              pnlUsd: null,
+              pnlMarginPct: null,
+              stopLossConfirmedAt: null,
+            },
+          });
+          return countLiveMutexOthers(tx, instance.userId, existingClaim.id);
         });
         claimParticipantId = existingClaim.id;
         revivedTerminal = true;
@@ -18669,15 +19455,21 @@ await this.notifications
       }
     } else {
       try {
-        const claimed = await this.prisma.signalCycleParticipant.create({
-          data: {
-            cycleId,
-            userId: instance.userId,
-            venue: 'bitfinex',
-            status: SignalCycleStatus.INTENT,
-          },
+        // HM C3: claim + live-mutex count in ONE txn under the account-wide lock (taken first)
+        const [claimed, others] = await this.prisma.$transaction(async (tx) => {
+          await takeLiveMutexLock(tx, instance.userId);
+          const row = await tx.signalCycleParticipant.create({
+            data: {
+              cycleId,
+              userId: instance.userId,
+              venue: 'bitfinex',
+              status: SignalCycleStatus.INTENT,
+            },
+          });
+          return [row, await countLiveMutexOthers(tx, instance.userId, row.id)] as const;
         });
         claimParticipantId = claimed.id;
+        catchupMutexOthers = others;
       } catch (err) {
         if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') return false;
         throw err;
@@ -18755,12 +19547,39 @@ await this.notifications
 
     const qty = exactQty.qty;
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
+    // RK 02:25: catch-up is a live market entry (non-reduce-only): it must carry a tile-keyed cid.
+    const catchupUntagged = untaggedOrderRefusal({ clientOrderId, reduceOnly: false });
+    if (catchupUntagged) {
+      await releaseClaim();
+      this.logger.error(
+        `[LIVE TILE GATE] catch-up entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}: ${catchupUntagged}`,
+      );
+      return false;
+    }
 
     let prePosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    let otherLiveParticipants = 0;
     try {
-      prePosition = await this.readOpenPositionDetailWithRetry(creds);
+      [prePosition, otherLiveParticipants] = await Promise.all([
+        this.readOpenPositionDetailWithRetry(creds),
+        this.countOtherLiveParticipants(instance.userId, agentId, claimParticipantId),
+      ]);
     } catch {
       await releaseClaim();
+      return false;
+    }
+    // Two-tile live gate (N1 mutex + N5 per-entry net=0), same shared rule as placeEntryInner.
+    otherLiveParticipants = Math.max(otherLiveParticipants, catchupMutexOthers);
+    const catchupAdmission = liveEntryAdmission({
+      otherLiveParticipants,
+      positionQty: prePosition ? prePosition.amount : 0,
+    });
+    if (!catchupAdmission.ok) {
+      await releaseClaim();
+      this.logger.warn(
+        `[LIVE TILE GATE] catch-up entry refused ${instance.userId} cycle=${cycleId} trade=${tradeId}`
+        + ` tile=${tileKeyForTradeId(tradeId) ?? 'unknown'}: ${catchupAdmission.reason}`,
+      );
       return false;
     }
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
@@ -18895,6 +19714,8 @@ await this.notifications
     await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
+      // HM R5 nit 6: only the market order's own trades are a real entry price.
+      fill_price_source: tradeEvidence != null && btcToSats(tradeEvidence.qty) > 0 ? 'exchange_trades' : 'position_base_fallback',
       qty: authenticatedQty,
       source_exact_qty_btc: showcaseQty,
       venue_qty_btc: authenticatedQty,
@@ -20171,6 +20992,7 @@ await this.notifications
     try {
     let closeQty = 0;
     let closeTarget: RelayLotExitTarget;
+    const lotClosePreflightStartedAtMs = Date.now();
     const stopIdsToCancel = new Set<number>();
     if (meta.stopOrderId) stopIdsToCancel.add(meta.stopOrderId);
 
@@ -20241,97 +21063,84 @@ await this.notifications
       return false;
     }
 
-    const direction = meta.direction;
-    // Already-flat path: the exchange position is gone (protective stop fired or
-    // showcase-mirror exit closed it first), so closeQty=0 and the mark-vs-fill formula
-    // would record $0 — even though Bitfinex realized a real result. Attribute the real
-    // P&L from the Bitfinex margin wallet ledger when only this lot was open, else
-    // reconstruct from this lot's own fill price vs the exit mark using the FULL lot qty
-    // (what the exchange would have realized on this lot's share of the merged position).
-    let pnlUsd: number;
-    let pnlSource: 'open_position' | 'exchange_realised' | 'reconstructed';
-    if (btcToSats(closeQty) === 0) {
-      const flat = await this.resolveAlreadyFlatPnl(
+    // B1 merge (#842 22abe36f + #852 HM2): Bitfinex has closed this lot. Any throw from here on (PnL, evidence, EXIT
+    // write) goes to the ONE post-close reconcile (reconcileExitAfterBitfinexClose): EXIT from the exchange fill under
+    // the same terminal claim, non-countable; relay paused only if that write fails. Force-flat relies on this path.
+    let exitRecorded = false;
+    try {
+      // HM R5 C1 + RK 09:10 (2): the exit price is ONLY the exiting order's own Bitfinex trades, by order id, for the
+      // exact qty (shared helper). Already flat (closeQty 0) => the stop(s) took the lot; else the close order we sent.
+      // Unreadable => exit_price null + EXIT_FILL_UNREADABLE + entries fenced. The mark is audit only.
+      const alreadyFlat = btcToSats(closeQty) === 0;
+      const exitFill = await this.readLiveExitOrderFill(creds, alreadyFlat
+        ? { kind: 'stop', orderIds: ownedStopOrderIds(meta), expectedQty: meta.qty, direction: meta.direction, participantId }
+        : { kind: 'close', orderIds: [closeTarget.closeExchangeOrderId], expectedQty: closeQty, direction: meta.direction, participantId });
+
+      const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
         agentId,
         userId,
-        creds,
         participantId,
+        creds,
         meta,
-        opts.fillPrice,
-        opts.mark,
+        closeTarget,
+      }).catch((err) => {
+        this.logger.warn(
+          `Policy close evidence unavailable ${participantId}: ${err instanceof Error ? err.message : err}`,
+        );
+        return {} as Record<string, unknown>;
+      });
+
+      const exitReasonMap: Record<
+        NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE' | 'TIME_60S',
+        string
+      > = {
+        TIME_60S: 'TIME_60S',
+        PROFIT_LOCK: 'PROFIT_LOCK',
+        THESIS_FAST_CUT: 'THESIS_FAST_CUT',
+        HARD_STOP: 'HARD_STOP',
+        SHOWCASE_VANISHED: 'SHOWCASE_VANISHED',
+        AUTHENTICATED_EMERGENCY_CLOSE: 'EMERGENCY_CLOSE',
+      };
+
+      await this.recordLiveExitEvent(userId, agentId, cycleId, {
+        venue: 'bitfinex',
+        fee_model: stableRelayFeeModel(),
+        execution_profile: stableRelayExecutionProfile(),
+        exit_reason: exitReasonMap[opts.reason],
+        peak_margin_pct: opts.peakMarginPct,
+        lock_floor_margin_pct: opts.lockFloor,
+        unreal_margin_pct: opts.unrealMarginPct,
+        mark_price_audit: opts.mark,
+        qty_closed: closeQty,
+        ...(alreadyFlat && exitFill.ok ? residentExitLegStamps(exitFill.firstMs) : {}),
+        ...authenticatedCloseEvidence,
+        ...exitFill.fields,
+        final_reconciliation: terminalFinalReconciliation(closeTarget),
+        terminal_authority_kind: terminalClaim.authority.kind,
+        terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
+        terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+        terminal_authority_evidence: terminalClaim.authority.evidence,
+        terminal_close_claim_token: terminalClaim.ownerToken,
+        terminal_close_request_id: terminalClaim.requestId,
+        terminal_close_phase: 'CONFIRMED',
+        terminal_close_claim_recovered: terminalClaim.recovered,
+        source: 'hire',
+      });
+      exitRecorded = true;
+
+      this.logger.log(
+        `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit_fill=${exitFill.price ?? EXIT_FILL_UNREADABLE} mark_audit=${opts.mark.toFixed(2)}`,
       );
-      pnlUsd = flat.pnlUsd;
-      pnlSource = flat.pnlSource;
-    } else {
-      pnlUsd =
-      direction === 'LONG'
-        ? (opts.mark - opts.fillPrice) * closeQty
-        : (opts.fillPrice - opts.mark) * closeQty;
-      pnlSource = 'open_position';
+      return true;
+    } catch (err) {
+      return this.reconcileExitAfterBitfinexClose({
+        agentId, userId, cycleId, participantId, meta, creds, terminalClaim, closeTarget,
+        fillPrice: opts.fillPrice, exitRecorded,
+        closePreflightStartedAtMs: lotClosePreflightStartedAtMs,
+        exitReason: opts.reason === 'AUTHENTICATED_EMERGENCY_CLOSE' ? 'EMERGENCY_CLOSE' : opts.reason,
+        err,
+      });
     }
-    const pnlMarginPct =
-      opts.reason === 'PROFIT_LOCK' && opts.lockFloor != null
-        ? opts.lockFloor
-        : opts.unrealMarginPct;
-
-    const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
-      agentId,
-      userId,
-      participantId,
-      creds,
-      meta,
-      closeTarget,
-    }).catch((err) => {
-      this.logger.warn(
-        `Policy close evidence unavailable ${participantId}: ${err instanceof Error ? err.message : err}`,
-      );
-      return {} as Record<string, unknown>;
-    });
-
-    const exitReasonMap: Record<
-      NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE' | 'TIME_60S',
-      string
-    > = {
-      TIME_60S: 'TIME_60S',
-      PROFIT_LOCK: 'PROFIT_LOCK',
-      THESIS_FAST_CUT: 'THESIS_FAST_CUT',
-      HARD_STOP: 'HARD_STOP',
-      SHOWCASE_VANISHED: 'SHOWCASE_VANISHED',
-      AUTHENTICATED_EMERGENCY_CLOSE: 'EMERGENCY_CLOSE',
-    };
-
-    await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
-      venue: 'bitfinex',
-      fee_model: stableRelayFeeModel(),
-      execution_profile: stableRelayExecutionProfile(),
-      exit_price: opts.mark,
-      exit_reason: exitReasonMap[opts.reason],
-      peak_margin_pct: opts.peakMarginPct,
-      lock_floor_margin_pct: opts.lockFloor,
-      unreal_margin_pct: opts.unrealMarginPct,
-      pnl_usd: Math.round(pnlUsd * 100) / 100,
-      pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-      qty_closed: closeQty,
-      pnl_source: pnlSource,
-      actual_bitfinex_realized_pnl_usd:
-        pnlSource === 'exchange_realised' ? Math.round(pnlUsd * 100) / 100 : undefined,
-      ...authenticatedCloseEvidence,
-      final_reconciliation: terminalFinalReconciliation(closeTarget),
-      terminal_authority_kind: terminalClaim.authority.kind,
-      terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
-      terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
-      terminal_authority_evidence: terminalClaim.authority.evidence,
-      terminal_close_claim_token: terminalClaim.ownerToken,
-      terminal_close_request_id: terminalClaim.requestId,
-      terminal_close_phase: 'CONFIRMED',
-      terminal_close_claim_recovered: terminalClaim.recovered,
-      source: 'hire',
-    });
-
-    this.logger.log(
-      `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit=${opts.mark.toFixed(2)} pnl_source=${pnlSource}`,
-    );
-    return true;
     } finally {
       this.exitingLots.delete(participantId);
       this.showcaseVanishedMisses.delete(participantId);
@@ -20603,30 +21412,6 @@ await this.notifications
       const meta = await this.loadExecutionMeta(row.id);
       if (!meta.qty || !meta.direction) continue;
 
-      const mark = await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0);
-      const fillPrice =
-        row.fillPrice != null ? Number(row.fillPrice) : meta.limitPrice ?? mark;
-      const exitPrice = mark;
-      // Fix 6 — realized P&L. Fill-vs-current-mark reconstruction misstates
-      // the outcome when the exchange's own stop (or a manual close) fired at
-      // a different price than the current mark. resolveAlreadyFlatPnl walks
-      // the exchange's realized ledger first (single-lot case) and only falls
-      // back to reconstruction — same path closeOrphanLedgerLots uses.
-      const flat = await this.resolveAlreadyFlatPnl(
-        agentId,
-        userId,
-        creds,
-        row.id,
-        meta,
-        fillPrice,
-        exitPrice || fillPrice,
-      );
-      const pnlUsd = flat.pnlUsd;
-      const pnlMarginPct =
-        fillPrice && fillPrice > 0
-          ? (pnlUsd / (fillPrice * meta.qty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
-          : 0;
-
       // Money-path safety: cancel any leftover Bitfinex orders on this lot
       // before recording the EXIT. Without this, the protective STOP and the
       // entry limit survive on Bitfinex as orphans after the position is flat —
@@ -20723,13 +21508,19 @@ await this.notifications
         continue;
       }
 
-      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
+      // HM R5 C1 + RK 09:10 (2): already flat => the lot's stop(s) by order id, exact qty (shared helper). Never the mark.
+      const stopFill = await this.readLiveExitOrderFill(creds, {
+        kind: 'stop',
+        orderIds: ownedStopOrderIds(meta),
+        expectedQty: meta.qty,
+        direction: meta.direction,
+        participantId: row.id,
+      });
+      await this.recordLiveExitEvent(userId, agentId, row.cycleId, {
         venue: 'bitfinex',
-        exit_price: exitPrice,
-        exit_reason: 'MANUAL_OR_EXCHANGE_CLOSE',
-        pnl_usd: Math.round(pnlUsd * 100) / 100,
-        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-        pnl_source: flat.pnlSource,
+        exit_reason: stopFill.ok ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
+        ...(stopFill.ok ? residentExitLegStamps(stopFill.firstMs) : {}),
+        ...stopFill.fields,
         source: 'hire',
         event: 'IMMEDIATE_EXCHANGE_FLAT',
         cancelled_order_ids: cancelledOids,
@@ -20816,14 +21607,16 @@ await this.notifications
       return false;
     }
 
-    // A disappeared reduce-only stop may itself be the terminal execution.
-    // Capture its immutable per-order trades before cleanup so terminal P&L
-    // and fill identity do not fall back to a later public mark.
-    const stopExecution = meta.stopOrderId
-      ? await this.resolveExchangeTradesFillEvidence(creds, meta.stopOrderId)
-      : null;
-    const exactStopExecution = stopExecution != null
-      && btcToSats(stopExecution.qty) === btcToSats(meta.qty);
+    // A disappeared reduce-only stop may itself be the terminal execution. HM R5 C1 + RK 09:10 (2): capture its immutable
+    // per-order trades (shared helper, by order id, exact lot qty) before cleanup. Unreadable => exit_price null +
+    // EXIT_FILL_UNREADABLE + entries fenced until the clearing read; never a later public mark.
+    const stopFill = await this.readLiveExitOrderFill(creds, {
+      kind: 'stop',
+      orderIds: ownedStopOrderIds(meta),
+      expectedQty: meta.qty,
+      direction: meta.direction,
+      participantId: participant.id,
+    });
 
     if (meta.stopOrderId) {
       const stopGone = await this.cancelManagedOrderGone(
@@ -20833,55 +21626,17 @@ await this.notifications
       );
       if (!stopGone.gone) return false;
     }
+    const pnlUsd = stopFill.pnlUsd;
 
-    const fillPrice =
-      finiteDecimalLikeNumber(participant.fillPrice) ??
-      meta.limitPrice ??
-      (await this.activeTrading.getMarkPrice());
-    const exitPrice = exactStopExecution
-      ? stopExecution.price
-      : await this.activeTrading.getMarkPrice().catch(() => fillPrice ?? 0);
-    const direction = meta.direction;
-    const grossPnlUsd =
-      fillPrice && exitPrice
-        ? direction === 'LONG'
-          ? (exitPrice - fillPrice) * meta.qty
-          : (fillPrice - exitPrice) * meta.qty
-        : 0;
-    const explicitUsdFees = exactStopExecution
-      ? stopExecution.fees
-          .filter((fee) => /^(?:USD|UST|USTF0)$/i.test(fee.currency ?? ''))
-          .reduce((sum, fee) => sum + fee.amount, 0)
-      : 0;
-    const pnlUsd = grossPnlUsd + explicitUsdFees;
-    const pnlMarginPct =
-      fillPrice && fillPrice > 0
-        ? (pnlUsd / (fillPrice * meta.qty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
-        : 0;
-
-    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+    await this.recordLiveExitEvent(userId, agentId, cycle.id, {
       venue: 'bitfinex',
       fee_model: stableRelayFeeModel(),
       execution_profile: stableRelayExecutionProfile(),
-      exit_price: exitPrice,
-      exit_reason: exactStopExecution ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
+      exit_reason: stopFill.ok ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
       // RK (1): exchange-resident stop: no send leg; fill = Bitfinex's own fill record (trigger print not carried).
-      ...(exactStopExecution ? residentExitLegStamps(stopExecution.firstExecutedAtMs) : {}),
-      pnl_usd: Math.round(pnlUsd * 100) / 100,
-      pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-      pnl_source: exactStopExecution ? 'bitfinex_order_trades' : 'reconstructed',
-      ...(exactStopExecution ? {
-        exit_order_id: meta.stopOrderId,
-        exchange_exit_fill_ids: stopExecution.fillIds.map(String),
-        exchange_exit_filled_qty: stopExecution.qty,
-        exchange_exit_fill_first_at: stopExecution.firstExecutedAtMs == null
-          ? null : new Date(stopExecution.firstExecutedAtMs).toISOString(),
-        exchange_exit_fill_last_at: stopExecution.lastExecutedAtMs == null
-          ? null : new Date(stopExecution.lastExecutedAtMs).toISOString(),
-        exchange_exit_costs: stopExecution.fees,
-        gross_pnl_usd: Math.round(grossPnlUsd * 100) / 100,
-        actual_bitfinex_realized_pnl_usd: Math.round(pnlUsd * 100) / 100,
-      } : {}),
+      ...(stopFill.ok ? residentExitLegStamps(stopFill.firstMs) : {}),
+      ...stopFill.fields,
+      ...(stopFill.ok ? { actual_bitfinex_realized_pnl_usd: stopFill.pnlUsd } : {}),
       source: 'hire',
       ...await this.authenticatedExchangeObservedTerminalProvenance(
         agentId, userId, participant.id, creds, 'AUTHENTICATED_POSITION_FLAT', {
@@ -20905,7 +21660,7 @@ await this.notifications
     });
 
     this.logger.log(
-      `Hire reconcile manual close ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)}`,
+      `Hire reconcile manual close ${userId} cycle=${cycle.id} exit_fill=${stopFill.ok ? stopFill.price : EXIT_FILL_UNREADABLE} pnl=${pnlUsd == null ? 'null' : `$${pnlUsd.toFixed(2)}`}`,
     );
     return true;
   }
@@ -21080,7 +21835,7 @@ await this.notifications
       if (cancel.ok) {
         autoCancelled += 1;
         this.logger.warn(
-          `[RECONCILE] auto-cancelled own orphan order ${order.id} (cid=${order.cid}) for ${userId} — matched participant ${matched.participantId}`,
+          `[RECONCILE] auto-cancelled own orphan order ${order.id} (cid=${order.cid}, tile=${decodeTileClientOrderId(order.cid) ?? 'n/a'}) for ${userId} — matched participant ${matched.participantId}`,
         );
         await this.cycles
           .recordHireExecutionEvent(userId, agentId, matched.cycleId, 'RECONCILE_AUTO_CANCELLED_OWN_ORPHAN', {
@@ -21088,6 +21843,7 @@ await this.notifications
             source: 'hire',
             bitfinex_order_id: order.id,
             client_order_id: order.cid,
+            tile_key: decodeTileClientOrderId(order.cid),
             matched_participant_id: matched.participantId,
             cancel_attempts: cancel.attempts,
             cancel_reason: cancel.reason ?? 'cancelled',
@@ -21188,32 +21944,25 @@ await this.notifications
     const stop = await this.activeTrading.findOrder(creds, meta.stopOrderId).catch(() => null);
     if (stop) return false;
 
-    const fillPrice =
-      finiteDecimalLikeNumber(participant.fillPrice) ?? meta.limitPrice ?? position.basePrice;
-    const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice);
-    const direction = meta.direction;
     const closeQty = Math.min(meta.qty, deficit);
-    const pnlUsd =
-      fillPrice && exitPrice
-        ? direction === 'LONG'
-          ? (exitPrice - fillPrice) * closeQty
-          : (fillPrice - exitPrice) * closeQty
-        : 0;
-    const pnlMarginPct =
-      fillPrice && fillPrice > 0
-        ? (pnlUsd / (fillPrice * closeQty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
-        : 0;
+    // HM R5 C1 + RK 09:10 (2): the stop's OWN trades by order id for the exact lot qty (shared helper, shared budget).
+    // Unreadable => exit_price null + EXIT_FILL_UNREADABLE + entries fenced; never the mark.
+    const stopFill = await this.readLiveExitOrderFill(creds, {
+      kind: 'stop',
+      orderIds: ownedStopOrderIds(meta),
+      expectedQty: meta.qty,
+      direction: meta.direction,
+      participantId: participant.id,
+    });
+    const pnlUsd = stopFill.pnlUsd;
 
-    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+    await this.recordLiveExitEvent(userId, agentId, cycle.id, {
       venue: 'bitfinex',
-      exit_price: exitPrice,
       exit_reason: 'EXCHANGE_STOP',
-      // RK (1): exchange-resident stop lot; no Bitfinex fill record on this path -> fails closed in the mapper.
-      ...residentExitLegStamps(null),
-      pnl_usd: Math.round(pnlUsd * 100) / 100,
-      pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+      // RK (1): exchange-resident stop lot: fill = Bitfinex's own fill record (null when unreadable -> non-countable).
+      ...residentExitLegStamps(stopFill.firstMs),
       qty_closed: closeQty,
-      pnl_source: 'open_position',
+      ...stopFill.fields,
       source: 'hire',
       ...await this.authenticatedExchangeObservedTerminalProvenance(
         agentId, userId, participant.id, creds, 'AUTHENTICATED_STOP_REDUCTION', {
@@ -21229,7 +21978,7 @@ await this.notifications
     });
 
     this.logger.log(
-      `Hire exchange stop lot ${userId} cycle=${cycle.id} qty=${closeQty} pnl=$${pnlUsd.toFixed(2)}`,
+      `Hire exchange stop lot ${userId} cycle=${cycle.id} qty=${closeQty} exit_fill=${stopFill.ok ? stopFill.price : EXIT_FILL_UNREADABLE} pnl=${pnlUsd == null ? 'null' : `$${pnlUsd.toFixed(2)}`}`,
     );
     return true;
   }
@@ -21857,6 +22606,385 @@ await this.notifications
     return { known: false, position: latest, samples };
   }
 
+  /**
+   * RK ruling 24 Oct (#852): live-guardian auto-disarm => FORCE-FLAT with a read-back. The caller (ops/force-flat-disarm)
+   * pauses the instance FIRST. Steps: (1) emergency-close every OPEN copy lot through the owner-equivalent close path
+   * (emergencyFlattenOpenCopyLots); (2) if the exchange still shows a position (residual/orphan), a reduce-only market
+   * flatten (submitPositionFlatten, CLOSE+REDUCE_ONLY: can never reverse); (3) cancel EVERY active order on the symbol,
+   * stops included; (4) a fresh private read-back: verdict FLAT_NO_STOPS only when no position AND no active order.
+   * Never waits for a fill (R8): one pass; the caller retries a bounded number of times. Returns no secrets.
+   */
+  async forceFlatDisarmAccount(
+    userId: string,
+    agentSlug: string,
+    reason = 'unspecified',
+  ): Promise<ForceFlatDisarmResult & { fenced: boolean; dbReconciled: boolean; dbOpenRemaining: number | null }> {
+    // HM1: hold the account entry fence for the WHOLE route (both ops/position-flatten and ops/force-flat-disarm). A failed
+    // acquisition still flattens (safety first) but is reported (fenced=false -> the caller returns ok=false).
+    // HM R5 N2 (supersedes R4 N2): the fence must be held from the flatten's START. The acquisition (which can queue behind
+    // every claim on the account live-mutex) is awaited for at most FENCE_BEFORE_FLATTEN_MAX_WAIT_MS before the first
+    // exchange write; past that bound the flatten runs anyway (safety first) and reports fenced=false (ok=false, RED).
+    // HM R5 nit 1: owner-scoped id (this process) + a heartbeat lease, so another process's boot cleanup never removes it.
+    const fenceId = flattenFenceId();
+    const fenceErrors: string[] = [];
+    let acquired = false;
+    const fenceSettled = acquireLiveEntryFence(
+      this.prisma, userId, fenceId, reason, Date.now(), new Date(Date.now() + LIVE_FENCE_LEASE_MS),
+    ).then(
+      () => { acquired = true; },
+      (e) => { fenceErrors.push(`fence:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`); },
+    );
+    const waitMs = (this as unknown as { fenceBeforeFlattenMaxWaitMs?: number }).fenceBeforeFlattenMaxWaitMs
+      ?? FENCE_BEFORE_FLATTEN_MAX_WAIT_MS;
+    let waitTimer: NodeJS.Timeout | undefined;
+    await Promise.race([fenceSettled, new Promise<void>((r) => { waitTimer = setTimeout(r, waitMs); })]);
+    if (waitTimer) clearTimeout(waitTimer);
+    const fenced = acquired;   // true = held before the flatten started, and (no TTL) until the release below
+    if (!fenced && !fenceErrors.length) fenceErrors.push(`fence:not held at flatten start (waited ${waitMs} ms)`);
+    const heartbeat = setInterval(() => {
+      if (acquired) void refreshLiveEntryFence(this.prisma, fenceId).catch(this.swallowedError('live-entry-fence-heartbeat'));
+    }, LIVE_FENCE_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    const touch = async () => undefined;   // the heartbeat above keeps the lease; the gate never reads it (B2a)
+    try {
+      // #852 E6 / RK (3): both flatten routes run here; their read-backs use the CRITICAL class of the shared budget
+      // (reserved headroom above the mirror and the money tick: never starved). Writes are never budget-refused.
+      const r = await withBitfinexCriticalReads(() => this.forceFlatDisarmAccountInner(userId, agentSlug, touch, reason));
+      // HM2 after the B1 merge: the per-lot closes above already reconcile the DB to Bitfinex through the ONE post-close
+      // reconcile (#842 reconcileExitAfterBitfinexClose, wired into closeVirtualLot), and pending entries go through
+      // emergencyFlattenOpenCopyLots' own cancel path. Here we only VERIFY, under the fence, after a FLAT_NO_STOPS
+      // read-back: any OPEN / PENDING_ENTRY row left on this venue => dbReconciled=false => the route returns ok=false
+      // (Fly RED). No second writer: rows are never force-closed outside the terminal-claim EXIT gate.
+      let dbReconciled = false;
+      let dbOpenRemaining: number | null = null;
+      const recErrors: string[] = [];
+      if (r.verdict === 'FLAT_NO_STOPS') {
+        try {
+          dbOpenRemaining = await this.countOpenAccountRows(userId);
+          dbReconciled = dbOpenRemaining === 0;
+          if (!dbReconciled) recErrors.push(`db-reconcile:${dbOpenRemaining} rows still OPEN/PENDING_ENTRY`);
+        } catch (e) {
+          recErrors.push(`db-reconcile:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
+        }
+      }
+      return { ...r, errors: [...fenceErrors, ...r.errors, ...recErrors], fenced, dbReconciled, dbOpenRemaining };
+    } finally {
+      clearInterval(heartbeat);
+      await fenceSettled;   // a late acquisition (fenced=false) is released too
+      if (acquired) await releaseLiveEntryFence(this.prisma, fenceId).catch(this.swallowedError('live-entry-fence-release'));
+    }
+  }
+
+  /**
+   * HM R4 B2(b-d): one boot reconcile pass over every Bitfinex account (see liveBootReconcileVerdict). Reads only; the only
+   * write is the stamp (dashboardState.relayBootReconcile) and, after a PASSING read, removing fence rows whose holder died
+   * with the previous process (acquiredAt before this process started). Blocked accounts are re-read until they pass.
+   */
+  private async runLiveBootReconcile(attempt: number): Promise<void> {
+    if (attempt > 1 && this.executorDestroyed) return;   // a retry after shutdown
+    let retry = false;
+    const blocked: string[] = [];
+    try {
+      const instances = await this.prisma.tradingAgentInstance.findMany({ where: { exchangeProvider: 'bitfinex' } });
+      const users = [...new Set(instances.map((i) => i.userId))];
+      for (const userId of users) {
+        const prior = liveBootGate.byUser.get(userId);
+        if (prior?.allowed) continue;
+        const stamp = await this.reconcileBootUser(userId, attempt);
+        if (!stamp.allowed) { retry = true; blocked.push(userId); }
+      }
+      liveBootGate.phase = 'DONE';
+    } catch (e) {
+      retry = true;   // instance list unreadable: the gate stays PENDING (every account blocked)
+      this.logger.error(`[LIVE-BOOT-RECONCILE] attempt=${attempt} failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)} RED: live entries blocked`);
+    }
+    if (!retry) return;
+    if (attempt >= LIVE_BOOT_RECONCILE_MAX_ATTEMPTS) {
+      await this.exhaustBootReconcile(blocked, attempt);
+      return;
+    }
+    if (this.executorDestroyed) return;
+    setTimeout(() => void this.runLiveBootReconcile(attempt + 1), LIVE_BOOT_RECONCILE_RETRY_MS).unref();
+  }
+
+  /** One account's boot reconcile read: stamp (memory + dashboardState), log, and the owner-scoped stale-fence cleanup on a pass. */
+  private async reconcileBootUser(userId: string, attempt: number, extra: Partial<LiveBootReconcileStamp> = {}): Promise<LiveBootReconcileStamp> {
+    const stamp: LiveBootReconcileStamp = { ...(await this.liveBootReconcileAccount(userId, attempt)), ...extra };
+    liveBootGateRecord(userId, stamp);
+    const line = `[LIVE-BOOT-RECONCILE] ${userId} attempt=${attempt} verdict=${stamp.verdict} allowed=${stamp.allowed} `
+      + `read_sent_at=${stamp.read_sent_at} process_start_at=${stamp.process_start_at} ${stamp.detail}`;
+    if (stamp.red) this.logger.error(`${line} RED: live entries blocked`);
+    else this.logger.warn(line);
+    await this.persistBootStamp(userId, stamp);
+    if (stamp.allowed) {
+      // HM R5 nit 1: owner-scoped: only another holder's flatten:* fence whose heartbeat stopped (or a legacy
+      // no-heartbeat row from before this process). Never an exit-fill fence, never a live holder's fence.
+      await this.prisma.liveEntryFence.deleteMany({ where: staleFlattenFenceWhere(userId, Date.now(), LIVE_PROCESS_START_MS) })
+        .catch(this.swallowedError('live-boot-reconcile-stale-fence'));
+    }
+    return stamp;
+  }
+
+  private async persistBootStamp(userId: string, stamp: LiveBootReconcileStamp): Promise<void> {
+    const payload = JSON.stringify(stamp);
+    await this.prisma.$executeRaw`
+      UPDATE "TradingAgentInstance"
+      SET "dashboardState" = jsonb_set(COALESCE("dashboardState", '{}'::jsonb), '{relayBootReconcile}', ${payload}::jsonb)
+      WHERE "userId" = ${userId}::text AND "exchangeProvider" = 'bitfinex'
+    `.catch(() => undefined);
+  }
+
+  /** HM R5 nit 4: the retry cap. Entries stay blocked (stamp red, allowed=false); the stamp says retries_exhausted; ALERT. */
+  private async exhaustBootReconcile(userIds: string[], attempt: number): Promise<void> {
+    this.logger.error(
+      `[LIVE-BOOT-RECONCILE] ALERT: ${attempt} attempts failed (cap ${LIVE_BOOT_RECONCILE_MAX_ATTEMPTS}); retries stopped, `
+      + `live entries stay BLOCKED for ${userIds.length ? userIds.join(',') : 'every account (instance list unreadable)'} until a restart re-reads`,
+    );
+    for (const userId of userIds) {
+      const prior = liveBootGate.byUser.get(userId);
+      if (!prior || prior.allowed) continue;
+      const stamp = { ...prior, retries_exhausted: true, red: true, stamped_at: new Date().toISOString() };
+      liveBootGateRecord(userId, stamp);
+      await this.persistBootStamp(userId, stamp);
+    }
+  }
+
+  /** HM R5 nit 3: an account first seen after the boot pass (no stamp): blocked until its own bounded boot read passes. */
+  private bootUnstampedInFlight?: Set<string>;
+  private reconcileUnstampedBootUser(userId: string): void {
+    const inflight = (this.bootUnstampedInFlight ??= new Set<string>());
+    if (inflight.has(userId) || liveBootGate.byUser.has(userId) || this.executorDestroyed) return;
+    inflight.add(userId);
+    const attemptOnce = async (attempt: number): Promise<void> => {
+      let stamp: LiveBootReconcileStamp | null = null;
+      try {
+        stamp = await this.reconcileBootUser(userId, attempt);
+      } catch (e) {
+        this.logger.error(`[LIVE-BOOT-RECONCILE] ${userId} late account attempt=${attempt} failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)} RED: live entries blocked`);
+      }
+      if (stamp?.allowed) { inflight.delete(userId); return; }
+      if (attempt >= LIVE_BOOT_RECONCILE_MAX_ATTEMPTS) {
+        await this.exhaustBootReconcile([userId], attempt).catch(() => undefined);
+        inflight.delete(userId);
+        return;
+      }
+      if (this.executorDestroyed) { inflight.delete(userId); return; }
+      setTimeout(() => void attemptOnce(attempt + 1), LIVE_BOOT_RECONCILE_RETRY_MS).unref();
+    };
+    this.bootUnstampedLast = attemptOnce(1);
+  }
+  private bootUnstampedLast?: Promise<void>;
+
+  private async liveBootReconcileAccount(userId: string, attempt: number): Promise<LiveBootReconcileStamp> {
+    const iso = (ms: number | null) => (ms == null ? null : new Date(ms).toISOString());
+    let r = await this.liveBootReconcileRead(userId);
+    let pendingNote = '';
+    const pending = (r.dbRows ?? []).filter((x) => x.status !== 'OPEN');
+    if (r.creds && r.dbRows && r.readAtMs != null && pending.length > 0) {
+      // HM R6 nit 5 (RK 10:26): cancel + read back, read the real fill, flatten any fill, stamp non-countable; else RED.
+      const res = await this.bootCancelPendingEntriesFor(userId, r.creds, pending.map((x) => ({
+        id: x.id, cycleId: r.cycleIdByRow.get(x.id) ?? null, entryOrderId: x.entryOrderId ?? null, qty: x.qty,
+      })));
+      if (!res.ok) {
+        return {
+          verdict: 'PENDING_ENTRY_CANCEL_FAILED', allowed: false, red: true, detail: `PENDING_ENTRY boot cancel failed: ${res.detail}`.slice(0, 500), attempt,
+          process_start_at: new Date(LIVE_PROCESS_START_MS).toISOString(), read_sent_at: iso(r.readSentAtMs), read_at: iso(r.readAtMs), stamped_at: new Date().toISOString(),
+        };
+      }
+      pendingNote = `; ${res.detail}${res.flattenRequired ? ` (fill flattened: ${res.flattenVerdict})` : ''}`;
+      r = await this.liveBootReconcileRead(userId);   // fresh read after the cancel / flatten
+    }
+    const v0 = liveBootReconcileVerdict({ processStartMs: LIVE_PROCESS_START_MS, readSentAtMs: r.readSentAtMs, positionAmount: r.positionAmount, activeOrders: r.activeOrders, dbRows: r.dbRows });
+    // after a boot cancel, relay entries are allowed ONLY on a FLAT_NO_STOPS read
+    const v = pendingNote && v0.verdict !== 'FLAT_NO_STOPS' ? { ...v0, allowed: false, detail: `after PENDING_ENTRY boot cancel requires FLAT_NO_STOPS: ${v0.detail}` } : v0;
+    return {
+      ...v,
+      detail: `${r.err ? `${v.detail}: ${r.err}` : v.detail}${pendingNote}`,
+      red: !v.allowed,
+      attempt,
+      process_start_at: new Date(LIVE_PROCESS_START_MS).toISOString(),
+      read_sent_at: iso(r.readSentAtMs),
+      read_at: iso(r.readAtMs),
+      stamped_at: new Date().toISOString(),
+    };
+  }
+
+  private async liveBootReconcileRead(userId: string): Promise<{
+    creds: ExchangeCredentials | null; readSentAtMs: number | null; readAtMs: number | null; positionAmount: number | null;
+    activeOrders: Array<{ id: number }> | null; dbRows: LiveBootDbRow[] | null; cycleIdByRow: Map<string, string>; err: string;
+  }> {
+    let creds: ExchangeCredentials | null = null;
+    let readSentAtMs: number | null = null;
+    let readAtMs: number | null = null;
+    let positionAmount: number | null = null;
+    let activeOrders: Array<{ id: number }> | null = null;
+    let dbRows: LiveBootDbRow[] | null = null;
+    const cycleIdByRow = new Map<string, string>();
+    let err = '';
+    try {
+      creds = await this.exchanges.getUserCredentials(userId, 'bitfinex');
+      if (!creds) throw new Error('credentials-missing');
+      const c = creds;
+      readSentAtMs = Date.now();
+      const [pos, orders] = await withBitfinexCriticalReads(() => Promise.all([
+        this.bitfinex.getOpenPositionDetail(c),
+        this.bitfinex.listActiveOrders(c),
+      ]));
+      readAtMs = Date.now();
+      positionAmount = pos ? pos.amount : 0;
+      activeOrders = orders.map((o) => ({ id: o.id }));
+      const rows = await this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId,
+          status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+          AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
+        },
+        select: { id: true, status: true, cycleId: true },
+      });
+      dbRows = [];
+      for (const r of rows) {
+        if (r.cycleId) cycleIdByRow.set(r.id, r.cycleId);
+        const meta = await this.loadExecutionMeta(r.id);
+        const stops = await this.participantRecordedStopOrderIds(r.id);
+        dbRows.push({
+          id: r.id,
+          status: String(r.status),
+          direction: meta.direction ?? null,
+          qty: meta.qty ?? null,
+          stopOrderIds: [...new Set([...(meta.stopOrderId ? [meta.stopOrderId] : []), ...stops])],
+          entryOrderId: meta.bitfinexOrderId ?? null,   // HM R6 nit 5: the order the boot cancels
+        });
+      }
+    } catch (e) {
+      err = (e instanceof Error ? e.message : String(e)).slice(0, 160);
+      if (readAtMs == null) { positionAmount = null; activeOrders = null; }
+      dbRows = null;
+    }
+    return { creds, readSentAtMs, readAtMs, positionAmount, activeOrders, dbRows, cycleIdByRow, err };
+  }
+
+  /** HM R6 nit 5: the Bitfinex / DB side of bootCancelPendingEntries (all reads strict: a failed read throws). */
+  private async bootCancelPendingEntriesFor(userId: string, creds: ExchangeCredentials, rows: BootPendingRow[]) {
+    const agentOf = async (cycleId: string | null) => {
+      if (!cycleId) throw new Error('no cycle id');
+      const cycle = await this.prisma.signalCycle.findUnique({ where: { id: cycleId }, select: { agentId: true } });
+      if (!cycle?.agentId) throw new Error(`cycle ${cycleId} not found`);
+      const agent = await this.prisma.tradingAgent.findUnique({ where: { id: cycle.agentId }, select: { id: true, slug: true } });
+      if (!agent) throw new Error(`agent ${cycle.agentId} not found`);
+      return agent;
+    };
+    return bootCancelPendingEntries(rows, {
+      cancel: (orderId) => this.bitfinex.cancelOrder(creds, orderId),
+      activeOrderIds: async () => (await withBitfinexCriticalReads(() => this.bitfinex.listActiveOrders(creds))).map((o) => Number(o.id)),
+      orderHistory: (orderId) => withBitfinexCriticalReads(() => this.bitfinex.fetchOrderHistoryEvidence(creds, orderId)),
+      orderTradesQty: async (orderId) => {
+        const trades = await withBitfinexCriticalReads(() => this.bitfinex.fetchOrderTrades(creds, orderId));
+        return trades.reduce((sum, t) => sum + Math.abs(Number(t.execAmount) || 0), 0);
+      },
+      forceFlat: async () => {
+        const agent = await agentOf(rows.find((x) => x.cycleId)?.cycleId ?? null);
+        const f = await this.forceFlatDisarmAccount(userId, agent.slug, 'boot-pending-entry-fill');
+        return { verdict: f.verdict, errors: f.errors };
+      },
+      stampNonCountable: async (row, info) => {
+        const agent = await agentOf(row.cycleId);
+        await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId as string, 'EXPIRED', { ...info, participant_id: row.id });
+      },
+    });
+  }
+
+  /**
+   * HM2 (#852, read-only since the B1 merge): OPEN / PENDING_ENTRY Bitfinex (or legacy no-venue) rows of the account.
+   * The force-flat route requires 0 after a FLAT_NO_STOPS read-back; it never writes rows itself.
+   */
+  async countOpenAccountRows(userId: string): Promise<number> {
+    return this.prisma.signalCycleParticipant.count({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
+      },
+    });
+  }
+
+  /**
+   * HM R4 N1 (#852): WHAT the force-flat closes, and the MANUAL path for everything else.
+   * Account-wide on the live instrument (BITFINEX_BTC_PERP_SYMBOL, tBTCF0:USTF0): after the DB-known lots are flattened, the
+   * WHOLE residual exchange position is closed (whatever opened it: relay, operator, manual app order) and EVERY active order
+   * on that symbol is cancelled; the read-back must be FLAT_NO_STOPS (no position, no orders) or the RED stays.
+   * NOT touched (manual operator path): positions/orders on any other symbol or wallet, funding offers, and transfers.
+   * Close those in the Bitfinex app. The Fly RED then clears only on a fresh relay mirror read FLAT_NO_STOPS taken after
+   * the RED and after every stacked code (an ack-only RED also needs POST /api/live-copy/guardian/red-ack); arming stays
+   * a separate operator action. If the relay worker itself is down, the same manual close applies; on restart the boot
+   * reconcile (runLiveBootReconcile) blocks entries until a post-boot read is FLAT_NO_STOPS or matches the DB with every
+   * recorded stop resident.
+   */
+  private async forceFlatDisarmAccountInner(
+    userId: string,
+    agentSlug: string,
+    touch: () => Promise<void>,
+    triggerReason = 'unspecified',
+  ): Promise<ForceFlatDisarmResult> {
+    const errors: string[] = [];
+    const msg = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 160);
+    let flattened = 0;
+    try {
+      flattened = (await this.emergencyFlattenOpenCopyLots(userId, agentSlug, undefined, { reason: triggerReason })).flattened;
+    } catch (e) {
+      errors.push(`lots:${msg(e)}`);
+    }
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    const instance = agent
+      ? await this.prisma.tradingAgentInstance.findUnique({ where: { agentId_userId: { agentId: agent.id, userId } } })
+      : null;
+    const empty = { flattened, residualCloseOrderId: null, cancelled: 0, positionAmount: null, openOrders: null };
+    if (!instance?.exchangeProvider || instance.exchangeProvider === 'paper') {
+      return { verdict: 'NOT_LIVE', ...empty, errors, readAt: new Date().toISOString() };
+    }
+    const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
+    if (!creds) return { verdict: 'READ_FAILED', ...empty, errors: [...errors, 'credentials-missing'], readAt: new Date().toISOString() };
+    let residualCloseOrderId: number | null = null;
+    await touch();
+    try {
+      const pos = await this.bitfinex.getOpenPositionDetail(creds);
+      if (pos && btcToSats(pos.amount) !== 0) {
+        residualCloseOrderId = await this.bitfinex.submitPositionFlatten(creds, {
+          positionDirection: pos.amount > 0 ? 'LONG' : 'SHORT',
+          qty: Math.abs(pos.amount),
+          leverage: resolveSubscriberLeverage(),
+        });
+      }
+    } catch (e) {
+      errors.push(`residual:${msg(e)}`);
+    }
+    let cancelled = 0;
+    await touch();
+    try {
+      for (const o of await this.bitfinex.listActiveOrders(creds)) {
+        try {
+          await this.bitfinex.cancelOrder(creds, o.id);
+          cancelled += 1;
+        } catch (e) {
+          errors.push(`cancel:${o.id}:${msg(e)}`);
+        }
+      }
+    } catch (e) {
+      errors.push(`orders:${msg(e)}`);
+    }
+    try {
+      const [pos, orders] = await Promise.all([
+        this.bitfinex.getOpenPositionDetail(creds),
+        this.bitfinex.listActiveOrders(creds),
+      ]);
+      const amt = pos ? pos.amount : 0;
+      const verdict = forceFlatReadBackVerdict(amt, orders.length);
+      return { verdict, flattened, residualCloseOrderId, cancelled, positionAmount: amt, openOrders: orders.length, errors, readAt: new Date().toISOString() };
+    } catch (e) {
+      errors.push(`readback:${msg(e)}`);
+      return { verdict: 'READ_FAILED', flattened, residualCloseOrderId, cancelled, positionAmount: null, openOrders: null, errors, readAt: new Date().toISOString() };
+    }
+  }
+
   async emergencyFlattenOpenCopyLots(
     userId: string,
     agentSlug: string,
@@ -21865,6 +22993,9 @@ await this.notifications
       actorId: string;
       reason: string;
     },
+    // HM4: the guardian trigger (force-flat / position-flatten reason). Separate
+    // from `operator` on purpose: operator mode skips the OPEN loop.
+    trigger?: { reason: string },
   ): Promise<{ flattened: number }> {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -22025,6 +23156,13 @@ await this.notifications
             operator_reason: operator?.reason,
             action: 'EMERGENCY_FLATTEN_OPEN_COPY_LOTS',
             agent_slug: agentSlug,
+            ...(trigger
+              ? {
+                  trigger_reason: trigger.reason,
+                  non_countable: true,
+                  non_countable_reason: `FORCE_FLAT:${trigger.reason}`,
+                }
+              : {}),
           },
         },
       });
@@ -22629,10 +23767,34 @@ await this.notifications
             foreignOrderIds: finalOrders.map((order) => order.id),
           }),
         });
-        await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'EXIT', {
+        // HM R5 C1: the same shared helper as every exit path (per-order VWAP over these exact stop trades, exact qty).
+        const incidentFill = liveOrderExitFill({
+          kind: 'stop',
+          expectedQty,
+          reads: filledOrderIds.map((orderId) => {
+            const own = uniqueFills.filter((fill) => fill.orderId === orderId);
+            const qty = own.reduce((sum, fill) => sum + Math.abs(fill.execAmount), 0);
+            return {
+              orderId,
+              read: {
+                price: own.reduce((sum, fill) => sum + Math.abs(fill.execAmount) * fill.execPrice, 0) / qty,
+                qty,
+                fillIds: own.map((fill) => fill.id),
+                firstExecutedAtMs: Math.min(...own.map((fill) => fill.mtsCreate)),
+                lastExecutedAtMs: Math.max(...own.map((fill) => fill.mtsCreate)),
+              },
+            };
+          }),
+          direction,
+          entryFillPrice: await this.realEntryFillPrice(row.id).catch(() => null),
+          leverage: DEFAULT_SUBSCRIBER_LEVERAGE,
+        });
+        await this.recordLiveExitEvent(userId, agent.id, row.cycleId, {
           venue: 'bitfinex', source: 'hire',
           reason: 'AUTHENTICATED_INCIDENT_STOP_FILL_ALREADY_FLAT',
-          exit_price: weightedExitPrice,
+          ...incidentFill.fields,
+          exit_price: incidentFill.ok ? incidentFill.price : null,
+          incident_weighted_exit_price_audit: weightedExitPrice,
           fill_ids: uniqueFills.map((fill) => String(fill.id)),
           exchange_order_ids: filledOrderIds.map(String),
           actual_fee_usd: uniqueFills.every((fill) => fill.feeCurrency === 'USD')

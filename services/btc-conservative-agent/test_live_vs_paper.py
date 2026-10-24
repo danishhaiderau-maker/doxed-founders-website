@@ -4,7 +4,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 # every live leg measured (HM 01:43 item 3): entry from the chain, exit Fly send / Railway receive from the outbox
 _LEGS = {"fly_signal_at_ts": 9.0, "fly_intent_emitted_at_ts": 9.1, "railway_received_at_ts": 9.2,
-         "exchange_ack_at_ts": 9.6, "exit_ack_at_ts": 50.4}
+         "exchange_ack_at_ts": 9.6, "exit_ack_at_ts": 50.4,
+         "exit_fill_price": 100.9, "exit_price_source": "exchange_fill", "exit_fill_at_ts": 60.0,   # HM R4 B1: a real exit fill
+         "fill_price_source": "exchange_trades"}                             # HM R5 nit 6: a real entry fill
 _EXIT_SEND = {"exit_signal_at_ts": 49.9, "fly_intent_at_ts": 50.0, "fly_send_started_at_ts": 50.01,
               "fly_send_rtt_s": 0.12, "railway_received_at_ts": 50.08}
 
@@ -188,3 +190,16 @@ def test_hm3_leg_spec_mirrors_ts():
             assert f"'{name}'" in ts, name
             for k in keys:
                 assert f"'{k}'" in ts, k
+
+
+def test_hm_r4_b1_closed_live_leg_without_a_real_exit_fill_is_non_countable():
+    """HM R4 B1 / RK 08:03 (R17): mark / entry-fallback / missing source => non-countable via live_exit_fill."""
+    twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 101.0, "exit_reason": "TAKE_PROFIT"}
+    base = {"correlation_id": "c7", "fill_price": 100.1, "fill_at_ts": 9.7, "exit_price": 100.9, "closed": True, **_LEGS}
+    ok = lv.pair_countability(base, twin, _EXIT_SEND)
+    assert ok["live_non_countable"] is False, ok
+    for src in ("mark", "entry_fallback", "none", None):
+        c = dict(base, exit_price_source=src, exit_fill_price=None if src else 100.9)
+        r = lv.pair_countability(c, twin, _EXIT_SEND)
+        assert r["live_non_countable"] is True and r["live_non_countable_reason"] == f"EXIT_FILL_UNREADABLE:{src or 'none'}", r
+        assert r["paper_twin_non_countable"] is False   # the paper twin is not tainted by a live read gap

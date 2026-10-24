@@ -16,6 +16,8 @@ import statistics
 import time
 from typing import Any, Iterable, Mapping
 
+import live_exit_fill as _lef
+
 SCHEMA = "fly_live_copy_monitor_v1"
 
 # Thresholds (seconds / bp). Owner may tighten after the rehearsal.
@@ -101,6 +103,8 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
         if r.get("type") in ("ORDER_FILLED",):
             ch["fill_reported_to_fly_at_ts"] = ch.get("fill_reported_to_fly_at_ts") or _f(r.get("fly_received_at_ts"))
             fill = r.get("fill") if isinstance(r.get("fill"), Mapping) else {}
+            if _f(fill.get("price")) is not None:   # HM R5 nit 6: the source rides with the price it labels (latest wins)
+                ch["fill_price_source"] = str(fill.get("source") or "none")
             ch["fill_price"] = _f(fill.get("price")) or ch.get("fill_price")
             ch["fill_qty"] = _f(fill.get("qty")) or ch.get("fill_qty")
         if r.get("type") in ("ORDER_PLACED", "ORDER_SENT"):
@@ -109,6 +113,8 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             ch["order_price"] = _f(order.get("price")) or ch.get("order_price")
             ch["order_type"] = order.get("type") or ch.get("order_type")
             ch["order_tif"] = order.get("tif") or ch.get("order_tif")
+            # HM R4 B1: the side for D3's fill-based trade P&L (trade_realised_pnl_usd: no pnl_usd fallback any more)
+            ch["side"] = (str(order.get("side")).upper() if order.get("side") else None) or ch.get("side")
             ch["entry_order_mode"] = order.get("entry_order_mode") or ch.get("entry_order_mode")
         if r.get("type") in ("INTENT_RECEIVED", "INTENT_SKIPPED", "INTENT_SUBMITTED"):
             d = r.get("decision") if isinstance(r.get("decision"), Mapping) else {}
@@ -119,19 +125,30 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
                                      "message": "executor skipped", "at_ts": _f(d.get("decided_at_ts"))})
         if r.get("type") == "STOP_CONFIRMED":
             ch["stop_confirmed"] = True
+            # AMEND4 E2'/E9 (sha 7073ed25): the resident stop price feeds the backstop level and stop-fill overshoot_bp
+            st = r.get("stop") if isinstance(r.get("stop"), Mapping) else {}
+            ch["stop_price"] = _f(st.get("price")) or ch.get("stop_price")
         if r.get("type") == "POSITION_CLOSED":
             ch["closed"] = True
             # live-vs-paper (HM 19 Oct): keep whatever the executor reports about the live exit; null if it reports none
             cl = next((r.get(k) for k in ("close", "exit", "fill") if isinstance(r.get(k), Mapping)), {})
-            ch["exit_price"] = _f(cl.get("price")) or _f(r.get("exit_price")) or ch.get("exit_price")
-            ch["exit_at_ts"] = _f(cl.get("ts")) or _f(r.get("closed_at_ts")) or _f(tl.get("closed_at_ts")) or ch.get("exit_at_ts")
+            ch["exit_price"] = _f(cl.get("price")) or _f(r.get("exit_price")) or ch.get("exit_price")   # display only
+            # HM R4 B1 / RK 08:03: D3 and countability read ONLY the real fill (live_exit_fill.exit_fill_price). The latest
+            # close report wins outright: no price_source (old reporter) or a non-real source => no exit fill price.
+            ch["exit_price_source"] = str(cl.get("price_source") or "none")
+            ch["exit_fill_price"] = (_f(cl.get("price")) if ch["exit_price_source"] in _lef.REAL_EXIT_FILL_SOURCES else None)
+            # HM R6 B1 / RK 10:26: the close time is Bitfinex's own exit fill time (the reporter's close.fill_at_ts = the
+            # exit order's last trade mtsCreate). The latest close report wins outright (like the price): none => None,
+            # never 'now', never the report / send time. D3 rolls a loss out of the caps by THIS time only.
+            ch["exit_fill_at_ts"] = _f(cl.get("fill_at_ts"))
+            ch["exit_at_ts"] = ch["exit_fill_at_ts"] or _f(cl.get("ts")) or _f(r.get("closed_at_ts")) or _f(tl.get("closed_at_ts")) or ch.get("exit_at_ts")
             ch["exit_reason"] = cl.get("reason") or r.get("exit_reason") or r.get("reason") or ch.get("exit_reason")
             ch["funding_usd"] = r.get("funding_usd") if r.get("funding_usd") is not None else ch.get("funding_usd")
             try:  # signed (a loss is negative): do not use _f(), which drops non-positive values
                 ch["pnl_usd"] = float(r["pnl_usd"]) if r.get("pnl_usd") is not None else ch.get("pnl_usd")
             except (TypeError, ValueError):
                 pass
-            ch["closed_at_ts"] = ch.get("exit_at_ts")
+            ch["closed_at_ts"] = ch["exit_fill_at_ts"]   # HM R6 B1: the gate / guardian close time is the real fill time only
             # HM 02:55 / RK (1): exit order class + exit leg stamps for live_vs_paper's per-leg check (missing ->
             # the leg is missing -> non-countable; never inferred).
             if cl.get("exit_order_class") in ("BOT_SENT", "EXCHANGE_RESIDENT"):

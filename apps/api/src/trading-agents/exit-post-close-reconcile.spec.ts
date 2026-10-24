@@ -81,6 +81,7 @@ const target = {
   closeQty: 0.01, targetAmount: 0, confirmedExchangeAmount: 0, remainingManagedOrderIds: [],
   accountWideActiveOrderIds: [], accountWideManagedOrderIds: [], orphanOrderIds: [], foreignOrderIds: [],
   closeSubmitStartedAtMs: RX + 50, closeExchangeAckAtMs: RX + 120, closeConfirmedAtMs: RX + 200,
+  closeExchangeOrderId: 555,
 };
 
 function harness(recordImpl?: (type: string, body: Record<string, unknown>, n: number) => void) {
@@ -97,7 +98,17 @@ function harness(recordImpl?: (type: string, body: Record<string, unknown>, n: n
     showcaseFlatOpenSince: new Map([['p1', 1]]),
     logger: { log() {}, warn() {}, error() {}, debug() {} },
     swallowedError: () => () => undefined,
-    prisma: { signalCycleParticipant: { findUnique: async () => ({ status: 'OPEN', terminalCloseClaimToken: null }) } },
+    prisma: {
+      signalCycleParticipant: { findUnique: async () => ({ status: 'OPEN', terminalCloseClaimToken: null }) },
+      // HM R5 C1 / RK 09:10: the entry is the real fill; the exit is the close order's own trades (by order id)
+      signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 100_000, fill_price_source: 'exchange_trades' } }) },
+      liveEntryFence: { upsert: async () => ({}) },
+    },
+    bitfinex: {
+      fetchOrderTrades: async (_c: unknown, orderId: number) => (orderId === 555
+        ? [{ id: 9001, execAmount: -0.01, execPrice: 101_050, mtsCreate: RX + 150, fee: -0.2, feeCurrency: 'USD' }]
+        : []),
+    },
     hasParticipantExited: async () => false,
     acquireTerminalCloseClaim: async () => claim,
     readOpenPositionDetailWithRetry: async () => ({ amount: 0.01, basePrice: 100_000 }),
@@ -163,7 +174,8 @@ test('RK: a forced throw after the Bitfinex close reconciles the DB to flat (EXI
   assert.equal(b.exit_post_close_reconciled, true);
   assert.match(String(b.exit_post_close_error), /RangeError: Invalid time value/);
   assert.equal(b.exit_price, 101_050); // the exchange's own fill
-  assert.equal(b.pnl_source, 'exchange_fill');
+  assert.equal(b.pnl_source, 'bitfinex_order_trades'); // HM R5 C1: the close order's own trades
+  assert.equal(b.exit_price_source, 'exchange_fill');
   assert.equal(b.pnl_usd, 10.5);
   assert.equal(b.terminal_close_phase, 'CONFIRMED');
   assert.equal(b.terminal_close_claim_token, 'tok-1');
@@ -205,6 +217,26 @@ test('RK: a throw after the EXIT was written (receipt/log) does not write a seco
   h.svc.logger = { ...orig, log: () => { throw new Error('log boom'); } };
   assert.equal(await run(h.svc, {}), true);
   assert.equal(h.events.filter((e) => e.type === 'EXIT').length, 1);
+  assert.ok(cleared(h.svc));
+});
+
+test('B1 merge: closeVirtualLot (force-flat / policy closes) routes a post-close throw to the SAME reconcile', async () => {
+  const h = harness((type, _b, n) => { if (type === 'EXIT' && n === 1) throw new Error('db write after close failed'); });
+  Object.assign(h.svc, { positionRuntime: new Map(), stopManagerCircuitOpen: new Map() });
+  const ok = await h.svc.closeVirtualLot('agent-1', 'user-1', 'cycle-1', 'p1', meta, { apiKey: 'k', apiSecret: 's' }, {
+    reason: 'AUTHENTICATED_EMERGENCY_CLOSE', mark: 101_000, fillPrice: 100_000, leverage: 1, peakMarginPct: 0,
+    unrealMarginPct: 0, stopLossMarginPct: 1, terminalAuthority: claim.authority,
+  });
+  assert.equal(ok, true);
+  assert.equal(h.calls.close, 1); // never re-submitted
+  const exits = h.events.filter((e) => e.type === 'EXIT');
+  assert.equal(exits.length, 1);
+  assert.equal(exits[0].body.exit_post_close_reconciled, true);
+  assert.equal(exits[0].body.exit_reason, 'EMERGENCY_CLOSE');
+  assert.equal(exits[0].body.exit_price, 101_050);
+  assert.equal(exits[0].body.exit_legs_unmeasured, 'POST_CLOSE_RECONCILED');
+  assert.equal(exits[0].body.terminal_close_claim_token, 'tok-1');
+  assert.deepEqual(h.pauses, []);
   assert.ok(cleared(h.svc));
 });
 

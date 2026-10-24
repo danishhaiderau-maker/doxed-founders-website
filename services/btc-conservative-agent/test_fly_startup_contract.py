@@ -52,7 +52,7 @@ def test_fly_refuses_missing_control_secrets_or_direct_live_mode():
     assert 'os.getenv("FORCE_PAPER_MODE")' in WRAPPER
     assert "REFUSED_DIRECT_FLY_LIVE" in WRAPPER
     assert "Railway is the isolated Bitfinex live executor" in WRAPPER
-    assert "return _is_direct_local_control(_client_ip())" in BOT
+    assert "return _admin_token_presented()" in BOT   # RK (4) #852 R3: token-only admin, no local bypass
     assert "return True  # gate disabled" not in BOT
     assert 'os.environ.setdefault(' in WRAPPER
     assert '"SHOWCASE_INFERENCE_USAGE_URL"' in WRAPPER

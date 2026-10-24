@@ -94,7 +94,6 @@ export class SignalCyclesController {
       local_mark_at_signal?: number;
       limit_price?: number;
       fill_price?: number;
-      exit_price?: number;
       qty?: number;
       pnl_usd?: number;
       pnl_margin_pct?: number;

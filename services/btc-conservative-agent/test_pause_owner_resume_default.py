@@ -52,7 +52,9 @@ bot._recompute_system_readiness = lambda: {
     "ws_transport_ready": True,
     "readiness_reasons": [],
 }
-LOOPBACK = {"REMOTE_ADDR": "127.0.0.1"}
+# RK (4) #852 R3: loopback is not an admin credential; every call carries a throwaway test token.
+bot._BOT_ADMIN_TOKEN = "test-admin-token-rk4"
+LOOPBACK = {"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"}
 DEPLOY = {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}
 
 

@@ -24,6 +24,7 @@ os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
+bot._BOT_ADMIN_TOKEN = "test-admin-token-rk4"  # RK(4) 24 Oct: admin routes need the token even on loopback
 
 # This script runs at import (pytest collection); restore the readiness function at the end so the
 # stub below does not leak into other test modules sharing the imported ``bot``.
@@ -49,7 +50,7 @@ bot._disarm_live_control = lambda reason="TEST": {"cancel": {"failed": [], "ok":
 bot.pipeline_state_sync = lambda: None
 # Allow /api/* handlers to run during tests (the bootstrap guard otherwise 503s).
 bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
-# Direct loopback control is always allowed without a token; we explicitly test
+# RK(4): direct loopback control now needs the admin token (sent below); we explicitly test
 # the proxied/forwarded case in [5] below with a real token.
 
 
@@ -90,7 +91,7 @@ bot.set_execution_paused("DAILY_DRAWDOWN")
 check("precondition: paused for DAILY_DRAWDOWN", bot.state.get("execution_reason") == "DAILY_DRAWDOWN")
 _stub_runtime(system_ready=False, ws_transport_ready=True, reasons=["READINESS_STABILIZING"])
 with bot.app.test_client() as client:
-    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
 check(
     "resume returns 200 (deadlock cleared)",
     resp.status_code == 200,
@@ -110,7 +111,7 @@ reset_pause_state()
 bot.set_execution_paused("DAILY_DRAWDOWN")
 _stub_runtime(system_ready=False, ws_transport_ready=False, reasons=["WS_NOT_READY"])
 with bot.app.test_client() as client:
-    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
 check(
     "resume returns 409 when WS unhealthy",
     resp.status_code == 409,
@@ -139,7 +140,7 @@ with bot.app.test_client() as client:
     retained = client.post(
         "/api/resume",
         json={"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"},
-        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN},
     )
 retained_body = retained.get_json() or {}
 check(
@@ -150,7 +151,7 @@ check(
 check("manual_admin_pause remains armed", bot.state.get("manual_admin_pause") is True)
 check("execution stays paused", bot.state.get("execution_paused") is True)
 with bot.app.test_client() as client:
-    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
 check(
     "bare operator resume returns 200 for ADMIN_MANUAL with healthy WS",
     resp.status_code == 200,
@@ -175,7 +176,7 @@ check(
 )
 _stub_runtime(system_ready=False, ws_transport_ready=True, reasons=["READINESS_STABILIZING"])
 with bot.app.test_client() as client:
-    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
 check(
     "resume returns 409 for non-resumable reason",
     resp.status_code == 409,
@@ -222,7 +223,7 @@ reset_pause_state()
 bot.set_execution_paused("DAILY_DRAWDOWN")
 _stub_runtime(system_ready=True, ws_transport_ready=True, reasons=[])
 with bot.app.test_client() as client:
-    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": bot._BOT_ADMIN_TOKEN})
 check(
     "resume returns 200 when system_ready=True",
     resp.status_code == 200,

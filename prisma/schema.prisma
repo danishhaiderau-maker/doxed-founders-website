@@ -2743,6 +2743,20 @@ model SignalCycleParticipantReduction {
   @@index([exchangeOrderId])
 }
 
+/// HM 24 Oct (#852) HM1: account entry fence held for the WHOLE ops/position-flatten and ops/force-flat-disarm route
+/// (one row per route run; acquired under the live-mutex advisory lock). While any unexpired row exists for the user,
+/// countLiveMutexOthers counts it, so every hire / catch-up claim and the pre-submit recount refuse. Released in finally;
+/// expiresAt bounds a crashed holder.
+model LiveEntryFence {
+  id         String   @id
+  userId     String
+  reason     String
+  acquiredAt DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([userId, expiresAt])
+}
+
 /// Durable, idempotent audit/fence for signed partial-reduction evidence using
 /// canonical reduction_id, prior_qty, reduced_qty, remaining_qty and fill_price.
 /// This model does not authorize or request exchange execution.

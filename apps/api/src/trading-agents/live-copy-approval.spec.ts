@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   LIVE_COPY_TILE_PREFIXES,
   approvalPermitsIngest,
+  approvalPermitsRelayCopy,
   evaluateLiveCopyPlacement,
   exchangeStopCapBp,
   liquidationDistanceBp,
@@ -71,12 +72,19 @@ test('reject ring is bounded', () => {
   assert.equal(r.since(1004).length, 1);
 });
 
+/** Two-tile gate: Fly signs the trade's tile key (mandatory for live entries). */
+function testTileKey(tradeId: string) {
+  const head = String(tradeId).split('-')[0].toLowerCase();
+  const code = ({ rnd: 1, gs1: 2, gb1: 3, gb2: 4, gs6: 5, dsl: 6, dsf: 7 } as Record<string, number>)[head];
+  return code == null ? {} : { tile_key: head, tile_key_code: code };
+}
+
 function signed(tradeId: string, secret: string, over: Record<string, unknown> = {}) {
   const approval = {
     schema: 'fly_live_copy_approval_v1', correlation_id: tradeId, trade_id: tradeId, event: 'ORDER_PLACED',
     research_lane: 'FAMILY_GS01_XV_PREMIUM_ATR_TP', relay_eligible: true, eligibility_source: 'OPERATOR',
     entry_allowed: true, output_on: true, tile_live_on: true, created_at_ts: NOW_MS / 1000 - 1,
-    max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT', hard_stop_bp: 35, exchange_stop_bp: 35, ...over,
+    max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT', hard_stop_bp: 35, exchange_stop_bp: 35, ...testTileKey(tradeId), ...over,
   };
   const text = JSON.stringify(approval);
   const key = createHmac('sha256', secret).update('fly-live-copy-approval-v1').digest();
@@ -140,4 +148,16 @@ test('tile prefix map covers the active Fly tiles', () => {
   assert.equal(LIVE_COPY_TILE_PREFIXES.FAMILY_GS01_XV_PREMIUM_ATR_TP, 'gs1');
   assert.equal(Object.keys(LIVE_COPY_TILE_PREFIXES).length, 5);
   for (const retired of ['FAMILY_DISLOC_BFX_DISLOCATION_1M', 'FAMILY_DISLOC_FOI_LONG_1M', 'FAMILY_DANISH_REGIME_ROUTER', 'FAMILY_PREMIUM_REVERSION_60M', 'FAMILY_GSB3_COMMITTED_FADE_REGIME', 'FAMILY_FADE_POOL', 'FAMILY_GS07_V07_PREMIUM_FADE_60M']) assert.equal(LIVE_COPY_TILE_PREFIXES[retired], undefined);
+});
+
+test('RK: an untagged live ENTRY approval is refused; untagged non-entry continuations still ingest', () => {
+  const sec = 'tile-key-secret';
+  const tagged = signed('gs1-t1', sec);
+  const untagged = signed('gs1-t1', sec, { tile_key: undefined, tile_key_code: undefined });
+  assert.equal(JSON.parse(untagged.signed_body).tile_key, undefined);
+  assert.equal(approvalPermitsRelayCopy(tagged, 'gs1-t1', sec).ok, true);
+  assert.deepEqual(approvalPermitsRelayCopy(untagged, 'gs1-t1', sec), { ok: false, reason: 'APPROVAL_TILE_TRADE_MISMATCH' });
+  assert.equal(approvalPermitsIngest(untagged, 'gs1-t1', 'ORDER_PLACED', sec, NOW_MS), false);
+  const exitUntagged = signed('gs1-t1', sec, { event: 'TRADE_CLOSED', tile_key: undefined, tile_key_code: undefined });
+  assert.equal(approvalPermitsIngest(exitUntagged, 'gs1-t1', 'TRADE_CLOSED', sec, NOW_MS), true);
 });

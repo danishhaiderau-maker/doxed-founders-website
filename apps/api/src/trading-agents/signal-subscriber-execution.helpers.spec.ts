@@ -3,6 +3,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
+import { decodeTileClientOrderId } from './live-tile-gate';
 // #842 Tasks 2-3 specs, wired here so `npm test --workspace=@dcf/api` and CI unit-tests run them.
 import './exit-post-close-reconcile.spec';
 import './rk1-live-exit-stamps.spec';
@@ -122,6 +123,13 @@ import {
   desiredLiveCopyCoordinationState,
 } from './signal-subscriber-execution.service';
 
+/** Two-tile gate: Fly signs the trade's tile key (mandatory for live entries). */
+function testTileKey(tradeId: string) {
+  const head = String(tradeId).split('-')[0].toLowerCase();
+  const code = ({ rnd: 1, gs1: 2, gb1: 3, gb2: 4, gs6: 5, dsl: 6, dsf: 7 } as Record<string, number>)[head];
+  return code == null ? {} : { tile_key: head, tile_key_code: code };
+}
+
 /** A Fly approval as live_copy_control.sign_approval would emit it (test key). */
 function signTestFlyApproval(tradeId: string, secret: string, over: Record<string, unknown> = {}) {
   const approval = {
@@ -129,7 +137,7 @@ function signTestFlyApproval(tradeId: string, secret: string, over: Record<strin
     event: 'ORDER_PLACED', research_lane: 'FAMILY_GS01_XV_PREMIUM_ATR_TP', relay_eligible: true,
     eligibility_source: 'OPERATOR', entry_allowed: true, output_on: true, tile_live_on: true,
     created_at_ts: Date.now() / 1000, max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT',
-    hard_stop_bp: 35, exchange_stop_bp: 35, liquidation_bp: 50, ...over,
+    hard_stop_bp: 35, exchange_stop_bp: 35, liquidation_bp: 50, ...testTileKey(tradeId), ...over,
   };
   const signedBody = JSON.stringify(approval);
   const key = createHmac('sha256', secret).update('fly-live-copy-approval-v1').digest();
@@ -693,7 +701,7 @@ const LIVE_VENUE_MARGIN_EVIDENCE = {
   observedAt: '2026-09-29T23:21:00.000Z', source: 'BITFINEX_PUBLIC_FUTURES_CONFIG',
 };
 
-async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = {}) {
+async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean; otherLive?: number } = {}) {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.venueMarginEvidence = { value: LIVE_VENUE_MARGIN_EVIDENCE, atMs: Date.now() };
   const now = Date.now();
@@ -738,7 +746,9 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = 
   };
   const submitted: Array<Record<string, unknown>> = [];
   const events: Array<Record<string, unknown>> = [];
-  service.logger = { log() {}, warn() {}, error() {} };
+  const deleted: string[] = [];
+  const warns: string[] = [];
+  service.logger = { log() {}, warn(m: string) { warns.push(String(m)); }, error() {} };
   service.cycleAudit = { stage() {} };
   service.config = { get: (k: string) => (k === 'SHOWCASE_WEBHOOK_SECRET' ? 'test-secret' : undefined) };
   service.activeTrading = {
@@ -751,7 +761,9 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = 
   service.prisma = {
     $transaction: async (run: (tx: any) => Promise<unknown>) => run({
       $executeRawUnsafe: async () => [{ pg_advisory_xact_lock: null }],
+      liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
       signalCycleParticipant: {
+        count: async () => opts.otherLive ?? 0, // HM C3: live-mutex count in the claim txn
         create: async () => ({ id: 'participant-exact-qty' }),
         findMany: async () => [{
           id: 'participant-exact-qty', cycleId: 'cycle-exact-qty',
@@ -759,9 +771,11 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = 
         }],
       },
     }),
+    liveEntryFence: { count: async () => 0 }, // HM1: pre-submit recount also checks the fence
     signalCycleParticipant: {
+      count: async () => opts.otherLive ?? 0, // two-tile live gate: other live participants
       create: async () => ({ id: 'participant-exact-qty' }),
-      delete: async () => ({}),
+      delete: async () => { deleted.push('participant-exact-qty'); return {}; },
       findUnique: async () => null,
       findMany: async () => [],
     },
@@ -790,8 +804,22 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = 
     'bitfinex',
     { availableUsd: 100, markPrice: 63_620, exchangeBookProvenEmpty: true },
   );
-  return { placed, submitted, events };
+  return { placed, submitted, events, deleted, warns };
 }
+
+test('two-tile live gate: a second live entry while another lot is pending/open is refused, logged, claim released', async () => {
+  const { placed, submitted, deleted, warns } = await runExactQtyEntry({ otherLive: 1 });
+  assert.equal(placed, false);
+  assert.equal(submitted.length, 0);
+  assert.deepEqual(deleted, ['participant-exact-qty']);
+  assert.ok(warns.some((w) => w.includes('[LIVE TILE GATE]') && w.includes('LIVE_SKIPPED_MUTEX') && w.includes('tile=gs1')));
+});
+
+test('two-tile live gate: the entry order cid carries the tile key', async () => {
+  const { placed, submitted } = await runExactQtyEntry();
+  assert.equal(placed, true);
+  assert.equal(decodeTileClientOrderId(submitted[0].clientOrderId as number), 'gs1');
+});
 
 test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
   const { placed, submitted, events } = await runExactQtyEntry();
@@ -853,10 +881,13 @@ test('market catch-up money path also submits the exact showcase position quanti
   service.showcaseRecoveryHits = new Map();
   service.showcaseSafeModeNoticeAt = new Map();
   service.prisma = {
+    $transaction: async function (this: any, run: (tx: any) => Promise<unknown>) { return run({ ...this, $executeRawUnsafe: async () => [] }); }, // HM C3 claim txn
+    liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
     signalCycleEvent: {
       create: async () => ({}),
     },
     signalCycleParticipant: {
+      count: async () => 0, // two-tile live gate: no other live participant
       findUnique: async () => null,
       create: async () => ({ id: 'participant-catchup-exact-qty' }),
       delete: async () => ({}),
@@ -901,7 +932,7 @@ test('market catch-up money path also submits the exact showcase position quanti
     },
     { apiKey: 'redacted', apiSecret: 'redacted' },
     0.25,
-    'cont-catchup-exact',
+    'gs1-cont-catchup-exact',
     63_614.55,
     25 / 63_614.55,
     63_620,
@@ -930,8 +961,11 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
   service.showcaseRecoveryHits = new Map();
   service.showcaseSafeModeNoticeAt = new Map();
   service.prisma = {
+    $transaction: async function (this: any, run: (tx: any) => Promise<unknown>) { return run({ ...this, $executeRawUnsafe: async () => [] }); }, // HM C3 claim txn
+    liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
     signalCycleEvent: { create: async ({ data }: any) => { fences.push(data.payload); return {}; } },
     signalCycleParticipant: {
+      count: async () => 0, // two-tile live gate: no other live participant
       findUnique: async () => null,
       create: async () => ({ id: 'participant-catchup-timeout' }),
       delete: async () => { deleted += 1; },
@@ -959,7 +993,7 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
       risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-timeout', 63_614.55,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'gs1-cont-catchup-timeout', 63_614.55,
     25 / 63_614.55, 63_620, 5.45,
   );
 
@@ -983,8 +1017,11 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
   service.showcaseRecoveryHits = new Map();
   service.showcaseSafeModeNoticeAt = new Map();
   service.prisma = {
+    $transaction: async function (this: any, run: (tx: any) => Promise<unknown>) { return run({ ...this, $executeRawUnsafe: async () => [] }); }, // HM C3 claim txn
+    liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
     signalCycleEvent: { create: async () => ({}) },
     signalCycleParticipant: {
+      count: async () => 0, // two-tile live gate: no other live participant
       findUnique: async () => null,
       create: async () => ({ id: 'participant-catchup-stop-fail' }),
       delete: async () => ({}),
@@ -1020,7 +1057,7 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
       risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-stop-fail', 63_614.55,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'gs1-cont-catchup-stop-fail', 63_614.55,
     25 / 63_614.55, 63_620, 5.45,
   );
 
@@ -1682,17 +1719,14 @@ test('live close does not await public mark enrichment before reduce-only close 
   const source = String(
     (SignalSubscriberExecutionService.prototype as any).executeShowcaseMirrorCloseOwned,
   );
-  const markPromiseAt = source.indexOf('preparedExitPricePromise');
-  const closeAt = source.indexOf('closeParticipantPositionToLedgerTarget', markPromiseAt);
-  const auditAwaitAt = source.indexOf('await preparedExitPricePromise', closeAt);
-  assert.ok(markPromiseAt >= 0);
-  assert.ok(closeAt > markPromiseAt);
-  assert.ok(auditAwaitAt > closeAt);
-  const criticalPromiseAll = source.slice(
-    source.indexOf('Promise.all', markPromiseAt),
-    source.indexOf(']);', source.indexOf('Promise.all', markPromiseAt)) + 3,
-  );
-  assert.doesNotMatch(criticalPromiseAll, /getMarkPrice/);
+  // HM R5 C1 + RK 09:10: the mark is never read for an exit price at all (so nothing can hold the close behind it);
+  // the exit price is the close order's own trades, read only after the close via the shared helper.
+  assert.doesNotMatch(source, /getMarkPrice/);
+  assert.doesNotMatch(source, /preparedExitPricePromise/);
+  const closeAt = source.indexOf('closeParticipantPositionToLedgerTarget');
+  const fillReadAt = source.indexOf('readLiveExitOrderFill', closeAt);
+  assert.ok(closeAt >= 0);
+  assert.ok(fillReadAt > closeAt);
 });
 
 test('live close keeps reduce-only stop protection through exchange close confirmation', () => {
@@ -1779,7 +1813,7 @@ test('concurrent signed close traverses durable claim and submits exactly one ex
   service.showcasePositionAbsentMisses = new Map();
   service.showcasePositionAbsentSince = new Map();
   service.showcaseFlatOpenSince = new Map();
-  service.logger = { log: () => undefined, warn: () => undefined };
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
   const cycle = {
     id: 'cycle-integrated-close', agentId: 'agent', tradeId: 'cont-integrated-close',
     intentEnvelope: { context: { showcase_event_seq: 21 } }, showcasePnlUsd: null,
@@ -1817,6 +1851,14 @@ test('concurrent signed close traverses durable claim and submits exactly one ex
   service.prisma = {
     signalCycleParticipant: participantStore,
     $transaction: async (run: (client: any) => Promise<unknown>) => run(tx),
+    // HM R5 C1 / RK 09:10: the exit price is the close order's own trades (by order id); the entry is the real fill
+    signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 64_500, fill_price_source: 'exchange_trades' } }) },
+    liveEntryFence: { upsert: async () => { throw new Error('no fence expected: the close fill is readable'); } },
+  };
+  service.bitfinex = {
+    fetchOrderTrades: async (_c: unknown, orderId: number) => (orderId === 88001
+      ? [{ id: 1, execAmount: 0.01, execPrice: 64_400, mtsCreate: Date.now(), fee: 0, feeCurrency: 'USD' }]
+      : []),
   };
   service.cycles = {
     recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => {
@@ -2294,6 +2336,10 @@ test('terminal protected partial already flat records FILLED and EXIT without su
   assert.deepEqual(types, ['FILLED', 'EXIT']);
   assert.equal(payloads[0]?.exchange_fill_ids, undefined);
   assert.equal(payloads[0]?.exchange_fill_costs, undefined);
+  // HM R5 C1 + RK 09:10: the stop's fill read failed => exit_price null, EXIT_FILL_UNREADABLE (never a mark / limit)
+  assert.equal(payloads[1]?.exit_price, null);
+  assert.equal(payloads[1]?.exit_fill_status, 'EXIT_FILL_UNREADABLE');
+  assert.equal(payloads[1]?.pnl_usd, null);
   assert.equal(stopSubmits, 0);
 });
 
@@ -4492,7 +4538,7 @@ test('Bitfinex reprice amends the exact resting order in place without a cancel 
       now: 1_700_000_000_000,
       chaseLabel: 'signed-limit=64075.00',
       event: 'BOT_ANCHOR_CHASE',
-      tradeId: 'cont-native-update',
+      tradeId: 'gs1-cont-native-update',
     },
   );
 
@@ -4501,6 +4547,62 @@ test('Bitfinex reprice amends the exact resting order in place without a cancel 
   assert.equal(persisted?.limitPrice, 64_075);
   assert.equal(persisted?.replacementMode, 'BITFINEX_IN_PLACE_UPDATE');
   assert.equal(persisted?.limitChaseCount, 2);
+});
+
+test('RK 02:25: a chase never re-places an untagged (legacy cid) entry order', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const activeTrading: any = Object.create(BitfinexTradingClient.prototype);
+  const calls: string[] = [];
+  activeTrading.findOrder = async () => ({ id: 9_002, amountOrig: -0.031, amount: -0.031 });
+  activeTrading.updateLimitOrder = async (_creds: unknown, input: { orderId: number; price: number }) => {
+    calls.push(`update:${input.orderId}:${input.price}`);
+    return input.orderId;
+  };
+  activeTrading.cancelOrder = async () => {
+    calls.push('cancel');
+  };
+  activeTrading.submitLimitOrder = async () => {
+    calls.push('submit');
+    return 9_003;
+  };
+  service.activeTrading = activeTrading;
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  service.positionRuntime = new Map();
+  service.hydrateRuntime = () => ({});
+  let persisted: any = null;
+  service.cycles = {
+    recordHireExecutionEvent: async (_userId: string, _agentId: string, _cycleId: string, _action: string, payload: Record<string, unknown>) => {
+      persisted = payload;
+    },
+  };
+
+  await service.replaceRestingLimitOwned(
+    'agent-native-update',
+    'user-native-update',
+    'cycle-native-update',
+    'participant-native-update',
+    {
+      bitfinexOrderId: 9_002,
+      direction: 'SHORT',
+      limitPrice: 64_100,
+      qty: 0.031,
+      limitChaseCount: 1,
+      clientOrderId: 987_654,
+    },
+    { apiKey: 'redacted', apiSecret: 'redacted' },
+    { action: 'ENTER', direction: 'SHORT', entry: {}, risk: { max_margin_usd: 20 } },
+    {
+      newLimit: 64_075,
+      mark: 64_080,
+      now: 1_700_000_000_000,
+      chaseLabel: 'signed-limit=64075.00',
+      event: 'BOT_ANCHOR_CHASE',
+      tradeId: 'gs1-cont-native-update-legacy',
+    },
+  );
+
+  assert.deepEqual(calls, []);   // no update, no cancel, no submit
+  assert.equal(persisted, null);
 });
 
 test('rapid signed reprices execute only against the newest durable order generation', async () => {
@@ -8887,7 +8989,16 @@ test('Scenario C policy close persists authenticated PnL, complete costs, profil
   service.showcaseFlatOpenSince = new Map();
   service.stopManagerCircuitOpen = new Map();
   service.positionRuntime = new Map();
-  service.logger = { log: () => undefined, warn: () => undefined };
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  // HM R5 C1 / RK 09:10: the exit price is the close order's (202) own trades; the entry is the real fill
+  service.bitfinex = {
+    fetchOrderTrades: async (_c: unknown, id: number) => (id === 202
+      ? [{ id: 5, execAmount: 0.01, execPrice: 63_900, fee: 0, feeCurrency: 'USD', mtsCreate: 20_150 }] : []),
+  };
+  service.prisma = {
+    signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 64_000, fill_price_source: 'exchange_trades' } }) },
+    liveEntryFence: { upsert: async () => { throw new Error('no fence expected: the close fill is readable'); } },
+  };
   service.hasParticipantExited = async () => false;
   service.acquireTerminalCloseClaim = async (input: any) => ({
     ownerToken: 'owner', requestId: 'request', phase: 'CLAIMED',
@@ -8939,6 +9050,9 @@ test('Scenario C policy close persists authenticated PnL, complete costs, profil
   assert.equal(exitPayload!.slippage_usd, 0.03);
   assert.deepEqual(exitPayload!.fill_ids, ['entry-fill', 'exit-fill']);
   assert.equal(exitPayload!.final_reconciliation.complete, true);
+  assert.equal(exitPayload!.exit_price, 63_900);   // the close order's own fill
+  assert.equal(exitPayload!.exit_fill_status, 'REAL_FILL');
+  assert.equal(exitPayload!.pnl_usd, 1);           // (64_000 - 63_900) * 0.01 SHORT
   assert.match(exitPayload!.fee_model, /execution_cost_profile_v1/);
   assert.match(exitPayload!.execution_profile, /relay_execution_profile_v1/);
 });
@@ -8967,7 +9081,11 @@ test('exchange-observed terminal stop uses exact stop fills instead of a later m
       if (type === 'EXIT') exitPayload = payload;
     },
   };
-  service.prisma = { tradingAgentInstance: { updateMany: async () => ({ count: 1 }) } };
+  service.prisma = {
+    tradingAgentInstance: { updateMany: async () => ({ count: 1 }) },
+    // HM R5 nit 6: the P&L entry is the entry order's own trades (FILLED exchange_trades)
+    signalCycleEvent: { findFirst: async () => ({ payload: { fill_price: 62_836, fill_price_source: 'exchange_trades' } }) },
+  };
   const closed = await service.reconcileManualClose(
     'agent', 'user',
     { id: 'cycle', status: SignalCycleStatus.OPEN, showcasePnlUsd: null },

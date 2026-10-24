@@ -97,12 +97,15 @@ test('RK1: subscriber-exchange-live book rows use the same leg check (missing st
   });
   const exitFull = { eventType: 'EXIT', payload: railwayExitLegStamps({ exitTriggerAtMs: 49_900, flySendStartedAtMs: 50_010, platformReceivedAtMs: 50_080 }) };
   (exitFull.payload as Record<string, unknown>).close_exchange_ack_at = iso(50.4);
+  (exitFull.payload as Record<string, unknown>).exit_exchange_fill_price = 100_100;   // HM R4 B1: real exit fill
+  (exitFull.payload as Record<string, unknown>).exit_fill_status = 'REAL_FILL';       // HM R6 B2: helper-stamped real fill
   const book = mapSubscriberExchangeLiveBook({
     orders: [], position: null,
     participants: [
       row('none', undefined),
       row('nosend', [placed, { eventType: 'EXIT', payload: { ...railwayExitLegStamps({ exitTriggerAtMs: 49_900, platformReceivedAtMs: 50_080 }), close_exchange_ack_at: iso(50.4) } }]),
-      row('full', [placed, exitFull]),
+      // HM R5 nit 6: countable only with the entry from the entry order's own trades
+      row('full', [placed, { eventType: 'FILLED', payload: { fill_price: 100_000, fill_price_source: 'exchange_trades' } }, exitFull]),
     ],
   });
   const by = Object.fromEntries(book.trades.map((t) => [t.tradeId, t]));
