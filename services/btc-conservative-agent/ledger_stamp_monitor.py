@@ -67,7 +67,8 @@ def _reverse_lines(path: Path, max_bytes: int) -> Iterator[tuple[bytes, bool]]:
 # listed here AND every writer module's retirement flag is True. Any other stream with no write since the
 # cutoff is RED (NO_WRITE_SINCE_NOT_ALLOWLISTED); any write since the cutoff to a retired stream is RED
 # (WRITE_TO_RETIRED_STREAM), stamped or not.
-RETIRED_STREAM_ALLOWLIST: dict[str, str] = {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+# One source of truth (RK): the allowlist lives in retired_streams.py, shared with V3EvidenceStore.open_read_only.
+from retired_streams import RETIRED_STREAM_ALLOWLIST  # noqa: E402
 RETIREMENT_FLAGS: dict[str, tuple[tuple[str, str], ...]] = {
     "market_segment": (
         ("research_v3_bridge", "MARKET_SEGMENT_WRITES_RETIRED"),
@@ -258,8 +259,12 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
             commit()
     info["last_write_ts"] = newest_mtime
     retired = _retired_reason(name)
+    # HM #872 nit: allowlisted but not every writer flag True -> explicit RETIREMENT_FLAG_MISMATCH (RED).
+    flag_mismatch = name in RETIRED_STREAM_ALLOWLIST and not retired
     wrote_since = info["stamped"] > 0 or info["unstamped"] > 0 or (newest_mtime is not None and newest_mtime >= since_ts)
-    if retired and wrote_since:
+    if flag_mismatch:
+        info["red_reason"] = "RETIREMENT_FLAG_MISMATCH"
+    elif retired and wrote_since:
         info["red_reason"] = "WRITE_TO_RETIRED_STREAM"
     elif not wrote_since:
         if retired:

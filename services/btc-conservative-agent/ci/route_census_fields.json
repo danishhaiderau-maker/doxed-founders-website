@@ -51,6 +51,22 @@
         "total_trades_source",
         "total_trades_mismatch"
       ]
+    },
+    "/api/monitor/trade-count": {
+      "top": [
+        "check",
+        "status",
+        "analytics_ts",
+        "total_trades",
+        "total_trades_memory",
+        "total_trades_disk",
+        "total_trades_source",
+        "total_trades_mismatch"
+      ],
+      "status_values": [
+        "GREEN",
+        "AMBER"
+      ]
     }
   }
 }

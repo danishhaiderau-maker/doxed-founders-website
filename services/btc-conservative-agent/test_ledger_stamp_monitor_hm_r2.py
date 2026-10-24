@@ -74,7 +74,7 @@ def test_retired_idle_only_when_every_flag_true(tmp_path, monkeypatch):
     monkeypatch.setattr(q, "SEGMENT_WRITES_RETIRED_R17", False)
     res = mon.check(tmp_path, SINCE)
     assert res["ledgers"]["market_segment"]["status"] == "RED"
-    assert res["red_streams"]["market_segment"] == "NO_WRITE_SINCE_NOT_ALLOWLISTED"
+    assert res["red_streams"]["market_segment"] == "RETIREMENT_FLAG_MISMATCH"  # HM #872 nit
 
 
 def test_ambiguous_mtime_boundary_warns_and_contradiction_is_not_green(tmp_path):
@@ -90,3 +90,17 @@ def test_ambiguous_mtime_boundary_warns_and_contradiction_is_not_green(tmp_path)
     assert any(w.startswith("MTIME_BOUNDARY_CONTRADICTED_BY_STAMP") for w in res["warnings"])
     assert "decision:MTIME_BOUNDARY_AMBIGUOUS:decision.jsonl" in res["unverified"]
     assert res["ledgers"]["decision"]["status"] in ("RED", "AMBER") and res["status"] != "GREEN"
+
+
+def test_allowlist_single_source_of_truth():
+    import retired_streams
+    assert mon.RETIRED_STREAM_ALLOWLIST is retired_streams.RETIRED_STREAM_ALLOWLIST
+
+
+def test_flag_mismatch_red_even_with_writes(tmp_path, monkeypatch):
+    import research_v3_bridge as b
+    _active(tmp_path)
+    _write(tmp_path / "v3" / "ledgers" / "market_segment.jsonl", [{"record_id": "x"}], mtime=SINCE + 100)
+    monkeypatch.setattr(b, "MARKET_SEGMENT_WRITES_RETIRED", False)
+    res = mon.check(tmp_path, SINCE)
+    assert res["red_streams"]["market_segment"] == "RETIREMENT_FLAG_MISMATCH"

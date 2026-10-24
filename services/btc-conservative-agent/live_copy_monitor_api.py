@@ -687,7 +687,12 @@ def live_flags_snapshot(max_age_s: float = 5.0) -> dict:
                 "mismatches": arming.get("mismatches") or [],
                 "verdict": arming.get("verdict"),
                 "output_enabled": bool(output.get("enabled")) if isinstance(output, dict) else None,
-                "force_paper_mode": bool(ctx.get("force_paper_mode")),
+                # HM post-#872: "force_paper_mode" is the governing FORCE_PAPER_MODE env (same reader as
+                # /api/status, _force_paper_mode_active). ctx["force_paper_mode"] is the live-copy paper LOCK
+                # (FORCE_PAPER and not LIVE_COPY_SOURCE_ENABLED) and is reported under its own name.
+                "force_paper_mode": bool(ctx.get("fly_direct_force_paper_mode")),
+                "force_paper_mode_source": "_force_paper_mode_active (same as /api/status)",
+                "live_copy_paper_lock": bool(ctx.get("force_paper_mode")),
                 "tiles_live_on": sorted(str(r.get("lane")) for r in ctx.get("switch_rows") or []
                                         if isinstance(r, dict) and (r.get("bitfinex_live_orders") or r.get("live_eligible"))),
                 "accounts": (arming.get("sources") or {}).get("website_accounts"),
