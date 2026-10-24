@@ -11,6 +11,7 @@ AUTH = {"X-Bot-Admin-Token": "retired-test-token"}
 
 
 def _setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "_API_RATE_LOG", type(bot._API_RATE_LOG)(bot._API_RATE_LOG.default_factory))  # HM nit (c): no 429 in a full run
     monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "retired-test-token")
     monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
     monkeypatch.setattr(bot, "_data_sync_runtime_root", lambda: str(tmp_path))
