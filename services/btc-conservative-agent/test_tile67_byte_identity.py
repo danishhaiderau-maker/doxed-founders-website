@@ -14,12 +14,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BASE = "51d926f93"
 # #839 F2/F3 (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result (realism-v2 shared trigger helper / entry quote stamping; R4 pricing intent unchanged for tiles 1-5 except the reviewed realism changes).
+# #840 order model (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core (live order-type model: resident stop, BOT_SENT market exits, model-time exits).
 PINNED = {
     "bot.py": {
         "get_mark_price": "f9c6c2b6cd40d0e9b558ee8b31d73f0a5b0079fc8162ba667a0b8265eba1c707",
-        "_paper_lane_entry_result": "beff32f680828074a2233e794250c8c65260210a3ecc4dbd941cb32846e30d47",
-        "_tp1_gate": "0a7525eacb19a11174f204045917bcfe2ee7f1602f062f7ae9db448ce4d004cf",
-        "_paper_lane_exit": "cf376f81eb080d117a07cf969b852e153d0eec2ec491639a91fdac0079d2fa16",
+        "_paper_lane_entry_result": "ed0e9b17379ac387091f9c9b3b8f3c91bd038dba20fc73f68dce7d049a042dd1",
+        "_tp1_gate": "02d113f32f656a59cc96ad0f1be35e42564e4f9274707f478fc6f1fa07cdae51",
+        "_paper_lane_exit": "a6112b728783dbdcf1e3deb0bb0c6319fde4356db228c41a46226e799d926f9e",
         "_disloc_delay": "bd27730709158b9bfdcc944c6f303603aa9c2b2f7ccf63d91fc4c485b9bbb9f4"
     },
     "paper_fill.py": {
@@ -28,7 +29,7 @@ PINNED = {
         "_safe": "577c4d1a9927bea25660a9a46802c84fabf3b5d44889bfed82a86e0f042cd002",
         "_snap": "e19ffc0d73e86ae849dff85c6bec6c1e6219883f5c3e1897a2d9666e1bef9f29",
         "taker_side_levels": "2e794b626132b0f1320049fa51683053c6ba948e3b8292aa2bc4a84209efa05b",
-        "_paper_fill_core": "f105d27460b921dd438f9461805288856914bfce6f6fad0e0bc6690be5e5b0c2",
+        "_paper_fill_core": "68200a5a1d77c50399ae185c924b97172048e63ccd833beb36da74bb34444923",
         "paper_fill": "ab0b29144b0b1990a09d9df4700bed9337407a16caf6376999d4523bb6d8da62",
         "book10l_at": "9bfbe8e684e475716e132b2105d7ad27eb43a3fc681db481601698f8b20f62d9",
         "book10l_missing_seconds": "3683b425ea5cf93da7aec4fcebbd26e26e9e5baaf75c52f672ae01d1b2f5b38d",

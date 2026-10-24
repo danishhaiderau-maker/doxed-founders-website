@@ -21,7 +21,8 @@ def test_roster_completeness_and_empty_pending():
     assert not pf.PENDING_MIGRATION
     assert tf.MIGRATED_LANES <= registry
     for lane in tf.MIGRATED_LANES:
-        assert pf.TILE_FILL_SITES[lane] == (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"))
+        assert pf.TILE_FILL_SITES[lane] == (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
+                                            ("tile_fill.py", "price_exit_resident"))  # REALISM_V2 exchange stop
 
 
 def test_every_fill_site_in_roster_passes_checker_and_book_is_positional():
@@ -196,13 +197,19 @@ class _Clock:
         self.now += s
 
 
-def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10")):
+def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None, **extra):
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
-    return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_paper_exit_attempt_trigger", "_paper_exit_missing_book_seconds",
+    return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_paper_exit_missing_book_seconds",
+                    "_paper_unpriced_marks", "_paper_exit_model_times", "_tp1_pending_action",
                     "_paper_lane_entry_result", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
-                    "_order_entry_decision", *extra_names],
+                    "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
+                    "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close",
+                    "_paper_entry_rest_drop", *extra_names],
                    trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
-                   _normalize_order_side_to_dir=lambda v: "LONG" if str(v).upper() in ("BUY", "LONG") else "SHORT")
+                   ACTIVE_TILE_REGISTRY=cpc.ACTIVE_TILE_REGISTRY, _is_paper_book_lane=lambda p: True,
+                   _exchange_stop_trigger=(xstop or (lambda pos, a, b: None)),
+                   _normalize_order_side_to_dir=lambda v: "LONG" if str(v).upper() in ("BUY", "LONG") else "SHORT",
+                   **extra)
 
 
 def test_b2_tp1_gate_never_sleeps_and_prices_after_due(monkeypatch):
@@ -212,20 +219,62 @@ def test_b2_tp1_gate_never_sleeps_and_prices_after_due(monkeypatch):
     pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "qty": 1.0}
     assert ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5) == ("WAIT", None)
     assert pos["_tp1_pending"]["due_ts"] == 1001.5
+    clk.now = 1001.0  # the gate reads the wall clock; `now` is the trigger time
     assert ns["_tp1_gate"](pos, "TP1", 1001.0, "LONG", 0.5) == ("WAIT", None)
+    clk.now = 1001.6
     state, leg = ns["_tp1_gate"](pos, "TP1", 1001.6, "LONG", 0.5)
     assert state == "DUE" and leg["status"] == "FILLED" and leg["_trigger_ts"] == 1000.0
     assert leg["fill_ts"] == 1001.5 and leg["fill_model"] == pf.FILL_MODEL
     assert clk.slept == []  # no sleep anywhere in the TP1 path
 
 
-def test_b2_stale_pending_restarts(monkeypatch):
-    _use_book(monkeypatch)
-    ns = _lane_ns(_Clock(0))
-    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0}
+def test_realism_v2_tp1_late_book_row_retries_same_model_time_then_prices(monkeypatch):
+    """TP1_UNPRICED_LEG root cause (HM 23 Oct): the book row for trigger + delay lands ~1-2 s late; the leg used to be
+    priced once at due and booked at its level with fill_valid False. Now it re-prices the SAME model time."""
+    landed = {"ok": False}
+    monkeypatch.setattr(pf, "book10l_at", lambda t: ({**BOOK, "s": int(t) - 1} if landed["ok"] else None))
+    clk = _Clock(1000.0)
+    ns = _lane_ns(clk)
+    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "trade_id": "x"}
+    assert ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5) == ("WAIT", None)
+    clk.now = 1001.6
+    assert ns["_tp1_gate"](pos, "TP1", 1100.0, "LONG", 0.5) == ("WAIT", None)  # row not written yet: WAIT
+    assert pos["_tp1_pending"]["trigger_ts"] == 1000.0  # never restarted / re-triggered
+    landed["ok"] = True
+    clk.now = 1003.4
+    state, leg = ns["_tp1_gate"](pos, "TP1", 1003.4, "LONG", 0.5)
+    assert state == "DUE" and leg["status"] == "FILLED" and leg["price"] == 99.0
+    assert leg["fill_ts"] == 1001.5 and leg["_trigger_ts"] == 1000.0 and leg["model_fill_ts"] == 1001.5
+    assert leg["pricing_attempts"] == 2 and leg["priced_wall_ts"] == 1003.4
+    assert leg["delay_source"] == "default_until_n10" and clk.slept == []
+
+
+def test_realism_v2_tp1_no_book_after_force_window_is_unpriced_not_level(monkeypatch):
+    monkeypatch.setattr(pf, "book10l_at", lambda t: None)
+    clk = _Clock(1000.0)
+    ns = _lane_ns(clk)
+    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "trade_id": "x"}
     ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5)
-    assert ns["_tp1_gate"](pos, "TP1", 1100.0, "LONG", 0.5) == ("WAIT", None)  # older than TP1_PENDING_MAX_S
-    assert pos["_tp1_pending"]["trigger_ts"] == 1100.0
+    clk.now = 1001.5 + tf.EXIT_FORCE_AFTER_S - 0.1
+    assert ns["_tp1_gate"](pos, "TP1", clk.now, "LONG", 0.5) == ("WAIT", None)
+    clk.now = 1001.5 + tf.EXIT_FORCE_AFTER_S + 0.1
+    state, leg = ns["_tp1_gate"](pos, "TP1", clk.now, "LONG", 0.5)
+    assert state == "DUE" and leg["price"] is None and leg["exit_pricing_basis"] == "NO_BOOK_UNPRICED"
+    assert leg.get("delay_source") != "FORCED_NO_DELAY"
+
+
+def test_realism_v2_tp1_committed_action_survives_policy_change(monkeypatch):
+    _use_book(monkeypatch)
+    ns = _lane_ns(_Clock(1000.0))
+    act = types.SimpleNamespace(close_fraction=0.5, remaining_fraction=0.5, reason="GS_LADDER_TP1",
+                                partial_key="ladder_tp1", stop_price=None, peak_price=101.0, book_price=100.5)
+    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0}
+    ns["_tp1_gate"](pos, "ladder_tp1", 1000.0, "LONG", 0.5, act)
+    got = ns["_tp1_pending_action"](pos)
+    assert got.reason == "GS_LADDER_TP1" and got.close_fraction == 0.5 and got.partial_key == "ladder_tp1"
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    seg = src[src.index("def _apply_family_tile_exit"):src.index("def _apply_position_exits")]
+    assert "_tp1_pending_action(source_pos)" in seg and "TP1_UNPRICED_LEG" in seg
 
 
 def test_b2_bot_tp1_site_returns_before_commit_and_prunes():
@@ -235,7 +284,8 @@ def test_b2_bot_tp1_site_returns_before_commit_and_prunes():
     assert 'source_pos.pop("_tp1_pending"' in seg and "leg_fallback" in seg and "leg_fresh_eligible" in seg
 
 
-def test_b3_forced_close_never_waits_and_is_not_fresh(monkeypatch):
+def test_realism_v2_forced_close_is_bot_sent_at_model_time(monkeypatch):
+    """REALISM_V2 F4: forced / admin closes are BOT_SENT market orders at trigger + delay (no `now - 0.3 s`)."""
     _use_book(monkeypatch)
     for reason in ("DEPLOY_FORCE_FLAT", "ADMIN_MANUAL_CLOSE", "TILE_RETIRED", "MANUAL_CLOSE"):
         clk = _Clock(5000.0)
@@ -243,31 +293,65 @@ def test_b3_forced_close_never_waits_and_is_not_fresh(monkeypatch):
         pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "_exit_eval_price": 100.0}
         out, marks = ns["_paper_lane_exit"](pos, reason)
         px, sim = out
-        assert px == 99.0 and sim["delay_source"] == "FORCED_NO_DELAY" and sim["delay_s"] == 0.0
-        assert sim["fill_ts"] <= 5000.0 + 1e-9  # latest complete second at or before now: no look-ahead
-        assert marks["exit_status"] == "PAPER_FILL_FORCED" and marks["fresh_data_excluded"] is True
+        assert px == 99.0 and sim["delay_source"] == "default_until_n10" and sim["delay_s"] == 1.5
+        assert sim["fill_ts"] == 5001.5 and abs(sum(clk.slept) - 1.5) < 1e-9
+        assert marks["exit_status"] == "PAPER_FILL" and marks["exit_pricing_basis"] == "MODEL_TIME"
+        assert marks["exit_order_class"] == "BOT_SENT" and marks["exit_model_fill_ts"] == 5001.5
         assert "exit_status" not in pos and "fresh_data_excluded" not in pos  # nothing written before the claim
-        assert clk.slept == []
 
 
-def test_b3_forced_without_book_is_forced_no_book(monkeypatch):
+def test_realism_v2_no_book_exit_is_unpriced_never_a_ticker_fallback(monkeypatch):
     _use_book(monkeypatch, book=None)
     clk = _Clock(5000.0)
     ns = _lane_ns(clk)
     pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5}
     out, marks = ns["_paper_lane_exit"](pos, "DEPLOY_FORCE_FLAT")
-    assert out is None and clk.slept == []
-    assert marks["exit_status"] == "FORCED_NO_BOOK" and marks["exit_fallback"] == "LEGACY_BBO_FALLBACK_NO_BOOK"
+    assert out is None
+    assert marks["exit_status"] == "NO_BOOK_UNPRICED" and marks["exit_fallback"] is None
+    assert marks["exit_pricing_basis"] == "NO_BOOK_UNPRICED" and marks["fill_valid"] is False
     assert marks["fresh_data_excluded"] is True and "exit_status" not in pos
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    seg = _func_src(src, "_paper_lane_exit") + _func_src(src, "_paper_forced_exit") + _func_src(src, "_tp1_gate")
+    for gone in ("REPRICED_CURRENT_TIME", "FORCED_NO_DELAY", "LEGACY_BBO_FALLBACK", "FORCED_LOOKBACK_S"):
+        assert gone not in seg, gone
 
 
-def test_b3_overdue_exit_goes_no_wait(monkeypatch):
+def test_realism_v2_overdue_exit_prices_its_model_time_without_waiting(monkeypatch):
     _use_book(monkeypatch)
     clk = _Clock(5000.0)
     ns = _lane_ns(clk)
     pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 4960.0}
-    (_, sim), _marks = ns["_paper_lane_exit"](pos, "TIME_EXIT")
-    assert sim["delay_source"] == "FORCED_NO_DELAY" and clk.slept == []
+    (_, sim), marks = ns["_paper_lane_exit"](pos, "TIME_EXIT")
+    assert sim["fill_ts"] == 4961.5 and clk.slept == [] and marks["exit_model_trigger_to_fill_s"] == 1.5
+    assert marks["exit_book_wait_s"] == 5000.0 - 4961.5  # visible per row: how late the pricing happened
+
+
+def test_realism_v2_exchange_stop_wins_race_against_in_flight_bot_exit(monkeypatch):
+    _use_book(monkeypatch)
+    clk = _Clock(5000.0)
+    hit = {"trigger_ts": 5000.7, "trigger_basis": "LAST_TRADE"}
+    ns = _lane_ns(clk, xstop=lambda pos, a, b: hit if a < hit["trigger_ts"] <= b else None)
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 5000.0,
+           "exchange_stop_bp": 35.0, "exchange_stop_px": 99.0}
+    (px, sim), marks = ns["_paper_lane_exit"](pos, "PHYSICAL_HARD_STOP_10PCT")
+    assert marks["exit_order_class"] == "EXCHANGE_RESIDENT" and marks["exit_reason_fired"] == "EXCHANGE_STOP_35BP"
+    assert marks["exit_race_lost_by"] == "PHYSICAL_HARD_STOP_10PCT"
+    assert sim["fill_ts"] == 5000.7 and sim["delay_s"] == 0.0 and sim["delay_source"] == "EXCHANGE_RESIDENT_NO_DELAY"
+    assert marks["exit_pricing_basis"] == "EXCHANGE_RESIDENT_TRIGGER_INSTANT"
+    # no resident trigger in flight -> the bot order fills at trigger + delay
+    ns2 = _lane_ns(_Clock(5000.0))
+    (_, sim2), marks2 = ns2["_paper_lane_exit"](dict(pos), "PHYSICAL_HARD_STOP_10PCT")
+    assert marks2["exit_order_class"] == "BOT_SENT" and sim2["fill_ts"] == 5001.5
+
+
+def test_realism_v2_exchange_stop_exit_fills_at_trigger_instant(monkeypatch):
+    _use_book(monkeypatch)
+    clk = _Clock(5000.0)
+    ns = _lane_ns(clk)
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 4999.2}
+    (px, sim), marks = ns["_paper_lane_exit"](pos, "EXCHANGE_STOP_35BP")
+    assert sim["fill_ts"] == 4999.2 and sim["delay_s"] == 0.0 and clk.slept == []
+    assert marks["exit_order_class"] == "EXCHANGE_RESIDENT"
 
 
 def test_nit_exit_uses_exit_trigger_ts_and_waits_only_remaining_delay(monkeypatch):
@@ -309,8 +393,12 @@ def test_b5_no_fill_shadow_row_fields(monkeypatch):
         a = 200.0 if seq["n"] == 1 else 210.0
         return {"s": int(t) - 1, "a": [[a, 1.0]], "b": [[199.0, 1.0]]}
     monkeypatch.setattr(pf, "book10l_at", stepped)
+    import quote_trigger as qt
+    monkeypatch.setattr(qt, "trades_between", lambda a, b: [])
     res = ns["_paper_lane_entry_result"](order, 1000.0)
-    assert res["status"] == "NO_FILL_IOC_CAP"
+    # REALISM_V2: the walk got nothing inside the 5 bp cap; the remainder rested 3 s with no trade-through -> NO_FILL
+    assert res["status"] == "NO_FILL" and res["entry_walk_status"] == "NO_FILL_IOC_CAP"
+    assert res["entry_unfilled_qty"] == 0.5 and res["entry_order_model"] == "WALK_THEN_REST"
     row = ns["_paper_no_fill_shadow_row"](order, "PAPER_IOC_NO_FILL_IOC_CAP")
     for k in ("signal_ts", "cap_px", "delay_s", "delay_source", "depth_snapshot_signal", "depth_snapshot_fill"):
         assert row[k] is not None, k
@@ -418,7 +506,9 @@ def test_resid_a_inline_close_never_waits(monkeypatch):
     ns["_PAPER_EXIT_TLS"].no_wait = True
     pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 5000.0}
     (_, sim), marks = ns["_paper_lane_exit"](pos, "TIME_EXIT")  # not a forced reason, trigger just now
-    assert sim["delay_source"] == "FORCED_NO_DELAY" and marks["fresh_data_excluded"] is True and clk.slept == []
+    # REALISM_V2 F4: priced at the model time if its row exists (here the stub book always has it), else unpriced
+    assert sim["fill_ts"] == 5001.5 and marks["exit_pricing_basis"] == "MODEL_TIME" and clk.slept == []
+    ns["_PAPER_EXIT_TLS"].no_wait = False
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     seg = src[src.index("def _dispatch_position_close"):src.index("PROTECTIVE_FALLBACK_HARD_BP =")]
     assert "_PAPER_EXIT_TLS.no_wait = True" in seg and seg.index("no_wait = True") < seg.index("close_position(pos, reason)")
@@ -432,22 +522,18 @@ def test_resid_b_close_position_applies_marks_after_claim_only():
     assert seg.index("if not close_claimed:") < seg.index("_apply_paper_exit_marks(source_pos")
 
 
-def test_resid_c_tp1_restart_log_and_livelock_guard(monkeypatch):
-    _use_book(monkeypatch)
-    ns = _lane_ns(_Clock(0))
-    log = ns["logger"]
+def test_realism_v2_tp1_never_restarts_or_prices_without_delay(monkeypatch):
+    """The stale restart / FORCED_NO_DELAY livelock path is gone: the marker keeps its first trigger."""
+    _use_book(monkeypatch, book=None)
+    clk = _Clock(1000.0)
+    ns = _lane_ns(clk)
     pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "trade_id": "x"}
-    t = 1000.0
-    states = []
-    for _ in range(5):
-        states.append(ns["_tp1_gate"](pos, "TP1", t, "LONG", 0.5)[0])
-        t += 6.0  # every look is past TP1_PENDING_MAX_S: the marker is stale each time
-    assert states[:3] == ["WAIT", "WAIT", "WAIT"] and "DUE" in states[3:]
-    assert any("stale marker restarted" in m for _, m in log.lines)
-    state, leg = ns["_tp1_gate"]({"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0,
-                                   "_tp1_pending": {"key": "TP1", "trigger_ts": 0.0, "restarts": 3}}, "TP1", 100.0, "LONG", 0.5)
-    assert state == "DUE" and leg["delay_source"] == "FORCED_NO_DELAY" and leg["delay_s"] == 0.0
-    assert any(level == "error" and "livelock guard" in m for level, m in log.lines)
+    ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5)
+    for k in range(1, 4):
+        clk.now = 1000.0 + 2.0 * k
+        assert ns["_tp1_gate"](pos, "TP1", clk.now, "LONG", 0.5) == ("WAIT", None)
+    assert pos["_tp1_pending"]["trigger_ts"] == 1000.0 and pos["_tp1_pending"]["attempts"] == 3
+    assert "restarts" not in pos["_tp1_pending"]
 
 
 def test_resid_c_pending_marker_cancelled_when_policy_stops_returning_tp1():
@@ -855,3 +941,50 @@ def test_slippage_helpers_are_pure_measurement_and_never_touch_fill_sites():
         for module, func in sites:
             assert not pf.fill_site_violations((ROOT / module).read_text(), func), (lane, func)
     assert not pf.tile_module_violations((ROOT / "tile_fill.py").read_text(), "tile_fill.py", (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")))
+
+
+def test_realism_v2_walk_then_rest_partial_and_trade_through(monkeypatch):
+    import quote_trigger as qt
+    # signal book ask 100 (cap 100.05) has 0.2 size; fill-second book the same -> walk fills 0.2 of 0.5
+    monkeypatch.setattr(pf, "book10l_at", lambda t: {"s": int(t) - 1, "a": [[100.0, 0.2], [101.0, 5.0]],
+                                                     "b": [[99.0, 1.0]]})
+    monkeypatch.setattr(qt, "trades_between", lambda a, b: [{"ts": a + 1.0, "px": 100.04, "amt": -0.1}])
+    clk = _Clock(1000.0)
+    ns = _lane_ns(clk)
+    order = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "signal_dir": "BUY", "qty": 0.5,
+             "signal_created_ts": 999.0}
+    assert ns["_paper_lane_entry_result"](order, 1000.6) is None  # walk done, resting until ttl + tape lag
+    res = ns["_paper_lane_entry_result"](order, 1000.5 + 3.0 + 1.0)
+    assert res["status"] == "PARTIAL" and abs(res["filled_qty"] - 0.3) < 1e-9
+    assert abs(res["entry_unfilled_qty"] - 0.2) < 1e-9 and res["entry_rest_filled_qty"] == 0.1
+    assert res["entry_walk_filled_qty"] == 0.2 and res["entry_rest_end_reason"] == "TTL_CANCEL"
+    assert ns["_paper_lane_entry_result"](order, 2000.0) is res  # cached
+
+
+def test_realism_v2_maker_rest_queue_reset_on_reprice_and_drop(monkeypatch):
+    import quote_trigger as qt
+    monkeypatch.setattr(pf, "book10l_at", lambda t: {"s": int(t) - 1, "a": [[100.1, 1.0]], "b": [[100.0, 2.0]]})
+    prints = {"rows": []}
+    monkeypatch.setattr(qt, "trades_between", lambda a, b: [r for r in prints["rows"] if a < r["ts"] <= b])
+    clk = _Clock(1000.0)
+    tm = {"t1": {"signal_ref": {"adaptive_entry_decision": {"action": "MAKER", "exec": {"kind": "PASSIVE",
+                                                                                         "ttl_sec": 900, "reprice_sec": 60}}}}}
+    ns = _lane_ns(clk)
+    ns["trades_map"] = tm
+    order = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "signal_dir": "BUY", "qty": 1.0,
+             "signal_created_ts": 999.0, "limit_price": 100.0}
+    assert ns["_paper_lane_entry_result"](order, 1001.0) is None
+    assert order["_entry_rest"]["queue_ahead"] == 2.0  # joined behind 2.0 at the bid
+    prints["rows"].append({"ts": 1005.0, "px": 100.0, "amt": -2.5})  # depletes the queue, fills 0.5
+    assert ns["_paper_lane_entry_result"](order, 1010.0) is None
+    assert abs(order["_entry_rest"]["remaining"] - 0.5) < 1e-12
+    order["limit_price"] = 100.0 + 1e-6 * 0 + 0.0  # same price: no reset
+    order["limit_price"] = 99.9  # reprice -> queue reset to the book size at the new price (0 here)
+    assert ns["_paper_lane_entry_result"](order, 1020.0) is None
+    assert order["_entry_rest"]["reprices"] == 1 and order["_entry_rest"]["queue_ahead"] == 0.0
+    assert ns["_paper_entry_rest_drop"](order, "REGIME_PASSIVE_TTL_UNFILLED") is True
+    res = order["paper_fill_result"]
+    assert res["status"] == "PARTIAL" and res["price"] == 100.0 and abs(res["entry_unfilled_qty"] - 0.5) < 1e-12
+    assert res["entry_order_model"] == "MAKER_REST" and res["entry_rest_reprices"] == 1
+    empty = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "_entry_rest": {"fills": []}}
+    assert ns["_paper_entry_rest_drop"](empty, "X") is False  # nothing filled -> the caller cancels (NO_FILL)

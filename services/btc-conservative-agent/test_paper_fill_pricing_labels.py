@@ -154,8 +154,9 @@ def test_non_paper_orders_are_refused_and_tagged_invalid():
 
 
 def test_no_book_exit_marks_and_unpriced_leg_are_non_fills():
-    assert BOT.count('fill_valid=False, non_fill_category="NO_BOOK_EXIT"') == 1
-    assert BOT.count('"fill_valid": False, "non_fill_category": "NO_BOOK_EXIT"') == 1
+    # REALISM_V2 F4: the inline forced path marks NO_BOOK through the shared _paper_unpriced_marks (one source)
+    assert '_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK")' in BOT
+    assert BOT.count('"fill_valid": False,\n            "non_fill_category": "NO_BOOK_EXIT"') == 1
     assert 'pos["non_fill_category"] = "TP1_UNPRICED_LEG"' in BOT
     assert '"fresh_epoch_id": _fresh_epoch_dv()' in BOT and '"all_legs_book10l": _all_legs_book10l(pos)' in BOT
 

@@ -5193,9 +5193,15 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         completed_partials=pos.get("policy_completed_partials") or (),
         peak_price=current_peak, **exit_kwargs,
     )
+    if source_pos.get("_tp1_pending") and _is_paper_book_lane(pos):
+        # REALISM_V2 PR2: a pending TP1 leg is a SENT reduce-only market order; it completes with its own committed
+        # action whatever the policy returns this tick (a later action is evaluated on the next tick).
+        _committed = _tp1_pending_action(source_pos)
+        if _committed is not None:
+            action = _committed
     if not action:
         if source_pos.get("_tp1_pending"):
-            _tp1_cancel_pending(source_pos, "policy no longer returns the TP1 action")
+            _tp1_cancel_pending(source_pos, "policy no longer returns the TP1 action (legacy marker without action)")
         with trade_lock:
             source_pos["policy_peak_price"] = current_peak
             if "policy_state" in pos:
@@ -5207,8 +5213,9 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         # The rule's own booking price (side-correct trigger tick, or the
         # resting maker target) is what close_position books.
         pos["_exit_eval_price"] = float(book_price)
-    if getattr(action, "maker", False) and float(action.remaining_fraction) <= 0:
+    if getattr(action, "maker", False) and float(action.remaining_fraction) <= 0 and not _is_paper_book_lane(pos):
         pos["exit_fee_type"] = "MAKER"
+    # REALISM_V2: no maker exits on paper-book tiles; every policy exit is a BOT_SENT reduce-only market walk.
     fill_px = float(book_price) if book_price else float(price)
     _leg_trigger_px = fill_px  # the rule's trigger level; fill_px is replaced by the leg's book fill below
     _tmeta = pos.pop("_trigger_meta", None) or {}
@@ -5223,19 +5230,26 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         _tp1_cancel_pending(source_pos, f"policy now returns a different action ({action.reason})")
     if float(action.remaining_fraction) > 0 and _is_paper_book_lane(pos):
         # Partial (TP1) legs: same shared pricer, no sleep under position_evaluation_lock (HM B2).
-        _gate, _leg = _tp1_gate(source_pos, action.partial_key, _leg_trigger_ts, direction, float(action.close_fraction))
+        _gate, _leg = _tp1_gate(source_pos, action.partial_key, _leg_trigger_ts, direction, float(action.close_fraction),
+                                action=action)
         if _gate == "WAIT":
+            with trade_lock:
+                source_pos["policy_peak_price"] = current_peak
+                if "policy_state" in pos:
+                    source_pos["policy_state"] = copy.deepcopy(pos["policy_state"])
             return False
         _leg_trigger_ts = float(_leg.pop("_trigger_ts"))
         _leg_fill = _leg
         if _leg_fill.get("status") == "FILLED" and float(_leg_fill.get("price") or 0) > 0:
             fill_px = float(_leg_fill["price"])
-            if _leg_fill.get("delay_source") == "FORCED_NO_DELAY":
-                pos["fresh_data_excluded"] = True  # livelock-guard leg: priced without delay, never fresh
         else:
-            pos["fresh_data_excluded"] = True  # unpriced leg: trigger-price fallback, never fresh data
-            pos["fill_valid"] = False  # not a paper fill: the trigger price is booked, the row is counted nowhere
+            # REALISM_V2 F4: no book within EXIT_FORCE_AFTER_S of the model time -> the leg is UNPRICED (no trigger /
+            # ticker price is booked), the row is UNVERIFIED and counted nowhere.
+            fill_px = None
+            pos["fresh_data_excluded"] = True
+            pos["fill_valid"] = False
             pos["non_fill_category"] = "TP1_UNPRICED_LEG"
+            pos["exit_pricing_basis"] = "NO_BOOK_UNPRICED"
         with trade_lock:
             source_pos.pop("_tp1_pending", None)
         pos.pop("_tp1_pending", None)
@@ -5250,21 +5264,25 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
     pos.setdefault("policy_original_qty", original_qty)
     close_qty = max(0.0, original_qty * close_fraction) if remaining_after > 0 else 0.0
     dir_factor = 1.0 if direction == "LONG" else -1.0
+    _leg_unpriced = fill_px is None
+    if _leg_unpriced:
+        fill_px = _leg_trigger_px  # qty accounting only; the receipt below carries price None and no realized pnl
     realized_gross = (fill_px - entry) * dir_factor * close_qty
     # Only genuine reductions belong in the partial-realized accumulator.
     # A terminal family action is priced once by close_position's remaining
     # runner calculation. Recording it here as a partial and then closing the
     # still-full position doubled both PnL USD and margin-return percentage.
-    if remaining_after > 0:
+    if remaining_after > 0 and not _leg_unpriced:
         pos["policy_partial_realized_gross_usd"] = round(
             _buf_float(pos.get("policy_partial_realized_gross_usd"), 0.0) + realized_gross, 8
         )
         pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
     receipt = {
         "ts": utc_iso(), "reason": reason, "close_fraction": close_fraction,
-        "remaining_fraction": remaining_after, "price": fill_px, "policy_id": pos.get("policy_id"),
+        "remaining_fraction": remaining_after, "price": None if _leg_unpriced else fill_px,
+        "policy_id": pos.get("policy_id"),
         "closed_qty": close_qty if remaining_after > 0 else float(pos.get("qty") or 0),
-        "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 else None,
+        "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 and not _leg_unpriced else None,
         "cumulative_realized_net_usd": _buf_float(
             pos.get("policy_partial_realized_net_usd"), 0.0
         ),
@@ -5272,7 +5290,17 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         "leg_fill_ts": (_leg_fill or {}).get("fill_ts"),
         "leg_priced_by": "paper_fill_book10l" if (_leg_fill or {}).get("status") == "FILLED" else None,
         "leg_fresh_eligible": bool(_leg_fill is None or (_leg_fill or {}).get("status") == "FILLED"),
-        "leg_fallback": ("TRIGGER_PRICE_UNPRICED_LEG" if _leg_fill is not None and _leg_fill.get("status") != "FILLED" else None),
+        "leg_fallback": ("NO_BOOK_UNPRICED" if _leg_fill is not None and _leg_fill.get("status") != "FILLED" else None),
+        "leg_exit_order_class": "BOT_SENT" if _leg_fill is not None else None,
+        # REALISM_V2 steering 3: the real model times of this leg, per row (trigger -> model fill = priced delay;
+        # priced_wall_ts - model_fill_ts = how late the book row landed).
+        "leg_model_fill_ts": (_leg_fill or {}).get("model_fill_ts"),
+        "leg_priced_delay_s": (_leg_fill or {}).get("delay_s"),
+        "leg_priced_delay_source": (_leg_fill or {}).get("delay_source"),
+        "leg_priced_wall_ts": (_leg_fill or {}).get("priced_wall_ts"),
+        "leg_book_wait_s": (round(float(_leg_fill["priced_wall_ts"]) - float(_leg_fill["model_fill_ts"]), 3)
+                            if (_leg_fill or {}).get("priced_wall_ts") and (_leg_fill or {}).get("model_fill_ts") else None),
+        "leg_pricing_attempts": (_leg_fill or {}).get("pricing_attempts"),
         "leg_provenance": __import__("tile_fill").provenance(_leg_fill) if _leg_fill is not None else None,
         "leg_trigger_price": _leg_trigger_px if _leg_fill is not None else None,
         "leg_pricer_signal_ts": (_leg_fill or {}).get("signal_ts"),
@@ -5411,10 +5439,64 @@ def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: fl
     pos.setdefault("trigger_price_source", _qt.DEFAULT_SOURCE)
 
 
+def _exchange_stop_fields(pos: dict) -> dict:
+    """REALISM_V2: the position's exchange-resident stop, computed ONCE from the paper entry fill and never moved
+    (stamped on the position; LIVE_CODE). {} when the tile has no exchange-stop plan."""
+    import order_model as _om
+    if pos.get("exchange_stop_px"):
+        return {k: pos.get(k) for k in ("exchange_stop_px", "exchange_stop_bp")}
+    lane = str(pos.get("research_lane") or "").upper()
+    lvl = _om.exchange_stop_level(pos.get("dir"), _entry_fill_sim(pos).get("avg_price") or pos.get("entry"),
+                                  ACTIVE_TILE_REGISTRY.get(lane))
+    if not lvl:
+        return {}
+    pos.update(lvl)
+    return lvl
+
+
+def _exchange_stop_trigger(pos: dict, t0: float, t1: float):
+    """First trade print at/through, or executable book top reaching, the resident stop level in (t0, t1]."""
+    import quote_trigger as _qt
+    import paper_fill as _pf
+    lvl = _exchange_stop_fields(pos)
+    if not lvl or t1 <= t0:
+        return None
+    rows = _qt.book_rows_between(t0, t1, _pf.book10l_at)
+    trades = _qt.trades_between(t0, t1)
+    return _qt.first_level_trigger(pos.get("dir"), _qt.KIND_STOP, lvl["exchange_stop_px"], t0, t1,
+                                   book_rows=rows, trades=trades)
+
+
 def _realism_level_stops(pos: dict, price: float, now: float, src: str, *, exit_source: str,
                          close_async: bool) -> bool:
-    """Hook for known-level stops (exchange-resident stop vs paper hard stop). PR1: no-op (False)."""
-    return False
+    """REALISM_V2 PR2: the exchange-resident stop (min(hard + 25 bp, liq - 15 bp), anchored at the entry fill, never
+    moved) fires on the first trade at/through or book top reaching its level since the last evaluation, whatever the
+    tile's TRIGGER_PRICE_SOURCE. It closes the whole open qty (resized on partials) as EXCHANGE_RESIDENT at the trigger
+    instant (delay 0). The paper hard stop stays in the policy (BOT_SENT); the in-flight race against it is settled in
+    _paper_lane_exit."""
+    import order_model as _om
+    if not _is_paper_book_lane(pos) or pos.get("_tp1_pending"):
+        return False
+    start = max(float(pos.get("_xstop_cursor_ts") or 0), float(pos.get("entry_ts") or 0), float(now) - 30.0)
+    hit = _exchange_stop_trigger(pos, start, float(now))
+    pos["_xstop_cursor_ts"] = float(now)
+    if not hit:
+        return False
+    reason = _om.exchange_stop_reason(pos["exchange_stop_bp"])
+    pos["exit_trigger_ts"] = float(hit["trigger_ts"])
+    pos["exit_trigger_eval_ts"] = time.time()
+    pos["exit_trigger_price"] = float(pos["exchange_stop_px"])
+    pos["exit_trigger_mark_price"] = float(price or 0) or None
+    pos["exit_trigger_source"] = str(exit_source)
+    pos["exit_order_class"] = _om.EXCHANGE_RESIDENT
+    pos["exit_policy_id"] = getattr(_patient_chase_policy(str(pos.get("research_lane") or "").upper()), "POLICY_ID", None)
+    _stamp_trigger_basis(pos, str(pos.get("dir") or "").upper(), float(hit["trigger_ts"]), price,
+                         {"basis": hit["trigger_basis"], "quote_stale": False})
+    if close_async:
+        _dispatch_position_close(pos, reason)
+    else:
+        close_position(pos, reason)
+    return True
 
 
 def _apply_position_exits(pos: dict, price: float, now: float = None, *,
@@ -7171,12 +7253,157 @@ def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
                "delay_source": delay_source, "requested_qty": order.get("requested_qty")}
         order["paper_fill_result"] = res
         return res
-    res = _tf.entry_fill(direction, float(order.get("requested_qty") or order.get("qty") or 0),
-                         signal_ts, delay_s, delay_source)
-    if force and res.get("status") == "REJECT_NO_BOOK":
-        return res  # a forced (immediate) look is not cached: the gate path may still price it from a later book
+    model = _paper_entry_order_model(order, lane)
+    if model.get("entry_order_model") == "MAKER_REST":
+        return _paper_entry_maker_rest(order, direction, signal_ts, delay_s, delay_source, model, now, force=force)
+    walk = order.get("_entry_walk_result")
+    if not isinstance(walk, dict):
+        walk = _tf.entry_fill(direction, float(order.get("requested_qty") or order.get("qty") or 0),
+                              signal_ts, delay_s, delay_source)
+        if walk.get("status") == "REJECT_NO_BOOK":
+            if force:
+                return walk  # a forced (immediate) look is not cached: the gate path may still price it later
+            order["paper_fill_result"] = walk
+            return walk
+        order["_entry_walk_result"] = walk
+    if model.get("entry_order_model") != "WALK_THEN_REST" or walk.get("status") == "FILLED" \
+            or walk.get("cap_px") is None or walk.get("fill_ts") is None:
+        res = {**walk, **model}
+        order["paper_fill_result"] = res
+        return res
+    # REALISM_V2 PR2 WALK_THEN_REST: the remainder rests at the 5 bp protection limit (cap_px) under maker rules
+    # (trade-through, or prints at the limit after the queue ahead is depleted; partials allowed) until the TTL,
+    # then cancels. Evaluated once the trade tape for the whole window has landed (or now, when forced).
+    rest_t0 = float(walk["fill_ts"])
+    rest_t1 = rest_t0 + float(model.get("entry_rest_ttl_s") or 3.0)
+    if not force and now < rest_t1 + PAPER_ENTRY_TAPE_LAG_S:
+        return None
+    res = _paper_entry_rest_finish(order, direction, walk, rest_t0, min(rest_t1, now), model, "TTL_CANCEL")
     order["paper_fill_result"] = res
     return res
+
+
+PAPER_ENTRY_TAPE_LAG_S = 1.0  # the trades tape lands ~<1 s late; the rest window is evaluated after it is complete
+
+
+def _paper_entry_order_model(order: dict, lane: str) -> dict:
+    """REALISM_V2 PR2: the entry order type from the tile spec + regime cell (data-driven, no per-tile code)."""
+    import order_model as _om
+    cached = order.get("_entry_order_model")
+    if isinstance(cached, dict):
+        return cached
+    tid = order.get("trade_id")
+    signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+    decision = (signal or {}).get("adaptive_entry_decision") or order.get("adaptive_entry_decision") or {}
+    cell = decision.get("exec") if decision.get("action") == "MAKER" else None
+    model = _om.entry_model(ACTIVE_TILE_REGISTRY.get(lane), decision, cell)
+    order["_entry_order_model"] = model
+    return model
+
+
+def _paper_entry_rest_finish(order: dict, direction: str, walk: dict, t0: float, t1: float, model: dict,
+                             why: str) -> dict:
+    """Advance the walk remainder resting at its protection limit over (t0, t1] and close the entry."""
+    import order_model as _om
+    import quote_trigger as _qt
+    req = float(order.get("requested_qty") or order.get("qty") or 0)
+    remaining = max(0.0, req - float(walk.get("filled_qty") or 0))
+    limit = float(walk["cap_px"])
+    queue = _om.queue_ahead_at(direction, limit, walk.get("depth_snapshot_fill"))
+    step = _om.maker_rest_step(direction, limit, remaining, queue, _qt.trades_between(t0, t1)) if t1 > t0 else \
+        {"fills": [], "remaining": remaining, "queue_ahead": queue}
+    out = _om.combine_entry(walk, step["fills"], req, model=model, rest_end_ts=t1, rest_end_reason=why)
+    out.update({"entry_rest_limit_px": limit, "entry_rest_queue_ahead_start": queue,
+                "entry_rest_start_ts": t0})
+    return out
+
+
+def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay_s, delay_source: str, model: dict,
+                            now: float, *, force: bool = False):
+    """REALISM_V2 PR2 MAKER_REST (B1 / B2 regime limits): the limit rests from signal + delay (sent) at
+    order["limit_price"], which _process_family_regime_entry reprices at the LIMIT_UPDATED cadence; every reprice
+    resets the queue position (queue ahead = book size at the new price). Fills come only from trade-through or
+    queue-depleting prints at the limit (partials allowed). A TOUCH taker fallback walks the remainder from the book;
+    TTL DROP closes the entry with whatever filled (NO_FILL when nothing). Never priced from the ticker."""
+    import order_model as _om
+    import quote_trigger as _qt
+    import paper_fill as _pf
+    import tile_fill as _tf
+    rest_t0 = signal_ts + float(delay_s)
+    if not force and now < rest_t0:
+        return None
+    req = float(order.get("requested_qty") or order.get("qty") or 0)
+    st = order.setdefault("_entry_rest", {"cursor_ts": rest_t0, "limit_px": None, "queue_ahead": 0.0,
+                                          "fills": [], "remaining": req, "reprices": 0})
+    limit = float(order.get("limit_price") or 0)
+    if limit <= 0:
+        return None
+    upto = now if force else now - PAPER_ENTRY_TAPE_LAG_S
+    if st["limit_px"] is None or abs(float(st["limit_px"]) - limit) > 1e-9:
+        if st["limit_px"] is not None:
+            st["reprices"] += 1
+        st["limit_px"] = limit
+        st["queue_ahead"] = _om.queue_ahead_at(direction, limit, _pf.book10l_at(max(float(st["cursor_ts"]), rest_t0)))
+        st["queue_reset_ts"] = float(st["cursor_ts"])
+    if order.get("regime_fallback_done"):
+        # TOUCH fallback: a marketable order for the remainder, walked from the book at send + delay.
+        sent = float(order.get("last_chase_ts") or now)
+        if not force and now < sent + float(delay_s):
+            return None
+        walk = _tf.entry_fill(direction, float(st["remaining"]), sent, delay_s, delay_source)
+        if walk.get("status") == "REJECT_NO_BOOK" and not force:
+            return None
+        res = _om.combine_entry(walk, st["fills"], req, model=model, rest_end_ts=sent,
+                                rest_end_reason="TOUCH_TAKER_FALLBACK")
+        res.update({"entry_rest_reprices": st["reprices"], "signal_ts": signal_ts, "delay_s": delay_s,
+                    "delay_source": delay_source, "side": direction})
+        order["paper_fill_result"] = res
+        return res
+    if upto > float(st["cursor_ts"]):
+        step = _om.maker_rest_step(direction, limit, st["remaining"], st["queue_ahead"],
+                                   _qt.trades_between(float(st["cursor_ts"]), upto))
+        st["fills"] = list(st["fills"]) + [list(f) for f in step["fills"]]
+        st["remaining"] = step["remaining"]
+        st["queue_ahead"] = step["queue_ahead"]
+        st["cursor_ts"] = upto
+    if st["remaining"] > 1e-12 and not force:
+        return None
+    return _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source, model,
+                                   "REST_FILLED" if st["remaining"] <= 1e-12 else "FORCED_CLOSE")
+
+
+def _paper_entry_rest_close(order: dict, direction: str, signal_ts: float, delay_s, delay_source: str, model: dict,
+                            why: str) -> dict:
+    import order_model as _om
+    import paper_fill as _pf
+    st = order.get("_entry_rest") or {}
+    req = float(order.get("requested_qty") or order.get("qty") or 0)
+    res = _om.combine_entry({"fill_model": _pf.FILL_MODEL, "fill_model_version": _pf.FILL_MODEL_VERSION,
+                             "status": "NO_FILL", "price": None, "filled_qty": 0.0, "leg": "entry"},
+                            [tuple(f) for f in st.get("fills") or ()], req, model=model,
+                            rest_end_ts=st.get("cursor_ts"), rest_end_reason=why)
+    res.update({"entry_rest_reprices": st.get("reprices"), "entry_rest_limit_px": st.get("limit_px"),
+                "signal_ts": signal_ts, "delay_s": delay_s, "delay_source": delay_source, "side": direction,
+                "price_source": "MAKER_REST_LIMIT" if res.get("filled_qty") else None})
+    order["paper_fill_result"] = res
+    return res
+
+
+def _paper_entry_rest_drop(order: dict, why: str) -> bool:
+    """TTL DROP of a paper MAKER_REST entry: if anything filled, close it as PARTIAL (unfilled qty recorded) and let
+    the fill path open the position; otherwise False (the caller cancels it as before -> NO_FILL)."""
+    if not _is_paper_book_lane(order):
+        return False
+    st = order.get("_entry_rest") or {}
+    if not st.get("fills"):
+        return False
+    lane = str(order.get("research_lane") or "").upper()
+    delay_s, delay_source = _disloc_delay(lane, "entry")
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
+    signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or 0)
+    _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source,
+                            _paper_entry_order_model(order, lane), why)
+    return True
 
 
 def _measured_usd(*candidates):
@@ -7210,7 +7437,7 @@ def _paper_result_as_sim(res: dict) -> dict:
             "walk_bp": ls.get("walk_bp"), "entry_delay_drift_usd": ls.get("touch_drift_usd"),
             "entry_delay_drift_bp": ls.get("touch_drift_bp"),
             "fully_filled": ok and status == "FILLED", "partial_fill": ok and status == "PARTIAL",
-            "levels_consumed": 0, "unfilled_qty": 0.0,
+            "levels_consumed": 0, "unfilled_qty": float((res or {}).get("entry_unfilled_qty") or 0.0),
             "evidence_status": "COMPLETE" if ok else "UNKNOWN", "unknown_reason": None if ok else status}
 
 
@@ -7246,44 +7473,55 @@ def _tp1_cancel_pending(source_pos: dict, why: str) -> None:
                        f"after {time.time() - float(pend.get('trigger_ts') or 0):.2f}s: {why} [PIPELINE ENFORCEMENT]")
 
 
-def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction: float):
-    """TP1 / partial leg without any sleep (B2). The first firing only stamps a pending marker
-    (trigger_ts, due_ts = trigger + measured delay). A later evaluation at or after due_ts prices the leg
-    from the book second at trigger_ts + delay. Returns (state, leg): "WAIT" or "DUE" (+ the paper_fill result).
-    Livelock guard (HM c): a marker older than TP1_PENDING_MAX_S is restarted with a log; after
-    TP1_MAX_RESTARTS restarts of the same key the leg is priced with the no-wait forced pricer
-    (FORCED_NO_DELAY, never fresh) instead of restarting forever."""
+def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction: float, action=None):
+    """TP1 / partial leg without any sleep (B2). The first firing stamps a pending marker (trigger_ts, due_ts =
+    trigger + delay, and the action itself: a sent reduce-only MARKET order is committed, so the leg completes even
+    if the policy stops returning it). A later evaluation at or after due_ts prices the leg from the book at the
+    MODEL time trigger_ts + delay. Returns (state, leg): "WAIT" or "DUE" (+ the paper_fill result).
+
+    REALISM_V2 PR2 (TP1_UNPRICED_LEG root cause, HM 23 Oct): the leg used to be priced exactly once at due_ts. The
+    book row for that second is usually not written yet (the 1 s book lands ~1-2 s late), so the single attempt
+    returned REJECT_NO_BOOK and the leg was booked at its trigger level with fill_valid False; the 5 s stale restart
+    and the forced no-delay livelock path made it worse. Now a non-FILLED result keeps WAITing and re-prices the SAME
+    model time until due_ts + EXIT_FORCE_AFTER_S; only then is the leg DUE unpriced (NO_BOOK, UNVERIFIED). No
+    restart, no no-delay pricing, no current-time repricing."""
     import tile_fill as _tf
     lane = str(source_pos.get("research_lane") or "").upper()
-    delay_s, delay_source = _disloc_delay(lane, "exit")
     original = float(source_pos.get("policy_original_qty") or source_pos.get("qty") or 0)
-    qty = max(0.0, original * float(close_fraction))
     pend = source_pos.get("_tp1_pending")
-    restarts = 0
-    if isinstance(pend, dict) and pend.get("key") == key:
-        if now - float(pend.get("trigger_ts") or 0) > _tf.TP1_PENDING_MAX_S:
-            restarts = int(pend.get("restarts") or 0) + 1
-            logger.warning(f"[TP1 PENDING] stale marker restarted trade_id={source_pos.get('trade_id')} key={key} "
-                           f"restarts={restarts} [PIPELINE ENFORCEMENT]")
-            pend = None
-    elif pend is not None:
-        pend = None
-    if pend is None:
-        if restarts >= _tf.TP1_MAX_RESTARTS:
-            logger.error(f"[TP1 PENDING] livelock guard: pricing leg without delay trade_id={source_pos.get('trade_id')} "
-                         f"key={key} restarts={restarts} [PIPELINE ENFORCEMENT]")
-            d = _tf.FORCED_LOOKBACK_S
-            res = _tf.exit_fill(direction, qty, now - d, d, "FORCED_NO_DELAY") if qty > 0 else None
-            return "DUE", {**(res or {}), "delay_s": 0.0, "delay_source": "FORCED_NO_DELAY", "_trigger_ts": float(now)}
+    if not (isinstance(pend, dict) and pend.get("key") == key):
+        delay_s, delay_source = _disloc_delay(lane, "exit")
+        marker = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s), "delay_s": float(delay_s),
+                  "delay_source": delay_source, "close_fraction": float(close_fraction), "attempts": 0}
+        if action is not None:
+            marker["action"] = {k: getattr(action, k, None) for k in (
+                "close_fraction", "remaining_fraction", "reason", "partial_key", "stop_price", "peak_price",
+                "book_price")}
         with trade_lock:
-            source_pos["_tp1_pending"] = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s),
-                                          "delay_s": float(delay_s), "delay_source": delay_source,
-                                          "restarts": restarts}
+            source_pos["_tp1_pending"] = marker
         return "WAIT", None
-    if now < float(pend["due_ts"]):
+    wall = time.time()
+    if wall < float(pend["due_ts"]):
         return "WAIT", None
+    qty = max(0.0, original * float(pend.get("close_fraction", close_fraction)))
     res = _tf.exit_fill(direction, qty, float(pend["trigger_ts"]), pend["delay_s"], pend["delay_source"]) if qty > 0 else None
-    return "DUE", {**(res or {}), "_trigger_ts": float(pend["trigger_ts"])}
+    pend["attempts"] = int(pend.get("attempts") or 0) + 1
+    filled = bool(res) and res.get("status") == "FILLED" and float(res.get("price") or 0) > 0
+    if not filled and wall < float(pend["due_ts"]) + _tf.EXIT_FORCE_AFTER_S:
+        return "WAIT", None  # the model-time book row is not written yet: retry the SAME model time next tick
+    leg = {**(res or {}), "_trigger_ts": float(pend["trigger_ts"]), "priced_wall_ts": wall,
+           "pricing_attempts": pend["attempts"], "model_fill_ts": float(pend["due_ts"])}
+    if not filled:
+        leg.update(status=(res or {}).get("status") or "NO_BOOK", price=None, exit_pricing_basis="NO_BOOK_UNPRICED")
+    return "DUE", leg
+
+
+def _tp1_pending_action(source_pos: dict):
+    """The committed action of a pending TP1 leg (a sent market order completes regardless of later policy output)."""
+    pend = source_pos.get("_tp1_pending")
+    a = (pend or {}).get("action") if isinstance(pend, dict) else None
+    import types as _types
+    return _types.SimpleNamespace(**a) if isinstance(a, dict) else None
 
 
 def _exit_price_vwap(pos: dict, final_price: float, final_qty: float) -> float:
@@ -7323,21 +7561,41 @@ def _paper_exit_sim(res: dict, pos: dict, direction: str, qty: float, marks: dic
     return round(px, 2), sim
 
 
+def _paper_unpriced_marks(t0, missing=None, why: str = "NO_BOOK") -> dict:
+    """REALISM_V2 F4: no book for the model time -> the exit is UNPRICED and UNVERIFIED. No ticker / legacy BBO price."""
+    return {"missing_book_seconds": missing, "exit_status": "NO_BOOK_UNPRICED", "fresh_data_excluded": True,
+            "exit_fallback": None, "_paper_exit_trigger_ts": t0, "fill_valid": False,
+            "non_fill_category": "NO_BOOK_EXIT", "exit_pricing_basis": "NO_BOOK_UNPRICED",
+            "exit_unpriced_reason": why}
+
+
 def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
-    """Forced / admin / retired-tile / overdue / inline closes never wait (HM B3): price from the latest complete
-    book second at or before now (no look-ahead), delay_source FORCED_NO_DELAY, never fresh data.
-    Returns (result_or_None, marks); the caller applies marks to the position only after it holds the close claim."""
+    """Inline (no-thread) closes never sleep (HM a). REALISM_V2 F4: no more `now - 0.3 s` pricing. The close is a
+    BOT_SENT market order sent at its trigger: it is priced at the MODEL time trigger + delay if that book row already
+    exists, else it is UNPRICED / UNVERIFIED (NO_BOOK). Returns (result_or_None, marks)."""
     import tile_fill as _tf
-    d = _tf.FORCED_LOOKBACK_S
-    marks = {"fresh_data_excluded": True, "_paper_exit_trigger_ts": None}
-    res = _tf.exit_fill(direction, qty, now - d, d, "FORCED_NO_DELAY")
+    lane = str(pos.get("research_lane") or "").upper()
+    t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
+    delay_s, delay_source = _disloc_delay(lane, "exit")
+    marks = {"_paper_exit_trigger_ts": None}
+    res = _tf.exit_fill(direction, qty, t0, delay_s, delay_source)
     if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
-        marks.update(exit_status="FORCED_NO_BOOK", exit_fallback="LEGACY_BBO_FALLBACK_NO_BOOK",
-                     fill_valid=False, non_fill_category="NO_BOOK_EXIT")
-        return None, marks
-    res = {**res, "delay_s": 0.0, "delay_source": "FORCED_NO_DELAY"}
-    marks["exit_status"] = "PAPER_FILL_FORCED"
+        return None, {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None}
+    marks.update(exit_status="PAPER_FILL", exit_pricing_basis="MODEL_TIME",
+                 **_paper_exit_model_times(t0, res, time.time(), 1))
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
+
+
+def _paper_exit_model_times(t0: float, res: dict, priced_wall: float, attempts: int) -> dict:
+    """Steering 3 (HM 23 Oct): the REAL model times of an exit, per row: trigger, model fill time (trigger + priced
+    delay), the book second used, and how long after the model fill time the book row was actually available."""
+    mf = res.get("fill_ts")
+    return {"exit_model_trigger_ts": float(t0), "exit_model_fill_ts": mf,
+            "exit_priced_delay_s": res.get("delay_s"), "exit_priced_delay_source": res.get("delay_source"),
+            "exit_model_trigger_to_fill_s": (round(float(mf) - float(t0), 3) if mf is not None else None),
+            "exit_book_s": res.get("book_s"), "exit_priced_wall_ts": priced_wall,
+            "exit_book_wait_s": (round(priced_wall - float(mf), 3) if mf is not None else None),
+            "exit_pricing_attempts": attempts}
 
 
 def _paper_exit_missing_book_seconds(trigger_ts: float):
@@ -7358,50 +7616,75 @@ def _paper_exit_attempt_trigger(t0: float, delay_s, attempt: int, now: float) ->
 
 
 def _paper_lane_exit(pos: dict, exit_reason: str):
-    """Exit priced by paper_fill at exit_trigger_ts + delay (bounded wait). Forced closes, exits older than
-    EXIT_FORCE_CAP_S and inline closes use the no-wait path; an exit still unpriced after EXIT_FORCE_AFTER_S is
-    FORCED_NO_BOOK. Never writes to pos: returns (result_or_None, marks) and the caller applies the marks
-    after taking the close claim (a sleeping thread that loses the claim leaves no trace)."""
+    """REALISM_V2 F4 + order-type model. Never writes to pos: returns (result_or_None, marks); the caller applies the
+    marks after taking the close claim.
+
+    - EXCHANGE_RESIDENT (exchange stop): full book walk at the trigger instant, delay 0.
+    - BOT_SENT (every other exit, forced/admin included): reduce-only market walk at the MODEL time trigger + delay.
+      While the bot order is in flight the resident stop can still trigger; if it does at or before the bot fill
+      time, the resident stop closes the position instead (exit_reason / class say which stop fired).
+    - Retries re-read the SAME model time (the book row lands late); no current-time repricing
+      (the old current-time repricing path is removed), no `now - 0.3 s` forced pricing, no ticker / legacy BBO fallback: still
+      unpriced after EXIT_FORCE_AFTER_S past the model time -> NO_BOOK_UNPRICED, UNVERIFIED.
+    - Inline closes (no thread) never sleep: model time if the row exists, else unpriced."""
     import tile_fill as _tf
+    import order_model as _om
     lane = str(pos.get("research_lane") or "").upper()
     now = time.time()
     direction = str(pos.get("dir") or "").upper()
     qty = float(pos.get("qty") or 0)
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(pos.get("_paper_exit_trigger_ts") or 0) or now
-    if (str(exit_reason or "").upper() in _paper_forced_reasons() or now - t0 >= _tf.EXIT_FORCE_CAP_S
-            or getattr(_PAPER_EXIT_TLS, "no_wait", False)):
-        out, marks = _paper_forced_exit(pos, now, direction, qty)
-        return out, {**marks, "_paper_exit_trigger_ts": None}
-    delay_s, delay_source = _disloc_delay(lane, "exit")
+    cls = _om.exit_order_class(exit_reason)
+    if cls == _om.EXCHANGE_RESIDENT:
+        delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
+        price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
+    else:
+        delay_s, delay_source = _disloc_delay(lane, "exit")
+        price_fn = lambda: _tf.exit_fill(direction, qty, t0, delay_s, delay_source)  # noqa: E731
+    base = {"exit_order_class": cls, "exit_reason_fired": str(exit_reason)}
+    if getattr(_PAPER_EXIT_TLS, "no_wait", False):
+        out, marks = _paper_forced_exit(pos, now, direction, qty) if cls == _om.BOT_SENT else (None, {})
+        if cls == _om.EXCHANGE_RESIDENT:
+            res = price_fn()
+            if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
+                marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None,
+                         "exit_pricing_basis": "EXCHANGE_RESIDENT_TRIGGER_INSTANT",
+                         **_paper_exit_model_times(t0, res, time.time(), 1)}
+                out = _paper_exit_sim(res, pos, direction, qty, marks)
+            else:
+                marks = {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None}
+        return out, {**base, **marks}
+    model_fill = t0 + float(delay_s)
+    while time.time() < model_fill:
+        time.sleep(min(model_fill - time.time(), 3.0))
+    if cls == _om.BOT_SENT and _is_paper_book_lane(pos):
+        # race: did the resident stop trigger while this bot order was in flight (t0, t0 + delay]?
+        hit = _exchange_stop_trigger(dict(pos), t0, model_fill)
+        if hit and _om.race(hit["trigger_ts"], t0, float(delay_s)) == _om.EXCHANGE_RESIDENT:
+            t_x = float(hit["trigger_ts"])
+            base.update(exit_order_class=_om.EXCHANGE_RESIDENT, exit_race_lost_by=str(exit_reason),
+                        exit_reason_fired=_om.exchange_stop_reason(float(pos.get("exchange_stop_bp") or 0)),
+                        exit_race_exchange_trigger_ts=t_x, exit_race_bot_trigger_ts=t0)
+            t0, delay_s = t_x, 0.0
+            price_fn = lambda: _tf.exit_resident_fill(direction, qty, t_x)  # noqa: E731
+    attempts = 0
     res = None
-    attempt = 0
-    price_trigger = t0
     while True:
-        wait = t0 + float(delay_s) - time.time()
-        if wait > 0:
-            time.sleep(min(wait, 3.0))
-        # HM 18 Oct: the first attempt prices at the model time t0+delay (unchanged). A retry used to re-read that SAME
-        # time, so a missing book second made every poll fail until FORCED_NO_BOOK (gs1-087476bba3ff, 10.479 s). Each
-        # retry now prices at the CURRENT time (latest book row; paper_fill still rejects a row older than 2 s) and
-        # the lag against the model time is recorded on the row as exit_repriced_lag_s.
-        price_trigger = _paper_exit_attempt_trigger(t0, delay_s, attempt, time.time())
-        res = _tf.exit_fill(direction, qty, price_trigger, delay_s, delay_source)
-        attempt += 1
+        res = price_fn()
+        attempts += 1
         if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
             break
-        if time.time() - t0 >= _tf.EXIT_FORCE_AFTER_S:
+        if time.time() - (t0 + float(delay_s)) >= _tf.EXIT_FORCE_AFTER_S:
             res = None
             break
         time.sleep(0.5)
     missing = _paper_exit_missing_book_seconds(t0)
     if res is None:
-        return None, {"missing_book_seconds": missing, "exit_status": "FORCED_NO_BOOK", "fresh_data_excluded": True,
-                      "exit_fallback": "LEGACY_BBO_FALLBACK_NO_BOOK", "_paper_exit_trigger_ts": t0,
-                      "fill_valid": False, "non_fill_category": "NO_BOOK_EXIT"}
-    lag = round(max(0.0, price_trigger - t0), 3)
-    marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None, "missing_book_seconds": missing,
-             "exit_repriced_lag_s": lag if lag > 0 else None,
-             "exit_pricing_basis": "REPRICED_CURRENT_TIME" if lag > 0 else "MODEL_TIME"}
+        return None, {**base, **_paper_unpriced_marks(t0, missing)}
+    marks = {**base, "exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None, "missing_book_seconds": missing,
+             "exit_pricing_basis": ("EXCHANGE_RESIDENT_TRIGGER_INSTANT" if base["exit_order_class"] == _om.EXCHANGE_RESIDENT
+                                    else "MODEL_TIME"),
+             **_paper_exit_model_times(t0, res, time.time(), attempts)}
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
@@ -28963,6 +29246,8 @@ def _process_family_regime_entry(now: float) -> int:
             )
         elif action == "DROP":
             reason = str(verdict.get("reason") or "REGIME_ENTRY_DROP")
+            if _paper_entry_rest_drop(order, reason):
+                continue  # REALISM_V2: a partially filled maker rest opens with its filled qty
             result = _cancel_pending_order_confirmed(order, reason, record_expired=True, expire_signal=True)
             if not result.get("finalized"):
                 continue
@@ -31745,8 +32030,16 @@ def close_position(pos: dict, exit_reason: str):
     if _is_paper_book_lane(pos):
         # Tiles 1-5: shared pricer. None (no book) falls back to the legacy BBO pricer, tagged and never fresh.
         _paper_exit, paper_marks = _paper_lane_exit(pos, exit_reason)
+        if (paper_marks or {}).get("exit_race_lost_by"):
+            exit_reason = str(paper_marks["exit_reason_fired"])  # the resident stop beat the in-flight bot order
     if _paper_exit is not None:
         price, exit_sim = _paper_exit
+    elif _is_paper_book_lane(pos):
+        # REALISM_V2 F4: unpriced (NO_BOOK) -> UNVERIFIED, never a ticker / legacy BBO price. The entry price is an
+        # accounting placeholder (zero pnl) so the position can close; the row is fill_valid False and counted nowhere.
+        price = float(_entry_fill_sim(pos).get("avg_price") or pos.get("entry") or 0)
+        exit_sim = {"source": "UNPRICED_NO_BOOK", "avg_price": None, "fill_price": None, "fully_filled": False,
+                    "exit_price_placeholder": "ENTRY_PRICE_ZERO_PNL_UNVERIFIED"}
     else:
         price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
     if exit_sim:
