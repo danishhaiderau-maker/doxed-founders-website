@@ -140,7 +140,7 @@ class ProductionRotationOrchestrator:
                 )
 
         sizes: dict[str, int] = {}
-        for ledger in LEDGER_NAMES:
+        for ledger in LEDGER_NAMES:  # R3-NON-INPUT: rotation stat() sizes only, never evidence
             try:
                 sizes[ledger] = int((self.root / "v3" / "ledgers" / f"{ledger}.jsonl").stat().st_size)
             except FileNotFoundError:

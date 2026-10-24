@@ -56,3 +56,10 @@ def _no_runtime_state_written_to_source_dir():
     for path in leaked:
         _remove_runtime_state(path)
     assert not leaked, f"test wrote runtime state into the source folder: {leaked}"
+
+
+
+# R3: legacy market_segment tests are strict AND scoped xfail (see r3_legacy_xfail.py).
+from r3_legacy_xfail import (  # noqa: E402,F401
+    pytest_collection_modifyitems, pytest_runtest_makereport, pytest_runtest_setup,
+)

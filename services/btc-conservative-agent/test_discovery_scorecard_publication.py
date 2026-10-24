@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import json
+from pathlib import Path
 
 from research.discovery_scorecard_publication import build_discovery_scorecard_publication
 from research.conservative_shadow_report import build_conservative_shadow_report
@@ -16,7 +17,7 @@ GENERATION = {
 def test_declared_terminal_economics_reaches_discovery_provenance_and_leader(tmp_path):
     from research.shadow_result_stream import digest
     root, evaluator, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow = declared_shadow_inputs(root)
     terminal = shadow["results"][0]["terminal"]
     terminal.update(economics_evidence_basis="DECLARED_SIMULATION", declared_contract_sha256="d" * 64)
     terminal["receipt_sha256"] = digest({k: v for k, v in terminal.items() if k != "receipt_sha256"})
@@ -153,8 +154,25 @@ def shadow_inputs(root):
     shadow = build_conservative_shadow_report(
         root, expected_generation=GENERATION, baseline_report=baseline,
         policy_candidates=candidates, policy_artifact_receipt=artifact, research_model=model)
-    assert shadow["complete_replay_count"] == 1
+    # R3: the shadow replay path is market_segment rows, so it is never complete
+    # (asserted by the tests that consume it, not by this shared helper).
     return baseline, shadow
+
+
+_DECLARED_SHADOW = Path(__file__).with_name("fixtures") / "declared_complete_shadow_report.json"
+
+
+def declared_shadow_inputs(root):
+    """Baseline as built today plus a FROZEN, declared COMPLETE shadow report.
+
+    R3: a shadow replay built from market_segment rows can never be complete, so tests of
+    the downstream consumers (result stream, discovery/dynamic publication) use this fixed,
+    receipt-signed input instead. It is test data, not market evidence, and is never produced
+    by the replay code path.
+    """
+    import json as _json
+    baseline, _ = shadow_inputs(root)
+    return baseline, _json.loads(_DECLARED_SHADOW.read_text())
 
 
 def test_valid_same_generation_verifies_gzip_hash_and_rows(tmp_path):
@@ -230,10 +248,19 @@ def test_evaluator_version_and_separate_segment_ids_are_consumed(tmp_path):
 
 
 def test_missing_explicit_segment_ids_do_not_fall_back_to_legacy_content_hash(tmp_path):
-    root, status, baseline = inputs(tmp_path, [evaluator_row(market_segment_ids=[])])
-    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
-                                                   evaluator_status=status, baseline_report=baseline)
-    assert report["missing_field_diagnostics"]["evaluator_conservative:tape_ids"] == 1
+    # R3 rewrite: market_segment_ids are not an input at all, so neither their absence nor
+    # their presence can change the publication (no fallback to a legacy content hash).
+    import json as _json
+    reports = []
+    for index, ids in enumerate(([], ["segment-a", "segment-b"])):
+        root, status, baseline = inputs(tmp_path / str(index), [evaluator_row(market_segment_ids=ids)])
+        report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+                                                       evaluator_status=status, baseline_report=baseline)
+        assert "segment-a" not in _json.dumps(report, default=str)
+        reports.append({key: report.get(key) for key in (
+            "status", "missing_field_diagnostics", "unjoinable_counts", "input_counts", "blockers")})
+    assert reports[0] == reports[1]
+    assert reports[0]["status"] == "BUILT_INCOMPLETE"
 
 
 def test_row_generation_mismatch_is_unjoinable_not_relabelled(tmp_path):
@@ -330,7 +357,7 @@ def test_baseline_order_does_not_change_diagnostics(tmp_path):
 
 def test_complete_composite_shadow_populates_conservative_leader(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow = declared_shadow_inputs(root)
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
         baseline_report=baseline, shadow_terminal_report=shadow)
@@ -354,7 +381,7 @@ def test_complete_composite_shadow_populates_conservative_leader(tmp_path):
 
 def test_tampered_shadow_terminal_receipt_is_rejected(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow = declared_shadow_inputs(root)
     shadow["results"][0]["terminal"]["net_pnl_usd"] += 1
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
@@ -376,7 +403,7 @@ def test_shadow_generation_mismatch_fails_whole_publication(tmp_path):
 
 def test_exact_shadow_duplicates_deduplicate_but_conflicts_block(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow = declared_shadow_inputs(root)
     shadow["results"].append(json.loads(json.dumps(shadow["results"][0])))
     shadow["candidate_replay_count"] = 2
     shadow["complete_replay_count"] = 2
@@ -406,7 +433,7 @@ def test_shadow_world_does_not_convert_observed_paper_rows(tmp_path):
         terminal_outcome_status="REALIZED_COST_COMPLETE", profitability_supported=True,
         net_pnl_usd=2, observed_cost_model_id="paper-cost",
         observed_execution_model="PAPER_OBSERVED")])
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow = declared_shadow_inputs(root)
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
         baseline_report=baseline, shadow_terminal_report=shadow)
@@ -466,7 +493,7 @@ def test_invalid_shadow_aggregate_count_fails_closed(tmp_path):
 
 def test_invalid_shadow_reason_bounds_or_blocker_type_fail_closed(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow = declared_shadow_inputs(root)
     for changes, expected in (
         ({"reason_counts": {"MISSING": 1}}, "SHADOW_TERMINAL_REASON_COUNT_EXCEEDS_UNKNOWN_REPLAYS"),
         ({"blockers": "ERROR"}, "SHADOW_TERMINAL_AGGREGATE_INVALID:blockers"),

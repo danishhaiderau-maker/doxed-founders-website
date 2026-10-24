@@ -186,10 +186,15 @@ def test_standalone_genome_missing_source_counters_are_unavailable_not_zero():
     script = helper.group(0) + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(standaloneGenomeCountCards)));"
     result = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True, timeout=15)
     rendered = json.loads(result.stdout)
+    # R3 rewrite: the market_segments counter is never a number (L1 copies are not
+    # evidence); every other counter keeps the unavailable-vs-zero distinction.
+    r3 = "INVALID R3 (L1 copies, not evidence)"
+    def expect(value):
+        return [value] * 3 + [r3] + [value] * 2
     for index in (0, 1, 4):
-        assert [value for _label, value in rendered[index]] == ["UNAVAILABLE"] * 6
+        assert [value for _label, value in rendered[index]] == expect("UNAVAILABLE")
     for index in (2, 3):
-        assert [value for _label, value in rendered[index]] == [0] * 6
+        assert [value for _label, value in rendered[index]] == expect(0)
 
 
 def test_static_and_shadow_counts_distinguish_missing_report_from_measured_zero(monkeypatch):
@@ -263,8 +268,12 @@ def test_maturity_rendering_distinguishes_unavailable_empty_zero_and_populated(m
     script = helper.group(0) + "\nconsole.log(JSON.stringify(" + json.dumps(payloads) + ".map(maturityCountCards)));"
     result = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True, timeout=15)
     cards = json.loads(result.stdout)
+    # R3 rewrite: the market_segments card is always the R3 label, never a count.
+    r3 = "INVALID R3 (L1 copies, not evidence)"
+    def expect(value):
+        return [value] * 5 + [r3] + [value] * 2
     assert [[value for _label, value in row] for row in cards] == [
-        ["UNAVAILABLE"] * 8, ["UNAVAILABLE"] * 8, [0] * 8, [7] * 8, ["UNAVAILABLE"] * 8]
+        expect("UNAVAILABLE"), expect("UNAVAILABLE"), expect(0), expect(7), expect("UNAVAILABLE")]
     dashboard._API_RESPONSE_CACHE.clear()
 
 

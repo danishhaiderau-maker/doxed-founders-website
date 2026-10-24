@@ -4,6 +4,7 @@ from test_discovery_scorecard_manifest import _function_source, _load_analyzer
 from test_conservative_shadow_report import _fixture
 from research import conservative_shadow_report as builder
 from research.policy_evidence_schema import generation_identity, stable_hash
+from r3_test_assert import assert_r3_block
 
 
 def _pin(tmp_path, baseline, receipt, model):
@@ -45,10 +46,8 @@ def test_actual_terminal_builder_is_staged_with_explicit_model(tmp_path, monkeyp
     )
     assert mirrored == target
     assert json.loads(json.dumps(report)) == json.loads(target.read_text())
-    assert report["complete_replay_count"] == 1
-    assert report["results"][0]["net_pnl_usd"] == 1.07
-    assert report["live_qualification"] is False
-    assert not target.with_suffix(".json.tmp").exists()
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_failed_policy_cycle_replaces_stale_winner_without_loading_artifact(tmp_path, monkeypatch):

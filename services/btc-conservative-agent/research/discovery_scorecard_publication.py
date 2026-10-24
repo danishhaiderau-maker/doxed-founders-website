@@ -344,7 +344,7 @@ def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "original_requested_qty": row.get("requested_qty"),
         "tape_sha256": row.get("tape_sha256"),
         "tape_hashes": row.get("tape_hashes"),
-        "tape_ids": row.get("market_segment_ids") if "market_segment_ids" in row else row.get("tape_ids"),
+        "tape_ids": row.get("tape_ids"),  # R3: market_segment ids are dropped input
         "tile_config_signature": row.get("tile_config_signature"),
         "config_signature": row.get("config_signature"),
         "cost_model_id": row.get("cost_model_id") or receipt.get("cost_model_id"),

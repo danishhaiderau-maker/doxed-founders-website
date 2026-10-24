@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -135,6 +136,28 @@ def test_scope_aware_report_selection() -> None:
             response = client.get("/api/report/lane_retirement_report.json")
             assert response.status_code == 200
             assert response.get_json()["session_scope"] == "FRESH-COLLECTION"
+
+
+def test_equal_mtime_report_pick_is_deterministic() -> None:
+    """HM #873: equal (scope, mtime) keys resolve to the first candidate, whatever the write order."""
+    for first_written in ("root", "reports"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_json(root / "research_session.json", {"fresh_collection_mode": False})
+            copies = {"root": root / "lane_retirement_report.json",
+                      "reports": root / "reports" / "lane_retirement_report.json"}
+            order = [first_written] + [k for k in copies if k != first_written]
+            for label in order:
+                _write_json(copies[label], {"schema": "lane_retirement_v2", "session_scope": "ALL-TIME",
+                                            "copy": label})
+            for path in copies.values():
+                os.utime(path, (1_700_000_000, 1_700_000_000))
+            _write_json(root / "report_manifest.json",
+                        {"reports": [{"file": "lane_retirement_report.json"}],
+                         "generated_at": "2026-07-30T23:00:00+00:00"})
+            _set_dashboard_roots(root, root)
+            assert dashboard._best_report_path("lane_retirement_report.json") == copies["root"]
+            assert dashboard._read_report("lane_retirement_report.json")["copy"] == "root"
 
 
 def test_download_everything_includes_compressed_chase_reports_from_manifest() -> None:
@@ -552,6 +575,8 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 "status": "EMPTY",
             },
         )
+        # Deterministic: the stale mirror copy is strictly older than the current report.
+        os.utime(mirror / "exit_reports_validation.json", (1_000_000, 1_000_000))
         _write_json(
             root / "safe_policy_genome_v3_report.json",
             {
@@ -656,10 +681,9 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         "raw/current_fly_mirror/v3/ledgers/execution.jsonl"
                         in names
                     )
-                    assert (
-                        "raw/current_fly_mirror/v3/market_segments/aa/segment.json"
-                        in names
-                    )
+                    # R3 rewrite (HM #873 a1): segment envelopes are not evidence and are
+                    # never shipped in the research download.
+                    assert not any("/v3/market_segments/" in name for name in names)
                     assert "raw/research_history/trades_3factor.csv" in names
                     assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
                     manifest = json.loads(zf.read("MANIFEST.json"))
@@ -679,7 +703,8 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert coverage["genome_and_dna"] is True
                     assert coverage["report_manifest"] is True
                     assert coverage["canonical_v3_ledgers"] is True
-                    assert coverage["canonical_v3_market_segments"] is True
+                    assert coverage["canonical_v3_market_segments"] is False
+                    assert coverage["canonical_v3_market_segments_status"]["reason"] == "INVALID_R3_MARKET_SEGMENT_INPUT"
                     assert coverage["replay_rotations"] is True
                     assert coverage["session_spec_index_receipts"] is True
                     assert coverage["paper_lifecycle_receipt"] is True

@@ -5,6 +5,8 @@ This offline tool is never imported by the collector.  Dry-run is the default;
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import argparse
 import hashlib
 import json
@@ -24,7 +26,7 @@ from research_v3_store import V3EvidenceStore
 
 RECOVERY_SOURCE = "ARCHIVED_FLY_MIRROR_RECOVERY"
 RECOVERY_SELECTION_VERSION = "archived_fly_mirror_recovery_v2"
-RECOVERY_LEDGER_RELATIVE = Path("v3/recovery_ledgers/market_segment.jsonl")
+RECOVERY_LEDGER_RELATIVE = Path("v3/recovery_ledgers/market_segment.jsonl")  # R3-NON-INPUT: retired R17 writer target
 
 
 class _RecoveryOverlayStore(V3EvidenceStore):
@@ -127,10 +129,8 @@ def _verify_archive_authority(
 
 def _latest_unknown_owners(root: Path, epoch_id: str) -> list[dict[str, Any]]:
     latest: dict[str, dict[str, Any]] = {}
-    paths = (
-        root / "v3" / "ledgers" / "market_segment.jsonl",
-        root / RECOVERY_LEDGER_RELATIVE,
-    )
+    # R3: market_segment input dropped; no segment ledger is read.
+    paths = tuple(_msr3.rows("v3/ledgers/market_segment.jsonl"))
     for candidate in paths:
         path = _contained(root, candidate)
         for row in _read_jsonl(path):

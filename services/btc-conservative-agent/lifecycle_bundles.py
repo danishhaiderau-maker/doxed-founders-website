@@ -6,6 +6,8 @@ content-addressed bundle that can be transferred and acknowledged safely.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import hashlib
 import json
 import math
@@ -153,6 +155,8 @@ def collect_lifecycle_rows(root: str | Path) -> dict[LifecycleKey, list[dict[str
     shared_refs: dict[tuple[str, str], list[dict]] = defaultdict(list)
     seen: set[tuple[LifecycleKey, str, str]] = set()
     for ledger in LEDGER_NAMES:
+        if ledger == "market_segment" and not _msr3.INPUT_ALLOWED:
+            continue  # R3: dropped input, never joined into a lifecycle
         path = ledger_dir / f"{ledger}.jsonl"
         if not path.exists():
             continue
@@ -667,6 +671,9 @@ def classify_evidence_collection(
 
 
 def _referenced_market_segments(root: Path, rows: Iterable[dict[str, Any]]) -> list[Path]:
+    # R3: segment objects are never bundled as evidence (dropped input).
+    if not _msr3.INPUT_ALLOWED:
+        return []
     paths: set[Path] = set()
     for row in rows:
         for field, value in row.items():
@@ -975,6 +982,7 @@ def materialize_bundle(
             row_count=len(frozen), first_timestamp=_utc_iso(min(timestamps)),
             last_timestamp=_utc_iso(max(timestamps)),
         )]
+        segments = segments if _msr3.INPUT_ALLOWED else []  # R3: never copied as evidence
         for source in segments:
             relative = source.relative_to(root).as_posix()
             destination = temporary / "market_segments" / source.stem[:2] / source.name
@@ -1214,6 +1222,7 @@ def materialize_transfer_bundle(
             row_count=len(frozen), first_timestamp=_utc_iso(min(timestamps)),
             last_timestamp=_utc_iso(max(timestamps)),
         )]
+        segments = segments if _msr3.INPUT_ALLOWED else []  # R3: never copied as evidence
         for source in segments:
             relative = source.relative_to(root).as_posix()
             destination = temporary / "market_segments" / source.stem[:2] / source.name
@@ -1320,7 +1329,10 @@ def verify_bundle(bundle_path: str | Path) -> dict[str, Any]:
     try:
         key = LifecycleKey(**manifest["identity"])
         events = _read_jsonl(bundle / "events.jsonl")
-        segment_paths = sorted((bundle / "market_segments").glob("*/*.json"))
+        # R3: archived market_segment envelopes are never re-read as evidence.
+        segment_paths = (
+            sorted((bundle / "market_segments").glob("*/*.json")) if _msr3.INPUT_ALLOWED else []
+        )
         schema = manifest.get("schema")
         if schema == BUNDLE_SCHEMA:
             evidence = manifest.get("completion") or {}
@@ -1438,6 +1450,8 @@ def materialize_ready_bundles(
             ).fetchone()[0]) % len(LEDGER_NAMES)
             ledger_order = tuple(LEDGER_NAMES[next_ledger:]) + tuple(LEDGER_NAMES[:next_ledger])
             for ledger in ledger_order:
+                if ledger == "market_segment" and not _msr3.INPUT_ALLOWED:
+                    continue  # R3: dropped input, never indexed
                 path = ledger_dir / f"{ledger}.jsonl"
                 if not path.exists():
                     continue

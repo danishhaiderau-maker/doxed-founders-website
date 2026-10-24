@@ -8,6 +8,7 @@ from research.baseline_execution_context import build_baseline_execution_context
 from research.baseline_execution_context import VerifiedLedgerRowIndex
 from research.policy_evidence_schema import canonical_json, stable_hash
 from research.declared_shadow_model import _baseline_context
+from r3_test_assert import assert_r3_block
 
 
 def _sha(value):
@@ -76,18 +77,8 @@ def test_signed_context_preserves_requested_quantity_and_partial_position_margin
     values = _fixture(partial=partial, mode=mode)
     before = deepcopy(values)
     result = build_baseline_execution_context(**values)
-    assert result["status"] == "SUPPORTED", result
-    context = result["context"]
-    assert values == before
-    assert context["requested_qty"] == "1"
-    assert float(context["margin_usd"]) == (4 if partial else 10)
-    assert context["requested_margin_usd"] == "10"
-    assert context["entry_receipt_sha256"] == _sha(values["entry_receipt"])
-    assert len(context["source_evidence_sha256"]) == 4
-    assert not {"fees_usd", "funding_usd", "trading_fees_usd", "latency_cost_usd"} & context.keys()
-    adapted = _baseline_context({"conservative_receipt": values["entry_receipt"], "execution_model_context": context}, values["generation"])
-    assert adapted == context
-    assert result["live_arming_authorized"] is False
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 @pytest.mark.parametrize("field,change,reason", [
@@ -168,16 +159,15 @@ def test_identical_duplicate_stage_zero_is_deduplicated_and_jsonl_membership_sup
     stage["raw_bytes"] = b'{"unrelated":true}\n' + canonical_json(stage["row"]).encode() + b"\n"
     values["pinned_sources"]["stage"] = hashlib.sha256(stage["raw_bytes"]).hexdigest()
     values["stage_zero_evidence"].append(deepcopy(stage))
-    assert build_baseline_execution_context(**values)["status"] == "SUPPORTED"
+    # R3 rewrite (HM #873 a1): dedup no longer yields SUPPORTED; segment coverage blocks it.
+    _assert_r3_context(build_baseline_execution_context(**values))
 
 
 def test_context_signature_changes_with_exact_entry_receipt_and_source_generation():
     values = _fixture()
-    original = build_baseline_execution_context(**values)["context"]
+    _assert_r3_context(build_baseline_execution_context(**values))
     values["entry_receipt"]["fill_latency_sec"] = 0
-    newer = build_baseline_execution_context(**values)["context"]
-    assert original["signature"] != newer["signature"]
-    assert newer["entry_receipt_sha256"] != original["entry_receipt_sha256"]
+    _assert_r3_context(build_baseline_execution_context(**values))
     values["generation"] = {**values["generation"], "generation_key": "different"}
     assert build_baseline_execution_context(**values)["status"] == "UNKNOWN"
 
@@ -186,14 +176,15 @@ def test_partial_context_margin_is_accepted_by_existing_terminal_quantity_accoun
     from test_conservative_shadow_terminal import _inputs, _rebind
     from research.conservative_shadow_terminal import evaluate_shadow_terminal
     inputs = _fixture(partial=True)
-    context = build_baseline_execution_context(**inputs)["context"]
+    inputs = _fixture(partial=True)
+    _assert_r3_context(build_baseline_execution_context(**inputs))
+    # no context -> nothing to feed the terminal; the terminal on segment rows is fail-closed too
     terminal = _inputs()
     terminal["entry_receipt"] = inputs["entry_receipt"]
-    for field in ("position_context_id", "atr_pct_at_fill", "leverage", "margin_usd"):
-        terminal["position_context"][field] = context[field]
     _rebind(terminal)
     result = evaluate_shadow_terminal(**terminal)
-    assert result["status"] == "COMPLETE", result
+    assert result["status"] == "UNKNOWN" and "INVALID_R3_MARKET_SEGMENT_INPUT" in result["blockers"]
+    assert result["net_pnl_usd"] is None
 
 
 def _multi_fill_inputs():
@@ -212,21 +203,8 @@ def test_multi_fill_reprice_context_uses_accepted_vwap_and_last_fill_time():
     values = _multi_fill_inputs()
     before = deepcopy(values["entry_receipt"])
     result = build_baseline_execution_context(**values)
-    assert result["status"] == "SUPPORTED", result
-    context = result["context"]
-    assert context["accepted_fill_vwap"] == "105.0"
-    assert context["entry_trigger_bucket_ts"] == "10"
-    assert context["accepted_fill_event_count"] == 2
-    assert float(context["margin_usd"]) == 4.2
-    assert float(context["accepted_fill_exact_notional"]) == 42
+    _assert_r3_context(result)
     assert values["entry_receipt"] == before
-    terminal = _inputs()
-    terminal["entry_receipt"] = values["entry_receipt"]
-    for field in ("position_context_id", "atr_pct_at_fill", "leverage", "margin_usd"):
-        terminal["position_context"][field] = context[field]
-    _rebind(terminal)
-    outcome = evaluate_shadow_terminal(**terminal)
-    assert outcome["status"] == "COMPLETE", outcome
 
 
 @pytest.mark.parametrize("field,value", [
@@ -256,7 +234,7 @@ def test_missing_accepted_fills_do_not_fall_back_to_top_level_price():
 def test_rejected_bad_attempt_does_not_change_accepted_position():
     values = _multi_fill_inputs()
     values["entry_receipt"]["quantity_attempts"].append({"accepted": False, "execution_price": None})
-    assert build_baseline_execution_context(**values)["context"]["accepted_fill_vwap"] == "105.0"
+    _assert_r3_context(build_baseline_execution_context(**values))
 
 
 def test_observed_atr_at_first_fill_cannot_replace_completion_atr():
@@ -279,14 +257,8 @@ def test_nonterminating_vwap_matches_terminal_normalization_without_losing_a_lot
         {"accepted": True, "rounded_executable_quantity": .1, "execution_price": price, "trigger_bucket_ts": ts}
         for price, ts in [(100, 9), (101, 9), (101, 10)]])
     result = build_baseline_execution_context(**values)
-    assert result["status"] == "SUPPORTED", result
-    terminal = _inputs()
-    terminal["entry_receipt"] = values["entry_receipt"]
-    for field in ("position_context_id", "atr_pct_at_fill", "leverage", "margin_usd"):
-        terminal["position_context"][field] = result["context"][field]
-    _rebind(terminal)
-    evaluated = evaluate_shadow_terminal(**terminal)
-    assert evaluated["status"] == "COMPLETE", evaluated
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(result, 'result')
 
 
 def test_missing_envelope_or_source_limit_is_explicit_unknown():
@@ -322,15 +294,9 @@ def test_large_jsonl_index_keeps_bounded_memory_and_attests_only_verified_rows(t
             assert "raw_bytes" not in proof
             values["stage_zero_evidence"] = [proof]
             result = build_baseline_execution_context(**values)
-            assert result["status"] == "SUPPORTED", result
-            assert result["context"]["verified_ledger_row_membership"][0]["source_sha256"] == source_hash
+            # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+            assert_r3_block(result, 'result')
             assert index.envelope("stage", {**stage, "requested_qty": 2}) is None
-            # Caller cannot change a proven row or replace attestation with
-            # a dictionary claiming that verification happened.
-            values["stage_zero_evidence"] = [{**proof, "row": {**stage, "requested_qty": 2}}]
-            assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_STREAM_ROW_PROOF_INVALID"]
-            values["stage_zero_evidence"] = [{**proof, "verified_row_proof": {"source_sha256": source_hash}}]
-            assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_STREAM_ROW_PROOF_INVALID"]
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -358,3 +324,12 @@ def test_stream_row_size_bound_does_not_read_unbounded_line(tmp_path):
     with VerifiedLedgerRowIndex() as index:
         with pytest.raises(ValueError, match="SOURCE_ROW_SIZE_LIMIT"):
             index.add_source(tmp_path, "source", expected_sha=hashlib.sha256(raw).hexdigest(), expected_size=len(raw))
+
+
+def _assert_r3_context(result):
+    """R3 rewrite: a baseline execution context built on market_segment coverage is
+    UNKNOWN, carries no context to size or arm from, and never authorizes live arming."""
+    assert result["status"] == "UNKNOWN", result
+    assert result["context"] is None
+    assert any(code.startswith("INVALID_R3_MARKET_SEGMENT_INPUT") for code in result["reason_codes"])
+    assert result["live_arming_authorized"] is False

@@ -8,6 +8,7 @@ from research.conservative_shadow_report import (
 from research.policy_evidence_schema import canonical_json, stable_hash
 from research.quantity_execution import build_signed_quantity_constraints
 from research_v3_contract import canonical_hash
+from r3_test_assert import assert_r3_block
 
 
 GEN = {name: name + "-1" for name in (
@@ -96,15 +97,8 @@ def test_explicit_current_model_runs_complete_end_to_end(tmp_path):
     report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
         baseline_report=baseline, policy_candidates=candidates,
         policy_artifact_receipt=artifact, research_model=model)
-    assert report["candidate_replay_count"] == report["complete_replay_count"] == 1
-    assert report["unknown_replay_count"] == 0
-    assert report["results"][0]["terminal"]["net_pnl_usd"] == 1.07
-    assert report["results"][0]["policy_signature"] != candidates[0]["policy_signature"]
-    assert report["results"][0]["source_candidate_policy_signature"] == candidates[0]["policy_signature"]
-    assert report["results"][0]["entry_baseline_signature"].startswith("entry-baseline-")
-    assert report["evaluation_scope"] == "ENTRY_PLUS_SINGLE_POSITION_EXIT"
-    assert report["portfolio_competition_status"] == "NOT_SIMULATED"
-    assert report["ranking_eligible"] is False
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_missing_model_is_unknown_without_zero_cost_defaults(tmp_path):
@@ -199,7 +193,10 @@ def test_segment_path_and_checksum_are_source_fenced(tmp_path):
         baseline_report=baseline, policy_candidates=candidates,
         policy_artifact_receipt=artifact, research_model=model)
     assert report["complete_replay_count"] == 0
-    assert report["reason_counts"]["SOURCE_SEGMENT_SHA256_MISMATCH"] == 1
+    assert report["reason_counts"]["INVALID_R3_MARKET_SEGMENT_INPUT"] >= 1
+    assert report["profitability_supported"] is False
+    assert report["ranking_eligible"] is False
+    assert report["live_qualification"] is False
 
 
 def test_current_policy_loader_verifies_generation_gzip_rows_and_signatures(tmp_path):
@@ -251,9 +248,8 @@ def test_different_candidate_horizons_are_order_independent(tmp_path):
     second_report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
         baseline_report=baseline, policy_candidates=list(reversed(candidates)),
         policy_artifact_receipt=artifact, research_model=model)
-    assert first["candidate_replay_count"] == first["complete_replay_count"] == 2
-    assert [(row["policy_signature"], row["status"]) for row in first["results"]] == [
-        (row["policy_signature"], row["status"]) for row in second_report["results"]]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(first, 'first')
 
 
 def test_last_accepted_fill_event_defines_path_start(tmp_path):
@@ -272,15 +268,12 @@ def test_last_accepted_fill_event_defines_path_start(tmp_path):
     report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
         baseline_report=baseline, policy_candidates=candidates,
         policy_artifact_receipt=artifact, research_model=model)
-    assert report["complete_replay_count"] == 1
-    expected_rows = [
-        {"schema": "market_microstructure_1s_v1", "bucket_ts": ts, "fresh": True,
-         "valid_bbo": True, "bid": px, "ask": px + .1, "bid_qty": 1, "ask_qty": 1,
-         "trade_count": 1, "buy_qty": .1, "sell_qty": .1}
-        for ts, px in ((12, 103), (13, 102))
-    ]
-    assert report["results"][0]["terminal"]["future_path_sha256"] == hashlib.sha256(
-        canonical_json(expected_rows).encode()).hexdigest()
+    assert report["complete_replay_count"] == 0
+    assert report["reason_counts"]["INVALID_R3_MARKET_SEGMENT_INPUT"] >= 1
+    assert report["profitability_supported"] is False
+    assert report["ranking_eligible"] is False
+    assert report["live_qualification"] is False
+    assert report["results"][0]["status"] == "UNKNOWN"
 
 
 def test_missing_model_large_grid_is_counted_without_segment_io(tmp_path, monkeypatch):

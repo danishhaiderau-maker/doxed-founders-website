@@ -324,7 +324,7 @@ class TransactionalReceiptStore:
                     (SCHEMA, authority_id, self.identity_json, "IMPORTING",
                      time.time(), None),
                 )
-                for ledger in LEDGER_NAMES:
+                for ledger in LEDGER_NAMES:  # R3-NON-INPUT: receipt-store state rows init, no read
                     connection.execute(
                         "INSERT INTO ledger_state VALUES(?,?,?,?,?,?,?,?)",
                         (ledger, None, None, 0, 0, 0, None, None),
@@ -751,7 +751,7 @@ class TransactionalReceiptStore:
         meta = self._validate_meta(expected_state={"IMPORTING", "ACTIVE"})
         ledger_summary = {}
         with self._connect(writable=False) as connection:
-            for ledger in LEDGER_NAMES:
+            for ledger in LEDGER_NAMES:  # R3-NON-INPUT: receipt authority activation reads path signatures/counts only, never evidence
                 if ledger not in ledger_paths or ledger not in generations:
                     raise ReceiptAuthorityError("RECEIPT_AUTHORITY_ACTIVATION_SCOPE_INCOMPLETE")
                 signature = _signature_payload(ledger_paths[ledger])

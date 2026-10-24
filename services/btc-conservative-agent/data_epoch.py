@@ -46,7 +46,7 @@ EPOCH_INDEPENDENT_BASES = frozenset({
     "market_microstructure_1s.jsonl", "cross_venue_tape_1m.jsonl", "market_context_1m.jsonl", "liquidations.jsonl",
 })
 # Content-addressed / tape directories that are not row streams of one epoch.
-EPOCH_AUDIT_SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bundle_index",
+EPOCH_AUDIT_SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bundle_index",  # R3-NON-INPUT: epoch audit skip list, never read
                          "research-timing-declarations", "corrupt_evidence_quarantine")
 # Operational ledgers that are never analyzer evidence (relay delivery guard archive and its retirement
 # ledger, runtime telemetry, tile-retirement and pre-entry handoff receipts). They legitimately span epochs

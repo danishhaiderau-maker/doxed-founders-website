@@ -6,6 +6,8 @@ It never supplies defaults for missing evidence and never changes an order.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import gzip
 import hashlib
 import json
@@ -653,6 +655,9 @@ def build_phase7_support_qualification(
 
 
 def _load_envelope(root: Path, segment: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    # R3 fail closed: a market_segment envelope is never evidence.
+    if not _msr3.INPUT_ALLOWED:
+        return None, _msr3.REASON
     ref = segment.get("segment_ref") if isinstance(segment.get("segment_ref"), Mapping) else {}
     digest = str(ref.get("sha256") or "").lower()
     relative = str(ref.get("relative_path") or "")
@@ -1025,12 +1030,12 @@ def build_v3_conservative_results(
     ledgers = {
         name: _read_jsonl(root / "ledgers" / f"{name}.jsonl", observe=lambda row: incident_index.add((row,)),
                           drop_keys=UNUSED_INTENT_KEYS)
-        if name == "order_intent" else _read_jsonl(root / "ledgers" / f"{name}.jsonl")
+        if name == "order_intent" else (
+            _msr3.rows("v3/ledgers/market_segment.jsonl") if name == "market_segment"
+            else _read_jsonl(root / "ledgers" / f"{name}.jsonl"))
         for name in ("decision", "opportunity", "order_intent", "market_segment", "execution", "lifecycle", "pre_entry_features")
     }
-    recovery_segments = _read_jsonl(
-        root / "recovery_ledgers" / "market_segment.jsonl"
-    )
+    recovery_segments = _msr3.rows("v3/recovery_ledgers/market_segment.jsonl")
     ledgers["market_segment"].extend(recovery_segments)
     for name, rows in ledgers.items():
         if name != "order_intent":
@@ -1367,6 +1372,7 @@ def build_v3_conservative_results(
     }
     incident_input.assert_unchanged()
     return {"schema": SCHEMA, "row_count": len(results), "classification_counts": counts,
+            "market_segment_input": _msr3.invalid("v3/ledgers/market_segment.jsonl"),
             **({"runtime_identity_incident_input": incident_input.provenance(),
                 "runtime_identity_incident_coverage": incident_index.coverage()} if incident_input.enabled else {}),
             "terminal_outcome_counts": terminal_counts,

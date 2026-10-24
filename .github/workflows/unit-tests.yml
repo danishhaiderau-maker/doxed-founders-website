@@ -72,6 +72,20 @@ jobs:
           if defects:
               raise SystemExit("tile registry defects: " + "; ".join(defects))
           PY
+      - name: R3 market_segment guards (RK #873) - 0 live reads, scoped strict xfail, shrink-only list
+        # Fails the PR if a live market_segment read is reintroduced, if the legacy xfail list grows
+        # (vs the base branch, and vs the CEILING constant), lists a forbidden-category test, or if the
+        # xfail plugin stops being strict/scoped.
+        run: |
+          base="${GITHUB_BASE_REF:-master}"
+          if git fetch --depth=1 origin "$base" 2>/dev/null && \
+             git show "FETCH_HEAD:services/btc-conservative-agent/ci/r3_legacy_segment_tests.txt" > /tmp/r3_base_list.txt 2>/dev/null; then
+            export R3_BASE_LIST=/tmp/r3_base_list.txt
+            echo "base list: $(grep -vc '^#' /tmp/r3_base_list.txt) entries"
+          fi
+          python -m pytest -q -p no:cacheprovider \
+            test_market_segment_r3_consumers.py::test_zero_live_market_segment_reads \
+            test_r3_legacy_xfail_scope.py
       - name: Run the allowlisted test files (ci/unit_test_allowlist.txt)
         # Allowlist of files that pass under pytest; KNOWN_RED files are listed with owner and date in
         # ci/known_red.txt, and test_ci_test_inventory.py fails when a test file is in neither list.

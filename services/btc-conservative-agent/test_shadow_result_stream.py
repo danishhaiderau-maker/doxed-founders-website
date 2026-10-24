@@ -7,7 +7,7 @@ import pytest
 
 from research.shadow_result_stream import ShadowResultStreamWriter, verify_result_stream, digest, RANGE
 from research.discovery_scorecard_publication import build_discovery_scorecard_publication
-from test_discovery_scorecard_publication import GENERATION, inputs, shadow_inputs
+from test_discovery_scorecard_publication import GENERATION, inputs, declared_shadow_inputs as shadow_inputs
 
 
 def complete_report(root, count=121):

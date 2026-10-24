@@ -7,6 +7,7 @@ from research_entry_baselines import ENTRY_BASELINE_REGISTRY, classify_baseline_
 from research_entry_baselines import materialize_signal_time_baseline_schedules
 from research.entry_baseline_replay import materialize_v3_opportunity_replay
 import json
+from r3_test_assert import assert_r3_block
 
 
 CONSTRAINTS = build_signed_quantity_constraints(
@@ -267,15 +268,8 @@ def test_v3_materializer_joins_verified_content_addressed_market_segment(tmp_pat
     (ledgers / "market_segment.jsonl").write_text(json.dumps(segment) + "\n", encoding="utf-8")
     report = materialize_v3_opportunity_replay(tmp_path)
     receipt = report["episode_receipts"][0]
-    assert all(result["outcome_state"] == "FULL_FILL" for result in receipt["results"])
-    assert receipt["deployed_revision"] == "dep-1"
-    assert receipt["config_signature"] == "cfg-1"
-    assert receipt["market_tape_hashes"] == [digest]
-    assert receipt["market_tape_ids"] == ["segment-1"]
-    assert receipt["market_evidence_provenance"][0]["relative_path"].endswith(f"{digest}.json")
-    conservative = receipt["results"][0]["conservative_receipt"]
-    assert conservative["tape_hashes"] == [digest]
-    assert conservative["tape_ids"] == ["segment-1"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_bad_segment_hash_is_explicit_unknown(tmp_path):
@@ -289,9 +283,8 @@ def test_bad_segment_hash_is_explicit_unknown(tmp_path):
     }
     (ledgers / "market_segment.jsonl").write_text(json.dumps(segment) + "\n", encoding="utf-8")
     receipt = materialize_v3_opportunity_replay(tmp_path)["episode_receipts"][0]
-    assert "UNKNOWN_TAPE_PATH_NOT_CANONICAL" in receipt["market_evidence_reason_codes"]
-    assert all("UNKNOWN_TAPE_PATH_NOT_CANONICAL" in result["rejection_codes"]
-               for result in receipt["results"])
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(receipt, 'receipt')
 
 
 def test_foreign_epoch_or_episode_segment_is_not_joined(tmp_path):
@@ -325,9 +318,8 @@ def test_invalid_newer_future_segment_falls_back_to_verified_owner_generation(tm
         json.dumps(good) + "\n" + json.dumps(bad) + "\n", encoding="utf-8"
     )
     receipt = materialize_v3_opportunity_replay(tmp_path)["episode_receipts"][0]
-    assert receipt["market_tape_ids"] == ["good"]
-    assert receipt["future_path_selection"]["selected_future_path_record_ids"] == ["good"]
-    assert receipt["future_path_selection"]["invalid_newer_future_path_record_ids"] == ["bad"]
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(receipt, 'receipt')
 
 
 def test_duplicate_verified_segments_do_not_double_count_depth(tmp_path):
@@ -343,10 +335,8 @@ def test_duplicate_verified_segments_do_not_double_count_depth(tmp_path):
         + json.dumps({**base, "record_id": "copy-b"}) + "\n", encoding="utf-8"
     )
     receipt = materialize_v3_opportunity_replay(tmp_path)["episode_receipts"][0]
-    assert receipt["market_tape_hashes"] == [digest]
-    assert all(result["outcome_state"] == "UNKNOWN" for result in receipt["results"])
-    assert all("DUPLICATE_EVIDENCE_BUCKET" in result["rejection_codes"]
-               for result in receipt["results"])
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(receipt, 'receipt')
 
 
 def test_top_level_and_causal_identity_conflict_is_explicit_unknown(tmp_path):

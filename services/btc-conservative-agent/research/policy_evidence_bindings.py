@@ -6,6 +6,8 @@ and fails closed when a schedule or a required market horizon is absent.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import copy
 import hashlib
 import gzip
@@ -75,8 +77,8 @@ _RECENT_BINDING_INDEX: dict[str, tuple[str, dict[str, Any]]] = {}
 
 def _binding_inputs_digest(root: Path) -> str:
     digest = hashlib.sha256()
-    paths = [root / "ledgers" / f"{name}.jsonl" for name in LEDGERS]
-    paths.append(root / "recovery_ledgers" / "market_segment.jsonl")
+    # R3: market_segment bytes are not an input, so they are not digested either.
+    paths = [root / "ledgers" / f"{name}.jsonl" for name in LEDGERS if name != "market_segment"]
     for path in paths:
         digest.update(path.as_posix().encode("utf-8") + b"\0")
         if not path.is_file():
@@ -131,6 +133,9 @@ def _atomic_write_bytes(path: Path, data: bytes, *, containment_root: Path) -> N
 
 
 def _verify_segment(v3_root: Path, row: Mapping[str, Any]) -> tuple[str | None, list[str]]:
+    # R3 fail closed: a market_segment envelope is never evidence.
+    if not _msr3.INPUT_ALLOWED:
+        return None, [_msr3.REASON]
     ref = row.get("segment_ref") if isinstance(row.get("segment_ref"), Mapping) else {}
     digest = str(ref.get("sha256") or "").lower()
     relative = str(ref.get("relative_path") or "")
@@ -287,17 +292,15 @@ def _build_v3_binding_index(root: Path) -> dict[str, Any]:
     ledgers = {
         name: _read_jsonl(root / "ledgers" / f"{name}.jsonl",
                           drop_keys=UNUSED_INTENT_KEYS if name == "order_intent" else ())
-        for name in LEDGERS
+        for name in LEDGERS if name != "market_segment"
     }
     # Fly is the raw-data authority and atomically refreshes ``ledgers``.  The
     # local analyzer may additionally bind checksum-verified archived paths
     # from this separate append-only derived overlay.  Keeping the authorities
     # distinct prevents a mirror refresh from erasing or impersonating locally
     # recovered evidence.
-    recovery_segments = _read_jsonl(
-        root / "recovery_ledgers" / "market_segment.jsonl"
-    )
-    ledgers["market_segment"].extend(recovery_segments)
+    recovery_segments = _msr3.rows("v3/recovery_ledgers/market_segment.jsonl")
+    ledgers["market_segment"] = _msr3.rows("v3/ledgers/market_segment.jsonl") + recovery_segments
     verification_cache: dict[str, tuple[str | None, tuple[str, ...]]] = {}
 
     def verify_segment_cached(row: Mapping[str, Any]) -> tuple[str | None, list[str]]:
@@ -438,6 +441,7 @@ def _build_v3_binding_index(root: Path) -> dict[str, Any]:
         "unknown_reason_counts": dict(sorted(reason_counts.items())),
         "raw_market_segment_row_count": len(ledgers["market_segment"]) - len(recovery_segments),
         "recovery_market_segment_row_count": len(recovery_segments),
+        "market_segment_input": _msr3.invalid("v3/ledgers/market_segment.jsonl"),
         "bindings_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
         "bindings": bindings,
     }

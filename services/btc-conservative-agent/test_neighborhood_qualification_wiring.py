@@ -1,4 +1,5 @@
 from research.v3_policy_report_adapter import candidate_from_genome
+from r3_test_assert import assert_r3_block
 
 
 CELL_SUPPORT = {
@@ -65,8 +66,8 @@ def test_adapter_maps_supported_neighborhood_evidence_to_mandatory_gate():
 
     assert report["qualification_gates"]["parameter_neighborhood_stability"] is True
     assert "QUALIFICATION_GATE_FAILED:parameter_neighborhood_stability" not in report["blockers"]
-    assert report["status"] == "QUALIFIED"
-    assert report["candidate"] is not None
+    # R3 rewrite (HM #873 a1): market_segment input is invalid; assert BLOCK, not legacy success.
+    assert_r3_block(report, 'report')
 
 
 def test_adapter_fails_closed_when_neighborhood_evidence_is_missing():
