@@ -14084,10 +14084,32 @@ def replay_csv_write_fallback(targets=CSV_FALLBACK_REPLAY_TARGETS) -> dict:
         return _replay_csv_write_fallback_locked(targets)
 
 
+# RK PASS 24 Oct: ids removed by a real delete-by-id. A later save must not bring them back (in-memory tombstone;
+# a restart reloads from the CSV, which no longer holds them).
+_DELETED_TRADE_IDS: set = set()
+
+
+def _reload_trades_after_delete(deleted_ids) -> int:
+    """Call with the trade-file lock held, after a real (non-dry) delete-by-id. Tombstone the ids, drop them from
+    the in-memory trade list, then reload it from CSV_TRADES. Returns how many in-memory rows were dropped."""
+    ids = {str(i) for i in (deleted_ids or ()) if i}
+    _DELETED_TRADE_IDS.update(ids)
+    with trade_lock:
+        before = len(trades)
+        trades[:] = [t for t in trades if str(t.get("trade_id") or "") not in _DELETED_TRADE_IDS]
+        dropped = before - len(trades)
+        load_session_trades_from_csv()
+    return dropped
+
+
 def dynamic_csv_writer(filename, row):
     last_err = None
     research_gate = globals().get("_research_write_gate") or threading.RLock()
     with research_gate, csv_lock:
+        if filename == CSV_TRADES and str((row or {}).get("trade_id") or "") in _DELETED_TRADE_IDS:
+            logger.warning(f"[TRADE-DELETE-BY-ID] refused re-save of deleted trade_id={row.get('trade_id')} "
+                           f"[PIPELINE ENFORCEMENT]")
+            return
         for attempt in range(CSV_WRITE_RETRIES):
             try:
                 _dynamic_csv_writer_once(filename, row)
@@ -52112,8 +52134,12 @@ def api_admin_trades_delete_by_id():
             research_gate.release()
             return False
     try:
-        out = _tdi.delete_trades_by_id(os.path.abspath(CSV_TRADES), body.get("ids"), body.get("list_sha256"),
-                                       dry_run=dry_run, lock=_TradeFileLock())
+        # Both locks are RLocks: hold them across the delete AND the in-memory reload so no save can interleave.
+        with _TradeFileLock():
+            out = _tdi.delete_trades_by_id(os.path.abspath(CSV_TRADES), body.get("ids"), body.get("list_sha256"),
+                                           dry_run=dry_run, lock=_TradeFileLock())
+            if not out.get("dry_run") and out.get("removed_count"):
+                out["in_memory_dropped"] = _reload_trades_after_delete(body.get("ids"))
     except _tdi.DeleteRefused as e:
         logger.warning(f"[TRADE-DELETE-BY-ID] refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
         return jsonify({"ok": False, "refused": e.code, "detail": e.detail}), 409
