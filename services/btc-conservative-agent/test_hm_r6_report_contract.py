@@ -91,7 +91,7 @@ def test_clearing_re_stamp_wins_with_its_own_fill_time():
 _READS = {
     "ORDER_PLACED": {"order": ["qty", "price", "type", "tif", "side", "entry_order_mode"]},
     "ORDER_FILLED": {"fill": ["price", "qty", "source"]},
-    "STOP_CONFIRMED": {"stop": ["price"]},
+    "STOP_CONFIRMED": {"stop": ["price", "exchange_order_id", "verified_on_exchange"]},
     "POSITION_CLOSED": {"close": ["price", "price_source", "fill_at_ts", "reason", "exit_order_class"]},
 }
 _TIMELINE = ["order_sent_at_ts", "exchange_ack_at_ts", "fill_at_ts", "stop_placed_at_ts", "stop_confirmed_at_ts",

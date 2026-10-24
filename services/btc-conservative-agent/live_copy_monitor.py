@@ -124,9 +124,16 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
                 ch["errors"].append({"type": "INTENT_SKIPPED", "code": d.get("reason"),
                                      "message": "executor skipped", "at_ts": _f(d.get("decided_at_ts"))})
         if r.get("type") == "STOP_CONFIRMED":
-            ch["stop_confirmed"] = True
             # AMEND4 E2'/E9 (sha 7073ed25): the resident stop price feeds the backstop level and stop-fill overshoot_bp
             st = r.get("stop") if isinstance(r.get("stop"), Mapping) else {}
+            # RK option (a) 25 Oct (3): protected ONLY once the stop is placed AND read back by its exchange order id
+            # (same bar as LiveCopyControl.record_stop_confirmation). A report without both stays unprotected, so
+            # live_guardian's STOP_MISSING_GT_5S flattens + RED after 5 s.
+            if st.get("exchange_order_id") and st.get("verified_on_exchange") is True:
+                ch["stop_confirmed"] = True
+                ch["stop_order_id"] = str(st.get("exchange_order_id"))[:40]
+            else:
+                ch["stop_unverified_report"] = True
             ch["stop_price"] = _f(st.get("price")) or ch.get("stop_price")
         if r.get("type") == "POSITION_CLOSED":
             ch["closed"] = True

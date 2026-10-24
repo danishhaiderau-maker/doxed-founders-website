@@ -76,7 +76,7 @@ def test_e1_open_mark_to_book_counts_against_the_cap_and_unreadable_blocks():
     assert {b["code"] for b in blocks} >= {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} and info["open_mark_loss"] > 0.5
     blocks, _ = ltg.daily_cap_entry_block([], mirror([pos], [STOP_L]), book(size=0.0001), NOW, "gs1")
     assert "OPEN_MARK_UNREADABLE" in {b["code"] for b in blocks}
-    assert ltg.cap_breach_response() == ltg.CAP_RESPONSE_ENTRY_BLOCK
+    assert ltg.cap_breach_response() == ltg.CAP_RESPONSE_DISARM_FLATTEN   # R20 supersedes AMEND4 E1
 
 
 def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
@@ -1067,7 +1067,7 @@ def test_852_l27_fly_protection_bootstrap_rearm_refuses_per_lane(monkeypatch):
     import types
     # HM C-R3-3: never overwrite the real registry for the rest of the session (monkeypatch restores it)
     import combo_pathway_config as _cpc
-    monkeypatch.setattr(_cpc, "ACTIVE_TILE_REGISTRY", {"GS01": {}})
+    monkeypatch.setattr(_cpc, "ACTIVE_TILE_REGISTRY", {"GS01": {"id_prefix": "gs1"}})
     boot = types.SimpleNamespace(snapshot=lambda: {"lanes": {}}, enable=lambda *a, **k: (True, {}),
                                  disable=lambda **k: {})
     tile_src = _SRC[_SRC.index("def _live_guardian_tile_arm_block"):_SRC.index("\ndef ", _SRC.index("def _live_guardian_tile_arm_block") + 10)]

@@ -92,6 +92,9 @@ STOP_RESIDENT_MAX_AGE_S = 5.0       # E6(L28): exchange stop confirmed resident 
 BOOK_ENTRY_MAX_AGE_S = 2.0          # E7(L30): book > 2 s old => block new entries (== paper_fill.MAX_BOOK_AGE_S)
 BOOK_HOLD_MAX_AGE_S = 10.0          # E7(L31): hold an open position only while the book is <= 10 s old AND the stop is resident
 CAP_RESPONSE_ENTRY_BLOCK = "ENTRY_BLOCK"
+# R20 (Danish 25 Oct 06:21 AEDT, supersedes AMEND4 E1): a daily-cap hit disarms ALL live tiles + force-flat + RED latch,
+# AND still blocks entry (stamped LIVE_SKIPPED_DAILY_CAP).
+CAP_RESPONSE_DISARM_FLATTEN = "DISARM_FLATTEN_RED_AND_ENTRY_BLOCK"
 SKIP_DAILY_CAP = "LIVE_SKIPPED_DAILY_CAP"          # E1(L12) stamp on the blocked (paper-only) signal
 STOP_FAILURE_FLATTEN = "STOP_FAILURE_FLATTEN"      # E2(L15) / E2'(L23) event + guardian code
 AMBER_BOOK_STALE = "BOOK_STALE_ENTRY_BLOCK"         # E7(L30)
@@ -176,6 +179,29 @@ def tile_key_for_lane(lane: str | None, registry: Mapping[str, Mapping] | None =
     reg = _registry() if registry is None else registry
     prefix = str(((reg.get(str(lane or "").upper()) or {}).get("id_prefix")) or "").lower()
     return prefix if prefix in TILE_KEY_CODES else None
+
+
+# RK 25 Oct 06:29 (2a): ONLY GS-01 (gs1) and FADE3 (gf3, GS-FADE3-TP30) may EVER be operator-eligible. gf3 additionally
+# needs its own LIVE_HM_GATE_FADE3=PASS:<ref> (it stays unset => refused). Every other tile is refused in code whatever the
+# admin action (eligibility route, tile-switch one-click, persisted sidecar). Changing this set needs an RK-ruled code PR.
+OPERATOR_ELIGIBLE_TILE_KEYS = frozenset({"gs1", "gf3"})
+FADE3_HM_GATE_ENV = "LIVE_HM_GATE_FADE3"
+
+
+def operator_eligibility_refusal(lane: str | None, registry: Mapping[str, Mapping] | None = None,
+                                 env: Mapping[str, str] | None = None) -> str | None:
+    """None when the lane MAY be operator-eligible, else the refusal code. Fail closed on any lookup error."""
+    import os
+    try:
+        reg = _registry() if registry is None else registry
+        key = str(((reg.get(str(lane or "").upper()) or {}).get("id_prefix")) or "").lower()
+    except Exception:  # noqa: BLE001
+        return "OPERATOR_ELIGIBILITY_UNREADABLE"
+    if key not in OPERATOR_ELIGIBLE_TILE_KEYS:
+        return "TILE_NEVER_OPERATOR_ELIGIBLE"
+    if key == "gf3" and not str((os.environ if env is None else env).get(FADE3_HM_GATE_ENV) or "").upper().startswith("PASS"):
+        return "FADE3_HM_GATE_NOT_PASSED"
+    return None
 
 
 def tile_key_for_trade_id(trade_id: str | None) -> str | None:
@@ -602,8 +628,9 @@ def liq_clamp_rate_violations(chains: Iterable[Mapping[str, Any]], liq_events: I
 # ---- AMEND4 shared functions (one implementation for every live tile, R4) -------------------------------------------------
 
 def cap_breach_response() -> str:
-    """THE switchable daily-cap breach response. AMEND4 E1 (L12): entry block only (no close, no disarm)."""
-    return CAP_RESPONSE_ENTRY_BLOCK
+    """THE daily-cap breach response. R20 (Danish 25 Oct 06:21 AEDT) supersedes AMEND4 E1 (L12, entry block only): a hit
+    disarms ALL live tiles, force-flats and latches RED; the entry block is kept. Frozen: no env/route/admin setter."""
+    return CAP_RESPONSE_DISARM_FLATTEN
 
 
 def book_age_s(book: Mapping[str, Any] | None, now: float) -> float | None:

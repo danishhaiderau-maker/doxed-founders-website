@@ -48988,9 +48988,15 @@ def monitor_exit_latency():
 
 @app.route('/api/monitor/exit-lag', methods=["GET"])
 def monitor_exit_lag():
-    """RK ruling 22:32 AEDT arm gate (read-only, admin or MONITOR_READ_TOKEN): CONSECUTIVE post-346ef2bf exits with
-    decision - trigger-row WS_FRAME receive_ts <= the old p95 (0.062 s). REGRESSION / UNMEASURED exits end the run.
-    ?required=N adds armable = run >= N."""
+    """RK ruling 25 Oct EXIT_LAG arm gate (+ option (a)), read-only, admin or MONITOR_READ_TOKEN. Scope from the #868
+    deploy (exit_lag_regression.GATE_SCOPE_START_TS); admin / force-flat closes and exchange-stop fills are excluded from
+    the run (ids listed); any other exit without a WS_FRAME receive_ts breaks it. The threshold is the real Bitfinex
+    trigger->fill time of >= 10 live exchange-resting stops (HM sets, RK reviews); until then gate = UNPROVEN, which does
+    NOT block GS-01 at $0.25 (option (a), ruling: SHARED-TRACKER 2026-10-25 05:22 AEDT "RK EXIT_LAG option (a) ruling, VERBATIM")
+    but makes every in-scope exit non-countable (EXIT_LAG_UNPROVEN). Enforced on the arm / live-entry paths by
+    _exit_lag_live_block (not here; this view is read-only).
+    Also: per-exit stop-fill book-row check (R0) and the bot-driven live exit stamp check. The legacy 24 Oct view
+    (0.062 s on post-346ef2bf rows) stays under "legacy_v1". ?required=N only feeds legacy_v1."""
     import exit_lag_regression as _elr
 
     def build(now):
@@ -49000,8 +49006,31 @@ def monitor_exit_lag():
         except ValueError:
             raise monitor_tiles.BadRequest("BAD_ARGS")
         closed = _exit_latency_closed_trade_rows(_elr.DEPLOY_TS - 3600)
-        return {**_elr.arm_gate(closed, required=req), **_monitor_tiles_common(now),
-                "scope": {"since_ts": _elr.DEPLOY_TS, "required": req}, "recomputed_p95": dict(_elr.RECOMPUTED_P95)}
+        _snap = _LIVE_GUARDIAN_STATE.get("exit_lag_chains") or (None, [])
+        chains_ts, chains = _snap[0], list(_snap[1] or [])   # guardian tick snapshot (no lock, no provider call)
+        try:
+            epoch = _offline_sim_epoch_floor()
+        except Exception:  # noqa: BLE001 - read-only view; an unreadable epoch scopes nothing out (fail closed: n may only shrink)
+            epoch = None
+        epoch = max(float(epoch or 0.0), _elr.GATE_SCOPE_START_TS)
+        gate = _elr.rk_gate(closed, chains, epoch_ts=epoch)
+        twins = {str(r.get("trade_id") or ""): r for r in closed}
+        stamps = []
+        for c in chains:
+            if not c.get("closed") or str(c.get("exit_order_class") or "").upper() == "EXCHANGE_RESIDENT":
+                continue
+            if (c.get("exit_fill_at_ts") or c.get("fill_at_ts") or 0) < epoch:
+                continue
+            row = {**(twins.get(str(c.get("correlation_id") or "")) or {}), "exit_ack_at_ts": c.get("exit_ack_at_ts"),
+                   "exit_order_class": c.get("exit_order_class"), "exit_reason": c.get("exit_reason")}
+            stamps.append({"correlation_id": c.get("correlation_id"), "account": c.get("account"),
+                           "exit_reason": c.get("exit_reason"), **_elr.live_exit_stamp_check(row)})
+        legacy = {**_elr.arm_gate(closed, required=req), "scope": {"since_ts": _elr.DEPLOY_TS, "required": req},
+                  "recomputed_p95": dict(_elr.RECOMPUTED_P95)}
+        return {**gate, **_monitor_tiles_common(now), "live_epoch_ts": epoch, "live_chains_snapshot_ts": chains_ts,
+                "live_exit_stamps": stamps,
+                "live_exit_stamps_missing": [x["correlation_id"] for x in stamps if x.get("missing")],
+                "legacy_v1": legacy}
 
     return _monitor_tiles_guard(build, 1_500_000)
 
@@ -50539,6 +50568,8 @@ def _live_guardian_tick(now=None) -> list:
             _live_guardian_red_clear_if_flat(now)   # RK (1): never before the post-restart exchange reconcile
         return []
     chains = _tile_integrity_chains(now)
+    # read-only snapshot for /api/monitor/exit-lag (the route must not build chains itself: the provider takes trade_lock)
+    _LIVE_GUARDIAN_STATE["exit_lag_chains"] = (now, list(chains))
     _floor_fn = globals().get("_offline_sim_epoch_floor")
     if _floor_fn is None:
         raise RuntimeError("live guardian: epoch floor function missing (refusing to evaluate without the fresh-epoch filter)")
@@ -50573,7 +50604,8 @@ def _live_guardian_tick(now=None) -> list:
                        f"d3_loss=${_rec.get('d3_loss_usd')} gap=${_rec.get('gap_usd')} drift=${_rec.get('drift_usd')}")
     # AMEND5 G4(b) (L22): LIQ_CLAMP_FLATTEN => flatten THAT position only (relay ops/position-flatten: no pause, no disarm)
     _posf = _lg.position_flatten_violations(viol)
-    # AMEND4 E1 (L12): cap / unreadable-PnL / stale-book codes are AMBER ENTRY BLOCKS only (never a disarm or force-flat);
+    # AMEND4 E1 (L12): unreadable-PnL / stale-book codes are AMBER ENTRY BLOCKS only. R20 (Danish 25 Oct 06:21, supersedes E1):
+    # daily-cap hits are ALSO in the disarm list (disarm ALL + force-flat + RED latch) while keeping the entry block;
     # _live_tile_admission refuses new live entries while a fresh AMBER is held (stamped LIVE_SKIPPED_DAILY_CAP).
     viol, amber = _lg.split_violations(viol)
     _LIVE_GUARDIAN_STATE["amber"] = ({"ts": now, "codes": sorted({v["code"] for v in amber}),
@@ -50716,7 +50748,7 @@ def monitor_live_guardian_route():
             "active": bool(_get_live_copy_output().snapshot().get("enabled")),
             "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
             "heartbeat_stale": _live_guardian_heartbeat_stale(), "heartbeat_stale_after_sec": _lg.HEARTBEAT_STALE_SEC,
-            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc")},
+            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc", "exit_lag_chains")},
             "calc": {**{k: v for k, v in (_LIVE_GUARDIAN_STATE.get("calc") or {}).items() if k != "flat_hist"},
                      "flat_hist_n": len((_LIVE_GUARDIAN_STATE.get("calc") or {}).get("flat_hist") or [])}}
     return _monitor_response(body, 32768)
@@ -62053,11 +62085,59 @@ _live_copy_bootstrap_lock = threading.Lock()
 _LIVE_TILE_GATE_LOG: "collections.deque" = collections.deque(maxlen=200)
 
 
+_EXIT_LAG_ALERTS: "collections.deque" = collections.deque(maxlen=200)
+
+
+def _exit_lag_gate_now():
+    """HM R2 (a): the exit-lag arm gate (exit_lag_regression.rk_gate) computed for the ARM / LIVE-ENTRY paths from the
+    closed rows plus the guardian's chain snapshot. Any error -> None, which arm_block_reason treats as a refusal."""
+    import exit_lag_regression as _elr
+    try:
+        closed = _exit_latency_closed_trade_rows(_elr.DEPLOY_TS - 3600)
+        snap = _LIVE_GUARDIAN_STATE.get("exit_lag_chains") or (None, [])
+        try:
+            epoch = _offline_sim_epoch_floor()
+        except Exception:  # noqa: BLE001
+            epoch = None
+        epoch = max(float(epoch or 0.0), _elr.GATE_SCOPE_START_TS)
+        return _elr.rk_gate(closed, list(snap[1] or []), epoch_ts=epoch)
+    except Exception as exc:  # noqa: BLE001 - unreadable gate = refused (fail closed)
+        logger.warning(f"[EXIT LAG GATE] unreadable: {type(exc).__name__}")
+        return None
+
+
+def _exit_lag_live_block(lane, margin_usd, *, where: str, trade_id=None):
+    """HM R2 (a): refuse a tile-ON arm or a live entry when the exit-lag gate blocks it (GS-01: gs01_arm_blocked_by_exit_lag,
+    other tiles: arm_eligible), when the gate is unreadable, or when a GS-01 order is above GS01_MAX_NOTIONAL_USD ($0.25
+    margin). Returns the refusal reason (an alert is raised) or None."""
+    import exit_lag_regression as _elr
+    import live_tile_gate as _ltg
+    try:
+        tk = _ltg.tile_key_for_lane(lane)
+    except Exception:  # noqa: BLE001
+        tk = None
+    reason = _elr.gs01_size_block_reason(tk, margin_usd)
+    if reason is None:
+        reason = _elr.arm_block_reason(_exit_lag_gate_now(), tk)
+    if reason:
+        alert = {"ts": time.time(), "where": where, "lane": str(lane or "").upper(), "tile_key": tk,
+                 "trade_id": trade_id, "reason": reason, "margin_usd": margin_usd}
+        _EXIT_LAG_ALERTS.append(alert)
+        logger.error(f"[ALERT][EXIT LAG GATE] {where} refused lane={alert['lane']} trade={trade_id}: {reason} "
+                     f"(margin_usd={margin_usd})")
+    return reason
+
+
 def _live_tile_admission(lane, trade_id, now):
     """Two-tile live gate (live_tile_gate.admit_entry) for the FIRST entry event of a live trade. Refusals are logged and
     kept in _LIVE_TILE_GATE_LOG; the paper tile is never touched (the trade simply is not copied)."""
     import live_tile_gate as _ltg
     from combo_pathway_config import ACTIVE_TILE_ORDER
+    _xl = _exit_lag_live_block(lane, _live_copy.MAX_MARGIN_USD, where="LIVE_ENTRY", trade_id=trade_id)
+    if _xl:   # HM R2 (a): exit-lag gate / GS-01 $0.25 cap, fail closed
+        row = {"ts": now, "trade_id": trade_id, "lane": lane, "tile_key": None, "admitted": False, "reasons": [_xl]}
+        _LIVE_TILE_GATE_LOG.append(row)
+        return False, [_xl], {"exit_lag_block": _xl}
     sw = _get_bfx_live_switch()
     armed = [l for l in ACTIVE_TILE_ORDER if (sw.snapshot(l) or {}).get("bitfinex_live_orders")]
     # strict chain build (no swallow): if the live-copy monitor context is unavailable the gate raises -> refused
@@ -62177,6 +62257,10 @@ def _live_copy_stamp_payload(payload, signal_at=None):
                         and not _get_live_copy_bootstrap().claim(lane, trade_id)):
                     # Entry relied on the bootstrap but could not bind it: withhold.
                     approval, approval_reasons = None, ["PROTECTION_BOOTSTRAP_CLAIM_FAILED"]
+        if approval and approval.get("entry_allowed"):
+            _xl = _exit_lag_live_block(lane, approval.get("max_margin_usd"), where="LIVE_ORDER", trade_id=trade_id)
+            if _xl:   # HM R2 (a): the signed order itself must be within the GS-01 cap and pass the exit-lag gate
+                approval, approval_reasons = None, [_xl]
         if approval:
             payload["live_copy_approval"] = approval
             _get_live_copy_approvals().append({k: approval.get(k) for k in (
@@ -63237,6 +63321,10 @@ def api_live_copy_protection_bootstrap():
         if lane not in ACTIVE_TILE_REGISTRY:
             results[lane] = {"ok": False, "error": "LANE_NOT_ACTIVE"}
             continue
+        import live_tile_gate as _ltg_allow
+        if _ltg_allow.operator_eligibility_refusal(lane) is not None:   # RK 06:35 (3) arm allowlist
+            results[lane] = {"ok": False, "error": "LANE_NOT_ARM_ALLOWLISTED"}
+            continue
         if not _get_live_copy_eligibility().is_eligible(lane):
             results[lane] = {"ok": False, "error": "LANE_NOT_OPERATOR_ELIGIBLE"}
             continue
@@ -63634,10 +63722,12 @@ def api_bitfinex_tile_live_orders(lane: str):
         return jsonify({"error": "'enabled' must be a JSON boolean",
                         "example": {"enabled": True}}), 400
     if enabled:
-        from combo_pathway_config import RETIRED_TILE_LANES as _retired_lanes
-        if lane in _retired_lanes:
-            # Retired tiles stay OFF across deploys and restores (owner rule).
-            return jsonify({"ok": False, "error": "TILE_RETIRED", "lane": lane,
+        # RK 25 Oct 06:35 (3): ALLOWLIST, not a per-name retired denylist: every lane except GS01 and gf3 (gf3 only with
+        # its own LIVE_HM_GATE_FADE3=PASS:<ref>, unset) is refused - retired, unknown or any string.
+        import live_tile_gate as _ltg_allow
+        _arm_refusal = _ltg_allow.operator_eligibility_refusal(lane)
+        if _arm_refusal is not None:
+            return jsonify({"ok": False, "error": "LANE_NOT_ARM_ALLOWLISTED", "reason": _arm_refusal, "lane": lane,
                             "bitfinex_live_orders": False}), 409
     sw = _get_bfx_live_switch()
     if enabled:
@@ -63666,6 +63756,10 @@ def api_bitfinex_tile_live_orders(lane: str):
         return jsonify({"ok": False, "error": _live_guardian_tile_arm_block(lane), "lane": lane, "bitfinex_live_orders": False,
                         "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval"),
                         "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l")}), 409
+    if enabled:
+        _xl = _exit_lag_live_block(lane, _live_copy.MAX_MARGIN_USD, where="TILE_ARM")
+        if _xl:   # HM R2 (a): exit-lag gate / GS-01 $0.25 cap, fail closed
+            return jsonify({"ok": False, "error": _xl, "lane": lane, "bitfinex_live_orders": False}), 409
     if enabled:
         sw.request_on(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     else:

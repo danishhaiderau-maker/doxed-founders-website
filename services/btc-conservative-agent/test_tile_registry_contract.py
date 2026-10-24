@@ -510,8 +510,12 @@ def test_bot_version_label_derives_the_tile_count_from_the_registry():
 
 
 def test_retired_tiles_cannot_be_switched_live():
+    # RK 06:35 (3): retired tiles are refused by the arm ALLOWLIST (gs1/gf3 only), not a per-name denylist.
+    import live_tile_gate as ltg
     src = open(__import__("os").path.join(__import__("os").path.dirname(__file__), "bot.py")).read()
-    assert '"error": "TILE_RETIRED"' in src
+    assert '"error": "LANE_NOT_ARM_ALLOWLISTED"' in src
+    for lane in RETIRED_TILE_LANES:
+        assert ltg.operator_eligibility_refusal(lane) is not None, lane
 
 
 def test_ha_gs07_and_tiles67_retired_and_roster_renumbered_1_to_5():

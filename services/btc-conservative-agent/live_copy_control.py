@@ -1328,6 +1328,9 @@ class LiveEligibility:
         lane = str(lane or "").upper()
         if lane not in self._active:
             return False  # retired / unknown lanes are never eligible
+        import live_tile_gate as _ltg
+        if _ltg.operator_eligibility_refusal(lane) is not None:
+            return False  # RK 06:29 (2a): only gs1 / gf3 (with its HM gate) may ever be eligible, whatever was persisted
         with self._lock:
             return bool((self._rows.get(lane) or {}).get("live_eligible"))
 
@@ -1335,6 +1338,11 @@ class LiveEligibility:
         lane = str(lane or "").upper()
         if lane not in self._active:
             return False, {"lane": lane, "live_eligible": False, "error": "TILE_NOT_ACTIVE"}
+        if eligible:
+            import live_tile_gate as _ltg
+            refusal = _ltg.operator_eligibility_refusal(lane)
+            if refusal is not None:   # RK 06:29 (2a): refused in code whatever the admin action
+                return False, {"lane": lane, "live_eligible": False, "error": refusal}
         now = float(self._clock())
         with self._lock:
             prior = dict(self._rows.get(lane) or {})
@@ -1357,7 +1365,7 @@ class LiveEligibility:
             rows = {lane: dict(self._rows.get(lane) or {"lane": lane, "live_eligible": False})
                     for lane in self._active}
         return {"schema": ELIGIBILITY_SCHEMA, "rows": rows,
-                "eligible_lanes": [l for l, r in rows.items() if r.get("live_eligible")]}
+                "eligible_lanes": [l for l, r in rows.items() if r.get("live_eligible") and self.is_eligible(l)]}
 
 
 # ---------------------------------------------------------------------------

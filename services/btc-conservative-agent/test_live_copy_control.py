@@ -107,8 +107,8 @@ def _ga(**over):
 
 def test_switch_allowlist_needs_operator_eligibility(tmp_path):
     sw = BitfinexLiveSwitch(tmp_path / "sw.json", legacy_sidecar=tmp_path / "legacy.json")
-    lane = next(l for l in ACTIVE_TILE_ORDER
-                if ACTIVE_TILE_REGISTRY[l].get("relay_capability") == "BLOCKED_UNQUALIFIED")
+    from combo_pathway_config import RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP as lane   # RK 06:35 (3): arm allowlist
+    assert ACTIVE_TILE_REGISTRY[lane].get("relay_capability") == "BLOCKED_UNQUALIFIED"
     off = sw.evaluate(lane, global_arm=_ga(), size_checks={})
     on = sw.evaluate(lane, global_arm=_ga(), size_checks={}, operator_eligible=True)
     assert "LANE_NOT_ALLOWLISTED" in off["denials"] and "LANE_RELAY_CAPABILITY_BLOCKED" in off["denials"]
@@ -136,10 +136,11 @@ def test_live_eligibility_default_off_persist_and_retired(tmp_path):
     ok, row = e.set("NOT_A_TILE", True)
     assert not ok and row["error"] == "TILE_NOT_ACTIVE"
     assert not e.is_eligible("NOT_A_TILE")
-    ok, _ = e.set(LANE, True)
-    assert ok and lc.LiveEligibility(path=p).is_eligible(LANE)  # persisted config
-    e.set(LANE, False)
-    assert not lc.LiveEligibility(path=p).is_eligible(LANE)
+    from combo_pathway_config import RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP as GS01   # RK 06:29 (2a): gs1/gf3 only
+    ok, _ = e.set(GS01, True)
+    assert ok and lc.LiveEligibility(path=p).is_eligible(GS01)  # persisted config
+    e.set(GS01, False)
+    assert not lc.LiveEligibility(path=p).is_eligible(GS01)
 
 
 def test_live_eligibility_fails_closed_when_unpersistable(tmp_path, monkeypatch):

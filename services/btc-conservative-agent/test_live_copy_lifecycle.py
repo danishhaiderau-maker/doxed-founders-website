@@ -98,7 +98,7 @@ def test_intent_without_decision_then_skipped_and_full_trade_drift():
         {"report_id": "f", "type": "ORDER_FILLED", "correlation_id": "gs1-x", "account": "acct-a", "timeline": tl,
          "fill": {"price": 100.0, "qty": 0.0003}, "event_at_ts": NOW - 97},
         {"report_id": "s", "type": "STOP_CONFIRMED", "correlation_id": "gs1-x", "account": "acct-a",
-         "timeline": {**tl, "stop_confirmed_at_ts": NOW - 96}, "stop": {"exchange_order_id": "9", "price": 99.6}},
+         "timeline": {**tl, "stop_confirmed_at_ts": NOW - 96}, "stop": {"exchange_order_id": "9", "verified_on_exchange": True, "price": 99.6}},
         {"report_id": "c", "type": "POSITION_CLOSED", "correlation_id": "gs1-x", "account": "acct-a", "timeline": tl,
          "close": {"price": 100.2, "reason": "TP"}, "event_at_ts": NOW - 10},
     ]
@@ -155,7 +155,7 @@ def _closed_trade(paper_reason="TIME_60S", live_reason="MANUAL_OR_EXCHANGE_CLOSE
         {"report_id": "f", "type": "ORDER_FILLED", "correlation_id": "dsl-1", "account": "acct-a", "timeline": tl,
          "fill": {"price": 100.0, "qty": 0.0003}, "event_at_ts": NOW - 97, "fly_received_at_ts": NOW - 95},
         {"report_id": "s", "type": "STOP_CONFIRMED", "correlation_id": "dsl-1", "account": "acct-a",
-         "timeline": {**tl, "stop_confirmed_at_ts": NOW - 96}, "stop": {"exchange_order_id": "9", "price": 99.6},
+         "timeline": {**tl, "stop_confirmed_at_ts": NOW - 96}, "stop": {"exchange_order_id": "9", "verified_on_exchange": True, "price": 99.6},
          "fly_received_at_ts": NOW - 95},
         {"report_id": "c", "type": "POSITION_CLOSED", "correlation_id": "dsl-1", "account": "acct-a", "timeline": tl,
          "close": {"price": live_exit, "reason": live_reason}, "event_at_ts": NOW - 10, "fly_received_at_ts": NOW - 9},
