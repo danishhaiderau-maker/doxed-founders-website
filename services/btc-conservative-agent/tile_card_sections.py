@@ -232,6 +232,10 @@ def _live_exit_text(rule: str, exit_policy: dict, spec: dict) -> str | None:
     if rule == "EARLY_CUT" and cut:
         return (f"Early cut at {_bp(cut['cut_margin_pct'])} within {_minutes(cut['window_sec'])}, only if the trade "
                 f"never ran past {_bp(cut['max_peak_margin_pct'])}")
+    if rule == "EXCHANGE_STOP":
+        return f"Exchange stop {_bp(-float(exit_policy['exchange_stop_bps']))} (first trade print through it)"
+    if rule == "TAKE_PROFIT":
+        return f"Take profit {_bp(float(exit_policy['take_profit_bps']))} on the executable book side"
     if rule == "TIME_EXIT":
         return f"Time backstop: close after {_minutes(exit_policy.get('max_duration_sec') or spec.get('path_end_sec'))}"
     # Continuous (August replica) rules, margin % at its leverage.

@@ -1,8 +1,9 @@
 """GS-FADE3-TP30 PAPER tile (key gf3, cid code 8, display slot 6). RK PASS 25 Oct 06:24 AEDT.
 
-PAPER ONLY. Self-simulated engine (like the retired DISLOC engine): it is NOT in COMBO_EXECUTION_LANES and never goes
-through the generic XVL engine. live_tile_gate.PAPER_ONLY_TILE_KEYS refuses every arm path; LIVE_HM_GATE_FADE3 stays
-unset in this PR.
+PAPER ONLY. Self-simulated engine (like the retired DISLOC engine): registry slot 6 in COMBO_EXECUTION_LANES with
+signal_clock SELF_SIMULATED_SIGNAL_CLOCK and self_simulated_paper, so the shared AI call and the XVL evaluator loop both
+skip it; bot._gf3_thread steps Fade3PaperEngine once a second over LiveFeatureFeed. live_tile_gate.PAPER_ONLY_TILE_KEYS
+refuses every arm path; LIVE_HM_GATE_FADE3 stays unset in this PR.
 
 Signal = sim E8 (FADE, ALL regimes, W=3), ported verbatim from the sim's feat.py / family.py
 (test_tile_fade3 pins their sha256 and checks parity on a seeded fixture):
@@ -38,6 +39,10 @@ TILE_KEY = "gf3"
 TILE_KEY_CODE = 8
 DISPLAY_SLOT = 6
 LANE = "FAMILY_GS_FADE3_TP30"
+# Registry identity (combo_pathway_config spec raw_policy_id; bot._load_tile_policy_modules checks it at boot).
+POLICY_ID = "GS_FADE3_E8_FADE_ALL_W3_Z2P5_MOM2ATR_IMB0P2_BZ2|TP30_HARD25_XSTOP35_TIME1200_CAP1"
+SELF_SIMULATED = True
+LEDGER_FILE = "gf3_paper_ledger.jsonl"
 TILE_NAME = "GS-FADE3-TP30"
 SIGNAL_ID = "E8-FADE-ALL-W3"
 PAPER_ONLY = True
@@ -444,8 +449,152 @@ def recount(rows: Iterable[Mapping[str, Any]], **kw) -> list:
     return [{**r, **countability(r, **kw)} for r in rows if r.get("event") == "CLOSE"]
 
 
+def read_ledger(path: str) -> list:
+    """All parseable rows of the gf3 ledger ([] before the first write); read-only."""
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        pass
+    return rows
+
+
 def append_jsonl(path: str) -> Callable[[Mapping], None]:
     def _w(row: Mapping) -> None:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, default=str, separators=(",", ":")) + "\n")
     return _w
+
+
+# ------------------------------------------------------------------ registry policy interface (dashboard / analyzer)
+def exit_config(analyzer_sync_id: str) -> dict:
+    """Per-trade exit snapshot (bot.get_exit_config_snapshot) for the self-simulated gf3 rules."""
+    return {"policy_snapshot_schema": "exit_policy_v1", "policy_source": "btc-conservative-agent",
+            "policy_version": POLICY_ID, "raw_policy_id": POLICY_ID, "analyzer_sync_id": analyzer_sync_id,
+            "exit_profile_id": POLICY_ID.split("|", 1)[1], "family": "GS_FADE3_FIRST_TRIGGER_WINS",
+            "take_profit_bp": TP_BP, "hard_stop_bp": HARD_STOP_BP, "exchange_stop_bp": EXCHANGE_STOP_BP,
+            "path_end_sec": TIME_EXIT_S, "partial_reduction_required": False}
+
+
+def dashboard_policy() -> dict:
+    """Static pathway card view (bot.build_static_pathway_lane_specs)."""
+    return {
+        "filter_chips": ["PAPER ONLY", "LIVE REFUSED", f"Cap touch +-{ENTRY_CAP_BP:g} bp", f"TP {TP_BP:g} bp",
+                         f"Hard stop {HARD_STOP_BP:g} bp", f"Exchange stop {EXCHANGE_STOP_BP:g} bp",
+                         f"{TIME_EXIT_S // 60}m cap"],
+        "entry": {"trigger": f"{SIGNAL_ID}: 3-min flow z-score spike faded (self-simulated 1 s engine)",
+                  "entry_path": "TILE_FADE3_SELF_SIMULATED", "fill_path": "TILE_FILL_IOC_CAP_THEN_A5_REST",
+                  "execution": "Own paper ledger; every live arm path refused",
+                  "chase_detail": f"No chase; remainder rests at the cap for {paper_fill.REST_TTL_S:g} s (A5)"},
+        "strategy_detail": [f"E8 FADE ALL W={FLOW_W_MIN}: z3 >= {Z_ENTRY:g}, mom5 >= {MOM_ATR_MULT:g} ATR30, "
+                            f"imb5 against >= {IMB_MIN:g}, |BZ| guard {BZ_LIMIT:g}, spread <= {SPREAD_MAX_BP:g} bp",
+                            f"First trigger wins: TP +{TP_BP:g} / hard -{HARD_STOP_BP:g} / exchange -"
+                            f"{EXCHANGE_STOP_BP:g} bp / {TIME_EXIT_S // 60}m; {COOLDOWN_S:g} s cooldown, one open, "
+                            f"${NOTIONAL_USD:g}",
+                            "PAPER ONLY: every live arm path refused (live_tile_gate.PAPER_ONLY_TILE_KEYS)"],
+        "exit": {"profile": "GS_FADE3_FIRST_TRIGGER_WINS", "take_profit_bp": TP_BP, "hard_stop_bp": HARD_STOP_BP,
+                 "exchange_stop_bp": EXCHANGE_STOP_BP, "fixed_time_exit": f"{TIME_EXIT_S // 60}m"},
+    }
+
+
+# ------------------------------------------------------------------ live feature feed (collector tails, read-only)
+class _JsonlHistory:
+    """Incremental byte-offset reader of one collector jsonl keeping HISTORY_S seconds of parsed rows by "s".
+
+    A shrink / inode change (rotation) resets to the new file's tail; the tile then re-warms (z needs ~4.8 h)."""
+
+    def __init__(self, path: str, parse: Callable[[dict], Any], tail_bytes: int) -> None:
+        self.path, self.parse, self.tail_bytes = path, parse, tail_bytes
+        self.rows: dict = {}
+        self._ino = None
+        self._offset = 0
+        self._partial = b""
+
+    def sync(self) -> None:
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return
+        if self._ino != st.st_ino or st.st_size < self._offset:
+            self.rows, self._ino, self._partial = {}, st.st_ino, b""
+            self._offset = max(0, st.st_size - self.tail_bytes)
+            drop_first = self._offset > 0
+        else:
+            drop_first = False
+        if st.st_size == self._offset:
+            return
+        with open(self.path, "rb") as fh:
+            fh.seek(self._offset)
+            chunk = fh.read(st.st_size - self._offset)
+        self._offset += len(chunk)
+        lines = (self._partial + chunk).split(b"\n")
+        self._partial = lines.pop()
+        for line in lines[1:] if drop_first else lines:
+            try:
+                r = json.loads(line)
+                sec = int(r["s"])
+                val = self.parse(r)
+            except (ValueError, KeyError, TypeError, IndexError):
+                continue
+            if val is not None:
+                self.rows[sec] = val
+        if self.rows:
+            floor = max(self.rows) - HISTORY_S
+            for sec in [k for k in self.rows if k < floor]:
+                del self.rows[sec]
+
+
+def _parse_book(r: dict):
+    b, a = r.get("b") or [], r.get("a") or []
+    if not b or not a:
+        return None
+    pad = [[np.nan, 0.0]] * 10
+    rx = r.get("receive_ts")
+    return ((list(b) + pad)[:10], (list(a) + pad)[:10], float(rx) if rx else None)
+
+
+def _parse_trades(r: dict):
+    return [[float(t[0]), float(t[1]), float(t[2]), float(t[3])] for t in r.get("tr") or []]
+
+
+def _parse_deriv(r: dict):
+    d, sp = r.get("deriv"), r.get("spot")
+    return (float(d), float(sp)) if d and sp else None
+
+
+class LiveFeatureFeed:
+    """features_fn for the engine over PRICE_SOURCES in ``root``: the newest complete book second s (s + 1 <= now,
+    receive_ts <= now), trade prints and deriv rows known by s + 1, then compute_features / entry_signals_e8 over
+    the last HISTORY_S seconds. Returns (s + 1, side or None, snapshot); (None, None, {}) before the first row."""
+
+    def __init__(self, root: str) -> None:
+        self.book = _JsonlHistory(os.path.join(root, PRICE_SOURCES[0]), _parse_book, 48 << 20)
+        self.trades = _JsonlHistory(os.path.join(root, PRICE_SOURCES[1]), _parse_trades, 32 << 20)
+        self.deriv = _JsonlHistory(os.path.join(root, PRICE_SOURCES[2]), _parse_deriv, 16 << 20)
+
+    def __call__(self, now: float):
+        for tail in (self.book, self.trades, self.deriv):
+            tail.sync()
+        secs = sorted(k for k, v in self.book.rows.items() if k + 1 <= now and (v[2] is None or v[2] <= now))
+        if not secs:
+            return None, None, {}
+        s_last = secs[-1]
+        S = np.asarray(secs, dtype=np.int64)
+        B = np.asarray([self.book.rows[k][0] for k in secs], dtype=float)
+        A = np.asarray([self.book.rows[k][1] for k in secs], dtype=float)
+        T = sorted((t for k, prints in self.trades.rows.items() if k + 1 <= s_last + 1 for t in prints),
+                   key=lambda t: (t[1], t[0]))
+        D = [[k, *v] for k, v in sorted(self.deriv.rows.items()) if k + 1 <= s_last + 1]
+        F = compute_features(S, B, A, np.asarray(T, dtype=float).reshape(-1, 4),
+                             np.asarray(D, dtype=float).reshape(-1, 3))
+        L, Sh = entry_signals_e8(F)
+        side = "LONG" if L[-1] else "SHORT" if Sh[-1] else None
+        snap = {k: (float(F[k][-1]) if np.isfinite(F[k][-1]) else None)
+                for k in ("mid", "spread", "imb5", "z3", "mom5", "ATR30", "BZ")}
+        return float(s_last + 1), side, snap
+

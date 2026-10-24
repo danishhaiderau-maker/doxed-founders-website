@@ -34217,6 +34217,7 @@ def _paper_delay_pool_reset() -> None:
 
 
 import live_ack_pool as _live_ack_pool
+import tile_fade3 as _tile_fade3
 
 _CROSS_LANE_POOL = None
 
@@ -34248,6 +34249,44 @@ def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_se
         logger.warning(f"[RK-A POOL] admit failed: {type(exc).__name__}")
     d, src, _meta = pool.total(pool_key, own_signal_to_send_s)
     return d, src
+
+
+# Tile 6 · GS-FADE3-TP30 (gf3): self-simulated 1 s PAPER engine (tile_fade3). Live is refused on every arm path
+# (live_tile_gate.PAPER_ONLY_TILE_KEYS); the AI router and the XVL evaluator loop skip the lane (signal clock).
+_GF3_POOL_KEYS = {"entry": _live_ack_pool.KEY_ENTRY_MKT, "exit": _live_ack_pool.KEY_EXIT_RO_MKT}
+_gf3_engine = None
+_gf3_engine_lock = threading.Lock()
+
+
+def _gf3_ledger_path() -> str:
+    return os.path.join(str(_data_sync_runtime_root()), _tile_fade3.LEDGER_FILE)
+
+
+def _gf3_get_engine():
+    global _gf3_engine
+    with _gf3_engine_lock:
+        if _gf3_engine is None:
+            lane = _tile_fade3.LANE
+            _gf3_engine = _tile_fade3.Fade3PaperEngine(
+                features_fn=_tile_fade3.LiveFeatureFeed(str(_data_sync_runtime_root())),
+                delay_fn=lambda leg: _disloc_delay(lane, leg, pool_key=_GF3_POOL_KEYS.get(leg)),
+                write_fn=_tile_fade3.append_jsonl(_gf3_ledger_path()),
+            )
+        return _gf3_engine
+
+
+def gf3_paper_thread():
+    """Steps the gf3 paper engine once a second while its research toggle is on (an open position keeps being
+    managed after a toggle-off so it always closes on a real paper fill)."""
+    while True:
+        try:
+            engine = _gf3_get_engine()
+            if is_research_lane_enabled(_tile_fade3.LANE) or engine.pos is not None or engine.pending is not None:
+                engine.step(time.time())
+        except Exception as exc:  # noqa: BLE001 - one bad second never kills the tile
+            logger.warning(f"[GF3 PAPER] step failed: {type(exc).__name__}: {exc}")
+        _worker_beat("gf3_paper_thread")
+        time.sleep(1.0)
 
 
 def _iso_or_unix(v):
@@ -35204,7 +35243,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
     "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency", "/api/monitor/exit-lag",
-    "/api/monitor/tiles/field-completeness",
+    "/api/monitor/tiles/field-completeness", "/api/monitor/tiles/gf3",
     # API-GAP-SWEEP-20261012
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
@@ -48802,6 +48841,25 @@ def monitor_tiles_specs():
     return _monitor_tiles_guard(build, budget)
 
 
+@app.route('/api/monitor/tiles/gf3', methods=["GET"])
+def monitor_tiles_gf3():
+    """Tile 6 · GS-FADE3-TP30 paper engine status + its closed ledger rows re-evaluated for countability
+    (?limit=50, max 200). Read-only; PAPER ONLY."""
+    def build(now):
+        try:
+            limit = max(1, min(200, int(request.args.get("limit") or 50)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("limit must be an integer")
+        engine = _gf3_get_engine()
+        rows = _tile_fade3.read_ledger(_gf3_ledger_path())
+        a5_now = _tile_fade3.a5_verified(engine.rest_trades_n)
+        closed = _tile_fade3.recount(rows, a5_verified_now=a5_now, latest_real_l_bp=None, clamp_hit=False)
+        return {"schema": "monitor_tile_gf3_v1", **_monitor_tiles_common(now),
+                "toggle_on": bool(is_research_lane_enabled(_tile_fade3.LANE)),
+                "status": engine.status(), "closed_n": len(closed), "closed": closed[-limit:]}
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_SPECS_BYTES)
+
 @app.route('/api/monitor/tiles/trades', methods=["GET"])
 def monitor_tiles_trades():
     """Per-trade rows (open, closed, pending, expired), cursor-paginated, whole rows only."""
@@ -61602,6 +61660,7 @@ def main():
     threading.Thread(target=regime_bars_boot_hydrate, name="regime-bars-hydrate", daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
     threading.Thread(target=xvl_evaluator_thread, name="xvl-evaluator", daemon=True).start()
+    threading.Thread(target=gf3_paper_thread, name="gf3-paper", daemon=True).start()
     _start_collector_worker("collector-maturation")
     _start_collector_worker("collector-v3-reconcile")
     threading.Thread(target=safe_thread(ai_shadow_maturation_loop), daemon=True).start()

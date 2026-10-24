@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import inspect
 import subprocess
 import sys
@@ -361,3 +362,61 @@ def test_engine_one_position():
     h.eng.step(1000.0)
     h.sig_ts = 1001.0
     assert h.eng.step(1002.0) == [] and h.calls.count("entry") == 1
+
+
+# ------------------------------------------------------------------ slot-6 registry activation + live feed + route
+def test_gf3_is_registry_slot_6_paper_only_and_skipped_by_ai_and_evaluator():
+    import combo_pathway_config as c
+    spec = c.ACTIVE_TILE_REGISTRY[tf.LANE]
+    assert c.ACTIVE_TILE_ORDER.index(tf.LANE) + 1 == tf.DISPLAY_SLOT and spec["id_prefix"] == tf.TILE_KEY
+    assert spec["raw_policy_id"] == tf.POLICY_ID and spec["implementation_modules"][0] == "tile_fade3.py"
+    assert spec["paper_only"] is True and spec["execution_scope"] == "PAPER_ONLY"
+    assert spec["live_copy_eligible"] is False and spec["platform_relay_eligible"] is False
+    assert spec["self_simulated_paper"] is True and spec["default_enabled"] is True
+    assert c.is_evaluator_clock_lane(tf.LANE) and tf.LANE not in c.evaluator_loop_lanes()
+    assert spec["exit_policy"]["exit_order"] == ("HARD_STOP", "EXCHANGE_STOP", "TAKE_PROFIT", "TIME_EXIT")
+    ex = spec["exit_policy"]
+    assert (ex["hard_stop_bps"], ex["take_profit_bps"], ex["exchange_stop_bps"], ex["max_duration_sec"]) == (
+        tf.HARD_STOP_BP, tf.TP_BP, tf.EXCHANGE_STOP_BP, tf.TIME_EXIT_S)
+    import live_tile_gate
+    assert tf.TILE_KEY in live_tile_gate.PAPER_ONLY_TILE_KEYS
+    assert tf.exit_config("x")["raw_policy_id"] == tf.POLICY_ID and tf.dashboard_policy()["filter_chips"][1] == "LIVE REFUSED"
+
+
+def _feed_files(root, n, s0=1_761_000_000):
+    rows = {"b": [], "t": [], "d": []}
+    for i in range(n):
+        s, px = s0 + i, 100000.0 + (i % 7)
+        rows["b"].append({"s": s, "b": [[px - 1 - k, 1.0] for k in range(5)], "a": [[px + 1 + k, 1.0] for k in range(5)]})
+        rows["t"].append({"s": s, "tr": [[i, s * 1000 + 1, 0.01, px]]})
+        rows["d"].append({"s": s, "deriv": px + 2, "spot": px, "mark": px})
+    for name, key in zip(tf.PRICE_SOURCES, "btd"):
+        (root / name).write_text("".join(json.dumps(r) + "\n" for r in rows[key]))
+    return s0
+
+
+def test_live_feature_feed_is_incremental_causal_and_pads_books(tmp_path):
+    s0 = _feed_files(tmp_path, 900)
+    feed = tf.LiveFeatureFeed(str(tmp_path))
+    assert tf.LiveFeatureFeed(str(tmp_path / "missing"))(s0 + 10) == (None, None, {})
+    ts, side, snap = feed(s0 + 500.5)  # only seconds with s + 1 <= now are complete
+    assert ts == s0 + 500 and side is None and snap["mid"] == pytest.approx(100000.0 + 499 % 7)
+    assert all(len(v[0]) == 10 for v in feed.book.rows.values())  # 5 levels padded to 10
+    with open(tmp_path / tf.PRICE_SOURCES[0], "a") as fh:
+        fh.write(json.dumps({"s": s0 + 900, "b": [[1, 1]], "a": [[2, 1]]}) + "\n")
+    off = feed.book._offset
+    ts, _, _ = feed(s0 + 1000)
+    assert ts == s0 + 901 and feed.book._offset > off and len(feed.book.rows) == 901
+
+
+def test_gf3_route_is_census_fixtured_and_monitored():
+    import pathlib
+    here = pathlib.Path(__file__).resolve().parent
+    fx = json.loads((here / "ci" / "route_census_fields.json").read_text())["routes"]["/api/monitor/tiles/gf3"]
+    eng = tf.Fade3PaperEngine(features_fn=lambda now: (None, None, {}), delay_fn=lambda leg: (0.0, "x"),
+                              write_fn=lambda row: None)
+    assert set(fx["status"]) <= set(eng.status())
+    src = (here / "bot.py").read_text()
+    assert "@app.route('/api/monitor/tiles/gf3'" in src and '"/api/monitor/tiles/gf3"' in src
+    assert 'target=gf3_paper_thread, name="gf3-paper"' in src
+    assert tf.read_ledger("/nonexistent/gf3.jsonl") == []
