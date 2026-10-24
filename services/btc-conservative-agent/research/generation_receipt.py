@@ -18,6 +18,13 @@ SCHEMA = "analyzer_generation_receipt_v1"
 RECEIPT_FILE = "analyzer_generation_receipt.json"
 
 GREEN, AMBER, RED = "GREEN", "AMBER", "RED"
+
+# The only data epoch a receipt may describe. Any other epoch id (including the collector sub-epoch
+# epoch-<hash>, which lives inside this data epoch) is hard-rejected: RED and incomplete.
+EXPECTED_DATA_EPOCH_ID = "ce-20261004-v31-freeze21b"
+QUARANTINED_INPUTS = {"exit_ladder_simulator": "BLOCKED_QUARANTINED"}
+OPTIONAL_INPUTS = {"cross_world_evidence": "OPTIONAL_MISSING"}
+_NON_GATING = {"BLOCKED_QUARANTINED", "OPTIONAL_MISSING", "RETIRED"}
 _RANK = {GREEN: 0, AMBER: 1, RED: 2}
 
 
@@ -68,6 +75,8 @@ def build_generation_receipt(
     input_blockers: Mapping[str, Any] | None = None,
     protection_replay_window: Mapping[str, Any] | None = None,
     data_epoch: Mapping[str, Any] | None = None,
+    source_revision: str | None = None,
+    expected_epoch_id: str = EXPECTED_DATA_EPOCH_ID,
 ) -> dict[str, Any]:
     studies = [
         _study_from_required(str(name), status)
@@ -86,7 +95,30 @@ def build_generation_receipt(
     integrity_status = str((integrity or {}).get("report_status") or "MISSING").upper()
     integrity_level = GREEN if integrity_status == "VALID" else RED
 
-    blockers_level = str((input_blockers or {}).get("level") or GREEN).upper()
+    # Exit-ladder sim (quarantined) and cross-world evidence (optional) are listed, never gating.
+    blocker_items = [i for i in (input_blockers or {}).get("items") or [] if isinstance(i, Mapping)]
+    quarantined, optional_missing, gating = [], [], []
+    for item in blocker_items:
+        name, status = item.get("input"), item.get("status")
+        if status == "OK":
+            continue
+        if name in QUARANTINED_INPUTS:
+            quarantined.append({"input": name, "status": QUARANTINED_INPUTS[name],
+                                "reason_code": item.get("reason_code")})
+        elif name in OPTIONAL_INPUTS:
+            optional_missing.append({"input": name, "status": OPTIONAL_INPUTS[name],
+                                     "reason_code": item.get("reason_code")})
+        elif status not in _NON_GATING:
+            gating.append(item)
+    if input_blockers and blocker_items:
+        blockers_level = GREEN
+        for item in gating:
+            blockers_level = _worst(blockers_level, RED if item.get("status") == "BLOCKED" else AMBER)
+        if any(i.get("input") == "protection_replay_window" and (i.get("evidence") or {}).get("alert_level") == RED
+               for i in blocker_items):
+            blockers_level = RED
+    else:
+        blockers_level = str((input_blockers or {}).get("level") or GREEN).upper()
     if blockers_level not in _RANK:
         blockers_level = AMBER
     window = dict(protection_replay_window or {})
@@ -102,7 +134,10 @@ def build_generation_receipt(
     if failed_required:
         reasons.append("required studies failed: " + ", ".join(failed_required))
     if integrity_status != "VALID":
-        reasons.append(f"integrity {integrity_status}")
+        failed_checks = [str(c.get("name") if isinstance(c, Mapping) else c)
+                         for c in (integrity or {}).get("failed_checks") or []]
+        reasons.append(f"integrity {integrity_status}"
+                       + (f" (failed: {', '.join(failed_checks[:8])})" if failed_checks else ""))
     if failed_optional:
         reasons.append("optional studies failed: " + ", ".join(failed_optional))
     if window_level != GREEN and window.get("truncated", True):
@@ -118,13 +153,15 @@ def build_generation_receipt(
             f"({fallback} events R17_UNPROVEN outside book coverage)"
         )
     if blockers_level != GREEN:
-        blocked = [
-            f"{item.get('input')}={item.get('status')}"
-            for item in (input_blockers or {}).get("items") or []
-            if isinstance(item, Mapping) and item.get("status") != "OK"
-        ]
+        blocked = [f"{item.get('input')}={item.get('status')}" for item in gating]
         if blocked:
             reasons.append("inputs: " + ", ".join(blocked))
+    # Book-only replay: a non-book pricing basis is never countable.
+    marks = window.get("mark_events_by_basis") or (window.get("mark_source") or {}).get("events_by_basis") or {}
+    non_book = sorted(b for b, n in dict(marks).items() if n and b not in ("BOOK10L_WALK_TRADE_STOP_V1", "R17_UNPROVEN"))
+    if non_book:
+        level = RED
+        reasons.append("protection replay priced off-book: " + ", ".join(non_book))
     epoch_admitted = (data_epoch or {}).get("pre_epoch_rows_admitted")
     if data_epoch and (epoch_admitted is None or int(epoch_admitted) > 0 or not data_epoch.get("epoch_id")):
         level = RED
@@ -133,18 +170,35 @@ def build_generation_receipt(
             + (f"{epoch_admitted} pre-epoch rows can enter results" if epoch_admitted is not None
                else f"purity unproven ({data_epoch.get('error') or 'no audit'})")
         )
+    epoch_id = (data_epoch or {}).get("epoch_id")
+    epoch_rejected = data_epoch is not None and epoch_id is not None and str(epoch_id) != expected_epoch_id
+    if data_epoch is None or epoch_rejected:
+        level = RED
+        reasons.append(f"epoch hard-rejected: receipt epoch {epoch_id!r} != {expected_epoch_id}")
     unplaced = int((data_epoch or {}).get("straddle_rows_unguarded") or 0) + int(
         (data_epoch or {}).get("unstamped_rows_unguarded") or 0)
     if unplaced:
+        # Item 5: straddle/unstamped rows are EXCLUDED; any that still reach a reader unguarded is RED.
+        level = RED
+        reasons.append(f"{unplaced} straddle/unstamped rows read unguarded (must be excluded)")
+    if not source_revision:
         level = _worst(level, AMBER)
-        reasons.append(f"{unplaced} straddle/unstamped rows read unguarded (never countable, not pre-epoch)")
+        reasons.append("source_revision missing")
     receipt = {
         "schema": SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "generation_id": manifest.get("generation_id"),
         "generation_revision": manifest.get("generation_revision"),
         "level": level,
-        "complete": not failed_required and integrity_status == "VALID",
+        "source_revision": source_revision or None,
+        "expected_epoch_id": expected_epoch_id,
+        "epoch_rejected": bool(data_epoch is None or epoch_rejected),
+        "complete": (not failed_required and integrity_status == "VALID" and data_epoch is not None
+                     and not epoch_rejected and not unplaced and not non_book),
+        "quarantined_inputs": quarantined,
+        "optional_inputs": optional_missing,
+        "protection_replay_excluded_by_reason": window.get("mark_excluded_events_by_reason")
+        or (window.get("mark_source") or {}).get("excluded_events_by_reason"),
         "reasons": reasons,
         "failed_required_studies": failed_required,
         "failed_optional_studies": failed_optional,

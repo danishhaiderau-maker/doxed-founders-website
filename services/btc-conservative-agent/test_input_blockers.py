@@ -337,11 +337,16 @@ class InputBlockersTest(unittest.TestCase):
                          ("DEGRADED", "REPORT_MISSING"))
         self.assertEqual(by_input["protection_replay_window"]["status"], "DEGRADED")
         self.assertEqual(by_input["cross_world_evidence"]["reason_code"], "FEWER_THAN_TWO_COMPUTABLE_WORLDS")
+        # Strategist ruling: listed, never gating.
+        self.assertEqual(by_input["cross_world_evidence"]["status"], "OPTIONAL_MISSING")
+        self.assertEqual(by_input["exit_ladder_simulator"]["status"], "BLOCKED_QUARANTINED")
+        self.assertEqual(document["quarantined_inputs"], ["exit_ladder_simulator"])
+        self.assertEqual(document["optional_inputs_missing"], ["cross_world_evidence"])
         self.assertEqual(by_input["signal_replay"]["status"], "DEGRADED")
         self.assertEqual(by_input["signal_replay"]["evidence"]["current_registry_executed"]["trades"], 2)
         self.assertEqual(by_input["counterfactual_stream"]["eligible"], 1)
         for item in document["items"]:
-            self.assertIn(item["status"], {"OK", "DEGRADED", "BLOCKED"})
+            self.assertIn(item["status"], {"OK", "DEGRADED", "BLOCKED", "BLOCKED_QUARANTINED", "OPTIONAL_MISSING"})
             for key in ("input", "reason_code", "reason", "eligible", "total", "evidence"):
                 self.assertIn(key, item)
         persisted = json.loads((self.report / ib.REPORT_FILE).read_text(encoding="utf-8"))

@@ -21967,6 +21967,23 @@ def _write_ledger_reconciliation(manifest):
     return recon
 
 
+def _receipt_source_revision(manifest):
+    """The analyzer code revision this generation ran (item 3): env/manifest, else the checkout's HEAD."""
+    prov = manifest.get("analysis_provenance") or {}
+    for value in (os.getenv("SOURCE_GIT_REV"), os.getenv("RAILWAY_GIT_COMMIT_SHA"), os.getenv("GIT_REVISION"),
+                  prov.get("analyzer_revision"), manifest.get("generation_revision")):
+        if value and str(value).strip().upper() != "UNKNOWN":
+            return str(value).strip()
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.abspath(__file__)),
+                             capture_output=True, text=True, timeout=5)
+        rev = out.stdout.strip()
+        return rev if out.returncode == 0 and len(rev) >= 7 else None
+    except Exception:
+        return None
+
+
 def _attach_generation_receipt(manifest, *, optional_errors):
     from research.generation_receipt import (
         RECEIPT_FILE,
@@ -22006,6 +22023,7 @@ def _attach_generation_receipt(manifest, *, optional_errors):
         input_blockers=input_blockers,
         protection_replay_window=_protection_replay_window_from_reports(),
         data_epoch=data_epoch,
+        source_revision=_receipt_source_revision(manifest),
     )
     recon = _write_ledger_reconciliation(manifest)
     if recon:
@@ -22022,6 +22040,8 @@ def _attach_generation_receipt(manifest, *, optional_errors):
         key: receipt[key] for key in (
             "schema", "level", "complete", "reasons", "failed_required_studies",
             "failed_optional_studies", "integrity_status", "protection_replay_window",
+            "source_revision", "expected_epoch_id", "epoch_rejected", "quarantined_inputs", "optional_inputs",
+            "protection_replay_excluded_by_reason",
         )
     }
     if "data_epoch" in receipt:

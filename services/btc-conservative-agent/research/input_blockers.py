@@ -515,6 +515,25 @@ def segment_promotion_item(data_dir: Path) -> dict[str, Any] | None:
                                               "migrated_at": receipt.get("completed_at")})
 
 
+# Strategist ruling (24 Oct): the exit-ladder simulator is quarantined until it is re-priced on real book rows,
+# and cross-world evidence is optional. Both are listed in every output with their original reason, and neither
+# moves the blockers level, fails integrity or makes a generation INVALID. When the simulator reports OK on
+# book pricing again, its item passes through unchanged (the design stays ready for real-book pricing).
+BLOCKED_QUARANTINED = "BLOCKED_QUARANTINED"
+OPTIONAL_MISSING = "OPTIONAL_MISSING"
+NON_GATING_STATUSES = frozenset({BLOCKED_QUARANTINED, OPTIONAL_MISSING, RETIRED})
+_RULING = {"exit_ladder_simulator": BLOCKED_QUARANTINED, "cross_world_evidence": OPTIONAL_MISSING}
+
+
+def _apply_strategist_input_ruling(items: list[dict]) -> None:
+    for item in items:
+        status = _RULING.get(item.get("input"))
+        if status and item.get("status") != "OK":
+            item["evidence"] = dict(item.get("evidence") or {}, original_status=item.get("status"))
+            item["status"] = status
+            item["gating"] = False
+
+
 def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict[str, Any]:
     """Return the analyzer_input_blockers_v1 document for one analyzer cycle."""
     from research.exit_ladder_paper_cohort import load_replay_index
@@ -539,6 +558,7 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
     promotion = segment_promotion_item(data_dir)
     if promotion is not None:
         items.append(promotion)
+    _apply_strategist_input_ruling(items)
     statuses = {item["status"] for item in items}
     replay_red = any(
         item["input"] == "protection_replay_window" and item["evidence"].get("alert_level") == "RED"
@@ -552,6 +572,8 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
         "epoch_source": epoch_source,
         "level": level,
         "counts": dict(sorted(Counter(item["status"] for item in items).items())),
+        "quarantined_inputs": [i["input"] for i in items if i["status"] == BLOCKED_QUARANTINED],
+        "optional_inputs_missing": [i["input"] for i in items if i["status"] == OPTIONAL_MISSING],
         "items": items,
     }
     if write:
