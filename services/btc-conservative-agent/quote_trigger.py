@@ -494,17 +494,46 @@ def first_level_trigger(direction: Any, kind: str, level: Any, t0: float, t1: fl
     return None
 
 
+_EXIT_MEMO: dict = {}
+_EXIT_MEMO_LOCK = threading.Lock()
+_EXIT_MEMO_STATS = {"hit": 0, "miss": 0}
+
+
 def book_exit_price(direction: Any, now: float, book_at: Callable[[float], Optional[Mapping]]) -> dict:
     """THE exit-trigger price for TP / TP1 / BE / bot hard stop, paper AND live (RK 17:24 BINDING; replaces the live
     WS-ticker BBO in get_mark_price): the executable book side (LONG best bid, SHORT best ask) of the latest complete
     1 s book row at ``now``. Stale (> 2 s) or missing -> px None + STALE_BOOK (no price-level trigger, no fallback)."""
-    try:
-        book = book_at(float(now))
-    except Exception:  # noqa: BLE001
-        book = None
-    s = _f(book.get("s")) if isinstance(book, Mapping) else None
+    # RK PASS (4): memo ONLY of the executable px of the NEWEST row, keyed (newest s, newest receive_ts, file size,
+    # direction). It is used only when at(now) would select that same newest row. Age and stale are ALWAYS recomputed
+    # from now below, so a stale memo can never price an exit.
+    key = None
+    nk = getattr(book_at, "newest_key", None)
+    ne = getattr(book_at, "newest_eligible", None)
+    if callable(nk) and callable(ne):
+        try:
+            k = nk()
+            if k is not None and ne(float(now)):
+                key = (k, str(direction))
+        except Exception:  # noqa: BLE001
+            key = None
+    hit = _EXIT_MEMO.get(key) if key is not None else None
+    if hit is not None:
+        s, px = hit
+        _EXIT_MEMO_STATS["hit"] += 1
+    else:
+        try:
+            book = book_at(float(now))
+        except Exception:  # noqa: BLE001
+            book = None
+        s = _f(book.get("s")) if isinstance(book, Mapping) else None
+        px = exec_px(direction, "exit", book) if isinstance(book, Mapping) else None
+        if key is not None and s is not None and int(s) == key[0][0]:
+            with _EXIT_MEMO_LOCK:
+                if len(_EXIT_MEMO) > 64:
+                    _EXIT_MEMO.clear()
+                _EXIT_MEMO[key] = (s, px)
+        _EXIT_MEMO_STATS["miss"] += 1
     age = _age(float(now), s + 1.0 if s is not None else None)
-    px = exec_px(direction, "exit", book) if isinstance(book, Mapping) else None
     stale = px is None or is_stale(age)
     return {"px": None if stale else px, "book_s": s, "price_age_s": age, "stale": stale,
             "flag": STALE_BOOK if stale else None, "basis": BASIS_BOOK_TOP, "trigger_version": TRIGGER_VERSION,

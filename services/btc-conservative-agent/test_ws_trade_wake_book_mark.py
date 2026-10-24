@@ -70,4 +70,7 @@ def test_stop_fill_rule_unchanged():
                           capture_output=True, text=True)
     assert base.returncode == 0
     for name in ("_realism_level_stops", "book_exit_mark", "get_mark_price"):
-        assert _fn_src(base.stdout, name) == _fn_src((HERE / "bot.py").read_text(), name), name
+        # #868 only adds the per-exit scan stamp (a record, not a fill rule); strip it before comparing the rule.
+        cur = _fn_src((HERE / "bot.py").read_text(), name)
+        cur = cur.replace('    _ess = globals().get("_exit_scan_stamp")\n    if _ess: pos.update(_ess(exit_source))\n', "")
+        assert _fn_src(base.stdout, name) == cur, name

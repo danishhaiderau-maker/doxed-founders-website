@@ -5334,6 +5334,8 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         pos["exit_trigger_real_mark"] = _real_mark_at(now)
         pos["exit_trigger_source"] = str(exit_source)
         pos["exit_mark_source"] = EXIT_MARK_SOURCE_BOOK  # RK C: the evaluated price is the book-side mark
+        _ess = globals().get("_exit_scan_stamp")
+        if _ess: pos.update(_ess(exit_source))
         _stamp_trigger_basis(pos, direction, now, price, _tmeta)
         with trade_lock:
             source_pos.clear()
@@ -5535,6 +5537,38 @@ def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: fl
     if m.get("quote_stale"):
         pos["exit_trigger_flag"] = _qt.STALE_BOOK
     pos.setdefault("trigger_price_source", _qt.DEFAULT_SOURCE)
+    pos.update(_trigger_receive_stamp(m))
+
+
+def _trigger_receive_stamp(meta: dict) -> dict:
+    """RK ruling 22:32 AEDT: the trigger book row's OWN collector receive_ts (WS_FRAME, Fly clock) - the only trigger
+    time the EXIT_LAG measure uses. Trade-tape triggers (no book row) and rows without a WS_FRAME receive_ts stamp
+    None -> EXIT_LAG_UNMEASURED (never the whole-second s, never the wall-clock trigger stamp)."""
+    m = meta or {}
+    out = {"exit_trigger_row_s": None, "exit_trigger_receive_ts": None, "exit_trigger_receive_ts_source": None}
+    row_s = m.get("trigger_event_book_s")
+    if row_s is None and m.get("trigger_trade_id") is None:  # a trade-tape trigger has no book row
+        row_s = m.get("book_s")
+    if row_s is None:
+        return out
+    try:
+        row_s = int(row_s)
+        import paper_fill as _pf
+        rows = [r for r in (_pf._book10l_rows_between(row_s, row_s) or ()) if int(r.get("s", -1)) == row_s]
+    except Exception:  # noqa: BLE001
+        return out
+    out["exit_trigger_row_s"] = row_s
+    r = rows[-1] if rows else {}
+    src = r.get("receive_ts_source")
+    try:
+        rx = float(r.get("receive_ts")) if r.get("receive_ts") is not None else None
+    except (TypeError, ValueError):
+        rx = None
+    if rx is not None and src == "WS_FRAME":
+        out.update(exit_trigger_receive_ts=rx, exit_trigger_receive_ts_source=src)
+    else:
+        out["exit_trigger_receive_ts_source"] = src
+    return out
 
 
 def _exchange_stop_fields(pos: dict) -> dict:
@@ -5722,6 +5756,8 @@ def _realism_level_stops(pos: dict, price: float, now: float, src: str = None, *
     pos["exit_trigger_mark_price"] = float(pos["exchange_stop_px"])  # DEPRECATED alias of exit_trigger_price
     pos["exit_trigger_real_mark"] = _real_mark_at(float(hit["trigger_ts"]))
     pos["exit_trigger_source"] = str(exit_source)
+    _ess = globals().get("_exit_scan_stamp")
+    if _ess: pos.update(_ess(exit_source))
     pos["exit_order_class"] = _om.EXCHANGE_RESIDENT
     pos["exit_policy_id"] = getattr(_patient_chase_policy(str(pos.get("research_lane") or "").upper()), "POLICY_ID", None)
     opts = _om.tile_options(ACTIVE_TILE_REGISTRY.get(str(pos.get("research_lane") or "").upper()))
@@ -8233,6 +8269,10 @@ def _non_countable_reasons(pos: dict, exit_reason) -> list:
         lf = _r17.liq_failure(pos)  # RK/HM K1: the shared r17 liquidation proof (liq stamped before this call)
         if lf:
             out.append(lf)
+    import exit_lag_regression as _elr
+    # RK PASS (7) + RK ruling 22:32: decision - trigger-row WS_FRAME receive_ts above the pre-346ef2bf p95
+    # (EXIT_LAG_REGRESSION) or not measurable (EXIT_LAG_UNMEASURED), all lanes.
+    out.extend(_elr.reasons(pos))
     return out
 
 
@@ -28280,8 +28320,74 @@ def _protective_exit_due(pos: dict, mark: float, now: float):
 _PROTECTIVE_COVERAGE = {"rows": [], "ts": None}
 
 
+_EXIT_SCAN_CTX = threading.local()
+EXIT_STAMP_SCHEMA = "exit_scan_stamp_v1"
+
+
+def _exit_scan_begin(source: str, interval_s: float = None, loop_lag_ms: float = None) -> None:
+    """RK PASS (6): open this thread's current exit scan. worker_loop_lag_ms = how late this scan started relative
+    to its intended period (prev scan end + interval), or the given lag (WS tick: queue age)."""
+    import paper_fill as _pf
+    c = _EXIT_SCAN_CTX
+    mono = time.monotonic()
+    if loop_lag_ms is None and interval_s is not None and getattr(c, "end_mono", None) is not None:
+        loop_lag_ms = max(0.0, (mono - c.end_mono - float(interval_s)) * 1000.0)
+    c.source, c.started_ts, c.started_perf = str(source), time.time(), time.perf_counter()
+    c.loop_lag_ms = round(loop_lag_ms, 3) if loop_lag_ms is not None else None
+    c.bt0 = _pf.book_tail_stats()
+    c.active = True
+
+
+def _exit_scan_end() -> None:
+    c = _EXIT_SCAN_CTX
+    c.end_mono = time.monotonic()
+    c.active = False
+
+
+def _exit_scan_stamp(exit_source=None) -> dict:
+    """Per-exit stamp from the CURRENT epoch's scan that triggered it (all None outside a scan, e.g. admin close).
+    book_refresh_* are process-wide BookTail counters accrued during this scan."""
+    import paper_fill as _pf
+    c = _EXIT_SCAN_CTX
+    active = bool(getattr(c, "active", False))
+    bt1 = _pf.book_tail_stats()
+    bt0 = getattr(c, "bt0", None) if active else None
+    sampler = globals().get("_RUNTIME_TELEMETRY")
+    lag = getattr(getattr(sampler, "lag", None), "last_ms", None)
+    th = threading.current_thread()
+    return {
+        "exit_stamp_schema": EXIT_STAMP_SCHEMA,
+        "exit_source": str(exit_source) if exit_source else (getattr(c, "source", None) if active else None),
+        "exit_scan_source": getattr(c, "source", None) if active else None,
+        "exit_scan_started_ts": round(c.started_ts, 6) if active else None,
+        "exit_scan_duration_ms": round((time.perf_counter() - c.started_perf) * 1000.0, 3) if active else None,
+        "exit_worker_loop_lag_ms": getattr(c, "loop_lag_ms", None) if active else None,
+        "exit_scheduler_lag_ms": lag,
+        "exit_book_refresh_ms": (round(bt1["refresh_ms_total"] - bt0["refresh_ms_total"], 3) if bt0 else None),
+        "exit_book_refreshes_in_scan": (bt1["refresh_count"] - bt0["refresh_count"] if bt0 else None),
+        "exit_trigger_wall_ts": round(time.time(), 6),  # sub-second: when the bot decided the trigger
+        "exit_thread_name": th.name, "exit_thread_native_id": getattr(th, "native_id", None),
+    }
+
+
+EXIT_SCAN_STAMP_KEYS = ("exit_stamp_schema", "exit_source", "exit_scan_source", "exit_scan_started_ts",
+                        "exit_scan_duration_ms", "exit_worker_loop_lag_ms", "exit_scheduler_lag_ms",
+                        "exit_book_refresh_ms", "exit_book_refreshes_in_scan", "exit_trigger_wall_ts",
+                        "exit_thread_name", "exit_thread_native_id",
+                        # RK ruling 22:32: the trigger row's own collector receive stamp (EXIT_LAG measure basis)
+                        "exit_trigger_row_s", "exit_trigger_receive_ts", "exit_trigger_receive_ts_source")
+
+
 def protective_exit_scan(now: float = None) -> int:
     """One pass of the fast exit path; returns the number of exits fired."""
+    _exit_scan_begin("PROTECTIVE_EXIT_WORKER", PROTECTIVE_EXIT_INTERVAL_SEC)
+    try:
+        return _protective_exit_scan_body(now)
+    finally:
+        _exit_scan_end()
+
+
+def _protective_exit_scan_body(now: float = None) -> int:
     started = time.perf_counter()
     now = time.time() if now is None else float(now)
     fired = 0
@@ -28373,6 +28479,7 @@ def process_positions():
     # redundant workers skip a busy cycle instead of starving API snapshots.
     if not position_evaluation_lock.acquire(blocking=False):
         return
+    globals().get("_exit_scan_begin", lambda *a, **k: None)("POSITION_MANAGER", globals().get("_position_monitor_interval_sec", lambda: None)())
     try:
         refresh_bbo_state()
         refresh_order_book_state()
@@ -28395,6 +28502,7 @@ def process_positions():
             # 10 Oct: 6.9/9.6/12.0 s serialized PROFIT_PROTECTION_STOP burst).
             _evaluate_position_exit(pos, mark, now, exit_source="POSITION_MANAGER", close_async=True)
     finally:
+        globals().get("_exit_scan_end", lambda: None)()
         position_evaluation_lock.release()
 
 def place_postonly_tp(pos, target_pct):
@@ -30473,6 +30581,7 @@ def _tick_driven_position_exits(price: float):
     # busy cycle instead of evaluating/closing the same position twice.
     if not position_evaluation_lock.acquire(timeout=0.25):
         return False
+    globals().get("_exit_scan_begin", lambda *a, **k: None)("WS_TICK")  # worker_loop_lag_ms None: tick-driven, no fixed period
     try:
         now = time.time()
         with trade_lock:
@@ -30486,6 +30595,7 @@ def _tick_driven_position_exits(price: float):
             _evaluate_position_exit(pos, mark, now, exit_source=EXIT_SOURCE_WS_TRADE_WAKE, close_async=True)
         return True
     finally:
+        globals().get("_exit_scan_end", lambda: None)()
         position_evaluation_lock.release()
 
 
@@ -32677,6 +32787,8 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
                                "entry": pos.get("entry_lock_wait_ms")},
         "signal_to_fill_sec": round(fill_ts - signal_ts, 3) if fill_ts and signal_ts else None,
         "venue": "PAPER" if not pos.get("bitfinex_live_entry") else "BITFINEX",
+        # RK PASS (6): current-epoch per-exit scan stamps (None when not stamped, e.g. pre-fix rows)
+        **{k: pos.get(k) for k in globals().get("EXIT_SCAN_STAMP_KEYS", ())},
     }
     for key in ("signal_ts", "decision_ts", "order_queued_ts", "order_sent_ts", "relay_received_ts",
                 "exchange_ack_ts", "first_fill_ts", "final_fill_ts", "bot_saw_fill_ts", "fill_ts",
@@ -32695,6 +32807,8 @@ def _stamp_admin_close_trigger(pos: dict, close_reason: str, now: float) -> bool
         return False
     pos["exit_trigger_ts"] = float(now)
     pos["exit_trigger_source"] = str(close_reason)
+    _ess = globals().get("_exit_scan_stamp")
+    if _ess: pos.update(_ess(close_reason))
     return True
 
 
@@ -32788,6 +32902,9 @@ def close_position(pos: dict, exit_reason: str):
             "research_lane": pos.get("research_lane"),
             "peak_pct": pos.get("max_pnl_pct"),
             "mae_pct": pos.get("max_drawdown"),
+            "exit_trigger_ts": pos.get("exit_trigger_ts"),
+            "exit_decision_ts": pos.get("exit_trigger_eval_ts"),
+            **{k: pos.get(k) for k in globals().get("EXIT_SCAN_STAMP_KEYS", ())},
         })
         entry = pos.get("entry", 0)
         qty = pos.get("qty", 0)
@@ -35086,7 +35203,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 # bearer), checked in each handler; never public, never a write.
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
-    "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
+    "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency", "/api/monitor/exit-lag",
     "/api/monitor/tiles/field-completeness",
     # API-GAP-SWEEP-20261012
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
@@ -48857,6 +48974,26 @@ def monitor_exit_latency():
     return _monitor_tiles_guard(build, 1_500_000)
 
 
+@app.route('/api/monitor/exit-lag', methods=["GET"])
+def monitor_exit_lag():
+    """RK ruling 22:32 AEDT arm gate (read-only, admin or MONITOR_READ_TOKEN): CONSECUTIVE post-346ef2bf exits with
+    decision - trigger-row WS_FRAME receive_ts <= the old p95 (0.062 s). REGRESSION / UNMEASURED exits end the run.
+    ?required=N adds armable = run >= N."""
+    import exit_lag_regression as _elr
+
+    def build(now):
+        try:
+            req = request.args.get("required")
+            req = None if req in (None, "") else max(0, min(100000, int(req)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("BAD_ARGS")
+        closed = _exit_latency_closed_trade_rows(_elr.DEPLOY_TS - 3600)
+        return {**_elr.arm_gate(closed, required=req), **_monitor_tiles_common(now),
+                "scope": {"since_ts": _elr.DEPLOY_TS, "required": req}, "recomputed_p95": dict(_elr.RECOMPUTED_P95)}
+
+    return _monitor_tiles_guard(build, 1_500_000)
+
+
 # ---------------------------------------------------------------------------
 # HM-MISSING-20261012: integrity checks with alert flags (admin or MONITOR_READ_TOKEN).
 # Pure logic in monitor_checks.py; read-only except the admin-only archive receipt POST.
@@ -51999,6 +52136,81 @@ def api_admin_trades_delete_rollback_snapshot():
     except _tdi.DeleteRefused as e:
         return jsonify({"ok": False, "refused": e.code}), 409
     logger.warning(f"[TRADE-DELETE-BY-ID] rollback snapshot deleted={out['deleted']} path={out['snapshot_path']} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
+
+
+def _ledger_delete_boot_recover() -> None:
+    """HM R2: restore any ledger left mid-write by a process death during ledgers/delete-by-sha."""
+    try:
+        import ledger_delete_by_sha as _lds
+        from research_v3_store import V3EvidenceStore
+        root = _data_sync_runtime_root()
+        if not (Path(root) / "v3" / _lds.SNAPSHOT_DIRNAME).is_dir():
+            return
+        for row in _lds.restore_incomplete_deletes(V3EvidenceStore.open_read_only(root)):
+            logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot restored interrupted delete {row} [PIPELINE ENFORCEMENT]")
+    except Exception as exc:
+        logger.error(f"[ALERT] [LEDGER-DELETE-BY-SHA] boot recovery failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+@app.route('/api/admin/ledgers/delete-by-sha', methods=['POST'])
+def api_admin_ledgers_delete_by_sha():
+    """RK PASS 24 Oct (R17): delete V3 ledger rows (decision/lifecycle/market_segment/order_intent) by row sha256.
+
+    Body: {"list_jsonl": "<RK list file text>", "list_sha256": "<sha256 of list_jsonl>", "dry_run": true (default),
+    "actor", "reason"}.  All validation, locking, snapshot, receipt/index rebase and tombstones live in
+    ledger_delete_by_sha.  Paths come from V3EvidenceStore only.  Never echoes a token.
+    """
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import ledger_delete_by_sha as _lds
+    from research_v3_store import V3EvidenceStore
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    dry_run = body.get("dry_run", True) is not False
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+    try:
+        with research_gate:
+            store = V3EvidenceStore.open_read_only(_data_sync_runtime_root())
+            out = _lds.delete_ledger_rows_by_sha(store, body.get("list_jsonl"), body.get("list_sha256"),
+                                                 dry_run=dry_run)
+    except _lds.DeleteRefused as e:
+        logger.warning(f"[LEDGER-DELETE-BY-SHA] refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": False, "refused": e.code, "detail": e.detail}), 409
+    logger.warning(
+        f"[LEDGER-DELETE-BY-SHA] actor={actor} reason={reason[:120]!r} dry_run={out['dry_run']} "
+        f"removed={out['removed_total']} files={json.dumps(out['files'], sort_keys=True)[:600]} "
+        f"list_sha={out['list_sha256']} snapshot={out['snapshot_path']} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": True, **out})
+
+
+@app.route('/api/admin/ledgers/delete-rollback-snapshot', methods=['POST'])
+def api_admin_ledgers_delete_rollback_snapshot():
+    """Delete the temporary rollback snapshot from ledgers/delete-by-sha and read back that it is gone."""
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import ledger_delete_by_sha as _lds
+    from research_v3_store import V3EvidenceStore
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    try:
+        store = V3EvidenceStore.open_read_only(_data_sync_runtime_root())
+        out = _lds.delete_rollback_snapshot(store, body.get("snapshot_path"))
+    except _lds.DeleteRefused as e:
+        logger.warning(f"[LEDGER-DELETE-BY-SHA] rollback snapshot delete refused code={e.code} actor={actor} [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": False, "refused": e.code}), 409
+    logger.warning(f"[LEDGER-DELETE-BY-SHA] rollback snapshot deleted={out['deleted']} path={out['snapshot_path']} "
+                   f"actor={actor} reason={reason[:120]!r} [PIPELINE ENFORCEMENT]")
     return jsonify({"ok": out["deleted"], **out}), (200 if out["deleted"] else 500)
 
 
@@ -60979,6 +61191,9 @@ def main():
     from crash_journal_repair import repair_known_incident_at_startup
     journal_repair_status = repair_known_incident_at_startup(Path.cwd())
     logger.info("[STARTUP] crash journal repair: %s", journal_repair_status)
+    # HM R2 blocker: restore any ledger left half-applied by ledgers/delete-by-sha BEFORE any thread
+    # (Flask, heartbeat, live-guardian, lifecycle pipeline, collectors) can read or append to it.
+    _ledger_delete_boot_recover()
     BOT_INSTANCE_ID = (
         f"dashboard-{DASHBOARD_PORT}-pid-{os.getpid()}-{uuid.uuid4().hex[:12]}"
     )

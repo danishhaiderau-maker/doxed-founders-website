@@ -373,3 +373,4 @@ vault/
 /.batch-transfer/
 /scripts/.batch-transfer/
 /node_modules
+!services/btc-conservative-agent/fixtures/r17_analyzer_epoch_unplaced_rows_d0dcf920.jsonl.gz
