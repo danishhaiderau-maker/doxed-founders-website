@@ -679,7 +679,8 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert coverage["genome_and_dna"] is True
                     assert coverage["report_manifest"] is True
                     assert coverage["canonical_v3_ledgers"] is True
-                    assert coverage["canonical_v3_market_segments"] is True
+                    assert coverage["canonical_v3_market_segments"] is False
+                    assert coverage["canonical_v3_market_segments_status"]["reason"] == "INVALID_R3_MARKET_SEGMENT_INPUT"
                     assert coverage["replay_rotations"] is True
                     assert coverage["session_spec_index_receipts"] is True
                     assert coverage["paper_lifecycle_receipt"] is True

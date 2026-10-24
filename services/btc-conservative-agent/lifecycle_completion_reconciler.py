@@ -8,6 +8,8 @@ already exist in the V3 ledgers.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import hashlib
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -69,8 +71,9 @@ def _post_observation(rows: list[Mapping[str, Any]]) -> Mapping[str, Any] | None
         if isinstance(direct, Mapping):
             candidates.append(direct)
         coverage = row.get("coverage")
+        # R3: a market_segment row is never an observation proof (dropped input).
         if (
-            str(row.get("ledger") or "") == "market_segment"
+            _msr3.INPUT_ALLOWED and str(row.get("ledger") or "") == "market_segment"
             and str(row.get("context_role") or "").upper() in {"POST_EXIT_PATH", "FULL_LIFECYCLE"}
             and isinstance(coverage, Mapping)
         ):

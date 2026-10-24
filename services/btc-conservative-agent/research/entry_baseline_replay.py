@@ -8,6 +8,8 @@ latency, or fee input produces UNKNOWN rather than NO_FILL.
 """
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 from collections import Counter
 from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
@@ -116,7 +118,6 @@ def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: 
     for relative in ("chase_offset_touch_grid.jsonl", "chase_offset_touch_grid.jsonl.1",
                      "v3/ledgers/baseline_execution_context.jsonl", "v3/ledgers/opportunity.jsonl",
                      "v3/ledgers/pre_entry_features.jsonl",
-                     "v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl",
                      *lifecycle_sources):
         if relative not in pins:
             statuses.append({"source_id": relative, "status": "UNAVAILABLE", "reason": "SOURCE_NOT_IN_PINNED_DATASET"})
@@ -128,6 +129,10 @@ def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: 
                 "selected_rows": count, "verification_basis": "VERIFIED_FULL_LEDGER_SHA256_STREAM_V1"})
         except (OSError, ValueError, UnicodeError, TypeError, RecursionError) as exc:
             statuses.append({"source_id": relative, "status": "UNKNOWN", "reason": str(exc)})
+    # R3: market_segment ledgers are dropped input, reported visibly, never indexed.
+    for relative in _msr3.LEDGERS:
+        statuses.append({"source_id": relative, "status": "INVALID", "rule": _msr3.RULE,
+                         "reason": _msr3.REASON})
     return statuses
 
 
@@ -998,10 +1003,8 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                             incident_index.add([linked])
     path = v3_root / "ledgers" / "opportunity.jsonl"
     segment_rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-    for segment_path in (
-        v3_root / "ledgers" / "market_segment.jsonl",
-        v3_root / "recovery_ledgers" / "market_segment.jsonl",
-    ):
+    # R3: market_segment input is dropped; no segment ledger is opened.
+    for segment_path in _msr3.rows("v3/ledgers/market_segment.jsonl"):
         if not segment_path.is_file():
             continue
         with segment_path.open("r", encoding="utf-8-sig") as handle:
@@ -1148,7 +1151,7 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                         # Object identity is established by the separately
                         # pinned ledger binding, never injected into its bytes.
                         relative = str(ref["relative_path"])
-                        for binding_relative in ("v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl"):
+                        for binding_relative in (_msr3.LEDGERS if _msr3.INPUT_ALLOWED else ()):
                             if binding_relative not in context_pins:
                                 continue
                             binding_proof = context_index.envelope(binding_relative, segment)
@@ -1168,6 +1171,7 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                     })
                 if not tape_hashes:
                     evidence_reasons.append("NO_MATCHING_VERIFIED_MARKET_SEGMENT")
+                    evidence_reasons.append(_msr3.REASON)
                 episode_context_sources = []
                 episode_context_reasons = list(context_pin_reasons)
                 if context_index:

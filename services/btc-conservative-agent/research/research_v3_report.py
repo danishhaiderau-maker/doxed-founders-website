@@ -1,6 +1,8 @@
 """Analyzer-facing Safe Policy Genome V3 status and ranking report."""
 from __future__ import annotations
 
+import market_segment_r3 as _msr3
+
 import gzip
 import hashlib
 import json
@@ -949,10 +951,8 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     lifecycles = [row for row in scoped(_read_ledger(store.ledger_path("lifecycle"))) if str(row.get("episode_id") or "") in allowed_episodes]
     terminal_lifecycles = [row for row in lifecycles if row.get("terminal") is True]
     executions = [row for row in scoped(_read_ledger(store.ledger_path("execution"))) if str(row.get("episode_id") or "") in allowed_episodes]
-    market_segment_rows = [
-        row for row in scoped(_read_ledger(store.ledger_path("market_segment")))
-        if str(row.get("episode_id") or "") in allowed_episodes
-    ]
+    # R3: market_segment input is dropped (L1 + ticker-last copies); see market_segment_r3.
+    market_segment_rows = _msr3.rows("v3/ledgers/market_segment.jsonl")
     for incident_rows in (opportunities, decisions, lifecycles, executions,
                           market_segment_rows, pre_entry_feature_receipts):
         incident_index.add(incident_rows)
@@ -1399,6 +1399,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "terminal_path_market_segments": len(terminal_path_segments),
             "pre_signal_context_segments": len(pre_signal_context_segments),
             "market_segment_ledger_rows": len(market_segment_rows),
+            "market_segment_input": _msr3.invalid("v3/ledgers/market_segment.jsonl"),
             "market_segment_objects_verified": verification["market_segment_count"],
             "entry_resolution_integrity": entry_resolution_integrity,
             "episode_quarantine": episode_quarantine,

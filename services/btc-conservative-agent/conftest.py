@@ -56,3 +56,19 @@ def _no_runtime_state_written_to_source_dir():
     for path in leaked:
         _remove_runtime_state(path)
     assert not leaked, f"test wrote runtime state into the source folder: {leaked}"
+
+
+# R3: legacy tests whose premise is market_segment evidence are strict-xfail.
+_R3_LEGACY_FILE = os.path.join(_SOURCE_DIR, "ci", "r3_legacy_segment_tests.txt")
+
+
+def pytest_collection_modifyitems(config, items):
+    try:
+        with open(_R3_LEGACY_FILE, encoding="utf-8") as handle:
+            legacy = {line.strip() for line in handle if line.strip() and not line.startswith("#")}
+    except FileNotFoundError:
+        return
+    for item in items:
+        if item.nodeid.rsplit("/", 1)[-1] in legacy:
+            item.add_marker(pytest.mark.xfail(
+                strict=True, reason="INVALID_R3_MARKET_SEGMENT_INPUT: legacy segment-evidence expectation"))

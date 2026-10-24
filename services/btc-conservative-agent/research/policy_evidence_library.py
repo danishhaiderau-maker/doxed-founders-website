@@ -80,7 +80,7 @@ def build_library_manifest(canonical_root: str | Path, *, analyzer_revision: str
         "schema": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "authority": "DERIVED_REBUILDABLE_CACHE_ONLY",
-        "raw_evidence_authority": "CANONICAL_V3_LEDGERS_AND_CONTENT_ADDRESSED_MARKET_SEGMENTS",
+        "raw_evidence_authority": "CANONICAL_V3_LEDGERS",  # R3: market segments are not evidence
         "evaluation_triggered": False,
         "generation": generation,
         "cache_status": cache_status,

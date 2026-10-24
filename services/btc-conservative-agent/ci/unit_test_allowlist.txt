@@ -308,6 +308,7 @@ test_local_reset_http_listener.py
 test_local_scan_reconciliation.py
 test_manual_pause_fill_handoff.py
 test_market_context.py
+test_market_segment_r3_consumers.py
 test_melbourne_time.py
 test_microstructure_tape.py
 test_mirror_coherence.py

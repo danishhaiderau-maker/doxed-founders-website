@@ -37,8 +37,9 @@ _OPTIONAL_SCALAR_IDENTITIES = {"schedule_id": ("schedule_id",),
     "economics_evidence_basis": ("economics_evidence_basis",),
     "declared_contract_sha256": ("declared_contract_sha256",)}
 _SEQUENCE_IDENTITIES = {
-    "tape_hashes": ("tape_sha256", "tape_hashes", "market_segment_sha256", "market_segment_hashes"),
-    "tape_ids": ("tape_id", "tape_ids", "market_segment_id", "market_segment_ids"),
+    # R3: market_segment hashes/ids are dropped as tape identity (market_segment_r3).
+    "tape_hashes": ("tape_sha256", "tape_hashes"),
+    "tape_ids": ("tape_id", "tape_ids"),
 }
 _IDENTITY_KEYS = tuple(_REQUIRED_SCALAR_IDENTITIES) + tuple(_OPTIONAL_SCALAR_IDENTITIES) + tuple(_SEQUENCE_IDENTITIES)
 _SENTINELS = {"UNKNOWN", "UNAVAILABLE", "NONE", "NULL", "NOT_AVAILABLE", "MISSING", "NAN", "INF", "INFINITY"}

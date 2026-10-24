@@ -1,4 +1,5 @@
 """Bounded original-byte shared-context coverage for analyzer report/export."""
+import market_segment_r3 as _msr3
 import hashlib
 import json
 import sqlite3
@@ -25,7 +26,8 @@ def _advance_context_index(root, byte_budget, row_budget):
         db.executescript('''CREATE TABLE IF NOT EXISTS cursor(ledger TEXT PRIMARY KEY,dev INTEGER,ino INTEGER,offset INTEGER,anchor TEXT);
         CREATE TABLE IF NOT EXISTS refs(ledger TEXT,offset INTEGER,length INTEGER,sha TEXT,epoch TEXT,episode TEXT,PRIMARY KEY(ledger,offset));
         CREATE INDEX IF NOT EXISTS refs_lookup ON refs(epoch,episode);''')
-        for ledger in ('opportunity', 'market_segment'):
+        # R3: market_segment input dropped (market_segment_r3); only opportunity is indexed.
+        for ledger in ('opportunity',):
             path = root / 'v3' / 'ledgers' / (ledger + '.jsonl')
             if not path.exists():
                 continue
@@ -75,7 +77,7 @@ def _advance_context_index(root, byte_budget, row_budget):
             db.execute('INSERT OR REPLACE INTO cursor VALUES(?,?,?,?,?)',(ledger,stat.st_dev,stat.st_ino,offset,anchor))
         db.commit()
         complete = True
-        for ledger in ('opportunity','market_segment'):
+        for ledger in ('opportunity',):
             path = root/'v3'/'ledgers'/(ledger+'.jsonl')
             if path.exists():
                 cursor = db.execute('SELECT offset FROM cursor WHERE ledger=?',(ledger,)).fetchone()
