@@ -233,6 +233,7 @@ test_gs_regime_engine.py
 test_hm_r4_b1_exit_fill.py
 test_hm_r5_fill_provenance.py
 test_hm_r6_report_contract.py
+test_hm_r7_a1_fade3_key.py
 test_hm_audit_20261010.py
 test_hm_missing_checks.py
 test_horizon_source_truth.py

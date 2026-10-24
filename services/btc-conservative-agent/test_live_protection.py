@@ -289,12 +289,12 @@ def test_g4b_clamp_rate_gt_5pct_at_n_ge_20_per_tile_disarms_all():
 def test_g4c_and_g6_arm_gate():
     c = {"outcome": ltg.G4_C}
     assert ltg.arm_gate_block("gs1", None) is None                          # GS-01 arms first (its L is unknown until it trades)
-    assert ltg.arm_gate_block("gs1", c) == ltg.DENY_G4_STOP_REEVAL and ltg.arm_gate_block("gs6", c, "PASS:x") == ltg.DENY_G4_STOP_REEVAL
-    assert ltg.arm_gate_block("gs6", None, "PASS:hm") == ltg.DENY_G6_NO_FIRST_L
+    assert ltg.arm_gate_block("gs1", c) == ltg.DENY_G4_STOP_REEVAL and ltg.arm_gate_block("gf3", c, "PASS:x") == ltg.DENY_G4_STOP_REEVAL
+    assert ltg.arm_gate_block("gf3", None, "PASS:hm") == ltg.DENY_G6_NO_FIRST_L
     for o in (ltg.G4_A, ltg.G4_B):
-        assert ltg.arm_gate_block("gs6", {"outcome": o}, None) == ltg.DENY_G6_HM_GATE
-        assert ltg.arm_gate_block("gs6", {"outcome": o}, "FAIL") == ltg.DENY_G6_HM_GATE
-        assert ltg.arm_gate_block("gs6", {"outcome": o}, "PASS:hm-20261024") is None
+        assert ltg.arm_gate_block("gf3", {"outcome": o}, None) == ltg.DENY_G6_HM_GATE
+        assert ltg.arm_gate_block("gf3", {"outcome": o}, "FAIL") == ltg.DENY_G6_HM_GATE
+        assert ltg.arm_gate_block("gf3", {"outcome": o}, "PASS:hm-20261024") is None
         assert ltg.arm_gate_block("gs1", {"outcome": o}) is None
     assert ltg.arm_gate_block("gb1", c) is None                             # (c') names GS-01 and FADE3 only
 
