@@ -91,3 +91,37 @@ def test_r20_no_other_source_assigns_the_limits():
         src = p.read_text(encoding="utf-8", errors="ignore")
         hits = [l.strip() for l in src.splitlines() if pat.search(l) and not l.lstrip().startswith("#")]
         assert hits == allowed.get(p.name, []), (p.name, hits)
+
+
+# ---- RK conditions on #885 ----
+def test_r20_env_above_ten_is_clamped_to_exactly_ten():
+    # r20_loss_limit_usd has no logger (pure function); the clamp itself is asserted
+    for above in ("10.000001", "10.5", "11", "100", "99999"):
+        got = ltg.r20_loss_limit_usd({"LIVE_LOSS_LIMIT_USD": above})
+        assert got == 10.00 and type(got) is float, (above, got)
+
+
+def test_r20_pins_exactly_ten_dollars_daily_total_and_guardian_rolling():
+    assert ltg.DAILY_LOSS_CAP_TOTAL_USD == 10.00          # daily (combined, UTC day)
+    assert lg.LIVE_TOTAL_LOSS_CAP_USD == 10.00            # all-time total
+    assert lg.DAILY_LOSS_CAP_USD == 10.00                 # guardian rolling-24 h
+
+
+def test_r20_small_loss_limit_fixture_is_opt_in_and_test_only():
+    import conftest
+    fx = conftest.small_loss_limit
+    marker = getattr(fx, "_pytestfixturefunction", None) or getattr(fx, "_fixture_function_marker", None)
+    assert marker is not None and marker.autouse is False
+    for p in HERE.rglob("*.py"):
+        if p.name.startswith("test_") or p.name == "conftest.py" or "tests" in p.parts:
+            continue
+        assert "small_loss_limit" not in p.read_text(encoding="utf-8", errors="ignore"), p.name
+
+
+def test_r20_production_loads_ten_with_no_fixture_and_no_env():
+    code = ("import live_guardian as lg, live_tile_gate as ltg;"
+            "print(ltg.DAILY_LOSS_CAP_TOTAL_USD, lg.LIVE_TOTAL_LOSS_CAP_USD, lg.DAILY_LOSS_CAP_USD)")
+    env = {k: v for k, v in os.environ.items() if k != "LIVE_LOSS_LIMIT_USD"}
+    out = subprocess.run([sys.executable, "-c", code], cwd=HERE, env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-500:]
+    assert out.stdout.split() == ["10.0"] * 3
