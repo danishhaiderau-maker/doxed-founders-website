@@ -1,0 +1,5 @@
+# Bump this file (any content change) on master to trigger
+# .github/workflows/once-clear-deploy-maintenance.yml and release a sticky
+# DEPLOY_MAINTENANCE pause via fly_failure_paper_resume.py (bootstrap waived).
+# 2026-10-25 sticky-lease fast-follow after #900
+epoch=20261025-sticky-lease-r1

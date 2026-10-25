@@ -2458,7 +2458,7 @@ jobs:
         run: |
           python -m pytest test_deploy_maintenance_boundary_hardening.py test_fill_single_flight.py -q
           python -m pytest ../../scripts/test_fly_deploy_workflow_order.py -q
-          python -m pytest ../../scripts/test_fly_failure_paper_resume.py ../../scripts/test_fly_receipt_bootstrap_gate.py ../../scripts/test_fly_resume_bootstrap.py ../../scripts/test_fly_resume_predeploy_abort.py ../../scripts/test-fly-workflow-revision-contract.py -q
+          python -m pytest ../../scripts/test_fly_failure_paper_resume.py ../../scripts/test_fly_preserve_maintenance.py ../../scripts/test_fly_receipt_bootstrap_gate.py ../../scripts/test_fly_resume_bootstrap.py ../../scripts/test_fly_resume_predeploy_abort.py ../../scripts/test-fly-workflow-revision-contract.py -q
 
       - uses: actions/setup-node@v4
         with:
@@ -3660,37 +3660,14 @@ jobs:
       - name: Best-effort preserve safe paper maintenance after failed guarded deploy
         # Source/test failure must not pause an unchanged healthy incumbent.
         # Preserve maintenance once either mutation step actually starts.
+        # Skip re-assert when paper is already safely resumed (sticky-lease fix):
+        # a mid-bootstrap /api/resume must not be undone by this failure-path pause.
         if: failure() && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure')
         continue-on-error: true
+        working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
-        run: |
-          python - <<'PY'
-          import json, os, time, urllib.request
-          base = "https://doxed-btc-bot.fly.dev"
-          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
-          last = None
-          for attempt in range(1, 6):
-              try:
-                  request = urllib.request.Request(base + "/api/pause", data=b'{"owner": "DEPLOY_MAINTENANCE"}', headers={**headers, "Content-Type": "application/json"}, method="POST")
-                  with urllib.request.urlopen(request, timeout=30) as response:
-                      json.load(response)
-                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=20) as response:
-                      status = json.load(response)
-                  if (
-                      status.get("force_paper_mode") is True
-                      and status.get("live_armed") is False
-                      and status.get("bitfinex_live_enabled") is False
-                      and status.get("execution_paused") is True
-                      and status.get("manual_admin_pause") is True
-                  ):
-                      print("Failure path preserved paper-only maintenance; no unaccepted revision was resumed")
-                      raise SystemExit(0)
-              except Exception as exc:
-                  last = exc
-              time.sleep(min(attempt, 5))
-          raise SystemExit(f"failed deploy paper maintenance could not be preserved: {type(last).__name__}")
-          PY
+        run: python scripts/fly_preserve_maintenance.py
 
       - name: Guaranteed paper resume after failed guarded deploy
         # Paper must never sit idle after a deploy attempt. Runs last on every
