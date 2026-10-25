@@ -1,5 +1,8 @@
 import live_guardian as g
 
+import pytest as _pytest_r20
+pytestmark = _pytest_r20.mark.usefixtures("small_loss_limit")   # R20: legacy logic at a lowered limit (see conftest)
+
 NOW = 1_800_000_000.0
 MIR = {"ok": True, "positions": [], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.79}}
 
@@ -503,11 +506,6 @@ DAY0 = 1_800_000_000.0 - (1_800_000_000.0 % 86400)      # 00:00 UTC of NOW's day
 
 def lc(tid, pnl, at):
     return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at, "exit_fill_at_ts": at, **real_fill(pnl)}
-
-
-def test_g6_caps_are_pinned_to_the_prereg_values():
-    assert ltg.DAILY_LOSS_CAP_PER_TILE_USD == 0.05 and ltg.DAILY_LOSS_CAP_TOTAL_USD == 0.10
-    assert "632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9" in ltg.DAILY_LOSS_CAP_SOURCE
 
 
 def test_g6_per_tile_cap_trips_at_five_cents_and_names_the_tile():

@@ -66,6 +66,18 @@ def test_shared_admission_rejects_identically_before_any_hash(deletion_request, 
     assert target.exists()
 
 
+def test_parent_file_receipt_mutation_proof_enotdir_maps_to_unsafe_receipt(deletion_request, monkeypatch):
+    """Mutant: let NotADirectoryError escape _checked_path -> CI NotADirectoryError instead of UNSAFE_RECEIPT_PATH."""
+    args, target = deletion_request
+    parent = args["root"] / "parent-file"
+    parent.write_bytes(b"ordinary-file")
+    args["receipt_path"] = parent / "deletion.json"
+    monkeypatch.setattr(deletion, "_fingerprint", lambda _: pytest.fail("must not hash"))
+    with pytest.raises(deletion.ResearchDeletionRejected, match="UNSAFE_RECEIPT_PATH"):
+        deletion.validate_exact_research_deletion(**args, prospective_receipt_parent=True)
+    assert target.exists()
+
+
 def test_executor_checks_protection_before_expensive_hash(deletion_request, monkeypatch):
     args, target = deletion_request
     monkeypatch.setattr(execution, "_fingerprint", lambda _: pytest.fail("must not hash"))

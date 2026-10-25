@@ -28,6 +28,9 @@ The guardian latches these REDs **ack-only**. Going FLAT does not clear them. Ea
 `POST /api/live-copy/guardian/red-ack`, with strict admin auth, a named actor, a reason, the exact current code and
 FLAT evidence newer than the RED:
 
+- **R20 loss limits (Danish 25 Oct 14:27 AEDT).** $10 per day and $10 in total, across all live tiles combined (one shared
+  constant, `live_tile_gate.R20_LIVE_LOSS_LIMIT_USD`; replaces the D3 $0.05/tile, $0.10/day caps). Hitting either disarms every
+  live tile and forces flat. `LIVE_LOSS_LIMIT_USD` can only lower it, never raise it.
 - **R20 daily-cap REDs** (`DAILY_CAP_DISARM_CODES`). Every daily-cap hit needs a fresh ack. This is stricter than the old
   self-clear-on-flat behaviour, and that is intended.
 - **R20 all-time total-loss REDs** (`LIVE_TOTAL_LOSS_RED_CODES`). Even after an ack, arming and `admit_entry` re-compute the

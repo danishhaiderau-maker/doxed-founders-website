@@ -290,13 +290,21 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
             raise ResearchDeletionRejected("PROTECTED_LIST_LIMIT_EXCEEDED")
         protected.add(_checked_path(raw, root))
     paths = sorted(set(bounded))
-    receipt = _checked_path(receipt_path, root)
+
+    def _receipt_checked_path(raw):
+        try:
+            return _checked_path(raw, root)
+        except NotADirectoryError:
+            # parent-file/deletion.json on POSIX: lstat walks through a regular-file parent.
+            raise ResearchDeletionRejected("UNSAFE_RECEIPT_PATH")
+
+    receipt = _receipt_checked_path(receipt_path)
     if (receipt in paths or receipt in allowed or io_path(receipt).exists()
             or (not prospective_receipt_parent and not io_path(receipt.parent).is_dir())
             or any(io_path(parent).exists() and not io_path(parent).is_dir()
                    for parent in receipt.parents if parent == root or root in parent.parents)):
         raise ResearchDeletionRejected("UNSAFE_RECEIPT_PATH")
-    journal = _checked_path(str(receipt) + ".progress.jsonl", root)
+    journal = _receipt_checked_path(str(receipt) + ".progress.jsonl")
     if journal in paths or journal in allowed or io_path(journal).exists():
         raise ResearchDeletionRejected("UNSAFE_PROGRESS_PATH")
     retained_sidecar = None

@@ -97,8 +97,8 @@ def test_reviewed_deleter_blobs_are_pinned():
     # Hard-coded, not computed: any edit to the deployed deleter must update these reviewed pins.
     here = Path(module.__file__).parent
     deployed = (here / "research_exact_deletion.py").read_bytes().replace(b"\r\n", b"\n")
-    assert hashlib.sha256(deployed).hexdigest() == "db4c865bd6745b1b8d957eb09e06d34cc70313dda3706c693a707b3d5134912b"
-    assert module.CURRENT_REVIEWED_DELETER_SHA256 == "db4c865bd6745b1b8d957eb09e06d34cc70313dda3706c693a707b3d5134912b"
+    assert hashlib.sha256(deployed).hexdigest() == "b0dbcf8f431ae77aae31c5b6a5e65f09faa696ec31d83f4111bdbefff1ce8791"
+    assert module.CURRENT_REVIEWED_DELETER_SHA256 == "b0dbcf8f431ae77aae31c5b6a5e65f09faa696ec31d83f4111bdbefff1ce8791"
     vendored = (here / module.VENDORED_REVIEWED_DELETERS[REVISION]).read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(vendored).hexdigest() == "3a64a7c7f21f238b712df4f4765f1f57d737fb046503635dfa517f48d10538e6"
     assert module.REVIEWED_FAILED_DELETERS[REVISION] == module.OLD_REVIEWED_DELETER_SHA256 == hashlib.sha256(vendored).hexdigest()

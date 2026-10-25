@@ -12,7 +12,9 @@ import uuid
 import zipfile
 from types import SimpleNamespace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+
+import pytest
 from research.platform_relay_evidence import _validate_platform_relay_evidence_payload as pure_validate_relay
 
 
@@ -952,6 +954,9 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
             "request": request,
             "jsonify": jsonify,
             "_admin_authed_strict": lambda: True,
+            # A8: status route is gated by admin OR the read-only monitor token (bot.py module scope).
+            "_admin_authed": lambda: True,
+            "monitor_integrity_authorized": lambda: False,
             "_active_analyzer_mirror_dir": lambda: None,
             "_analyzer_mirror_dir": lambda: legacy,
             "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
@@ -971,6 +976,44 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
         assert status.status_code == 404
         assert status.json["available"] is False
         assert status.json["legacy_data_preserved"] is True
+
+
+def test_legacy_html_mirror_status_mutation_proof_admin_namespace():
+    """Mutant: drop _admin_authed from the exec namespace -> NameError on /status (was CI 500)."""
+    from flask import Flask, jsonify, request
+
+    tree = ast.parse(BOT)
+    fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "api_analyzer_mirror_status"
+    )
+    legacy = Path(tempfile.mkdtemp())
+    try:
+        app = Flask("analyzer-status-mutation-proof")
+        namespace = {
+            "app": app,
+            "request": request,
+            "jsonify": jsonify,
+            "monitor_integrity_authorized": lambda: False,
+            "_active_analyzer_mirror_dir": lambda: None,
+            "_analyzer_mirror_dir": lambda: legacy,
+            "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
+        }
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), namespace)
+        client = app.test_client()
+        # Flask wraps the NameError; this is the CI failure mode without fixture stubs.
+        response = client.get("/api/analyzer-mirror/status")
+        assert response.status_code == 500
+    finally:
+        shutil.rmtree(legacy, ignore_errors=True)
+
+
+def test_watchdog_windows_stack_basename_mutation_proof():
+    """Mutant: Path() on a Windows frame string keeps the private dir on Linux."""
+    raw = r"C:\private\operator\bot.py:4:mutate_state"
+    filename = raw.rsplit(":", 2)[0]
+    assert PureWindowsPath(filename).name == "bot.py"
+    assert Path(filename).name != "bot.py"
 
 
 if __name__ == "__main__":

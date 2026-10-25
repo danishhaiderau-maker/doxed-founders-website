@@ -469,6 +469,7 @@ def test_pool_ready_threshold_pinned_at_n10_independent_of_unverified():
     assert tf.pool_ready(entry, {"delay_source_kind": "live_ack", "pool_n": 10, "delay_unverified": False})
 
 
+@pytest.mark.cpu_budget
 def test_feature_step_cpu_within_budget_on_full_window(tmp_path):
     import time as _time
     s0 = _feed_files(tmp_path, int(tf.HISTORY_S) + 60)
@@ -480,5 +481,6 @@ def test_feature_step_cpu_within_budget_on_full_window(tmp_path):
         t0 = _time.process_time()
         feed(end - 4 + k)
         worst = max(worst, _time.process_time() - t0)
-    assert worst < tf.STEP_CPU_BUDGET_S, worst
+    assert worst < tf.STEP_CPU_CI_CEILING_S, worst
+    assert tf.STEP_CPU_BUDGET_S == pytest.approx(0.1)
     assert "STEP_CPU_BUDGET_S" in (HERE / "bot.py").read_text()

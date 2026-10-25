@@ -177,36 +177,69 @@ class TradesTail:
         self._lock = threading.Lock()
         self._by_s: dict = {}
         self._max_s: Optional[int] = None
+        self._ino: Optional[int] = None
+        self._offset = 0
+        self._partial = b""
+        self._synced_ident: Optional[tuple] = None  # (st_ino, st_size) after last read; memory only
+        self.refresh_count = 0
+
+    def _ingest_line(self, line: bytes) -> None:
+        if not line.strip():
+            return
+        try:
+            r = json.loads(line)
+            sec = int(r["s"])
+        except (ValueError, KeyError, TypeError):
+            return
+        prints = []
+        for tr in r.get("tr") or []:
+            try:
+                ms, amt, px = float(tr[1]), float(tr[2]), float(tr[3])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if px > 0 and math.isfinite(px) and math.isfinite(ms):
+                prints.append({"ts": ms / 1000.0, "px": px, "amt": amt, "id": tr[0], "recv_s": sec})
+        self._by_s[sec] = prints
+
+    def _prune(self) -> None:
+        if not self._by_s:
+            self._max_s = None
+            return
+        hi = max(self._by_s)
+        for sec in [s for s in self._by_s if s < hi - self.keep_s]:
+            del self._by_s[sec]
+        self._max_s = hi
 
     def _refresh(self) -> None:
         try:
-            size = os.path.getsize(self.path)
-            with open(self.path, "rb") as fh:
-                fh.seek(max(0, size - self.tail_bytes))
-                chunk = fh.read()
+            st = os.stat(self.path)
         except OSError:
             return
-        lines = chunk.splitlines()
-        for line in (lines[1:] if size > self.tail_bytes else lines):
-            try:
-                r = json.loads(line)
-                sec = int(r["s"])
-            except (ValueError, KeyError, TypeError):
-                continue
-            prints = []
-            for tr in r.get("tr") or []:
-                try:
-                    ms, amt, px = float(tr[1]), float(tr[2]), float(tr[3])
-                except (TypeError, ValueError, IndexError):
-                    continue
-                if px > 0 and math.isfinite(px) and math.isfinite(ms):
-                    prints.append({"ts": ms / 1000.0, "px": px, "amt": amt, "id": tr[0], "recv_s": sec})
-            self._by_s[sec] = prints
-        if self._by_s:
-            hi = max(self._by_s)
-            for sec in [s for s in self._by_s if s < hi - self.keep_s]:
-                del self._by_s[sec]
-            self._max_s = hi
+        ident = (st.st_ino, st.st_size)
+        if ident == self._synced_ident:
+            return
+        drop_first = False
+        if self._ino is None or st.st_ino != self._ino or st.st_size < self._offset:
+            self._by_s.clear()
+            self._max_s = None
+            self._ino = st.st_ino
+            self._offset = max(0, st.st_size - self.tail_bytes)
+            self._partial = b""
+            drop_first = self._offset > 0
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(self._offset)
+                chunk = fh.read(max(0, st.st_size - self._offset))
+        except OSError:
+            return
+        self._offset += len(chunk)
+        lines = (self._partial + chunk).split(b"\n")
+        self._partial = lines.pop()
+        for line in (lines[1:] if drop_first else lines):
+            self._ingest_line(line)
+        self._prune()
+        self._synced_ident = ident
+        self.refresh_count += 1
 
     def between(self, t0: float, t1: float) -> list:
         with self._lock:

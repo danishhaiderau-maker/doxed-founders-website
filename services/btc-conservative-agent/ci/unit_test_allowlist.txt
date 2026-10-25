@@ -654,6 +654,7 @@ test_ledger_stamp_monitor_m123.py
 test_ledger_stamp_monitor_hm_r2.py
 test_api_state_analytics.py
 test_booktail_incremental.py
+test_tradestail_incremental.py
 test_exit_lag_regression.py
 test_exit_lag_rk_gate.py
 test_exit_scan_stamps.py
@@ -673,3 +674,8 @@ test_ledger_scan_incremental_retired.py
 test_restart_initiator.py
 test_r0_maker_rest_fill.py
 test_r8_fresh_start_relabel.py
+test_trade_count_id_diff.py
+test_trade_tombstone_external_delete.py
+test_r20_live_loss_limit.py
+test_r20_open_mark_limit_boundary.py
+test_tile_fade3_incremental_feed.py
