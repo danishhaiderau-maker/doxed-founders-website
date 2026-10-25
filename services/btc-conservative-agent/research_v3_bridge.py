@@ -1360,7 +1360,7 @@ def dual_write_lane_decision(
 def reconcile_overdue_expected_order_decisions(
     *, epoch_id: str, data_dir: str, active_rows: Iterable[Mapping[str, Any]] = (),
     observed_ts: float | None = None, runtime_revision: str = "",
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Close durable pre-order expectations lost by a runtime interruption."""
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
 
@@ -1379,9 +1379,16 @@ def reconcile_overdue_expected_order_decisions(
     terminal_keys = set(index["lifecycle"]["keys"])
     active_keys = {key(row) for row in active_rows if all(key(row))}
     now_ts = float(observed_ts if observed_ts is not None else time.time())
+    # An (episode, lane) that already has an order intent / terminal row under a
+    # DIFFERENT policy_signature is identity-divergent: the decision and the order
+    # disagree about which policy ran.  Fabricating a NO_ORDER for it would invent
+    # a second outcome, and counting it would double-book the episode.  Skip it
+    # and surface it as non-countable with an explicit reason (R14).
+    resolved_episode_lanes = {(ep, lane) for ep, _sig, lane in (*intent_keys, *terminal_keys) if ep and lane}
     result = {"expected": 0, "reconciled": 0, "duplicates": 0,
               "deferred": 0, "blocked": 0, "unwritten": 0,
-              "not_overdue": 0, "resolved_or_active": 0}
+              "not_overdue": 0, "resolved_or_active": 0, "identity_divergent": 0,
+              "non_countable": []}
     decision_path = store.ledger_path("decision")
     candidates = index["decision"]["candidates"]
 
@@ -1394,6 +1401,14 @@ def reconcile_overdue_expected_order_decisions(
                     continue
                 if identity in intent_keys or identity in terminal_keys or identity in active_keys:
                     result["resolved_or_active"] += 1
+                    continue
+                if (identity[0], identity[2]) in resolved_episode_lanes:
+                    result["identity_divergent"] += 1
+                    result["non_countable"].append({
+                        "episode_id": identity[0], "research_lane": identity[2],
+                        "policy_signature": identity[1], "countable": False,
+                        "reason": "DECISION_ORDER_POLICY_SIGNATURE_DIVERGENT",
+                    })
                     continue
                 if deadline > now_ts:
                     result["not_overdue"] += 1
