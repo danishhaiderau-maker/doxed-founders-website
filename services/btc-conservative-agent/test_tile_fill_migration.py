@@ -201,7 +201,7 @@ class _Clock:
 
 def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None, **extra):
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
-    return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_paper_exit_missing_book_seconds",
+    return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_r0_stop_fill_reason", "_paper_exit_missing_book_seconds",
                     "_paper_unpriced_marks", "_paper_exit_model_times", "_exit_book_age_ms", "_finite_nonneg", "_tp1_pending_action",
                     "_paper_lane_entry_result", "_paper_lane_entry_core", "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
@@ -337,15 +337,34 @@ def test_realism_v2_exchange_stop_wins_race_against_in_flight_bot_exit(monkeypat
     ns = _lane_ns(clk, xstop=lambda pos, a, b: hit if a < hit["trigger_ts"] <= b else None)
     pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 5000.0,
            "exchange_stop_bp": 35.0, "exchange_stop_px": 99.0}
-    (px, sim), marks = ns["_paper_lane_exit"](pos, "PHYSICAL_HARD_STOP_10PCT")
+    # Race applies to delayed BOT_SENT (TIME_EXIT); paper STOP reasons are R0 FIRST_AFTER delay-0 and have no flight window.
+    (px, sim), marks = ns["_paper_lane_exit"](pos, "TIME_EXIT")
     assert marks["exit_order_class"] == "EXCHANGE_RESIDENT" and marks["exit_reason_fired"] == "EXCHANGE_STOP_35BP"
-    assert marks["exit_race_lost_by"] == "PHYSICAL_HARD_STOP_10PCT"
+    assert marks["exit_race_lost_by"] == "TIME_EXIT"
     assert sim["fill_ts"] == 5000.7 and sim["delay_s"] == 0.0 and sim["delay_source"] == "EXCHANGE_RESIDENT_NO_DELAY"
     assert marks["exit_pricing_basis"] == "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER"
-    # no resident trigger in flight -> the bot order fills at trigger + delay
+    # no resident trigger in flight -> TIME_EXIT fills at trigger + delay
     ns2 = _lane_ns(_Clock(5000.0))
-    (_, sim2), marks2 = ns2["_paper_lane_exit"](dict(pos), "PHYSICAL_HARD_STOP_10PCT")
+    (_, sim2), marks2 = ns2["_paper_lane_exit"](dict(pos), "TIME_EXIT")
     assert marks2["exit_order_class"] == "BOT_SENT" and sim2["fill_ts"] == 5001.5
+
+
+def test_r0_paper_stop_fills_first_after_not_latest_model_time(monkeypatch):
+    """R0: PHYSICAL_HARD_STOP / INITIAL_ATR_STOP must walk FIRST_AFTER (STOP_RULE_NO_POOL), never LATEST at trigger+delay."""
+    _use_book(monkeypatch)
+    clk = _Clock(5000.0)
+    ns = _lane_ns(clk)
+    pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 5000.0,
+           "_exit_eval_price": 99.5}
+    (px, sim), marks = ns["_paper_lane_exit"](pos, "PHYSICAL_HARD_STOP_10PCT")
+    assert px == 99.0  # side-correct bid walk, not the trigger 99.5 and not the ask 100
+    assert marks["exit_order_class"] == "BOT_SENT" and marks["exit_stop_rule"] is True
+    assert sim["delay_s"] == 0.0 and sim["delay_source"] == "STOP_RULE_NO_POOL"
+    assert sim["book_row_rule"] == pf.ROW_RULE_FIRST_AFTER and sim["leg"] == "exit_resident"
+    assert marks["exit_pricing_basis"] == "STOP_RULE_FIRST_ROW_AT_OR_AFTER_TRIGGER"
+    assert clk.slept == []
+    (_, sim_be), marks_be = ns["_paper_lane_exit"](dict(pos), "BREAKEVEN_LOCK")  # no "STOP" token -> still BOT_SENT delayed
+    assert marks_be.get("exit_stop_rule") is False and sim_be["delay_s"] == 1.5
 
 
 def test_realism_v2_exchange_stop_exit_fills_at_trigger_instant(monkeypatch):

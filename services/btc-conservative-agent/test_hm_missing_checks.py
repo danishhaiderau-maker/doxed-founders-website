@@ -166,6 +166,7 @@ def test_checks_and_exit_bbo_with_a_populated_tape_ring(bot, monkeypatch):
     row = {}
     bot._stamp_exit_bbo(row)
     assert row.get("exit_book_top_bid") == 99.5 and row.get("exit_book_top_ask") == 99.7
+    assert row.get("exit_book_top_source") in ("BOOK_AT_CLOSE", "BOOK_AT_FILL_TS")
     assert "exit_bid" not in row and "exit_ask" not in row
     monkeypatch.setattr(paper_fill, "book10l_at", lambda t: {"s": float(t) - 30, "b": [[1, 1]], "a": [[2, 1]]})
     stale = {}
@@ -175,3 +176,34 @@ def test_checks_and_exit_bbo_with_a_populated_tape_ring(bot, monkeypatch):
                                   environ_base=REMOTE)
     assert r.status_code == 200, r.get_json()
     assert r.get_json()["checks"]["data-completeness"]["status"] in ("GREEN", "AMBER", "RED")
+
+
+def test_stamp_exit_bbo_prefers_fill_snapshot_over_later_wall_book(monkeypatch):
+    """Exit-truth R3: stamp the fill-time touch (CTRL/B2 false RED was wall-clock book after a stop cascade)."""
+    import ast
+    import pathlib
+    import time as _time
+    import paper_fill
+    import quote_trigger as qt
+    src = pathlib.Path(__file__).resolve().parent.joinpath("bot.py").read_text(encoding="utf-8")
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_stamp_exit_bbo")
+    ns = {"time": _time, "paper_fill": paper_fill, "quote_trigger": qt}
+    exec(compile(ast.Module([node], []), "bot.py", "exec"), ns)
+    # Wall book is worse (LONG exit would look +6 bp better than this later bid if stamped from now).
+    monkeypatch.setattr(paper_fill, "book10l_at",
+                        lambda t: {"s": 200, "b": [[99.94, 1.0]], "a": [[99.96, 1.0]]})
+    row = {"exit_depth_snapshot_fill": {"s": 100, "b": [[100.0, 1.0]], "a": [[100.02, 1.0]]},
+           "exit_price": 100.0}
+    ns["_stamp_exit_bbo"](row)
+    assert row["exit_book_top_bid"] == 100.0 and row["exit_book_top_ask"] == 100.02
+    assert row["exit_book_top_s"] == 100 and row["exit_book_top_source"] == "FILL_SNAPSHOT"
+    # exit-truth vs fill-time touch is GREEN; vs wall book would have been RED.
+    out = mc.exit_truth([{"trade_id": "ctrl", "side": "LONG", "status": "CLOSED",
+                          "exit": {"close_ts": 100.0, "exit_price": 100.0, "exit_reason": "INITIAL_ATR_STOP",
+                                   "exit_book_top_bid": row["exit_book_top_bid"],
+                                   "exit_book_top_ask": row["exit_book_top_ask"]}}], [], [], since=0)
+    assert out["status"] == "GREEN" and not out["violations"]
+    wall = mc.exit_truth([{"trade_id": "ctrl", "side": "LONG", "status": "CLOSED",
+                           "exit": {"close_ts": 100.0, "exit_price": 100.0, "exit_reason": "INITIAL_ATR_STOP",
+                                    "exit_book_top_bid": 99.94, "exit_book_top_ask": 99.96}}], [], [], since=0)
+    assert wall["status"] == "RED" and wall["violations"][0]["booked_better_than_touch_bp"] > 5.0

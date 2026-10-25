@@ -338,8 +338,8 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
                 stop_reason = lock_reason
 
     if stop_price is not None and _adverse_hit(sign, price, stop_price):
-        # book_price must be set so close_position books the stop level, not a
-        # later (worse) market tick — otherwise a lock can report slightly negative.
+        # book_price is the TRIGGER level only (exit_trigger_price / _exit_eval_price). Paper-book lanes
+        # reprice the fill via paper_fill FIRST_AFTER (R0); never book this stop level as the exit fill.
         return ExitAction(stop_reason, remaining, stop_price, stop_price, 0.0, peak,
                           book_price=stop_price)
     current_margin_pct = _margin_return_pct(entry, sign, price, leverage)

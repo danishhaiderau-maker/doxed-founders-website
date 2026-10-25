@@ -60,6 +60,9 @@ def test_exec_side():
     b = _book(T, 100.0, 101.0)
     assert qt.exec_px("LONG", "exit", b) == 100.0 and qt.exec_px("SHORT", "exit", b) == 101.0
     assert qt.exec_px("LONG", "entry", b) == 101.0 and qt.exec_px("SHORT", "entry", b) == 100.0
+    # R0/R3: exit_resident / exit_forced share the exit side (LONG sells bid); never the ask.
+    assert qt.exec_side("LONG", "exit_resident") == "b" and qt.exec_side("LONG", "exit_forced") == "b"
+    assert qt.exec_side("SHORT", "exit_resident") == "a" and qt.exec_px("LONG", "exit_resident", b) == 100.0
 
 
 def test_level_reached_at_or_through():

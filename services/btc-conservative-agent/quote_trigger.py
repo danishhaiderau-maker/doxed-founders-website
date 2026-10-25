@@ -145,11 +145,17 @@ def _top(book: Any, key: str) -> Optional[float]:
 
 
 def exec_side(direction: Any, leg: str) -> Optional[str]:
-    """Book side an order would execute against: LONG exit / SHORT entry -> bid ("b"); else ask ("a")."""
+    """Book side an order would execute against: LONG exit / SHORT entry -> bid ("b"); else ask ("a").
+
+    Exit legs include the shared paper_fill aliases ``exit``, ``exit_resident`` and ``exit_forced`` (R0/R3): any
+    ``exit_*`` must sell the bid on a LONG and buy the ask on a SHORT — never the opposite touch.
+    """
     d = _side(direction)
     if d is None:
         return None
-    sells = (d == "LONG") == (str(leg).lower() == "exit")
+    leg_l = str(leg or "").lower()
+    is_exit = leg_l == "exit" or leg_l.startswith("exit_")
+    sells = (d == "LONG") == is_exit
     return "b" if sells else "a"
 
 
