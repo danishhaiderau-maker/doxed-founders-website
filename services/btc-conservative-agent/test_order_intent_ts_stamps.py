@@ -46,3 +46,22 @@ def test_every_order_intent_row_from_bridge_suite_is_stamped():
             assert isinstance(value, float) and math.isfinite(value) and value > 0, (row.get("record_id"), key, value)
         assert row.get("order_intent_ts_basis") in {
             "SOURCE", "SUBMITTED_FROM_OBSERVED", "OBSERVED_FROM_SUBMITTED", "WRITE_TIME_FALLBACK"}
+
+
+def test_paper_submit_site_labels_copied_observed_ts():
+    """HM #886 nit: site 1 has only the submit time, so observed_ts is a copy, not SOURCE."""
+    captured = []
+    real_append = research_v3_store.V3EvidenceStore.append
+
+    def spy(self, ledger, row, **kwargs):
+        if ledger == "order_intent":
+            captured.append(dict(row))
+        return real_append(self, ledger, row, **kwargs)
+
+    suite = unittest.defaultTestLoader.loadTestsFromModule(test_research_v3_bridge)
+    with mock.patch.object(research_v3_store.V3EvidenceStore, "append", spy):
+        unittest.TextTestRunner(verbosity=0, stream=open("/dev/null", "w")).run(suite)
+    submits = [r for r in captured if r.get("intent_kind") == "ACTUAL_PAPER_LIMIT_SUBMIT"]
+    assert submits
+    for row in submits:
+        assert row["order_intent_ts_basis"] in {"OBSERVED_FROM_SUBMITTED", "WRITE_TIME_FALLBACK"}, row

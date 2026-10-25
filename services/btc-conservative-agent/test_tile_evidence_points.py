@@ -256,3 +256,28 @@ def test_fill_ttl_lifecycle_contradictions_are_quarantined():
     assert [r["trade_id"] for r in current] == ["FAMILY_A-t1", "FAMILY_B-t3"]
     assert [(r["trade_id"], reason) for r, reason in quarantined] == [
         ("FAMILY_A-t2", "FILL_TTL_LIFECYCLE_CONTRADICTION")]
+
+def test_write_time_fallback_submitted_ts_is_never_a_timing_anchor():
+    """HM #886 nit: a WRITE_TIME_FALLBACK stamp must not anchor the market-at-signal counterfactual."""
+    opportunities = [{"lane": "FAMILY_A", "event": "ORDER_SUBMITTED", "trade_id": "w0", "ts": T0}]
+
+    def terminal(basis):
+        return {"research_lane": "FAMILY_A", "epoch_id": EPOCH, "terminal": True, "terminal_no_fill": True,
+                "outcome_state": "NO_FILL", "record_id": "lifecycle:w0:paper-no-fill-terminal",
+                "event_id": "w0", "terminal_reason": "LIMIT_NOT_REACHED", "terminal_ts": T0 + 900,
+                "executed_direction": "LONG", "submitted_ts": T0 + 1, "order_intent_ts_basis": basis}
+    def cf(basis):
+        report = _build(trades=[_trade(9)], opportunities=opportunities, lifecycles=[terminal(basis)])
+        return report["fill_worlds"]["FAMILY_A"]["unfilled_counterfactual"]["NO_FILL"]["market_at_signal"]["n"]
+    assert cf("OBSERVED_FROM_SUBMITTED") == 1
+    assert cf("WRITE_TIME_FALLBACK") == 0
+
+
+def test_loader_keeps_order_intent_ts_basis_on_lifecycle_rows(tmp_path):
+    import json
+    row = {"research_lane": "FAMILY_A", "event_id": "w0", "submitted_ts": T0 + 1,
+           "order_intent_ts_basis": "WRITE_TIME_FALLBACK"}
+    (tmp_path / tep.LIFECYCLE_FILE).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / tep.LIFECYCLE_FILE).write_text(json.dumps(row) + "\n", encoding="utf-8")
+    inputs = tep.load_evidence_inputs(lambda name: str(tmp_path / name))
+    assert [r["order_intent_ts_basis"] for r in inputs["lifecycles"]] == ["WRITE_TIME_FALLBACK"]

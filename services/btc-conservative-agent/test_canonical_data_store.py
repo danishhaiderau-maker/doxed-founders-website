@@ -365,3 +365,55 @@ def test_genesis_with_no_post_cutoff_datasets_is_empty_but_valid(tmp_path):
     assert result["datasets"] == 0
     assert len(validate_manifest_chain(out)) == 1
 
+
+# --- HM #886 B1/B2: boundary and guard kills ----------------------------------
+_AT_FLOOR = "2026-10-17T19:01:11Z"      # == GENESIS_FLOOR_TS (1792263671): kept
+_FLOOR_MINUS_1 = "2026-10-17T19:01:10Z"  # 1792263670: excluded
+
+
+def test_genesis_floor_boundary_is_inclusive(tmp_path):
+    src = tmp_path / "src"
+    append_manifest(src, _fields(dataset_epoch="epoch-edge-out", collection_started_at=_FLOOR_MINUS_1,
+                                 dataset_checksum="e" * 64))
+    append_manifest(src, _fields(dataset_epoch="epoch-edge-in", collection_started_at=_AT_FLOOR,
+                                 dataset_checksum="f" * 64))
+    result = build_genesis_manifest(src, tmp_path / "genesis")
+    assert [d["dataset_epoch"] for d in result["genesis"]["datasets"]] == ["epoch-edge-in"]
+    assert result["excluded_pre_floor_entries"] == 1
+
+
+@pytest.mark.parametrize("floor", [GENESIS_FLOOR_TS - 1, GENESIS_FLOOR_TS + 1])
+def test_genesis_build_refuses_any_other_floor(tmp_path, floor):
+    with pytest.raises(CanonicalStoreError, match="GENESIS_FLOOR_MUST_EQUAL_CUTOFF"):
+        build_genesis_manifest(_legacy_store(tmp_path), tmp_path / "genesis", floor_ts=floor)
+    assert not (tmp_path / "genesis").exists()
+
+
+def test_genesis_row_mid_chain_is_rejected(tmp_path):
+    out = tmp_path / "genesis"
+    build_genesis_manifest(_legacy_store(tmp_path), out)
+    journal = out / "canonical_dataset_manifest.jsonl"
+    lines = journal.read_text().splitlines()
+    genesis, head = json.loads(lines[0]), json.loads(lines[1])
+    # Re-chain as [head-as-first-row, genesis-as-second-row] with valid hashes.
+    first = {k: v for k, v in head.items() if k != "entry_hash"}
+    first["previous_entry_hash"] = None
+    first["entry_hash"] = hashlib.sha256(json.dumps(first, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    second = {k: v for k, v in genesis.items() if k != "entry_hash"}
+    second["previous_entry_hash"] = first["entry_hash"]
+    second["entry_hash"] = hashlib.sha256(json.dumps(second, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    journal.write_text("\n".join(json.dumps(r, sort_keys=True, separators=(",", ":")) for r in (first, second)) + "\n")
+    (out / "canonical_dataset_current.json").write_text(json.dumps(second))
+    with pytest.raises(CanonicalStoreError, match="MANIFEST_GENESIS_INVALID:2"):
+        validate_manifest_chain(out)
+
+
+def test_genesis_dedups_datasets_by_epoch_and_checksum(tmp_path):
+    # Units: entries (journal rows) vs datasets (distinct (epoch, checksum)); prod was 426 entries / 331 datasets.
+    src = tmp_path / "src"
+    for checksum in ("a" * 64, "a" * 64, "b" * 64):
+        append_manifest(src, _fields(dataset_epoch="epoch-new", collection_started_at=_POST, dataset_checksum=checksum))
+    result = build_genesis_manifest(src, tmp_path / "genesis")
+    assert result["datasets"] == 2  # 3 post-floor entries -> 2 distinct datasets
+    assert [d["dataset_checksum"] for d in result["genesis"]["datasets"]] == ["a" * 64, "b" * 64]
+

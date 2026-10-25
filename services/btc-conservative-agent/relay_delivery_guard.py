@@ -311,8 +311,6 @@ class RelayDeliveryGuard:
         return deliverable
 
     def _reason_locked(self, record: dict, *, owner_id, armed: bool, armed_at_ts) -> Optional[str]:
-        if is_pre_cutoff(record):
-            return HOLD_PRE_CUTOFF
         event_id = str(record.get("event_id") or "")
         if event_id and event_id in self._retired:
             return HOLD_RETIRED  # never deliverable, armed or not

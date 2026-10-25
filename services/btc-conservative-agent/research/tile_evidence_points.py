@@ -451,9 +451,11 @@ def build_tile_evidence_points(
             submitted_ts = _epoch_seconds(row.get("submitted_ts"))
             if v2_start_ts and submitted_ts is not None and submitted_ts < v2_start_ts:
                 continue
+            # A WRITE_TIME_FALLBACK stamp is not an exchange time: never use it as a timing anchor.
+            timing_ts = None if _upper(row.get("order_intent_ts_basis")) == "WRITE_TIME_FALLBACK" else submitted_ts
             scan = scan_for(event_id, row.get("shared_ai_call_id"))
             direction = _upper(row.get("executed_direction"))
-            signal_ts = _epoch_seconds((scan or {}).get("ts")) or submitted_ts
+            signal_ts = _epoch_seconds((scan or {}).get("ts")) or timing_ts
             unfilled[lane].append({
                 "trade_id": event_id, "world": world, "source": "V3_LIFECYCLE_LEDGER",
                 "collector_touched": False, "ttl_outcome": row.get("no_fill_ttl_outcome"),
@@ -771,7 +773,7 @@ def load_evidence_inputs(resolve: Callable[[str], str | None],
             "research_lane", "epoch_id", "terminal", "terminal_no_fill", "outcome_state",
             "observation_status", "exact_reason", "shared_ai_call_id", "observed_ts", "paper_policy_spec",
             "record_id", "event_id", "terminal_reason", "terminal_ts", "executed_direction", "submitted_ts",
-            "no_fill_ttl_outcome")),
+            "order_intent_ts_basis", "no_fill_ttl_outcome")),
         "ai_scans": _read_jsonl(resolve(AI_SCAN_FILE), None, ("trade_id", "ai_decision", "direction", "ts")),
         "intent_audit": _read_jsonl(resolve(INTENT_AUDIT_FILE), None, ("trade_id", "shared_ai_call_id")),
         "tape_rows": _read_jsonl(resolve(TAPE_FILE), None, ("bucket_ts", "bid", "ask", "last")),
