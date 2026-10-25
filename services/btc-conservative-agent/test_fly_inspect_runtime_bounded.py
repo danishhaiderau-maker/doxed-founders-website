@@ -112,13 +112,19 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     section = source[gate_start:resume_start]
     deploy_job = source.split("  test-and-deploy:", 1)[1]
     assert "timeout-minutes: 180" in deploy_job
+    assert "python scripts/fly_receipt_bootstrap_gate.py" in section
+    assert "timeout-minutes: 95" in section
 
-    assert "observed_bootstrap_rows = 21_353" in section
-    assert "conservative_records_per_cycle = 512" in section
-    assert "backlog_interval_seconds = 1" in section
-    assert "bootstrap_timeout_seconds = 90 * 60" in section
-    assert "minimum_cycles = (" in section
-    assert "deadline = time.monotonic() + bootstrap_timeout_seconds" in section
+    gate = (Path(__file__).resolve().parents[2] / "scripts" / "fly_receipt_bootstrap_gate.py").read_text(
+        encoding="utf-8"
+    )
+    assert "observed_bootstrap_rows = 21_353" in gate
+    assert "conservative_records_per_cycle = 512" in gate
+    assert "backlog_interval_seconds = 1" in gate
+    assert "timeout=90 * 60" in gate
+    assert "minimum_cycles = (" in gate
+    assert "bootstrap_terminal_stall" in gate
+    assert "RECEIPT_BOOTSTRAP_TERMINAL_STALL" in gate
     observed_rows = 21_353
     records_per_cycle = 512
     store = STORE.read_text(encoding="utf-8")
@@ -128,19 +134,18 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert "_BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024" in store
     minimum_cycles = (observed_rows + records_per_cycle - 1) // records_per_cycle
     assert 90 * 60 >= minimum_cycles
-    assert 'call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})' in section
-    assert section.count('call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})') == 1
-    assert 'call("/api/status?fresh=1")' in section  # #676: gate reads bypass the 1 s probe cache
-    assert 'str(status.get("source_git_rev") or "").lower() == expected' in section
-    assert 'status.get("execution_paused") is True' in section
-    assert 'status.get("manual_admin_pause") is True' in section
-    assert 'pipeline.get("owner") is True' in section
-    assert 'pipeline.get("running") is True' in section
-    assert 'pipeline.get("source_revision_match") is True' in section
-    assert 'bootstrap.get("required") is True' in section
-    assert 'bootstrap.get("status") == "COMPLETE"' in section
-    assert 'bootstrap.get("complete") is True' in section
-    assert "receipt bootstrap did not complete before bounded maintenance timeout" in section
+    assert 'request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})' in gate
+    assert gate.count('request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})') == 1
+    assert '"/api/status?fresh=1"' in gate  # #676: gate reads bypass the 1 s probe cache
+    assert 'str(status.get("source_git_rev") or "").lower() == expected' in gate
+    assert 'status.get("execution_paused") is True' in gate
+    assert 'status.get("manual_admin_pause") is True' in gate
+    assert 'pipeline.get("owner") is True' in gate
+    assert 'pipeline.get("running") is True' in gate
+    assert 'pipeline.get("source_revision_match") is True' in gate
+    assert "bootstrap_complete(status)" in gate
+    assert "receipt bootstrap did not complete before bounded maintenance timeout" in gate
+    assert "receipt bootstrap terminal stall" in gate
 
 
 def test_lifecycle_worker_start_is_not_conditioned_on_paper_pause_state():

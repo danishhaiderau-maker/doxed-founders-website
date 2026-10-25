@@ -1,4 +1,7 @@
 
+## 25 Oct 2026 ~05:18 UTC — DEPLOY_MAINTENANCE stuck after v729
+- See `docs/TRACKER.md`. Root cause: receipt bootstrap terminal stall (`SOURCE_LEDGER_TRUNCATED`, 0 progress, 30 min backoff) blocked paper resume after healthy v729 deploy run 40161182874. Fix branch `cursor/deploy-maintenance-pause-2a94` (fail-loud stall + release pause on failure/resume-paper). Clear requires Danish cancel+admin `/api/resume` or Actions `resume-paper` (no secrets in cloud agent). Live stayed disarmed.
+
 ## LIVE-FIX-1501 Clock (HM 23:42, observability) - PR open, shipped-unverified
 - Root cause: Fly VM runs chronyd (stratum 2, ref 216.239.35.8 Google). `chronyc -c tracking` 23:44 AEDT: system offset +0.058 ms, root delay 0.75 ms, dispersion 0.24 ms => max error ~0.67 ms. Cloudflare cdn-cgi/trace `ts` probe reported +267..+992 ms: probe artifact, not real skew.
 - Change: remove adjtime slew (it fought chrony); retire Cloudflare probe (CLOCK_OFFSET_PROBE_ENABLED default 0); clock_sync_v2 source=chrony, offset_ms = chrony max error bound; /live/clock adds `fly.chrony` and `railway` estimate +/-100 ms (bounded from order_sent->fill_mts).

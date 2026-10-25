@@ -28,8 +28,12 @@ def test_held_maintenance_deploy_skips_bootstrap_wait_but_resume_requires_it():
     step = _step(job, "Complete receipt bootstrap inside exact-revision maintenance")
     assert "inputs.keep_maintenance_pause == true" in step["if"]
     assert step["if"].strip().startswith("${{ !(")
+    assert "python scripts/fly_receipt_bootstrap_gate.py" in step["run"]
     resume = (Path(__file__).resolve().parent / "fly_failure_paper_resume.py").read_text(encoding="utf-8")
     assert '"bootstrap_complete_if_required"' in resume
+    assert "bootstrap_terminal_stall" in resume
+    gate = (Path(__file__).resolve().parent / "fly_receipt_bootstrap_gate.py").read_text(encoding="utf-8")
+    assert "RECEIPT_BOOTSTRAP_TERMINAL_STALL" in gate
 
 
 def test_reset_plan_and_verify_never_use_one_long_machine_exec():

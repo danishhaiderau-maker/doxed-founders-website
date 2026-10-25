@@ -145,17 +145,20 @@ def test_bootstrap_status_observation_retries_only_transient_transport_failures(
         DEPLOY.index("- name: Complete receipt bootstrap inside exact-revision maintenance"):
         DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
     ]
+    assert "python scripts/fly_receipt_bootstrap_gate.py" in main
+    gate = (Path(__file__).resolve().parent / "fly_receipt_bootstrap_gate.py").read_text(encoding="utf-8")
     continuation = BOOTSTRAP_HELPER
-    for block in (main, continuation):
+    assert "from fly_resume_bootstrap import _http_clients, _transient" in gate
+    assert "bootstrap_terminal_stall" in gate
+    for block in (gate, continuation):
         assert "while " in block and "monotonic() <" in block
         assert "attempt += 1" in block
-        assert "urllib.error.URLError" in block and "TimeoutError" in block
         assert "- " in block and "monotonic()" in block
         assert "2 ** min(attempt - 1, 4)" in block
         assert 'raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")' in block
-    assert "if exc.code not in {502, 503, 504}:" in main
+    assert "urllib.error.URLError" in continuation and "TimeoutError" in continuation
     assert "exc.code in TRANSIENT_HTTP" in continuation
-    assert 'status = observe_status(deadline)' in main
+    assert "_transient(exc)" in gate
     assert 'until=bootstrap_deadline' in continuation
     assert 'until=deadline' in continuation
 
