@@ -67,7 +67,9 @@ def _checked_path(raw, root: Path) -> Path:
     for part in (path, *path.parents):
         try:
             info = io_path(part).lstat()
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
+            # ENOTDIR (a path component is a regular file) means "does not exist" on POSIX, the same
+            # as FileNotFoundError on Windows; later admission checks reject it with the shared code.
             pass
         else:
             if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:

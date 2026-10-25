@@ -944,6 +944,9 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
             "request": request,
             "jsonify": jsonify,
             "_admin_authed_strict": lambda: True,
+            # A8: status route is gated by admin OR the read-only monitor token (bot.py module scope).
+            "_admin_authed": lambda: True,
+            "monitor_integrity_authorized": lambda: False,
             "_active_analyzer_mirror_dir": lambda: None,
             "_analyzer_mirror_dir": lambda: legacy,
             "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",

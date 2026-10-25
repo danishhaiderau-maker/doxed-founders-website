@@ -336,6 +336,10 @@ def archive_before_cleanup(
 ) -> dict[str, Any]:
     store = Path(root).resolve()
     assert_local_generation_available(store, stage="canonical_archive_publish")
+    # Check the link itself before contained_path() resolves it away (a resolved link was reported as
+    # PATH_OUTSIDE_CANONICAL_STORE, or silently archived its in-store target, never SYMLINK_FORBIDDEN).
+    if Path(candidate).is_symlink():
+        raise CanonicalStoreError("CLEANUP_SYMLINK_FORBIDDEN")
     source = contained_path(store, candidate)
     if not source.exists():
         raise CanonicalStoreError("CLEANUP_TARGET_MISSING")
