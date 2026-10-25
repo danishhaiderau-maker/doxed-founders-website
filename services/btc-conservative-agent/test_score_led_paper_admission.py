@@ -47,6 +47,8 @@ def _load_fanout(namespace):
     namespace.setdefault("is_cross_venue_clock_lane", lambda _lane: False)
     namespace.setdefault("is_evaluator_clock_lane", lambda _lane: False)
     _load_bot_function("_record_tile_decision_and_dispatch", namespace)
+    # bot.py's refusal counter (monitor_tiles.record_lane_refusal) is a module global outside the extracted function
+    namespace.setdefault("monitor_tiles", type("MT", (), {"record_lane_refusal": staticmethod(lambda *_a, **_k: None)}))
     return _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
 
 

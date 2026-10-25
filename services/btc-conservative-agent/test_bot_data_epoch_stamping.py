@@ -30,7 +30,7 @@ def _hooks(runtime_root: Path, epoch_id: str | None, **extra):
         "_data_sync_runtime_root": lambda: runtime_root, "_runtime_git_rev": lambda: "abc123",
         "EXECUTION_FIX_VERSION": "v31-test", "COMBO_EXECUTION_FIX_VERSION": "v31-test",
         "FILL_MODEL_IDEAL_TOUCH": "IDEAL_TOUCH", "COLLECTOR_VERSION": "collector_test",
-        "FEATURE_SCHEMA_VERSION": "features_test",
+        "FEATURE_SCHEMA_VERSION": "features_test", "FRESH_START_UTC": "2026-10-17T19:01:11+00:00",
         "logger": type("L", (), {"info": print, "error": print})(), **extra,
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT), "exec"), ns)

@@ -30,6 +30,8 @@ def load_fanout(namespace):
     """The shared fan-out plus the per-tile verdict helper it delegates to."""
     namespace.setdefault("_patient_chase_policy", lambda _lane: None)
     load_function("_record_tile_decision_and_dispatch", namespace)
+    # bot.py's refusal counter (monitor_tiles.record_lane_refusal) is a module global outside the extracted function
+    namespace.setdefault("monitor_tiles", type("MT", (), {"record_lane_refusal": staticmethod(lambda *_a, **_k: None)}))
     return load_function("spawn_combo_lanes_from_ai_scan", namespace)
 
 
