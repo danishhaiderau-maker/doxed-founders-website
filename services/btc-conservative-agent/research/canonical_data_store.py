@@ -27,6 +27,10 @@ STORE_DIRNAME = "canonical-research-data"
 CURRENT_MANIFEST = "canonical_dataset_current.json"
 MANIFEST_JOURNAL = "canonical_dataset_manifest.jsonl"
 PARITY_STATUS = "canonical_dataset_parity.json"
+# RK 2026-10-25: the canonical chain restarts at a genesis row whose floor is
+# the R5/R17 cutoff.  Only datasets collected at/after the floor are listed.
+GENESIS_FLOOR_TS = 1792263671
+GENESIS_KIND = "canonical_research_genesis_v1"
 
 
 class CanonicalStoreError(RuntimeError):
@@ -252,13 +256,53 @@ def record_analyzer_completion(
     return append_manifest(store, fields)
 
 
+def _iso_to_unix(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    if "." in text:
+        head, _, tail = text.partition(".")
+        digits = ""
+        for ch in tail:
+            if not ch.isdigit():
+                break
+            digits += ch
+        zone = tail[len(digits):]
+        text = head + ("." + digits[:6] if digits else "") + zone
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def _row_started_ts(row: Mapping[str, Any]) -> float | None:
+    return _iso_to_unix(row.get("collection_started_at"))
+
+
 def validate_manifest_chain(root: str | os.PathLike[str]) -> list[dict[str, Any]]:
+    """Verify the hash chain.
+
+    When the first row is a genesis row the chain is checked from that
+    genesis: its floor must equal GENESIS_FLOOR_TS, every dataset it lists and
+    every later row must be collected at/after the floor, and no other genesis
+    row may appear.  A journal without a genesis keeps the legacy checks.
+    """
     store = Path(root).resolve()
     rows: list[dict[str, Any]] = []
     previous = ""
     journal = store / MANIFEST_JOURNAL
     if not journal.is_file():
         return rows
+    floor: float | None = None
     for line_number, raw in enumerate(journal.read_text(encoding="utf-8").splitlines(), 1):
         row = json.loads(raw)
         if not isinstance(row, dict) or row.get("schema") != MANIFEST_SCHEMA:
@@ -269,12 +313,111 @@ def validate_manifest_chain(root: str | os.PathLike[str]) -> list[dict[str, Any]
         actual = hashlib.sha256(_canonical_bytes(unhashed)).hexdigest()
         if expected != actual or str(row.get("previous_entry_hash") or "") != previous:
             raise CanonicalStoreError(f"MANIFEST_CHAIN_INVALID:{line_number}")
+        if row.get("genesis") is not None:
+            if line_number != 1 or row.get("genesis") is not True or row.get("genesis_kind") != GENESIS_KIND:
+                raise CanonicalStoreError(f"MANIFEST_GENESIS_INVALID:{line_number}")
+            if row.get("genesis_floor_ts") != GENESIS_FLOOR_TS:
+                raise CanonicalStoreError("MANIFEST_GENESIS_FLOOR_MISMATCH")
+            datasets = row.get("datasets")
+            if not isinstance(datasets, list):
+                raise CanonicalStoreError("MANIFEST_GENESIS_DATASETS_INVALID")
+            for index, item in enumerate(datasets):
+                started = _row_started_ts(item) if isinstance(item, dict) else None
+                if started is None or started < GENESIS_FLOOR_TS:
+                    raise CanonicalStoreError(f"MANIFEST_GENESIS_PRE_FLOOR_DATASET:{index}")
+            floor = float(GENESIS_FLOOR_TS)
+        elif floor is not None:
+            started = _row_started_ts(row)
+            if started is None or started < floor:
+                raise CanonicalStoreError(f"MANIFEST_PRE_GENESIS_ROW:{line_number}")
         rows.append(row)
         previous = expected
     current = _read_current(store)
     if rows and (not current or current.get("entry_hash") != rows[-1].get("entry_hash")):
         raise CanonicalStoreError("CURRENT_MANIFEST_POINTER_MISMATCH")
     return rows
+
+
+def _write_journal_line(journal: Path, body: Mapping[str, Any]) -> None:
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(dict(body), sort_keys=True, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def build_genesis_manifest(
+    source_root: str | os.PathLike[str],
+    output_root: str | os.PathLike[str],
+    *,
+    floor_ts: int = GENESIS_FLOOR_TS,
+) -> dict[str, Any]:
+    """Build a new genesis chain in ``output_root`` from ``source_root``.
+
+    The source journal is read only and never modified.  The output journal
+    holds one genesis row listing the distinct post-floor datasets, followed by
+    a rebased copy of the latest post-floor entry so the current pointer keeps
+    a full analyzer identity.  ``output_root`` must not already hold a journal.
+    """
+    if floor_ts != GENESIS_FLOOR_TS:
+        raise CanonicalStoreError("GENESIS_FLOOR_MUST_EQUAL_CUTOFF")
+    source = Path(source_root).resolve()
+    output = Path(output_root).resolve()
+    if source == output:
+        raise CanonicalStoreError("GENESIS_OUTPUT_MUST_BE_SEPARATE")
+    assert_local_generation_available(output, stage="canonical_genesis_build")
+    journal = output / MANIFEST_JOURNAL
+    if journal.exists() or (output / CURRENT_MANIFEST).exists():
+        raise CanonicalStoreError("GENESIS_OUTPUT_NOT_EMPTY")
+    source_rows = validate_manifest_chain(source)
+    kept = [row for row in source_rows
+            if (_row_started_ts(row) or -1.0) >= floor_ts and not row.get("genesis")]
+    datasets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in kept:
+        key = (str(row.get("dataset_epoch")), str(row.get("dataset_checksum")))
+        if key in seen:
+            continue
+        seen.add(key)
+        datasets.append({
+            "dataset_epoch": row.get("dataset_epoch"),
+            "dataset_checksum": row.get("dataset_checksum"),
+            "collection_started_at": row.get("collection_started_at"),
+            "row_count": row.get("row_count"),
+            "source_entry_hash": row.get("entry_hash"),
+        })
+    genesis = {
+        "schema": MANIFEST_SCHEMA,
+        "genesis": True,
+        "genesis_kind": GENESIS_KIND,
+        "genesis_floor_ts": floor_ts,
+        "recorded_at": _utc_now(),
+        "previous_entry_hash": None,
+        "source_journal_entries": len(source_rows),
+        "source_head_entry_hash": source_rows[-1]["entry_hash"] if source_rows else None,
+        "excluded_pre_floor_entries": len(source_rows) - len(kept),
+        "datasets": datasets,
+    }
+    genesis["entry_hash"] = hashlib.sha256(_canonical_bytes(genesis)).hexdigest()
+    _write_journal_line(journal, genesis)
+    head = genesis
+    if kept:
+        latest = dict(kept[-1])
+        rebased_from = latest.pop("entry_hash")
+        for name in ("schema", "recorded_at", "previous_entry_hash"):
+            latest.pop(name, None)
+        head = {
+            "schema": MANIFEST_SCHEMA,
+            "recorded_at": _utc_now(),
+            "previous_entry_hash": genesis["entry_hash"],
+            **latest,
+            "rebased_from_entry_hash": rebased_from,
+        }
+        head["entry_hash"] = hashlib.sha256(_canonical_bytes(head)).hexdigest()
+        _write_journal_line(journal, head)
+    _atomic_json(output / CURRENT_MANIFEST, head)
+    return {"genesis": genesis, "head": head, "datasets": len(datasets),
+            "excluded_pre_floor_entries": genesis["excluded_pre_floor_entries"]}
 
 
 def parity_status(
