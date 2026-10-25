@@ -19,6 +19,7 @@ import data_epoch as _data_epoch
 import system_health_banner
 import system_health_alerts
 import runtime_uptime
+import pause_accounting
 import monitor_api
 import http_emergency_routes as _her
 import monitor_tiles
@@ -6392,6 +6393,8 @@ _DEPLOY_RETAINED_PAUSE_OWNERS = frozenset({PAUSE_OWNER_OPERATOR, PAUSE_OWNER_SAF
 # Bulk mirror downloads yield CPU to a guarded deploy's maintenance boundary
 # for a bounded window, so a stuck pause can never starve the mirror.
 _DEPLOY_MAINTENANCE_SHED = {"requested_at": 0.0}
+# One boot-count per process for durable pause_attempt_count (see pause_accounting).
+_PAUSE_ACCOUNTING_BOOT_NOTED = {"done": False}
 
 
 def _pause_owner_locked() -> str | None:
@@ -48036,7 +48039,11 @@ def _restart_initiator_check(now: float) -> dict:
 
 
 def _deploy_maintenance_pause_age_sec(now: float) -> float:
-    """Seconds since DEPLOY_MAINTENANCE was requested (shed clock or uptime since)."""
+    """Seconds since DEPLOY_MAINTENANCE was requested (durable episode, shed, or uptime)."""
+    # Prefer volume-persisted pause_started_at so age survives boot_at resets.
+    durable = pause_accounting.age_sec(state, now=now)
+    if durable > 0:
+        return durable
     requested = float(_DEPLOY_MAINTENANCE_SHED.get("requested_at") or 0.0)
     if requested > 0:
         return max(0.0, float(now) - requested)
@@ -48048,6 +48055,19 @@ def _deploy_maintenance_pause_age_sec(now: float) -> float:
     except Exception:
         pass
     return 0.0
+
+
+def _pause_accounting_public(now: float | None = None) -> dict:
+    """Durable pause total seconds + attempt count for status/health."""
+    now = float(now or time.time())
+    with state_lock:
+        paused = bool(state.get("execution_paused") or state.get("manual_admin_pause"))
+        owner = _pause_owner_locked()
+        fields = {
+            "pause_started_at": state.get("pause_started_at"),
+            "pause_attempt_count": state.get("pause_attempt_count"),
+        }
+    return pause_accounting.snapshot(fields, now=now, paused=paused, owner=owner)
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -51158,6 +51178,7 @@ def status():
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "uptime": _runtime_uptime_summary(now),
         "restart_cause": _runtime_restart_cause(now),
+        "pause_accounting": _pause_accounting_public(now),
         "data_epoch": _data_epoch_public(),
         "canonical_epoch": _canonical_epoch_public(),
         "runtime_hygiene": _runtime_hygiene_public(),
@@ -51464,6 +51485,7 @@ def health():
         "force_paper_mode": _force_paper_mode_active(),
         "volume": _volume_health_snapshot(now),
     }
+    payload["pause_accounting"] = _pause_accounting_public(now)
     try:
         payload["disk_alert"] = disk_alert.compute_disk_alert(payload["volume"])
     except Exception as exc:
@@ -51643,11 +51665,17 @@ def api_pause():
         )
         # Deploy maintenance never downgrades a deliberate operator pause.
         pause_owner = PAUSE_OWNER_OPERATOR if already_operator else requested_owner
+        pause_acct = pause_accounting.begin_or_retry(
+            state, owner=pause_owner, now=time.time(),
+        )
         if pause_owner == PAUSE_OWNER_DEPLOY_MAINTENANCE:
             # Sticky-lease / deploy reassert must not reset the shed clock —
             # otherwise fly.paused stays AMBER forever while the laptop ages to RED.
+            # Prefer the durable episode start so age survives process restarts.
             if float(_DEPLOY_MAINTENANCE_SHED.get("requested_at") or 0.0) <= 0:
-                _DEPLOY_MAINTENANCE_SHED["requested_at"] = time.time()
+                _DEPLOY_MAINTENANCE_SHED["requested_at"] = float(
+                    pause_acct.get("started_at") or time.time()
+                )
         state["manual_admin_pause"] = True
         state["pause_intent"] = pause_owner
         # Entry gates read these flags; they must be true before this request
@@ -51661,6 +51689,8 @@ def api_pause():
             state["execution_reason"] = "ADMIN_MANUAL"
             state["_pause_priority"] = priority
         execution_reason = str(state.get("execution_reason") or "ADMIN_MANUAL")
+        pause_started_at = state.get("pause_started_at")
+        pause_attempt_count = int(state.get("pause_attempt_count") or 0)
     # Persist before any cancel/trade_lock work so true-flat survives a stalled
     # response or process restart without requiring another /api/pause.
     save_persistent_config()
@@ -51672,6 +51702,8 @@ def api_pause():
         bitfinex_live_enabled=False,
         pause_intent=pause_owner,
         pause_owner=pause_owner,
+        pause_started_at=pause_started_at,
+        pause_attempt_count=pause_attempt_count,
     )
     logger.warning(f"[ADMIN] Manual pause via /api/pause owner={pause_owner} [PIPELINE ENFORCEMENT]")
     worker, result = _start_pause_finalization()
@@ -51682,6 +51714,10 @@ def api_pause():
         "execution_reason": execution_reason,
         "pause_owner": pause_owner,
         "pause_intent_durable": True,
+        "pause_accounting": pause_accounting.snapshot(
+            {"pause_started_at": pause_started_at, "pause_attempt_count": pause_attempt_count},
+            now=time.time(), paused=True, owner=pause_owner,
+        ),
     }
     if worker.is_alive() or not result.get("done"):
         payload.update({
@@ -51952,6 +51988,7 @@ def _api_resume_with_reset_intent_held():
     with state_lock:
         state["manual_admin_pause"] = False
         state["pause_intent"] = None
+        pause_accounting.clear(state)
         # Clear shed clock so the next DEPLOY_MAINTENANCE pause starts a fresh 45m AMBER window.
         _DEPLOY_MAINTENANCE_SHED["requested_at"] = 0.0
     save_persistent_config()
@@ -51966,6 +52003,8 @@ def _api_resume_with_reset_intent_held():
         manual_admin_pause=False,
         pause_owner=remaining_owner,
         pause_intent=None,
+        pause_started_at=None,
+        pause_attempt_count=0,
     )
     logger.info(
         f"[ADMIN] Manual resume via /api/resume "
@@ -51976,6 +52015,9 @@ def _api_resume_with_reset_intent_held():
         "execution_paused": still_paused,
         "pause_owner": remaining_owner,
         "active_pause_reason": remaining_reason or None,
+        "pause_accounting": pause_accounting.snapshot(
+            {}, now=time.time(), paused=still_paused, owner=remaining_owner,
+        ),
     })
 
 
@@ -59559,6 +59601,9 @@ def _persistent_config_keys():
         "exit_only_lanes",
         "manual_admin_pause",
         "pause_intent",
+        # Durable pause episode clock + retry count (survives boot_at resets).
+        "pause_started_at",
+        "pause_attempt_count",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
@@ -59641,10 +59686,23 @@ def load_persistent_config():
                 state["research_lane_enabled"] = merged_lanes
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
+                pause_boot_noted = False
                 if bool(state.get("manual_admin_pause")):
                     state["execution_paused"] = True
                     state["execution_reason"] = "ADMIN_MANUAL"
                     state["_pause_priority"] = PAUSE_PRIORITIES["ADMIN_MANUAL"]
+                    # Count this process boot against the open pause episode once.
+                    if not _PAUSE_ACCOUNTING_BOOT_NOTED["done"]:
+                        pause_accounting.note_boot(state, now=time.time())
+                        _PAUSE_ACCOUNTING_BOOT_NOTED["done"] = True
+                        pause_boot_noted = True
+                    started = float(state.get("pause_started_at") or 0.0)
+                    if (
+                        state.get("pause_intent") == PAUSE_OWNER_DEPLOY_MAINTENANCE
+                        and started > 0
+                        and float(_DEPLOY_MAINTENANCE_SHED.get("requested_at") or 0.0) <= 0
+                    ):
+                        _DEPLOY_MAINTENANCE_SHED["requested_at"] = started
         with state_lock:
             lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE) or DEFAULT_RESEARCH_LEVERAGE)
             leverage_raised = False
@@ -59686,7 +59744,7 @@ def load_persistent_config():
                         if k in raw_sg:
                             out_sg[k] = bool(raw_sg[k])
                 state["spread_gate"] = out_sg
-        if leverage_raised:
+        if leverage_raised or pause_boot_noted:
             save_persistent_config()
         logger.info(f"Loaded persistent config from {config_path} - ai_threshold restored")
 
