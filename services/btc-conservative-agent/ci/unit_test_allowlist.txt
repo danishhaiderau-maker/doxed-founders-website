@@ -672,4 +672,5 @@ test_r3_legacy_xfail_scope.py
 test_ledger_scan_incremental_retired.py
 test_restart_initiator.py
 test_r20_live_loss_limit.py
+test_r20_open_mark_limit_boundary.py
 test_tile_fade3_incremental_feed.py
