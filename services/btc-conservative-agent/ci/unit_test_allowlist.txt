@@ -679,3 +679,4 @@ test_tile_fade3_incremental_feed.py
 test_order_intent_ts_stamps.py
 test_relay_guard_cutoff.py
 test_analyzer_r1_rk_ruling.py
+test_baseline_schema_fail_closed.py
