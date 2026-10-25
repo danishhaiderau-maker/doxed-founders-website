@@ -48231,22 +48231,10 @@ def system_health_view():
     out = system_health_banner.with_staleness(report)
     out["received_at"] = received_at
     out["uptime"] = dict(_runtime_uptime_summary(), proof=None if out.get("stale") else proof)
-    self_checks = _system_health_fly_self_checks()
-    out["fly_self_checks"] = self_checks
-    bad = [c for c in self_checks if c["status"] != "GREEN"]
-    # summary counts include the Fly self-checks (a RED here must show in counts, not only in the checks list)
-    counts = dict(out.get("counts") or {})
-    for c in self_checks:
-        k = c["status"] if c["status"] in ("GREEN", "AMBER", "RED") else None
-        if k:
-            counts[k] = int(counts.get(k) or 0) + 1
-    out["counts"] = counts
-    if bad:
-        out["failing"] = list(out.get("failing") or []) + bad
-        rank = {"GREEN": 0, "SKIP": 0, "PENDING": 0, "UNKNOWN": 0, "AMBER": 1, "RED": 2}
-        worst = max(bad, key=lambda c: rank[c["status"]])["status"]
-        if rank[worst] > rank.get(out.get("verdict"), 0):
-            out["verdict"] = worst
+    # Merge Fly self-checks by id (worst wins). Naive append duplicated fly.paused
+    # when the laptop report already had it (often RED) and the Fly shed clock
+    # still said AMBER after a deploy reassert.
+    out = system_health_banner.merge_fly_self_checks(out, _system_health_fly_self_checks())
     if not _admin_authed_strict():
         out["failing"] = [
             {k: c.get(k) for k in ("id", "status", "observed", "threshold")}
@@ -51656,7 +51644,10 @@ def api_pause():
         # Deploy maintenance never downgrades a deliberate operator pause.
         pause_owner = PAUSE_OWNER_OPERATOR if already_operator else requested_owner
         if pause_owner == PAUSE_OWNER_DEPLOY_MAINTENANCE:
-            _DEPLOY_MAINTENANCE_SHED["requested_at"] = time.time()
+            # Sticky-lease / deploy reassert must not reset the shed clock —
+            # otherwise fly.paused stays AMBER forever while the laptop ages to RED.
+            if float(_DEPLOY_MAINTENANCE_SHED.get("requested_at") or 0.0) <= 0:
+                _DEPLOY_MAINTENANCE_SHED["requested_at"] = time.time()
         state["manual_admin_pause"] = True
         state["pause_intent"] = pause_owner
         # Entry gates read these flags; they must be true before this request
@@ -51961,6 +51952,8 @@ def _api_resume_with_reset_intent_held():
     with state_lock:
         state["manual_admin_pause"] = False
         state["pause_intent"] = None
+        # Clear shed clock so the next DEPLOY_MAINTENANCE pause starts a fresh 45m AMBER window.
+        _DEPLOY_MAINTENANCE_SHED["requested_at"] = 0.0
     save_persistent_config()
     set_execution_paused("")
     with state_lock:

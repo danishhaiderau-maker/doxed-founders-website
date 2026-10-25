@@ -116,6 +116,9 @@ Paper must be running. A `DEPLOY_MAINTENANCE` pause is AMBER for up to 45 minute
 (guarded deploy). Any other owner, or a longer pause, is RED. The laptop watcher,
 the Fly self-check (`/api/system-health` `fly_self_checks`), and the uptime strip
 (`PAUSED_DEPLOY`) all use the same 45-minute age gate — none may stay AMBER forever.
+`/api/system-health` merges laptop `failing` with `fly_self_checks` by check id
+(worst status wins), so `fly.paused` appears once even when the two clocks briefly
+disagree. Deploy pause reassert must not reset the Fly shed clock.
 Fix: identify the owner from `/api/status`. For a stuck deploy boundary, check the
 workflow run (`gh run list --workflow fly-bot-deploy.yml`); its failure path resumes paper
 (bootstrap hard-timeout / terminal stall falls through to guaranteed paper resume).

@@ -71,10 +71,13 @@ def _bot(monkeypatch):
     monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "health-test-token")
     monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
     monkeypatch.setitem(bot._SYSTEM_HEALTH_REPORT, "report", None)
+    bot._DEPLOY_MAINTENANCE_SHED["requested_at"] = 0.0
     with bot.state_lock:
         monkeypatch.setitem(bot.state, "ws_last_tick", time.time())
         monkeypatch.setitem(bot.state, "execution_paused", False)
         monkeypatch.setitem(bot.state, "live_armed", False)
+        monkeypatch.setitem(bot.state, "manual_admin_pause", False)
+        monkeypatch.setitem(bot.state, "pause_intent", None)
     return bot
 
 
@@ -140,6 +143,121 @@ def test_fly_paused_self_check_turns_red_after_45_minutes(monkeypatch):
         paused=True, pause_owner="DEPLOY_MAINTENANCE",
         paused_for_sec=ru.DEPLOY_PAUSE_AMBER_MAX_SEC,
     ) == "AMBER"
+
+
+def test_merge_fly_self_checks_dedupes_fly_paused_worst_wins():
+    """Boss later (b): system-health listed fly.paused twice (laptop RED + Fly AMBER)."""
+    report = {
+        "schema": shb.SCHEMA,
+        "verdict": "RED",
+        "stale": False,
+        "counts": {"RED": 1, "AMBER": 0, "GREEN": 20},
+        "failing": [{
+            "id": "fly.paused", "status": "RED",
+            "observed": "paused owner=DEPLOY_MAINTENANCE for 52m",
+            "threshold": "unpaused; DEPLOY_MAINTENANCE <= 45m",
+            "hint": "guarded deploy boundary",
+            "runbook": "docs/SYSTEM_HEALTH_RUNBOOK.md#fly-paused",
+        }],
+        "open_alarms": [],
+    }
+    self_checks = [
+        {"id": "fly.ws_ticks", "status": "GREEN", "observed": "3s", "threshold": "<=120s"},
+        {"id": "fly.paused", "status": "AMBER",
+         "observed": "paused owner=DEPLOY_MAINTENANCE for 2m",
+         "threshold": "unpaused; DEPLOY_MAINTENANCE <= 45m"},
+        {"id": "fly.live_armed", "status": "GREEN", "observed": "disarmed", "threshold": "disarmed"},
+        {"id": "fly.only_on_fly", "status": "AMBER", "observed": "x", "threshold": "y"},
+    ]
+    out = shb.merge_fly_self_checks(report, self_checks)
+    paused = [c for c in out["failing"] if c["id"] == "fly.paused"]
+    assert len(paused) == 1 and paused[0]["status"] == "RED"
+    assert paused[0]["hint"] == "guarded deploy boundary"  # laptop hint kept when Fly wins nothing
+    assert [c["id"] for c in out["failing"]].count("fly.paused") == 1
+    assert any(c["id"] == "fly.only_on_fly" and c["status"] == "AMBER" for c in out["failing"])
+    # Laptop RED already counted; Fly AMBER must not add a second fly.paused or bump AMBER for it.
+    # Fly-only AMBER (fly.only_on_fly) and Fly GREEN checks still adjust counts.
+    assert out["counts"]["RED"] == 1
+    assert out["counts"]["AMBER"] == 1  # fly.only_on_fly only
+    assert out["counts"]["GREEN"] == 22  # 20 laptop + fly.ws_ticks + fly.live_armed
+    assert out["verdict"] == "RED"
+
+
+def test_merge_fly_self_checks_escalates_when_fly_is_worse():
+    report = {
+        "schema": shb.SCHEMA, "verdict": "AMBER", "stale": False,
+        "counts": {"RED": 0, "AMBER": 1, "GREEN": 10},
+        "failing": [{"id": "fly.paused", "status": "AMBER", "observed": "paused 10m",
+                     "threshold": "unpaused"}],
+        "open_alarms": [],
+    }
+    out = shb.merge_fly_self_checks(report, [
+        {"id": "fly.paused", "status": "RED", "observed": "paused owner=DEPLOY_MAINTENANCE for 50m",
+         "threshold": "unpaused; DEPLOY_MAINTENANCE <= 45m"},
+    ])
+    paused = [c for c in out["failing"] if c["id"] == "fly.paused"]
+    assert len(paused) == 1 and paused[0]["status"] == "RED"
+    assert "50m" in paused[0]["observed"]
+    assert out["counts"]["AMBER"] == 0 and out["counts"]["RED"] == 1
+    assert out["verdict"] == "RED"
+
+
+def test_fly_view_lists_fly_paused_once_when_laptop_and_self_disagree(monkeypatch):
+    bot = _bot(monkeypatch)
+    now = time.time()
+    laptop = {
+        "schema": shb.SCHEMA,
+        "generated_at": _iso(now),
+        "verdict": "RED",
+        "counts": {"RED": 1, "GREEN": 24},
+        "failing": [{
+            "id": "fly.paused", "status": "RED",
+            "observed": "paused owner=DEPLOY_MAINTENANCE for 55m",
+            "threshold": "unpaused; DEPLOY_MAINTENANCE <= 45m",
+            "hint": "guarded deploy boundary",
+            "runbook": "docs/SYSTEM_HEALTH_RUNBOOK.md#fly-paused",
+        }],
+        "open_alarms": [{"id": "fly.paused", "since": _iso(now - 55 * 60)}],
+    }
+    client = bot.app.test_client()
+    assert client.post("/api/system-health/report", json=laptop, headers=AUTH, environ_base=REMOTE).status_code == 200
+    with bot.state_lock:
+        monkeypatch.setitem(bot.state, "execution_paused", True)
+        monkeypatch.setitem(bot.state, "manual_admin_pause", True)
+        monkeypatch.setitem(bot.state, "pause_intent", "DEPLOY_MAINTENANCE")
+        monkeypatch.setitem(bot.state, "ws_last_tick", now)
+    # Fresh reassert clock → Fly self-check would be AMBER alone; merge must keep one RED.
+    bot._DEPLOY_MAINTENANCE_SHED["requested_at"] = now - 5 * 60
+    body = client.get("/api/system-health", environ_base=REMOTE).get_json()
+    paused = [c for c in body["failing"] if c["id"] == "fly.paused"]
+    assert len(paused) == 1 and paused[0]["status"] == "RED"
+    assert body["verdict"] == "RED"
+
+
+def test_deploy_maintenance_shed_clock_survives_reassert(monkeypatch):
+    bot = _bot(monkeypatch)
+    monkeypatch.setattr(bot, "_recompute_system_readiness", lambda: {
+        "system_ready": True, "ws_transport_ready": True, "readiness_reasons": [],
+    })
+    monkeypatch.setattr(bot, "_resume_active_reset_receipt_exists", lambda: False)
+    client = bot.app.test_client()
+    first = client.post("/api/pause", json={"owner": "DEPLOY_MAINTENANCE"},
+                        headers=AUTH, environ_base=REMOTE)
+    assert first.status_code == 200
+    started = float(bot._DEPLOY_MAINTENANCE_SHED["requested_at"])
+    assert started > 0
+    time.sleep(0.05)
+    again = client.post("/api/pause", json={"owner": "DEPLOY_MAINTENANCE"},
+                        headers=AUTH, environ_base=REMOTE)
+    assert again.status_code == 200
+    assert float(bot._DEPLOY_MAINTENANCE_SHED["requested_at"]) == started
+    resumed = client.post(
+        "/api/resume",
+        json={"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"},
+        headers=AUTH, environ_base=REMOTE,
+    )
+    assert resumed.status_code == 200, resumed.get_json()
+    assert float(bot._DEPLOY_MAINTENANCE_SHED["requested_at"]) == 0.0
 
 
 def test_analyzer_route_reads_laptop_report_and_bypasses_cache(monkeypatch, tmp_path):
