@@ -1458,6 +1458,13 @@ def _floor_ts(value):
     return floor_ts if value is None or pd.isna(value) or value < floor_ts else value
 
 
+def _floor_label(ts):
+    """``ts`` (UTC Timestamp) as "18 Oct 06:01 AEDT" in Australia/Sydney; None when absent."""
+    if ts is None or pd.isna(ts):
+        return None
+    return ts.tz_convert("Australia/Sydney").strftime("%d %b %H:%M %Z")
+
+
 def _v2_data_start_ts():
     """Analyzer floor when declared; else v2 segment genesis (Fly shipper baseline, then laptop heartbeat)."""
     floor = _analyzer_floor_epoch_ts()
@@ -22873,6 +22880,8 @@ def build_executive_summary_payload(
         "session_hours": round(float(hours), 2) if hours is not None else None,
         "data_start_utc": data_start.strftime("%Y-%m-%d %H:%M UTC") if data_start is not None else None,
         "data_start_hours": round(data_start_hours, 2) if data_start_hours is not None else None,
+        # RK #882 12:48: the analyzer floor (fresh start) in the user's zone, e.g. "18 Oct 06:01 AEDT".
+        "data_start_label": _floor_label(data_start),
         "dataset": dataset_counts or {},
         "performance": {
             "trades": n_trades,
@@ -22996,7 +23005,8 @@ def _fmt_pct(val, decimals=1, default="n/a"):
 
 def _session_age_label(payload):
     if payload.get("data_start_hours") is not None:
-        return f"~{payload['data_start_hours']:.1f}h since v2 data start {payload.get('data_start_utc')}"
+        start = payload.get("data_start_label") or payload.get("data_start_utc")
+        return f"~{payload['data_start_hours']:.1f}h since fresh start {start}"
     hours = payload.get("session_hours")
     return f"~{hours:.1f}h bot session" if hours else ""
 

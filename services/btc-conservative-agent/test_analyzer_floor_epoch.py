@@ -54,3 +54,11 @@ def test_selector_rejects_pre_cutoff_row_and_uses_epoch_admit(tmp_path, monkeypa
     out = eng._selector_trades(lambda _path: rows, "trades.csv")
     assert [r["id"] for r in out] == ["post"]
     assert seen and set(seen) == {"trades.csv"}
+
+
+def test_since_label_reads_fresh_start_in_aedt(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    label = eng._floor_label(eng._v2_data_start_ts())
+    assert label == "18 Oct 06:01 AEDT"
+    text = eng._session_age_label({"data_start_hours": 1.0, "data_start_label": label, "data_start_utc": "x"})
+    assert text == "~1.0h since fresh start 18 Oct 06:01 AEDT"

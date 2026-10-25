@@ -27,7 +27,7 @@ def test_promoted_heartbeat_genesis_drives_label_without_touching_epoch(tmp_path
     assert 4.4 < payload["data_start_hours"] < 4.6
     assert payload["session_hours"] > 200
     label = analyzer._session_age_label(payload)
-    assert label.startswith("~4.") and "since v2 data start" in label
+    assert label.startswith("~4.") and "since fresh start" in label
     assert "bot session" not in analyzer.format_executive_summary_short(payload)
 
 
