@@ -40,6 +40,7 @@ jobs:
         run: |
           npx tsx --test \
             src/trading-agents/live-guardian-force-flat.spec.ts \
+            src/trading-agents/btc10-ops-railway-admin.spec.ts \
             src/trading-agents/shared-read-budget.spec.ts \
             src/trading-agents/live-mutex-concurrency.spec.ts \
             src/trading-agents/live-row-countability.spec.ts \
