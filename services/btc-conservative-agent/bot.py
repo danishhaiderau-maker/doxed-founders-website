@@ -7964,12 +7964,21 @@ def _resident_priced(res) -> bool:
     return res.get("status") == "FILLED" or (res.get("status") == "PARTIAL" and bool(res.get("depth_short")))
 
 
+def _r0_stop_fill_reason(reason) -> bool:
+    """R0 / exit_lag_regression.stop_fill_row_check: reason names containing STOP (not take-profit) must price
+    FIRST_AFTER the trigger — never a LATEST decision-time / model-time row that can sit >5 bp better than the touch."""
+    r = str(reason or "").upper()
+    return "STOP" in r and "TAKE_PROFIT" not in r
+
+
 def _paper_lane_exit(pos: dict, exit_reason: str):
     """REALISM_V2 F4 + order-type model. Never writes to pos: returns (result_or_None, marks); the caller applies the
     marks after taking the close claim.
 
-    - EXCHANGE_RESIDENT (exchange stop): full book walk at the trigger instant, delay 0.
-    - BOT_SENT (every other exit, forced/admin included): reduce-only market walk at the MODEL time trigger + delay.
+    - EXCHANGE_RESIDENT (exchange stop): full book walk at the trigger instant, delay 0, FIRST_AFTER.
+    - R0 paper STOP (HARD_STOP / ATR_STOP / …): same FIRST_AFTER walk, delay 0, STOP_RULE_NO_POOL (shared with
+      research_v3). Order class stays BOT_SENT; pricing is not a LATEST model-time walk.
+    - BOT_SENT (TP / time / BE / trail / forced/admin): reduce-only market walk at MODEL time trigger + delay.
       While the bot order is in flight the resident stop can still trigger; if it does at or before the bot fill
       time, the resident stop closes the position instead (exit_reason / class say which stop fired).
     - Retries re-read the SAME model time (the book row lands late); no current-time repricing
@@ -7978,15 +7987,24 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
     - Inline closes (no thread) never sleep: model time if the row exists, else unpriced."""
     import tile_fill as _tf
     import order_model as _om
+    import r17_fields as _r17f
     lane = str(pos.get("research_lane") or "").upper()
     now = time.time()
     direction = str(pos.get("dir") or "").upper()
     qty = float(pos.get("qty") or 0)
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(pos.get("_paper_exit_trigger_ts") or 0) or now
     cls = _om.exit_order_class(exit_reason)
+    stop_rule = cls != _om.EXCHANGE_RESIDENT and _r0_stop_fill_reason(exit_reason)
     if cls == _om.EXCHANGE_RESIDENT:
         delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
         price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
+    elif stop_rule:
+        # R0: paper STOP = first full book row received at/after the trigger (same FIRST_AFTER path as research_v3).
+        delay_s, delay_source = 0.0, _r17f.STOP_RULE_NO_POOL
+        _paper_note_exit_trigger(pos, t0)
+        price_fn = lambda: _tf.price_exit_resident(  # noqa: E731
+            {"side": direction, "open_qty": qty},
+            {"trigger_ts": t0, "delay_s": 0.0, "delay_source": delay_source})
     else:
         # RK (2): own trigger -> send code point (exit_sent_ts, stamped by close_position before pricing); never
         # now - t0 (pricing lag: the thread waits for the book row). Pooled send->ack by order type (EXIT_RO_MKT).
@@ -7995,14 +8013,22 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         _paper_note_exit_trigger(pos, t0)
         price_fn = lambda: _paper_stamp_pool(  # noqa: E731
             _tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
-    base = {"exit_order_class": cls, "exit_reason_fired": str(exit_reason)}
+    base = {"exit_order_class": cls, "exit_reason_fired": str(exit_reason), "exit_stop_rule": bool(stop_rule)}
+    first_after = cls == _om.EXCHANGE_RESIDENT or stop_rule
+
+    def _first_after_basis() -> str:
+        if base["exit_order_class"] == _om.EXCHANGE_RESIDENT:
+            return "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER"
+        if base.get("exit_stop_rule"):
+            return "STOP_RULE_FIRST_ROW_AT_OR_AFTER_TRIGGER"
+        return "MODEL_TIME"
+
     if getattr(_PAPER_EXIT_TLS, "no_wait", False):
-        out, marks = _paper_forced_exit(pos, now, direction, qty) if cls == _om.BOT_SENT else (None, {})
-        if cls == _om.EXCHANGE_RESIDENT:
+        if first_after:
             res = price_fn()
             if _resident_priced(res):
                 marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None,
-                         "exit_pricing_basis": "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER",
+                         "exit_pricing_basis": _first_after_basis(),
                          "exit_price_age_s": res.get("price_age_s"), "exit_book_row_rule": res.get("book_row_rule"),
                          "exit_unverified_reason": res.get("unverified_reason"),
                          "exit_evidence_status": res.get("evidence_status"),
@@ -8011,20 +8037,24 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
                 marks.update(_liquidation_stamp(pos, t0, res.get("price")))
                 out = _paper_exit_sim(res, pos, direction, qty, marks)
             else:
-                marks = {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None}
+                out, marks = None, {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"),
+                                    "_paper_exit_trigger_ts": None}
+            return out, {**base, **marks}
+        out, marks = _paper_forced_exit(pos, now, direction, qty)
         return out, {**base, **marks}
     model_fill = t0 + float(delay_s)
     while time.time() < model_fill:
         time.sleep(min(model_fill - time.time(), 3.0))
-    if cls == _om.BOT_SENT and _is_paper_book_lane(pos):
+    if cls == _om.BOT_SENT and not stop_rule and _is_paper_book_lane(pos):
         # race: did the resident stop trigger while this bot order was in flight (t0, t0 + delay]?
         hit = _exchange_stop_trigger(dict(pos), t0, model_fill)
         if hit and _om.race(hit["trigger_ts"], t0, float(delay_s)) == _om.EXCHANGE_RESIDENT:
             t_x = float(hit["trigger_ts"])
             base.update(exit_order_class=_om.EXCHANGE_RESIDENT, exit_race_lost_by=str(exit_reason),
                         exit_reason_fired=_om.exchange_stop_reason(float(pos.get("exchange_stop_bp") or 0)),
-                        exit_race_exchange_trigger_ts=t_x, exit_race_bot_trigger_ts=t0)
+                        exit_race_exchange_trigger_ts=t_x, exit_race_bot_trigger_ts=t0, exit_stop_rule=False)
             t0, delay_s = t_x, 0.0
+            first_after = True
             price_fn = lambda: _tf.exit_resident_fill(direction, qty, t_x)  # noqa: E731
     attempts = 0
     res = None
@@ -8033,8 +8063,8 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         attempts += 1
         if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
             break
-        if base["exit_order_class"] == _om.EXCHANGE_RESIDENT and _resident_priced(res):
-            break  # HM C7: depth-short PARTIAL walk of the resident stop: priced on the visible depth, UNVERIFIED
+        if first_after and _resident_priced(res):
+            break  # HM C7: depth-short PARTIAL walk of the resident/stop-rule fill: priced on visible depth, UNVERIFIED
         if time.time() - (t0 + float(delay_s)) >= _tf.EXIT_FORCE_AFTER_S:
             res = None
             break
@@ -8057,9 +8087,8 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
     if res is None:
         return None, {**base, **_paper_unpriced_marks(t0, missing)}
     marks = {**base, "exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None, "missing_book_seconds": missing,
-             "exit_pricing_basis": ("EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER"
-                                    if base["exit_order_class"] == _om.EXCHANGE_RESIDENT
-                                    else ("FORCED_NO_BOOK_FIRST_ROW" if base.get("exit_forced_no_book") else "MODEL_TIME")),
+             "exit_pricing_basis": ("FORCED_NO_BOOK_FIRST_ROW" if base.get("exit_forced_no_book")
+                                    else _first_after_basis()),
              "exit_price_age_s": res.get("price_age_s"), "exit_book_row_rule": res.get("book_row_rule"),
              "exit_evidence_status": res.get("evidence_status"),
              "exit_unverified_reason": res.get("unverified_reason"),
@@ -33337,24 +33366,61 @@ def _stamp_regime_at_signal(trade_row: dict, pos, master) -> None:
 
 
 def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
-    """HM-BATCH2 / R3 (no ticker anywhere): record the book top at close on every closed row as COMPARISON columns only
-    (never pricing): exit_book_top_bid / exit_book_top_ask / exit_book_top_s from the latest complete bfx_book_10l_1s row
-    (paper_fill.book10l_at, the shared pricer's rows). The old exit_bid / exit_ask came from the WS-ticker microstructure
-    tape ring and are no longer written. A row older than max_age_sec is not stamped (exit_book_top_missing). Never raises.
-    HM R2 N-c: kept (not dead) - read by monitor_checks (exit spread check), data_gaps (exit_bid/ask columns) and
-    monitor_tiles (row view). Comparison only; no pricer or trigger reads these columns."""
+    """HM-BATCH2 / R3 (no ticker anywhere): record the book top used for exit-truth COMPARISON only (never pricing).
+
+    Prefer the shared pricer's fill-time depth snapshot already on the row (``exit_depth_snapshot_fill``): exit-truth
+    must compare the booked fill to the same side-correct touch the walk used. Stamping ``book10l_at(now)`` after a
+    stop cascade let the touch keep moving adversely while the fill stayed at the fill-time bid/ask → false RED
+    (>5 bp "better than touch"; CTRL/B2 24-25 Oct). Fallback: book at exit fill_ts, then wall clock. Never raises.
+    HM R2 N-c: kept — read by monitor_checks / data_gaps / monitor_tiles. Comparison only.
+    """
     try:
         import paper_fill as _pf
         import quote_trigger as _qt
+
+        def _from_book(book, source: str) -> bool:
+            if not isinstance(book, dict):
+                return False
+            bid = _qt.exec_px("SHORT", "entry", book)  # best bid
+            ask = _qt.exec_px("LONG", "entry", book)   # best ask
+            s = float(book["s"]) if book.get("s") is not None else None
+            if bid is None or ask is None or s is None:
+                return False
+            trade_row["exit_book_top_bid"] = bid
+            trade_row["exit_book_top_ask"] = ask
+            trade_row["exit_book_top_s"] = s
+            trade_row["exit_book_top_source"] = source
+            return True
+
+        snap = trade_row.get("exit_depth_snapshot_fill")
+        if _from_book(snap if isinstance(snap, dict) else None, "FILL_SNAPSHOT"):
+            return
         now = time.time()
-        book = _pf.book10l_at(now)
+        fill_ts = None
+        for key in ("exit_ts", "exit_fill_ts"):
+            try:
+                v = float(trade_row.get(key) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v > 0:
+                fill_ts = v
+                break
+        ev = trade_row.get("event_timestamps") if isinstance(trade_row.get("event_timestamps"), dict) else {}
+        if fill_ts is None:
+            try:
+                v = float(ev.get("exit_fill_ts") or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v > 0:
+                fill_ts = v
+        t_lookup = float(fill_ts) if fill_ts is not None else now
+        book = _pf.book10l_at(t_lookup)
         s = float(book.get("s")) if isinstance(book, dict) and book.get("s") is not None else None
         if s is None or now - (s + 1.0) > float(max_age_sec):
             trade_row.setdefault("exit_book_top_missing", True)
             return
-        trade_row["exit_book_top_bid"] = _qt.exec_px("SHORT", "entry", book)  # best bid
-        trade_row["exit_book_top_ask"] = _qt.exec_px("LONG", "entry", book)   # best ask
-        trade_row["exit_book_top_s"] = s
+        if not _from_book(book, "BOOK_AT_FILL_TS" if fill_ts is not None else "BOOK_AT_CLOSE"):
+            trade_row.setdefault("exit_book_top_missing", True)
     except Exception:
         trade_row.setdefault("exit_book_top_missing", True)
 _AI_SHADOW_BOOK = _ai_shadow.ChallengerBook()
