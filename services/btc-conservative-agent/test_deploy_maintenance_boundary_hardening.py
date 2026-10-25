@@ -202,6 +202,9 @@ def test_guaranteed_resume_is_the_final_step_on_every_failure_exit():
     assert "steps.paper_maintenance.outcome == 'failure'" in block
     assert "steps.deploy_source.outcome == 'success'" in block
     assert "PRIOR_OPERATOR_STATE: ${{ steps.paper_maintenance.outputs.prior_operator_state }}" in block
+    # Bootstrap hard-timeout fallthrough: waive completeness so paper resumes.
+    assert "BOOTSTRAP_GATE_FAILED:" in block
+    assert "steps.receipt_bootstrap.outcome == 'failure'" in block
     assert "timeout-minutes: 15" in block
     assert "continue-on-error" not in block
     assert WORKFLOW.index("Best-effort preserve safe paper maintenance after failed guarded deploy") < WORKFLOW.index(
