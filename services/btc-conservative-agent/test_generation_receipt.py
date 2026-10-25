@@ -81,7 +81,7 @@ def test_receipt_is_red_when_a_required_study_errors():
 
 def test_receipt_green_only_when_everything_ran_and_integrity_valid():
     manifest = _manifest(**{"a.json": {"available_in_generation": True}})
-    assert build_generation_receipt(manifest, integrity={"report_status": "VALID"}, **OK)["level"] == "GREEN"
+    assert build_generation_receipt(manifest, integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]}, **OK)["level"] == "GREEN"
     assert build_generation_receipt(manifest, integrity={}, **OK)["level"] == "RED"
 
 
@@ -89,7 +89,7 @@ def test_receipt_flags_truncated_replay_and_blocked_inputs():
     manifest = _manifest(**{"a.json": {"available_in_generation": True}})
     receipt = build_generation_receipt(
         manifest,
-        integrity={"report_status": "VALID"},
+        integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]},
         protection_replay_window={"truncated": True, "events_eligible": 2415, "events_selected": 150},
         input_blockers={"level": "AMBER", "items": [
             {"input": "exit_ladder", "status": "BLOCKED", "reason_code": "NO_ELIGIBLE"}]},
@@ -107,7 +107,7 @@ def test_receipt_names_mark_fallback_instead_of_truncation():
     manifest = _manifest(**{"a.json": {"available_in_generation": True}})
     receipt = build_generation_receipt(
         manifest,
-        integrity={"report_status": "VALID"},
+        integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]},
         protection_replay_window={"truncated": False, "events_eligible": 2800, "events_selected": 2800,
                                   "alert_level": "AMBER", "reason": "REPLAY_MARK_FALLBACK",
                                   "mark_fallback_events": 12}, **OK,
@@ -121,7 +121,7 @@ def test_receipt_reads_mark_fallback_from_nested_mark_source():
     manifest = _manifest(**{"a.json": {"available_in_generation": True}})
     receipt = build_generation_receipt(
         manifest,
-        integrity={"report_status": "VALID"},
+        integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]},
         protection_replay_window={"truncated": False, "events_eligible": 3054, "events_selected": 3054,
                                   "alert_level": "AMBER",
                                   "mark_source": {"reason": "REPLAY_MARK_FALLBACK", "fallback_events": 55}},
@@ -130,7 +130,7 @@ def test_receipt_reads_mark_fallback_from_nested_mark_source():
 
 
 def test_receipt_round_trips(tmp_path):
-    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"}, **OK)
+    receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]}, **OK)
     write_generation_receipt(tmp_path, receipt)
     assert load_generation_receipt(tmp_path)["level"] == "GREEN"
     assert load_generation_receipt(tmp_path / "none") == {}

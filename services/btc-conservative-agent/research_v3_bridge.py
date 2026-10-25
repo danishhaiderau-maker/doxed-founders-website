@@ -444,6 +444,26 @@ def _admitting_fill_gate(order: Mapping[str, Any]) -> Mapping[str, Any]:
     return admitted if same_generation else gate
 
 
+def _fill_book_stamp(sim: Any) -> tuple[float | None, float | None]:
+    """R3/R0 (RK #882): the order-book row a paper fill or close priced on -> (book_ts, price_age_sec).
+
+    book_ts is the measured receive time of that row (else its by-second stamp); the age is the pricer's own
+    price_age_s (else book_age_ms / 1000). Either is None only when the pricer recorded no book."""
+    sim = sim if isinstance(sim, Mapping) else {}
+
+    def num(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    book_ts = _first(num(sim.get("book_receive_ts")), num(sim.get("book_s")))
+    age = num(sim.get("price_age_s"))
+    if age is None and num(sim.get("book_age_ms")) is not None:
+        age = round(num(sim.get("book_age_ms")) / 1000.0, 3)
+    return book_ts, age
+
+
 def _paper_fill_execution_receipt(
     order: Mapping[str, Any], position: Mapping[str, Any], signal: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -486,6 +506,11 @@ def _paper_fill_execution_receipt(
         fill_model = str(fill_sim["fill_model"])
         fill_basis = _paper_fill.FILL_BASIS_TAKER_WALK
         supported = fill_sim.get("evidence_status") == _paper_fill.EVIDENCE_COMPLETE and filled is not None and filled > 0
+    sim_book_ts, sim_age = _fill_book_stamp(fill_sim)
+    book_ts = _first(source.get("book_ts"), source.get("market_ts"), sim_book_ts)
+    book_age_sec = number(source.get("book_age_sec"), sim_age)
+    if book_ts is None or book_age_sec is None:
+        supported = False  # R3/R0: a fill with no order-book time and price age is never countable
     if not fill_basis:
         # Taker-at-signal / SIM_MARKET fills never visit the venue-executable gate;
         # label them explicitly so GS-04 (and other takers) are not UNCLASSIFIED.
@@ -518,8 +543,8 @@ def _paper_fill_execution_receipt(
         "filled_qty": filled,
         "remaining_qty": remaining,
         "partial_fill": bool(order.get("partial_fill")) or bool(remaining and remaining > 0),
-        "book_ts": _first(source.get("book_ts"), source.get("market_ts")),
-        "book_age_sec": number(source.get("book_age_sec")),
+        "book_ts": book_ts,
+        "book_age_sec": book_age_sec,
         "best_bid": number(source.get("best_bid")),
         "best_ask": number(source.get("best_ask")),
         "side_correct_executable_quote": number(source.get("side_correct_executable_quote")),
@@ -2122,6 +2147,9 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
         "entry_price": entry_price, "exit_price": outcome.get("exit"),
+        # R3/R0 (RK #882): the close stamps the time and age of the book it priced on (None = no book -> R17)
+        "exit_book_ts": _fill_book_stamp(_first(position.get("exit_fill_sim"), outcome.get("exit_fill_sim")))[0],
+        "exit_price_age_s": _fill_book_stamp(_first(position.get("exit_fill_sim"), outcome.get("exit_fill_sim")))[1],
         "filled_qty": _first(outcome.get("execution_qty"), position.get("qty")), "net_pnl_usd": outcome.get("net_pnl_usd"),
         "gross_pnl_usd": outcome.get("gross_pnl_usd"), "trading_fees_usd": outcome.get("trading_fees_usd"),
         "funding_fees_usd": outcome.get("funding_fees_usd"), "exit_reason": outcome.get("exit_reason"),

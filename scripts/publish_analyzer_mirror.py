@@ -50,7 +50,7 @@ R3_QUARANTINED_FILES = frozenset((
     "conservative-results.jsonl.gz", "conservative_fill_descriptive_report.json",
     "entry_baseline_replay_episode_receipts.jsonl.gz", "entry_baseline_replay_report.json",
     "exit_ladder_simulator_report.json", "fast_cut_survivor_report.json", "fast_cut_sweep_report.json",
-    "genome_grid_report.json", "genome_grid_rows.jsonl.gz", "qualified_exit_policy_grid_report.json",
+    "genome_grid_report.json", "genome_grid_rows.jsonl.gz",
     "research_api_cache.sqlite3", "research_api_summary.json", "walk_forward_scores.json",
     "walk_forward_scores.md", "walk_forward_trades.jsonl.gz",
 ))

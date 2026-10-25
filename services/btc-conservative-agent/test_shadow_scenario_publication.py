@@ -39,11 +39,15 @@ def publication_call(source_input, baseline):
     return calls
 
 
+
+def _book(generation, results, non_book=()):
+    return {"schema": "entry_baseline_book_replay_v1", "generation": generation,
+            "results": list(results), "non_book_rows": list(non_book)}
+
 def test_normal_pinned_scenario_reaches_actual_publication_bound_to_this_generation(tmp_path, monkeypatch):
     _, source = pin(tmp_path, monkeypatch)
-    baseline = {"generation": GEN, "episode_receipts": [
-        {"signal_ts": 102, "results": [{"outcome_state": "FULL_FILL"}]},
-        {"signal_ts": 101, "results": [{"outcome_state": "UNKNOWN"}]}]}
+    baseline = _book(GEN, [{"signal_ts": 102, "outcome_state": "FULL_FILL"}],
+                     [{"signal_ts": 101, "non_book_reason": "NO_BOOK"}])
     calls = publication_call(source, baseline)
     contract = validate_contract(calls[0]["research_model"], GEN)
     assert contract["first_cohort_signal_ts"] == 101
@@ -55,9 +59,8 @@ def test_normal_pinned_scenario_reaches_actual_publication_bound_to_this_generat
 
 def test_actual_callsite_does_not_drop_unknown_early_opportunity(tmp_path, monkeypatch):
     _, source = pin(tmp_path, monkeypatch)
-    baseline = {"generation": GEN, "episode_receipts": [
-        {"signal_ts": 101, "results": [{"outcome_state": "FULL_FILL"}]},
-        {"signal_ts": 99, "results": [{"outcome_state": "UNKNOWN"}]}]}
+    baseline = _book(GEN, [{"signal_ts": 101, "outcome_state": "FULL_FILL"}],
+                     [{"signal_ts": 99, "non_book_reason": "NO_BOOK"}])
     with pytest.raises(ValueError, match="POST_SIGNAL_DECLARATION"):
         publication_call(source, baseline)
 
@@ -67,9 +70,9 @@ def test_actual_callsite_missing_input_never_produces_contract(tmp_path, monkeyp
     value = scenario()
     if defect == "missing_funding": del value["funding"]
     _, source = pin(tmp_path, monkeypatch, value)
-    baseline = {"generation": GEN, "episode_receipts": [{"signal_ts": 101}]}
-    if defect == "missing_time": baseline["episode_receipts"].append({"results": []})
-    if defect == "empty_cohort": baseline["episode_receipts"] = []
+    baseline = _book(GEN, [{"signal_ts": 101}])
+    if defect == "missing_time": baseline["non_book_rows"].append({"non_book_reason": "NO_BOOK"})
+    if defect == "empty_cohort": baseline["results"] = []
     if defect == "bad_epoch": baseline["generation"] = dict(GEN, epoch_id="new-source-epoch")
     with pytest.raises(ValueError): publication_call(source, baseline)
 
@@ -77,7 +80,7 @@ def test_actual_callsite_missing_input_never_produces_contract(tmp_path, monkeyp
 def test_same_pin_rebinds_publication_but_mutation_cannot_publish(tmp_path, monkeypatch):
     path, source = pin(tmp_path, monkeypatch)
     newer = dict(GEN, manifest_entry_hash="f" * 64, generation_key="new-generation")
-    baseline = {"generation": newer, "episode_receipts": [{"signal_ts": 101}]}
+    baseline = _book(newer, [{"signal_ts": 101}])
     assert publication_call(source, baseline)[0]["research_model"]["generation"] == newer
     path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(ValueError, match="INPUT_CHANGED"): source.assert_unchanged()
@@ -85,4 +88,10 @@ def test_same_pin_rebinds_publication_but_mutation_cannot_publish(tmp_path, monk
 
 @pytest.mark.parametrize("bad", [None, True, float("nan"), "101"])
 def test_invalid_time_in_any_episode_does_not_shrink_comparison_cohort(bad):
-    assert first_signal_ts_from_baseline({"episode_receipts": [{"signal_ts": 101}, {"signal_ts": bad}]}) is None
+    assert first_signal_ts_from_baseline(_book(GEN, [{"signal_ts": 101}], [{"signal_ts": bad}])) is None
+
+
+def test_legacy_episode_receipts_layout_is_not_read():
+    # RK R1/R22: only entry_baseline_book_replay_v1 is read; the old episode_receipts shape yields no time.
+    assert first_signal_ts_from_baseline({"generation": GEN, "episode_receipts": [{"signal_ts": 101}]}) is None
+    assert first_signal_ts_from_baseline(_book(GEN, [{"signal_ts": 105}], [{"signal_ts": 103}])) == 103

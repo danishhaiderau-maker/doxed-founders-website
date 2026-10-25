@@ -56,10 +56,13 @@ def test_default_paper_fill_model_is_book10l_and_realistic_on_flips_off():
 
 
 def test_receipt_uses_pricer_evidence_not_the_venue_gate():
-    order = {"fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE"}, "filled_qty": 0.0003, "qty": 0.0003}
+    order = {"fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE", "book_s": 1792300000, "price_age_s": 0.5},
+             "filled_qty": 0.0003, "qty": 0.0003}
     rec = research_v3_bridge._paper_fill_execution_receipt(order, {"qty": 0.0003}, {})
     assert rec["fill_model"] == MODEL and rec["fill_basis"] == "BOOK10L_TAKER_WALK"
     assert rec["execution_basis"] == f"{MODEL}:BOOK10L_TAKER_WALK" and rec["conservative_fill_supported"] is True
+    unstamped = {**order, "fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE"}}  # RK #882 R3: no book time/age
+    assert research_v3_bridge._paper_fill_execution_receipt(unstamped, {"qty": 0.0003}, {})["conservative_fill_supported"] is False
     legacy = research_v3_bridge._paper_fill_execution_receipt({"qty": 1.0}, {"qty": 1.0}, {})
     assert legacy["execution_basis"] == "UNSUPPORTED"  # untouched for non-paper orders
 

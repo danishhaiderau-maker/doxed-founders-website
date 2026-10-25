@@ -36,7 +36,7 @@ def test_inventory_matches_ast_and_counts_21():
         mod = "analyzer_research_engine_v62" if p.parent == HERE else f"research.{p.stem}"
         lf |= {f"{mod}.{c}" for c in _callers(p, names)}
     assert lf == set(r3_quarantine.INVENTORY["LIMIT_FILL_1S"])
-    assert len(tick) + len(lf) == 21
+    assert len(tick) + len(lf) == 20  # one retired exit-grid producer removed (RK R1)
 
 
 def test_every_tick_sim_producer_is_retired_or_quarantined():
@@ -50,13 +50,13 @@ def test_every_tick_sim_producer_is_retired_or_quarantined():
 def test_retired_report_writers_write_nothing_and_label_section(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(analyzer, "DATA_DIR", str(tmp_path), raising=False)
-    for name in ("qualified_exit_policy_grid_report", "fast_cut_survivor_report", "fast_cut_sweep_report"):
+    for name in ("fast_cut_survivor_report", "fast_cut_sweep_report"):
         rep = getattr(analyzer, name)()
         assert rep["status"] == r3_quarantine.STATUS and rep["countable"] is False
         assert rep["label"] == r3_quarantine.RETIRED_LABEL
     assert list(tmp_path.rglob("*.json")) == []
     out = capsys.readouterr().out
-    assert out.count("source retired (R17)") == 3
+    assert out.count("source retired (R17)") == 2
 
 
 def test_retired_sweeps_return_none_and_print_label(capsys):
@@ -66,7 +66,7 @@ def test_retired_sweeps_return_none_and_print_label(capsys):
 
 
 def test_readers_refuse_retired_files():
-    for f in ("fast_cut_survivor_report.json", "fast_cut_sweep_report.json", "qualified_exit_policy_grid_report.json"):
+    for f in ("fast_cut_survivor_report.json", "fast_cut_sweep_report.json"):
         assert r3_quarantine.quarantined_file(f"/x/{f}")
     json.dumps(r3_quarantine.disabled_payload("TICK_SIM"))
 
@@ -75,8 +75,6 @@ def test_readers_refuse_retired_files():
 import importlib
 
 LIMIT_FILES = (
-    "entry_baseline_replay_report.json",
-    "entry_baseline_replay_episode_receipts.jsonl.gz",
     "conservative-results.jsonl.gz",
     "conservative_fill_descriptive_report.json",
 )
@@ -132,13 +130,13 @@ def test_limit_fill_1s_readers_refuse(tmp_path):
     from research import input_blockers, research_dashboard
     for f in LIMIT_FILES:
         assert r3_quarantine.quarantined_file(f"/x/{f}")
+    # RK R1: the entry baseline replay is rebuilt on book_limit_entry, so it is no longer a LIMIT_FILL_1S
+    # output; a stale (non book-replay) report is refused by schema instead of being read.
+    assert not r3_quarantine.quarantined_file("/x/entry_baseline_replay_report.json")
     (tmp_path / "entry_baseline_replay_report.json").write_text('{"schema":"stale"}')
-    assert analyzer._load_json_report(str(tmp_path / "entry_baseline_replay_report.json")) == {}
     item = input_blockers.entry_baseline_replay_item(tmp_path)
-    assert item["status"] == input_blockers.RETIRED and item["reason_code"] == input_blockers.SOURCE_RETIRED_R17
+    assert item["status"] == "DEGRADED" and item["reason_code"] == "BASELINE_REPLAY_SCHEMA_INVALID"
     assert research_dashboard._pick_best_payload("conservative_fill_descriptive_report.json", {"d": 1}) == {"d": 1}
-    payload, _meta = research_dashboard._declared_atomic_generation_report("entry_baseline_replay_report.json")
-    assert payload is None
 
 
 def _row_pricer_callers() -> set[str]:

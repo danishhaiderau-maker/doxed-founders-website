@@ -145,7 +145,6 @@ CONFIDENCE_BAND_CROSS_REPORT_FILE = "confidence_band_cross_report.json"
 EDGE_VALIDATION_REPORT_FILE = "edge_validation_report.json"
 BENCHMARK_CONTRIBUTION_REPORT_FILE = "benchmark_contribution_report.json"
 FAST_CUT_SWEEP_REPORT_FILE = "fast_cut_sweep_report.json"
-QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE = "qualified_exit_policy_grid_report.json"
 TOP_COMBINATIONS_REPORT_FILE = "top_combinations_report.json"
 CHASE_EFFICIENCY_MATRIX_REPORT_FILE = "chase_efficiency_matrix_report.json"
 CHASE_THRESHOLD_REPORT_FILE = "chase_threshold_report.json"
@@ -183,8 +182,6 @@ MIN_LANE_APPROVES_FOR_RETIREMENT = 10
 _CONSOLE_STDOUT = sys.stdout
 ANALYZER_CONSOLE_VERBOSE = False
 _ANALYZER_REPORT_SUBDIR = None
-ALL_DATA_REPORTS_SUBDIR = os.path.join(REPORTS_DIR, "all_data")
-ALL_DATA_SESSION_SCOPE = {"data_scope": "all", "fresh_collection_mode": False}
 
 
 def analyzer_report_path(filename: str) -> str:
@@ -243,16 +240,16 @@ class _AnalyzerTee:
 ANALYZER_LOOP_INTERVAL_MINUTES = max(1, int(os.getenv("ANALYZER_INTERVAL_MINUTES", "30")))
 
 
-def resolve_analyzer_session_scope() -> tuple:
+def resolve_analyzer_session_scope() -> str:
     """Always analyze the current session — from last fresh collection wipe onward."""
     session = load_research_session()
     if session.get("fresh_collection_mode") or session.get("fresh_collection_start_time"):
         iso = session.get("fresh_collection_start_iso") or "n/a"
-        return True, f"SESSION (fresh collection from {iso})"
+        return f"SESSION (fresh collection from {iso})"
     if session.get("bot_start_time"):
         iso = session.get("bot_start_iso") or "n/a"
-        return True, f"SESSION (bot session from {iso})"
-    return True, "SESSION (no research_session.json — analyzing all loaded rows)"
+        return f"SESSION (bot session from {iso})"
+    return "SESSION (no research_session.json — analyzing all loaded rows)"
 
 
 def start_research_dashboard_server():
@@ -698,7 +695,6 @@ ANALYZER_JSON_REPORT_FILES = (
     EDGE_PREDICTIVENESS_REPORT_FILE,
     EDGE_SCORE_DECILE_REPORT_FILE,
     FAST_CUT_SURVIVOR_REPORT_FILE,
-    QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE,
     FILL_QUALITY_REPORT_FILE,
     FIRST_15M_OUTCOME_REPORT_FILE,
     HORIZON_COUNTERFACTUAL_REPORT_FILE,
@@ -828,7 +824,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Exit Combinations", EXIT_COMBINATIONS_REPORT_FILE, "Exit reason × entry combo — leakage and best exit paths"),
     ("Exit Leakage by Reason", EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "Which exit reasons destroy the most value"),
     ("Exit Ladder Simulator", EXIT_LADDER_SIMULATOR_REPORT_FILE, "Replay tick sim — alternate ladder rungs vs live"),
-    ("Qualified Exit Policy Grid", QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE, "Fail-closed real-copy thesis, ladder, and MFE holdout grid"),
     ("Correlated Price Clusters", CORRELATED_PRICE_CLUSTER_REPORT_FILE, "Research-only price clustering with qualified 120m replay"),
     ("AI Scan Independence", "ai_scan_independence_report.json", "AI pipeline vs production tile ON/OFF"),
     ("Lane Memory", "lane_memory_validation.json", "Retired lane exposure + bucket bounds"),
@@ -1126,10 +1121,12 @@ def _session_start_ts(session: dict):
     if raw is None:
         return None
     try:
-        return pd.Timestamp(float(raw), unit="s", tz="UTC")
+        start = pd.Timestamp(float(raw), unit="s", tz="UTC")
     except Exception:
         iso = session.get("fresh_collection_start_iso") or session.get("bot_start_iso")
-        return pd.to_datetime(iso, utc=True, errors="coerce")
+        start = pd.to_datetime(iso, utc=True, errors="coerce")
+    # RK #882 12:48: the cohort cutoff is never earlier than the analyzer floor (fresh start / epoch start).
+    return _floor_ts(start)
 
 
 def _session_hours(session: dict = None) -> float:
@@ -1433,11 +1430,49 @@ def _mirror_publish_freshness():
         return {"error": f"{type(exc).__name__}: {exc}"[:300], "publish_stale": None}
 
 
-def _v2_data_start_ts():
-    """Clean-epoch start when declared; else v2 segment genesis (Fly shipper baseline, then laptop heartbeat)."""
+ANALYZER_MIN_FLOOR_TS = 1792263671
+
+
+def _analyzer_floor_epoch_ts():
+    """RK #882 12:48: analyzer floor = max(epoch manifest started_at_ts, fresh_start_epoch.json epoch_ts).
+
+    Never below ANALYZER_MIN_FLOOR_TS (1792263671).  DATA_EPOCH_ID is not involved.
+    """
+    from research_segment_epoch import fresh_start_epoch
+
+    candidates = []
     guard = _epoch_guard()
     if guard.declared:
-        return pd.Timestamp(float(guard.manifest["started_at_ts"]), unit="s", tz="UTC")
+        candidates.append(float(guard.manifest["started_at_ts"]))
+    doc = fresh_start_epoch(os.path.dirname(_agent_data_path("fresh_start_epoch.json")))
+    if doc:
+        candidates.append(float(doc["epoch_ts"]))
+    # RK/HM #882: hard minimum = the 12:20 credibility cutoff (18 Oct 06:01:11 AEDT), even when both are missing.
+    candidates.append(float(ANALYZER_MIN_FLOOR_TS))
+    return max(candidates)
+
+
+def _floor_ts(value):
+    """``value`` (a UTC Timestamp or None) raised to the analyzer floor."""
+    floor = _analyzer_floor_epoch_ts()
+    if floor is None:
+        return value
+    floor_ts = pd.Timestamp(floor, unit="s", tz="UTC")
+    return floor_ts if value is None or pd.isna(value) or value < floor_ts else value
+
+
+def _floor_label(ts):
+    """``ts`` (UTC Timestamp) as "18 Oct 06:01 AEDT" in Australia/Sydney; None when absent."""
+    if ts is None or pd.isna(ts):
+        return None
+    return ts.tz_convert("Australia/Sydney").strftime("%d %b %H:%M %Z")
+
+
+def _v2_data_start_ts():
+    """Analyzer floor when declared; else v2 segment genesis (Fly shipper baseline, then laptop heartbeat)."""
+    floor = _analyzer_floor_epoch_ts()
+    if floor is not None:
+        return pd.Timestamp(floor, unit="s", tz="UTC")
     sources = (
         (os.path.join("segment-shipper-v2", "state.json"),
          lambda doc: (doc.get("baseline") or {}).get("created_at")),
@@ -4179,7 +4214,7 @@ def _simulate_ticks_fast_cut_ladder(
 
     R3 WARNING: this walks signal_replay ticker/BBO ticks. exit_ladder_simulator_report is
     quarantined (research/r3_quarantine.py EXIT_LADDER_SIM); the other callers (stop_* sweeps,
-    qualified_exit_policy_grid_report, _sim_replay_pnl_*, fast_cut_* reports) are flagged for the
+    _sim_replay_pnl_*, fast_cut_* reports) are flagged for the
     RK rebuild on paper_fill + quote_trigger and must not feed countable evidence."""
     if not ticks or not entry or entry <= 0:
         return None
@@ -4732,243 +4767,6 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
         print(mfe_slice[["mfe_protect_%", "sum_pnl_usd", "win_rate_pct", "thesis_exits"]].to_string(index=False))
 
     return float(best["sum_pnl_usd"])
-
-
-@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
-def qualified_exit_policy_grid_report():
-    """Costed, chronological, real-copy-only thesis/ladder/MFE grid.
-
-    The physical hard stop is an invariant (30%), not an optimisation axis.
-    Actual exchange results remain separate from counterfactual simulations.
-    """
-    from research.runtime_identity_incidents import load_incident_input, REASON
-    incident_input = load_incident_input()
-    all_replays = _load_jsonl_replays()
-    cohort_assessments = {}
-    for cohort_name in (
-        SHOWCASE_STRATEGY,
-        BITFINEX_COPY_FIDELITY,
-        REAL_COPY_PARAMETER_OPTIMISATION,
-    ):
-        ids, reason_counts, cohort_evidence_rows = _analysis_eligible_trade_ids(cohort_name)
-        cohort_assessments[cohort_name] = {
-            "included_row_count": len(ids),
-            "evidence_row_count": cohort_evidence_rows,
-            "exclusion_reason_counts": reason_counts,
-        }
-    eligible_ids, exclusions, evidence_rows = _analysis_eligible_trade_ids(
-        REAL_COPY_PARAMETER_OPTIMISATION
-    )
-    evidence = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
-    qualified = []
-    local_exclusions = Counter()
-    def has_executable_horizons(replay, origin, phase=None):
-        if origin is None:
-            return False
-        side_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
-        ticks = [tick for tick in (replay.get("ticks") or []) if isinstance(tick, dict)]
-        for seconds in HORIZON_PROFIT_HORIZONS.values():
-            if not any(
-                (phase is None or str(tick.get("phase") or "") == phase)
-                and float(tick.get("t") or -1) >= float(origin) + seconds
-                and (_cluster_float(tick.get(side_key)) or 0) > 0
-                for tick in ticks
-            ):
-                return False
-        return True
-    for trade_id in sorted(eligible_ids):
-        replay = all_replays.get(trade_id)
-        row = evidence.get(trade_id) or {}
-        if incident_input.enabled and (
-            incident_input.affected(row) or incident_input.affected({
-                key: value for key, value in (replay or {}).items() if key != "ticks"
-            })
-        ):
-            # Tick t values in this legacy replay are relative offsets, not
-            # absolute UTC proof. Missing absolute replay timing stays UNKNOWN.
-            local_exclusions[REASON] += 1
-            continue
-        if not replay:
-            local_exclusions["REPLAY_ROW_MISSING"] += 1
-            continue
-        if replay.get("replay_complete") is not True:
-            local_exclusions["REPLAY_INCOMPLETE"] += 1
-            continue
-        if row.get("required_entry_horizons_complete") is not True:
-            local_exclusions["REQUIRED_ENTRY_HORIZON_INCOMPLETE"] += 1
-            continue
-        if row.get("required_post_exit_horizons_complete") is not True:
-            local_exclusions["REQUIRED_POST_EXIT_HORIZON_INCOMPLETE"] += 1
-            continue
-        if not has_executable_horizons(replay, replay.get("virtual_fill_t")):
-            local_exclusions["ENTRY_BBO_HORIZON_EVIDENCE_INCOMPLETE"] += 1
-            continue
-        if not has_executable_horizons(replay, replay.get("exit_t_rel"), "post_exit"):
-            local_exclusions["POST_EXIT_BBO_HORIZON_EVIDENCE_INCOMPLETE"] += 1
-            continue
-        costs = row.get("actual_costs") or (row.get("bitfinex_evidence") or {}).get("actual_costs") or {}
-        total_cost = costs.get("total_cost_usd")
-        if total_cost is None:
-            parts = [costs.get(key) for key in ("fees_usd", "funding_usd", "slippage_usd")]
-            if any(value is None for value in parts):
-                local_exclusions["COST_EVIDENCE_INCOMPLETE"] += 1
-                continue
-            total_cost = sum(float(value) for value in parts)
-        actual_pnl = row.get("actual_bitfinex_realized_pnl_usd")
-        if actual_pnl is None:
-            local_exclusions["BITFINEX_ACTUAL_PNL_MISSING"] += 1
-            continue
-        try:
-            total_cost = float(total_cost)
-            actual_pnl = float(actual_pnl)
-        except (TypeError, ValueError):
-            local_exclusions["NONFINITE_PNL_OR_COST"] += 1
-            continue
-        if not (np.isfinite(total_cost) and np.isfinite(actual_pnl)):
-            local_exclusions["NONFINITE_PNL_OR_COST"] += 1
-            continue
-        policy_key = row.get("policy_comparability_key")
-        if not policy_key:
-            local_exclusions["POLICY_COMPARABILITY_KEY_MISSING"] += 1
-            continue
-        qualified.append((trade_id, replay, total_cost, actual_pnl, str(policy_key)))
-
-    policy_group_counts = Counter(item[4] for item in qualified)
-    selected_policy_key = (
-        sorted(policy_group_counts, key=lambda key: (-policy_group_counts[key], key))[0]
-        if policy_group_counts else None
-    )
-    if selected_policy_key:
-        mismatches = sum(count for key, count in policy_group_counts.items() if key != selected_policy_key)
-        if mismatches:
-            local_exclusions["POLICY_COMPARABILITY_KEY_MISMATCH"] += mismatches
-        qualified = [item for item in qualified if item[4] == selected_policy_key]
-
-    qualified.sort(key=lambda item: str(item[1].get("start_ts") or ""))
-    split_at = max(1, int(len(qualified) * 0.7)) if qualified else 0
-    train = qualified[:split_at]
-    holdout = qualified[split_at:]
-    cells = []
-    for thesis_stop in (-6, -8, -10, -12):
-        for trigger, lock in ((4, 2), (5, 3), (8, 5), (12, 10)):
-            ladder = _build_ladder_with_first_rung(trigger, lock)
-            for mfe_floor in (0, 2, 4, 6, 8, 10):
-                cell = {
-                    "hard_stop_margin_pct": HARD_STOP_MARGIN_PCT,
-                    "thesis_fast_cut_pct": thesis_stop,
-                    "ladder_first_trigger_pct": trigger,
-                    "ladder_first_lock_pct": lock,
-                    "mfe_protect_pct": mfe_floor,
-                }
-                for label, cohort_rows in (("train", train), ("holdout", holdout)):
-                    outcomes = []
-                    simulation_missing = 0
-                    for _tid, replay, cost, _actual_pnl, _policy_key in cohort_rows:
-                        entry = _replay_entry_price(replay)
-                        simulated = _simulate_ticks_fast_cut_ladder(
-                            replay.get("ticks") or [], entry, replay.get("direction"),
-                            int(replay.get("leverage") or 100),
-                            float(replay.get("margin_usdt") or 20), thesis_stop, ladder,
-                            THESIS_EXIT_ABOVE_DEFAULT, fill_t=replay.get("virtual_fill_t"),
-                            mfe_protect_pct=None if mfe_floor == 0 else mfe_floor,
-                        )
-                        if simulated is not None:
-                            outcomes.append(float(simulated[0]) - cost)
-                        else:
-                            simulation_missing += 1
-                    mean = (sum(outcomes) / len(outcomes)) if outcomes else None
-                    ci95 = None
-                    if len(outcomes) >= 2:
-                        half = 1.96 * float(np.std(outcomes, ddof=1)) / np.sqrt(len(outcomes))
-                        ci95 = [round(mean - half, 4), round(mean + half, 4)]
-                    cell[label] = {
-                        "n": len(outcomes),
-                        "simulation_missing": simulation_missing,
-                        "counterfactual_net_pnl_usd": round(sum(outcomes), 4),
-                        "counterfactual_avg_net_pnl_usd": round(mean, 4) if mean is not None else None,
-                        "confidence_interval_95_avg_net_pnl_usd": ci95,
-                    }
-                cells.append(cell)
-
-    ranked = sorted(
-        (cell for cell in cells if cell["train"]["n"] > 0),
-        key=lambda cell: cell["train"]["counterfactual_net_pnl_usd"],
-        reverse=True,
-    )
-    selected = ranked[0] if ranked else None
-    conclusions_allowed = bool(
-        selected and selected["train"]["n"] >= 30 and selected["holdout"]["n"] >= 20
-        and selected["holdout"]["confidence_interval_95_avg_net_pnl_usd"] is not None
-        and selected["holdout"]["confidence_interval_95_avg_net_pnl_usd"][0] > 0
-    )
-    report = {
-        "schema": "qualified_exit_policy_grid_v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "generation_revision": (
-            os.getenv("SOURCE_GIT_REV") or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-            or os.getenv("GIT_REVISION") or os.getenv("GIT_SHA") or "UNKNOWN"
-        ),
-        "cohort": REAL_COPY_PARAMETER_OPTIMISATION,
-        "cohort_schema": "analysis_cohorts_v1",
-        "cohorts": cohort_assessments,
-        "evidence_rows": evidence_rows,
-        "eligible_ids": len(eligible_ids),
-        "qualified_costed_replays": len(qualified),
-        "selected_policy_comparability_key": selected_policy_key,
-        "policy_group_counts": dict(policy_group_counts),
-        "cohort_exclusion_reason_counts": exclusions,
-        "grid_exclusion_reason_counts": dict(local_exclusions),
-        "physical_hard_stop_invariant_pct": HARD_STOP_MARGIN_PCT,
-        "chronological_split": {"train_n": len(train), "holdout_n": len(holdout), "train_pct": 70},
-        "actual_bitfinex": {
-            "n": len(qualified),
-            "realized_pnl_usd": round(sum(item[3] for item in qualified), 4),
-        },
-        "counterfactual_grid": cells,
-        "selected_on_train": selected,
-        "conclusions_allowed": conclusions_allowed,
-        "live_policy_change_allowed": conclusions_allowed,
-        # HM C9 (R17): signal_replay and counterfactual writers are retired, so with no replay rows the grid
-        # is "source retired (R17)", never INSUFFICIENT_QUALIFIED_HOLDOUT.
-        "verdict": ("QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed
-                    else "SOURCE_RETIRED_R17" if not all_replays and not qualified
-                    else "INSUFFICIENT_QUALIFIED_HOLDOUT"),
-        "source_status": "source retired (R17)" if not all_replays and not qualified else None,
-        "preliminary_descriptive_estimate": {
-            "status": "DESCRIPTIVE_ONLY" if selected else "NO_ESTIMATE",
-            "selected_on_train": selected,
-            "sample_size": len(qualified),
-            "warning": "Train-selected counterfactuals are not live recommendations unless the qualified chronological holdout gate passes.",
-        },
-        "qualified_live_recommendation": {
-            "status": "AVAILABLE" if conclusions_allowed else "NOT_AVAILABLE",
-            "parameters": ({
-                "hard_stop_margin_pct": selected["hard_stop_margin_pct"],
-                "thesis_fast_cut_pct": selected["thesis_fast_cut_pct"],
-                "ladder_first_trigger_pct": selected["ladder_first_trigger_pct"],
-                "ladder_first_lock_pct": selected["ladder_first_lock_pct"],
-                "mfe_protect_pct": selected["mfe_protect_pct"],
-            } if conclusions_allowed else None),
-            "note": (
-                f"The physical hard stop remains the fixed {HARD_STOP_MARGIN_PCT:g}% "
-                "invariant; this report never widens it."
-            ),
-        },
-        "question_outputs": {
-            "hard_stop": {"status": "FIXED_SAFETY_INVARIANT", "value_pct": HARD_STOP_MARGIN_PCT},
-            "thesis_fast_cut": {"status": "QUALIFIED" if conclusions_allowed else "PRELIMINARY_ONLY" if selected else "NO_EVIDENCE"},
-            "scenario_c_ladder": {"status": "QUALIFIED" if conclusions_allowed else "PRELIMINARY_ONLY" if selected else "NO_EVIDENCE"},
-            "chase": {"status": "NOT_EVALUATED_BY_THIS_REPORT", "recommendation": None},
-        },
-        "note": "Actual Bitfinex P&L is never overwritten by counterfactual outcomes. Missing replay, costs, horizons, or cohort evidence fails closed.",
-    }
-    if incident_input.enabled:
-        report["runtime_identity_incident_input"] = incident_input.provenance()
-    incident_input.assert_unchanged()
-    with open(analyzer_report_path(QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE), "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
-    return report
 
 
 def qualified_chase_policy_report():
@@ -7900,7 +7698,6 @@ def run_v55_analysis(df, decisions, blocked, ai_log):
     _safe_replay_sweep("thesis stop wide sweep", stop_thesis_wide_sweep_all_replays, df if not df.empty else None)
     _safe_replay_sweep("stop x ladder 2D grid sweep", stop_ladder_2d_grid_sweep_all_replays, df if not df.empty else None)
     _safe_replay_sweep("stop x ladder x MFE 3D sweep", stop_ladder_mfe_3d_sweep_all_replays, df if not df.empty else None)
-    _safe_replay_sweep("qualified exit policy grid", qualified_exit_policy_grid_report)
     entry_gate_replay_sweeps(blocked)
     entry_gate_mtf_chop_sweet_spot_sweep(blocked)
     pullback_replay_fill_sweep(blocked)
@@ -9503,7 +9300,7 @@ def _assert_local_generation_unfenced(stage):
     assert_local_generation_available(configured, stage=stage)
 
 
-def run(interval_min=30, session_only=True, max_iterations=None):
+def run(interval_min=30, max_iterations=None):
     iteration = 0
     sleep_sec = max(60, int(interval_min) * 60)
     while True:
@@ -9513,7 +9310,7 @@ def run(interval_min=30, session_only=True, max_iterations=None):
         retry_reason = "scheduled interval"
         print(f"\n=== ANALYZER {ANALYZER_VERSION} ITERATION {iteration} START {PIPELINE_ENFORCEMENT_TAG} ===")
         try:
-            _run_analyzer_iteration(iteration, interval_min, session_only)
+            _run_analyzer_iteration(iteration, interval_min)
         except KeyboardInterrupt:
             raise
         except Exception as exc:
@@ -9547,7 +9344,7 @@ def run(interval_min=30, session_only=True, max_iterations=None):
         time.sleep(retry_sec)
 
 
-def _run_analyzer_iteration(iteration, interval_min, session_only):
+def _run_analyzer_iteration(iteration, interval_min):
         global _CURRENT_MIRROR_GENERATION_LEASE
         from research.mirror_generation_lease import MirrorGenerationLease
 
@@ -9561,7 +9358,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             _assert_local_generation_unfenced("analyzer_iteration_under_lease")
             _CURRENT_MIRROR_GENERATION_LEASE = lease
             try:
-                return _run_analyzer_iteration_with_lease(iteration, interval_min, session_only)
+                return _run_analyzer_iteration_with_lease(iteration, interval_min)
             finally:
                 _CURRENT_MIRROR_GENERATION_LEASE = None
 
@@ -9582,7 +9379,7 @@ def _capture_generation_source_heartbeat():
         _CURRENT_GENERATION_SOURCE_HEARTBEAT = None
 
 
-def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
+def _run_analyzer_iteration_with_lease(iteration, interval_min):
         global _CURRENT_ANALYZER_GENERATION_STARTED_AT
         global _CURRENT_MIRROR_COHERENCE_TOKEN
         from research.mirror_coherence import assert_mirror_coherent
@@ -9616,11 +9413,10 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             "csv_setups": len(setups),
         }
         historical_trade_cohort_report()
-        data_scope = "session" if session_only else "all"
-        if session_only:
-            trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(
-                session, trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
-            )
+        # RK B4 #882 (R22): ALL-DATA mode deleted -- the analyzer only reads the current session.
+        trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(
+            session, trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
+        )
         session_trade_ids = (set(trades["trade_id"].astype(str))
                              if trades is not None and "trade_id" in getattr(trades, "columns", []) else None)
         trades, cohort_quarantine = split_current_tile_cohort(
@@ -9718,7 +9514,6 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
                 decisions=decisions,
                 blocked=blocked,
                 dataset_counts=dataset_counts,
-                data_scope=data_scope,
             )
             return
 
@@ -9841,7 +9636,6 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             decisions=decisions,
             blocked=blocked,
             dataset_counts=dataset_counts,
-            data_scope=data_scope,
         )
 
 
@@ -12951,6 +12745,23 @@ def _write_aux_report(path, payload, session):
     return payload
 
 
+def _selector_trades(read_csv, trades_file):
+    """trades.csv rows through the epoch guard (admit=_epoch_admit) and the analyzer floor (RK #882 12:48)."""
+    floor = _analyzer_floor_epoch_ts()
+    out = []
+    for row in read_csv(_agent_data_path(trades_file)):
+        if not _epoch_admit(trades_file, row):
+            continue
+        if floor is not None:
+            from research.tile_evidence_points import _epoch_seconds
+
+            ts = _epoch_seconds(row.get("close_ts")) or _epoch_seconds(row.get("ts"))
+            if ts is None or ts < floor:
+                continue
+        out.append(row)
+    return out
+
+
 def fixed_vs_dynamic_selector_report(session=None):
     """Publish best fixed tile vs regime-conditional selector, walk-forward OOS after costs."""
     from research.fixed_vs_dynamic_selector import build_fixed_vs_dynamic_selector
@@ -12962,7 +12773,7 @@ def fixed_vs_dynamic_selector_report(session=None):
         payload = build_fixed_vs_dynamic_selector(
             registry=ACTIVE_TILE_REGISTRY,
             tile_order=CURRENT_RESEARCH_LANES,
-            trades=_read_csv(_agent_data_path(TRADES_FILE)),
+            trades=_selector_trades(_read_csv, TRADES_FILE),
             epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
             v2_start_ts=v2_start.timestamp() if v2_start is not None else None,
             relay_interference_ids=set(relay_interference_trade_ids()),
@@ -13771,9 +13582,16 @@ def _v3_ledger_rows(name):
                         rows.append(row)
                 return rows
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                # RK R1 ruling (25 Oct 2026): fail closed.  The refusal is recorded and surfaces as the named
+                # integrity check ``v3_read_authority`` (INVALID), never as a silent empty ledger.
+                V3_READ_AUTHORITY_FAILURES[name] = f"{type(exc).__name__}: {exc}"
                 print(f"  ⚠️ V3 ledger authority unavailable for {name}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
                 return []
     return []
+
+
+# ledger name -> refusal ("<ExcType>: <message>") for every V3 read refused in this process (fail closed).
+V3_READ_AUTHORITY_FAILURES = {}
 
 
 def _compressed_shadow_rows(session=None):
@@ -14960,6 +14778,11 @@ def run_integrity_checks(
                 f"≥{min(5, len(sample) // 2)} of {len(sample)} sample trades linked",
                 f"linked={linked}",
             )
+
+    from research.analyzer_integrity_reconciliation import v3_read_authority_check
+    checks.append(v3_read_authority_check(V3_READ_AUTHORITY_FAILURES))
+    if not checks[-1]["passed"]:
+        valid = False
 
     scope = _shadow_scope_label(session) if session else "SESSION"
     payload = {
@@ -21104,6 +20927,12 @@ def _write_evidence_coverage_triage_report(canonical_root, binding_status, conse
     root = Path(canonical_root).resolve()
     if root.name != "canonical-research-data":
         raise ValueError("EVIDENCE_COVERAGE_ROOT_NOT_CANONICAL")
+    from research.r3_quarantine import is_retired_payload
+    if is_retired_payload(conservative_status):
+        # RK R1 ruling (25 Oct 2026): honest interim error.  The conservative results this report reconciles
+        # are retired (R17, 1 s evaluate_limit_fill) until rebuilt on book_limit_entry; the retired stub carries
+        # no generation, which used to surface as the misleading EVIDENCE_COVERAGE_GENERATION_MISMATCH.
+        raise ValueError("CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17: evidence coverage awaits the book_limit_entry rebuild")
     binding_generation = binding_status.get("generation") or {}
     conservative_generation = conservative_status.get("generation") or {}
     if not binding_generation or binding_generation != conservative_generation:
@@ -22113,6 +21942,10 @@ def write_report_manifest(
             analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE),
             policy_reports,
         )
+        from research.analyzer_integrity_reconciliation import apply_v3_read_authority_check
+        reconciled_integrity = apply_v3_read_authority_check(
+            analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE), V3_READ_AUTHORITY_FAILURES,
+        )
         print(
             f"  Integrity after policy cycle: {reconciled_integrity['report_status']} "
             f"({len(reconciled_integrity['failed_checks'])} failed) {PIPELINE_ENFORCEMENT_TAG}"
@@ -22154,14 +21987,6 @@ def write_report_manifest(
         analysis_provenance = dict(analysis_provenance)
         analysis_provenance["shadow_model_input"] = shadow_model_input.provenance()
     generation_revision = analysis_provenance["generation_revision"]
-    # This grid must belong to this run or be explicitly absent. A stale file
-    # from an earlier revision must never appear current merely because it is
-    # still on disk.
-    qualified_grid_error = None
-    try:
-        qualified_exit_policy_grid_report()
-    except Exception as exc:
-        qualified_grid_error = f"{type(exc).__name__}: {exc}"
     reports = []
     dynamic_policy_error = None
     dynamic_policy_report = None
@@ -22179,7 +22004,10 @@ def write_report_manifest(
     baseline_replay_error = None
     baseline_replay = None
     try:
-        from research.entry_baseline_replay import materialize_v3_opportunity_replay
+        # RK R1 ruling (25 Oct 2026): rebuilt on the shared book_limit_entry helper -- full size at the real
+        # best bid/ask plus measured delay, price age recorded, current epoch only, non-book rows listed by reason
+        # and trade id, stamped with book/trades path + sha256 + epoch.  The 1 s evaluate_limit_fill path stays retired.
+        from research.entry_baseline_book_replay import build_entry_baseline_book_replay
         from research.policy_evidence_schema import generation_identity
 
         baseline_manifest_path = Path(policy_data_dir) / "canonical_dataset_current.json"
@@ -22189,49 +22017,32 @@ def write_report_manifest(
             baseline_manifest,
             analyzer_revision=str(generation_revision),
         )
-        baseline_replay = materialize_v3_opportunity_replay(
-            policy_data_dir, incident_input=incident_input,
-            generation=baseline_generation, canonical_manifest=baseline_manifest,
-        )
-        from research.r3_quarantine import is_retired_payload as _r3q_is_retired
-
-        if _r3q_is_retired(baseline_replay):
-            # RK #847 cond 4: priced on market_microstructure_1s -> source retired (R17); no report, no sidecar.
-            raise _R3RetiredSection(baseline_replay)
+        baseline_replay = build_entry_baseline_book_replay(policy_data_dir, baseline_generation)
         if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
             raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
-        baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
-        from research.entry_baseline_replay import replay_health, write_replay_report
-
-        baseline_replay["health"] = replay_health(baseline_replay)
-
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
-        replay_sidecar = write_replay_report(
-            baseline_replay, target, sidecar_name=ENTRY_BASELINE_REPLAY_RECEIPTS_FILE,
-        )
-        _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
+        temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        temp.write_text(json.dumps(baseline_replay, indent=2, default=str), encoding="utf-8")
+        os.replace(temp, target)
         replay_mirror = _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_REPORT_FILE)
         reports.append({
-            "title": "Same-Opportunity Entry Baseline Replay",
+            "title": "Same-Opportunity Entry Baseline Replay (book walk)",
             "file": ENTRY_BASELINE_REPLAY_REPORT_FILE,
             "category": "Chase",
-            "description": "Signed baseline outcomes and truthful UNKNOWN schedule coverage",
+            "description": "Baselines walked on the 10-level book via book_limit_entry; non-book rows listed by reason",
             "size_bytes": replay_mirror.stat().st_size,
             "modified_at": datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat(),
             "analysis_provenance": analysis_provenance,
             "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
             "summaries": baseline_replay.get("summaries"),
-            "status": baseline_replay["health"]["status"],
-            "health": baseline_replay["health"],
-            "episode_receipts_sidecar": replay_sidecar,
+            "status": baseline_replay["status"],
+            "source_provenance": baseline_replay["source_provenance"],
+            "non_book_reason_counts": baseline_replay["non_book_reason_counts"],
         })
-    except _R3RetiredSection as retired_section:
-        baseline_replay = None
-        print(f"  Same-Opportunity Entry Baseline Replay: {retired_section.payload['label']} "
-              f"({retired_section.payload['status']} {retired_section.payload['quarantine']}) — not written")
     except Exception as exc:
+        baseline_replay = None
         baseline_replay_error = f"{type(exc).__name__}: {exc}"
     try:
         if lifecycle_bundle_inventory is None and lifecycle_bundle_inventory_error is None:
@@ -22651,13 +22462,6 @@ def write_report_manifest(
                 ),
                 "generation_error": policy_cycle_error,
             },
-            QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE: {
-                "available_in_generation": any(
-                    row.get("file") == QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE
-                    for row in reports
-                ),
-                "generation_error": qualified_grid_error,
-            },
             DYNAMIC_POLICY_ANALYSIS_REPORT_FILE: {
                 "available_in_generation": any(
                     row.get("file") == DYNAMIC_POLICY_ANALYSIS_REPORT_FILE
@@ -22685,9 +22489,6 @@ def write_report_manifest(
             "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"
         ),
     }
-    if any(row.get("file") == ENTRY_BASELINE_REPLAY_REPORT_FILE and row.get("episode_receipts_sidecar")
-           for row in reports):
-        manifest["text_artifacts"].append(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
     manifest["generation_id"] = hashlib.sha256(
         json.dumps(
             {
@@ -22943,13 +22744,12 @@ def build_executive_summary_payload(
     decisions=None,
     blocked=None,
     dataset_counts=None,
-    data_scope="all",
 ):
     """Aggregate KPIs from analysis_df + JSON reports (written during same run)."""
     session = session or load_research_session()
-    scope = "ALL-DATA" if data_scope == "all" else _shadow_scope_label(session)
-    hours = _session_hours(session) if data_scope == "session" else None
-    data_start = _v2_data_start_ts() if data_scope == "session" else None
+    scope = _shadow_scope_label(session)
+    hours = _session_hours(session)
+    data_start = _v2_data_start_ts()
     data_start_hours = ((pd.Timestamp.now(tz="UTC") - data_start).total_seconds() / 3600.0
                         if data_start is not None else None)
 
@@ -23074,11 +22874,13 @@ def build_executive_summary_payload(
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": ANALYZER_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "data_scope": data_scope,
+        "data_scope": "session",
         "session_scope": scope,
         "session_hours": round(float(hours), 2) if hours is not None else None,
         "data_start_utc": data_start.strftime("%Y-%m-%d %H:%M UTC") if data_start is not None else None,
         "data_start_hours": round(data_start_hours, 2) if data_start_hours is not None else None,
+        # RK #882 12:48: the analyzer floor (fresh start) in the user's zone, e.g. "18 Oct 06:01 AEDT".
+        "data_start_label": _floor_label(data_start),
         "dataset": dataset_counts or {},
         "performance": {
             "trades": n_trades,
@@ -23202,7 +23004,8 @@ def _fmt_pct(val, decimals=1, default="n/a"):
 
 def _session_age_label(payload):
     if payload.get("data_start_hours") is not None:
-        return f"~{payload['data_start_hours']:.1f}h since v2 data start {payload.get('data_start_utc')}"
+        start = payload.get("data_start_label") or payload.get("data_start_utc")
+        return f"~{payload['data_start_hours']:.1f}h since fresh start {start}"
     hours = payload.get("session_hours")
     return f"~{hours:.1f}h bot session" if hours else ""
 
@@ -23223,7 +23026,7 @@ def format_executive_summary_short(payload):
         "=" * 72,
         f"=== EXECUTIVE SUMMARY — {scope} ({time_label}) | {payload.get('analyzer_sync_id', ANALYZER_SYNC_ID)} ===",
         "=" * 72,
-        f"Data scope: {payload.get('data_scope', 'all').upper()} | CSV trades: {csv_n} | Analyzed fills: {analyzed}",
+        f"Data scope: {payload.get('data_scope', 'UNKNOWN').upper()} | CSV trades: {csv_n} | Analyzed fills: {analyzed}",
         f"Session trades (all lanes, incl. non-tile) {analyzed} | WR {p.get('win_rate_pct', 'n/a')}% | "
         f"PnL {_fmt_usd(p.get('net_pnl_usd'))} | "
         f"EV {p.get('expectancy_usd', 'n/a')}/trade | MFE capture {p.get('mfe_capture_pct', 'n/a')}%",
@@ -23491,7 +23294,7 @@ def format_research_coverage_text(payload):
         "=" * W,
         "=== RESEARCH COVERAGE & STATISTICAL CONFIDENCE ===",
         "=" * W,
-        f"Scope: {payload.get('session_scope', 'ALL-DATA')} ({payload.get('data_scope', 'all').upper()})",
+        f"Scope: {payload.get('session_scope', 'ALL-DATA')} ({payload.get('data_scope', 'UNKNOWN').upper()})",
         f"CSV rows — trades: {ds.get('csv_trades', 'n/a')} | blocked: {ds.get('csv_blocked', 'n/a')} | "
         f"decisions: {ds.get('csv_decisions', 'n/a')}",
         f"Analyzed — trades: {cov.get('trades', 0)} | approves: {cov.get('approves', 0)} | "
@@ -23766,39 +23569,6 @@ def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
         return False
 
 
-def generate_all_data_companion_reports(dataset_counts=None, session_trade_count=0):
-    """Write generic historical reports without promoting archived lanes."""
-    dataset_counts = dataset_counts or {}
-    csv_n = int(dataset_counts.get("csv_trades") or 0)
-    if csv_n <= 0:
-        return
-    sub = ALL_DATA_REPORTS_SUBDIR
-    os.makedirs(sub, exist_ok=True)
-    print(
-        f"\n=== ALL-DATA COMPANION — full CSV ({csv_n} rows; session fills={session_trade_count}) "
-        f"→ {sub}/ {PIPELINE_ENFORCEMENT_TAG} ==="
-    )
-    _set_analyzer_report_subdir(sub)
-    try:
-        trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
-        no_filter_session = {}
-        shadow_report = shadow_fill_outcome_matrix(trades, session=no_filter_session, blocked=blocked)
-        paused_shadow_research_report(session=no_filter_session)
-        benchmark_report = benchmark_vs_lanes_report(
-            trades, session=no_filter_session, blocked=blocked, shadow_report=shadow_report, all_trades=trades,
-        )
-        chase_payload = chase_attribution_report(trades=trades, session=no_filter_session)
-        chase_effectiveness_report(trades=trades, session=no_filter_session, chase_payload=chase_payload)
-        chase_threshold_report(trades=trades, session=no_filter_session)
-        top_combinations_report(trades=trades, session=no_filter_session)
-        exit_combinations_report(trades=trades, session=no_filter_session)
-        print(f"  ✅ ALL-DATA companion reports → {sub}/ {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as exc:
-        print(f"  ⚠️ ALL-DATA companion failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-    finally:
-        _set_analyzer_report_subdir(None)
-
-
 def finalize_analyzer_outputs(
     session=None,
     trades=None,
@@ -23806,7 +23576,6 @@ def finalize_analyzer_outputs(
     decisions=None,
     blocked=None,
     dataset_counts=None,
-    data_scope="all",
 ):
     """Write hierarchical text reports + dashboard; print all layers to console."""
     main_rankings_report(session=session, trades=trades)
@@ -23818,7 +23587,6 @@ def finalize_analyzer_outputs(
         decisions,
         blocked=blocked,
         dataset_counts=dataset_counts,
-        data_scope=data_scope,
     )
     # The Genome pipeline used to be described in the UI but was never invoked
     # by the continuous analyzer. Rebuild it on every cycle so the Genome tab
@@ -23940,14 +23708,6 @@ def finalize_analyzer_outputs(
         )
     except Exception as exc:
         print(f"  ⚠️ Trade accumulator sync failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-    if str(data_scope).lower() == "session":
-        stc = 0
-        if trades is not None and not trades.empty:
-            if "trade_id" in trades.columns:
-                stc = len(trades.drop_duplicates(subset=["trade_id"]))
-            else:
-                stc = len(trades)
-        generate_all_data_companion_reports(dataset_counts, session_trade_count=stc)
     snap = _save_rolling_snapshot()
     if _laptop_artifacts_enabled():
         try:
@@ -24047,7 +23807,7 @@ if __name__ == "__main__":
         os.chdir(_configured_report_root)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
-    session_only, scope_reason = resolve_analyzer_session_scope()
+    scope_reason = resolve_analyzer_session_scope()
     dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/")
 
     _once_mode = len(sys.argv) > 1 and str(sys.argv[1]).startswith("--once")
@@ -24063,7 +23823,7 @@ if __name__ == "__main__":
         )
         print(f"  Data scope: {scope_reason}")
         try:
-            run(interval_min=interval_min, session_only=session_only, max_iterations=1)
+            run(interval_min=interval_min, max_iterations=1)
         finally:
             _close_native_fault_log(_native_fault_handle)
             _restore_analyzer_output(_tee, _log_handle)
@@ -24078,7 +23838,7 @@ if __name__ == "__main__":
     print(f"  Dashboard:  {dashboard_url}")
     dashboard_process = start_research_dashboard_server()
     try:
-        run(interval_min=interval_min, session_only=session_only)
+        run(interval_min=interval_min)
     finally:
         if dashboard_process is not None and dashboard_process.poll() is None:
             dashboard_process.terminate()

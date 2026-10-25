@@ -130,8 +130,14 @@ def first_signal_ts_from_baseline(baseline_report):
     """
     if not isinstance(baseline_report, dict):
         return None
-    episodes = baseline_report.get("episode_receipts")
-    if not isinstance(episodes, list) or not 0 < len(episodes) <= 100000:
+    # entry_baseline_book_replay_v1: every current-epoch row is in results (book-priced) or non_book_rows.
+    if baseline_report.get("schema") != "entry_baseline_book_replay_v1":
+        return None
+    results, non_book = baseline_report.get("results"), baseline_report.get("non_book_rows")
+    if not isinstance(results, list) or not isinstance(non_book, list):
+        return None
+    episodes = results + non_book
+    if not 0 < len(episodes) <= 100000:
         return None
     earliest = None
     for episode in episodes:

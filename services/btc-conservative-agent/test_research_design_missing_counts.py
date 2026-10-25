@@ -40,19 +40,23 @@ assert(!nodes['research-design-banner'].textContent.includes('LOAD_FAILED'));
     assert result.returncode==0,result.stdout+result.stderr
 
 
-def test_episode_receipts_are_summarized_not_shipped(monkeypatch):
+def test_book_replay_rows_are_summarized_not_shipped(monkeypatch):
+    """RK B4 #882: restores the removed receipts-not-shipped test for the book-walk layout
+    (results / non_book_rows / other_epoch_rejected stay in the report file)."""
     monkeypatch.setattr(dashboard,'_API_RESPONSE_CACHE',{})
-    receipts=[{'receipt_id':f'r{i}','results':[{'pad':'x'*1000}]} for i in range(50)]
+    rows=[{'row_id':f'r{i}','pad':'x'*1000} for i in range(50)]
     def report(name):
-        value=dict(same_opportunity_count=50,summaries={},episode_receipts=receipts) if name=='entry_baseline_replay_report.json' else {}
+        value=dict(schema='entry_baseline_book_replay_v1',same_opportunity_count=50,summaries={},
+                   results=rows,non_book_rows=rows[:10],other_epoch_rejected=rows[:5]) if name=='entry_baseline_replay_report.json' else {}
         return value, {'manifest':{'generation_id':'test','generated_at':'2026-10-03T00:00:00+00:00'}}
     monkeypatch.setattr(dashboard,'_declared_atomic_generation_report',report)
     monkeypatch.setattr(dashboard,'_generation_freshness_meta',lambda *_:{'current':True})
     response=dashboard.app.test_client().get('/api/research-design')
     replay=response.get_json()['entry_baseline_replay']
-    assert 'episode_receipts' not in replay
-    assert replay['episode_receipt_count']==50 and replay['episode_receipts_omitted'] is True
-    assert replay['episode_receipts_url']=='/api/report/entry_baseline_replay_report.json'
+    for key in ('results','non_book_rows','other_epoch_rejected','episode_receipts'):
+        assert key not in replay
+    assert replay['same_opportunity_count']==50 and replay['schema']=='entry_baseline_book_replay_v1'
+    assert replay['rows_url']=='/api/report/entry_baseline_replay_report.json'
     assert response.get_json()['generated_at']=='2026-10-03T00:00:00+00:00'
     assert len(response.data)<20000
-    assert len(receipts)==50
+    assert len(rows)==50

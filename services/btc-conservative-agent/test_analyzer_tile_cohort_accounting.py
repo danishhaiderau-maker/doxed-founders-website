@@ -81,7 +81,7 @@ def test_executive_summary_and_funnel_share_the_cohort_total(engine, tmp_path, m
     assert scope["quarantined_trade_rows"]["by_lane"]["CONTINUOUS"] == 2
     payload = engine.build_executive_summary_payload(
         session={"collector_v22_epoch_id": CURRENT}, trades=kept,
-        analysis_df=kept.drop_duplicates(subset=["trade_id"]), data_scope="session",
+        analysis_df=kept.drop_duplicates(subset=["trade_id"]),
     )
     assert payload["performance"]["trades"] == 4
     assert payload["performance"]["net_pnl_usd"] == round(engine.tile_cohort_pnl(kept)["net_pnl_usd"], 2)

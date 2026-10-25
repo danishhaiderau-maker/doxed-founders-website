@@ -475,27 +475,24 @@ ENTRY_BASELINE_REPLAY_REPORT = "entry_baseline_replay_report.json"
 
 
 def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any]:
-    """DEGRADED (never OK) when any baseline in the entry baseline replay has 0 fills, or the report is missing."""
-    from research.entry_baseline_replay import replay_health
-    from research.r3_quarantine import quarantined_file
+    """DEGRADED (never OK) when the book-walk entry baseline replay is missing, has no book-priced rows, or any
+    baseline has 0 fills (RK R1: rebuilt on book_limit_entry; layout entry_baseline_book_replay_v1)."""
+    from research.entry_baseline_book_replay import book_replay_health
 
-    if quarantined_file(ENTRY_BASELINE_REPLAY_REPORT):
-        # RK #847 cond 4: priced on market_microstructure_1s -> retired, never read, never BLOCKED.
-        return _retired("entry_baseline_replay")
     report = _load_json(report_dir / ENTRY_BASELINE_REPLAY_REPORT)
     if report is None:
         # HM #847 N2: an absent report is a measured gap, never silently dropped.
         return _item("entry_baseline_replay", "DEGRADED", "REPORT_MISSING",
                      f"{ENTRY_BASELINE_REPLAY_REPORT} was not produced.", side="ANALYZER")
-    health = replay_health(report)
-    status = "OK" if health["status"] == "OK" else "DEGRADED"
+    health = book_replay_health(report)
+    status = health["status"]
+    total = health["book_priced"] + health["non_book"]
     return _item(
         "entry_baseline_replay", status, health.get("reason_code"),
-        (f"Entry baseline replay: {health['fills']} fills, {health['unknown']}/"
-         f"{health['directional_evaluations']} directional evaluations UNKNOWN"
+        (f"Entry baseline book replay: {health['fills']} fills, {health['non_book']}/{total} rows not book-priced"
          + (f"; zero-fill baselines: {', '.join(health['degraded_baselines'])}."
             if health.get("degraded_baselines") else ".")),
-        eligible=health["directional_evaluations"] - health["unknown"], total=health["directional_evaluations"],
+        eligible=health["book_priced"], total=total,
         side="ANALYZER" if status != "OK" else None, evidence=health,
     )
 

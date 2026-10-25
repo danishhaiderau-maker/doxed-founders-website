@@ -22,7 +22,7 @@ def _pin(tmp_path, baseline, receipt, model):
 
 def test_terminal_report_is_before_atomic_manifest_and_registered():
     source = _function_source("write_report_manifest")
-    baseline = source.index('baseline_replay["generation"] = baseline_generation')
+    baseline = source.index('baseline_replay = build_entry_baseline_book_replay(policy_data_dir, baseline_generation)')
     terminal = source.index("shadow_terminal, shadow_terminal_mirror = _write_conservative_shadow_report(")
     final = source.index('manifest = {\n        "schema": "report_manifest_v1"')
     assert baseline < terminal < final
