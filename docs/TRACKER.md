@@ -1,5 +1,13 @@
 # Ops tracker
 
+## 25 Oct 2026 ~07:25 UTC — sticky DEPLOY_MAINTENANCE re-assert after clear resume (fast-follow)
+
+- **Live:** still `execution_paused=true`, `pause_owner=DEPLOY_MAINTENANCE`, `_pause_priority=200` on rev `b57014c0eb28`; bootstrap `PENDING` / `SOURCE_LEDGER_TRUNCATED` / 0 progress; live disarmed.
+- **Root cause:** Run [40166110026](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40166110026) bootstrap gate failed with `receipt bootstrap lost exact-revision flat maintenance` when Danish's deploy-owned `/api/resume` cleared the pause mid-gate (~07:02Z). Failure-path **Best-effort preserve** immediately re-POSTed `/api/pause` (durable `manual_admin_pause`+`pause_intent` lease on the Fly volume). Guaranteed paper resume then waited 12m on `bootstrap_complete_if_required` and died without releasing. Not an in-flight Actions pause loop after 07:14Z — the sticky lease is the persisted config flag plus preserve-after-clear-resume.
+- **#900:** merged `f99681380` (bootstrap hard-timeout + stall/`BOOTSTRAP_GATE_FAILED` waiver + fly.paused RED). Does **not** include preserve skip-if-already-resumed.
+- **Fast-follow:** `cursor/sticky-deploy-maintenance-lease-86dd` — `scripts/fly_preserve_maintenance.py` skips `/api/pause` when paper is already safely resumed; once-clear workflow on `scripts/once/clear-deploy-maintenance.flag` (push path; no `workflow_dispatch` required). Live stays disarmed; no Soft B / Force / wipe / tip / arm.
+- **Release plan:** after deploys [40169802400](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40169802400) (#889) and [40172488019](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40172488019) (#900) settle → merge fast-follow (once-clear + failure-resume) or run `BOOTSTRAP_GATE_FAILED=1 python scripts/fly_failure_paper_resume.py`; prove `execution_paused=false` stable ≥10m.
+
 ## 25 Oct 2026 ~16:31 AEDT (HM) — bootstrap hard-timeout + fly.paused RED (#900 follow-up)
 
 - **Finding:** Run [40161182874](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40161182874) still in_progress ~55–70+ min on **Complete receipt bootstrap inside exact-revision maintenance**; resume-paper steps pending. Fly `39358c1` / v729: `execution_paused=true`, `pause_owner=DEPLOY_MAINTENANCE`, `running=false` / uptime `PAUSED_DEPLOY` amber since ~04:30Z; bootstrap still PENDING / `SOURCE_LEDGER_TRUNCATED` / 0 progress / 1800s backoff. Live flat + disarmed.

@@ -417,16 +417,20 @@ def test_generation_remains_mandatory_outside_the_exact_bootstrap():
 def test_failed_deploy_preserves_pause_and_never_resumes_unaccepted_revision():
     failure_pause = DEPLOY.index("- name: Best-effort preserve safe paper maintenance after failed guarded deploy")
     assert failure_pause > DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
-    block = DEPLOY[failure_pause:]
+    # Slice only this step — Guaranteed paper resume follows and legitimately POSTs /api/resume.
+    nxt = DEPLOY.find("\n      - name: ", failure_pause + 10)
+    block = DEPLOY[failure_pause:] if nxt == -1 else DEPLOY[failure_pause:nxt]
     assert "if: failure()" in block
     assert "continue-on-error: true" in block
-    assert 'base + "/api/pause"' in block
+    assert "python scripts/fly_preserve_maintenance.py" in block
+    # Sticky-lease fix: no blind inline /api/pause; helper skips when already resumed.
+    assert 'data=b\'{"owner": "DEPLOY_MAINTENANCE"}\'' not in block
     assert 'base + "/api/resume"' not in block
-    assert 'status.get("force_paper_mode") is True' in block
-    assert 'status.get("live_armed") is False' in block
-    assert 'status.get("bitfinex_live_enabled") is False' in block
-    assert 'status.get("execution_paused") is True' in block
-    assert 'status.get("manual_admin_pause") is True' in block
+    preserve = (ROOT / "scripts/fly_preserve_maintenance.py").read_text(encoding="utf-8")
+    assert "def already_resumed_safe" in preserve
+    assert "SKIPPED_ALREADY_RESUMED" in preserve
+    assert 'request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})' in preserve
+    assert 'base + "/api/resume"' not in preserve
 
 
 def test_admin_pause_is_persisted_before_guarded_deploy_can_continue():

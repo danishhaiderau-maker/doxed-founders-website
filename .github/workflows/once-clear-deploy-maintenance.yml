@@ -1,0 +1,67 @@
+# Push-triggered once path to release a sticky DEPLOY_MAINTENANCE pause without
+# workflow_dispatch (agents often get 403 on dispatch) and without asking the
+# operator to call /api/resume again.
+#
+# Trigger: push to master that touches scripts/once/clear-deploy-maintenance.flag
+# (bump the flag file contents / commit message). Uses the same failure-resume
+# helper with bootstrap completeness waived so SOURCE_LEDGER_TRUNCATED stalls
+# cannot block release. Never arms live.
+name: Once clear DEPLOY_MAINTENANCE
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "scripts/once/clear-deploy-maintenance.flag"
+  workflow_dispatch:
+
+concurrency:
+  group: fly-btc-production
+  cancel-in-progress: false
+
+jobs:
+  clear-deploy-maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Release sticky DEPLOY_MAINTENANCE (paper-only, live stays disarmed)
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          # Waive receipt-bootstrap completeness — same fallthrough as failed
+          # guarded deploy — so a stalled SOURCE_LEDGER_TRUNCATED ledger cannot
+          # keep paper idle behind Guaranteed resume.
+          BOOTSTRAP_GATE_FAILED: "1"
+          FAILURE_RESUME_TIMEOUT_SEC: "600"
+          PRIOR_OPERATOR_STATE: '{"captured":true,"operator_paused":false}'
+        run: python scripts/fly_failure_paper_resume.py
+      - name: Prove paper active and live still disarmed
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          last = None
+          for _ in range(20):
+              with urllib.request.urlopen(
+                  urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=20
+              ) as response:
+                  status = json.load(response)
+              last = status
+              if (
+                  status.get("execution_paused") is False
+                  and status.get("manual_admin_pause") is False
+                  and status.get("live_armed") is False
+                  and status.get("bitfinex_live_enabled") is False
+                  and status.get("force_paper_mode") is True
+              ):
+                  print("paper active; live remains disarmed; DEPLOY_MAINTENANCE lease cleared")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit("once-clear did not prove paper active: " + json.dumps(last, sort_keys=True))
+          PY
