@@ -70,7 +70,7 @@ def test_a2_overshoot_bp_sign_positive_is_worse():
     assert ltg.overshoot_bp("LONG", 100.0, 100.1) == -10.0 and ltg.overshoot_bp("LONG", None, 1.0) is None
 
 
-def test_e1_open_mark_to_book_counts_against_the_cap_and_unreadable_blocks():
+def test_e1_open_mark_to_book_counts_against_the_cap_and_unreadable_blocks(small_loss_limit):   # R20: logic at a lowered limit
     pos = dict(LONG, base_price=100600.0, amount=0.001)    # walk at bid 100000 => loss 0.6 USD
     blocks, info = ltg.daily_cap_entry_block([], mirror([pos], [STOP_L]), book(), NOW, "gs1")
     assert {b["code"] for b in blocks} >= {ltg.VIOL_TILE_LOSS_CAP, ltg.VIOL_TOTAL_LOSS_CAP} and info["open_mark_loss"] > 0.5
