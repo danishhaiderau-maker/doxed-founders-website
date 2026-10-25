@@ -844,7 +844,7 @@ def _conservative_child_receipt(
     ``book_limit_entry`` composes quote_trigger (book-row trigger at the limit) and paper_fill (capped IOC walk);
     the 1 s ``market_microstructure_1s`` rows / evaluate_limit_fill are no longer read.  ``book_at`` is the event's
     BookWalkWindow; without it the entry is UNSUPPORTED (``BOOK_WALK_UNAVAILABLE``).  ``window`` (the same
-    BookWalkWindow) supplies the real trade prints the resting remainder fills on (order_model.maker_rest_step) and
+    BookWalkWindow) supplies the real trade prints the resting remainder fills on (paper_fill.maker_rest_fills) and
     the shared C2 gap detector for book touches while resting (HM #848 C1).
     """
     schedule = _conservative_child_schedule(

@@ -10,7 +10,7 @@ This module composes only shared helpers - no pricing, trigger or queue logic of
   is marketable when it lands (an IOC walk ONLY at placement).  The book seen is bounded to the interval: an order
   that would arrive after the interval ends never reads a later row (``ARRIVAL_AFTER_INTERVAL_END``).
 * resting remainder (HM #848 C1): whatever is not filled at arrival RESTS at L until the interval ends and fills
-  only through ``order_model.maker_rest_step`` - the same queue model the bot's paper MAKER_REST uses - over REAL
+  only through ``paper_fill.maker_rest_fills`` - the same R0 queue model the bot's paper MAKER_REST uses - over REAL
   trade prints (``trades_between``): a print through L fills us, a print AT L on the aggressor side first depletes
   the queue ahead (``order_model.queue_ahead_at`` on the arrival row), then fills us.  Resting fills are AT L (no
   price improvement).  A book row touching L with no print never fills.  When the order rested through a book touch
@@ -73,7 +73,7 @@ def _base(direction: str, qty: Any) -> dict[str, Any]:
         "schema": RECEIPT_SCHEMA, "evaluator_version": EVALUATOR_VERSION,
         "fill_model": _pf.FILL_MODEL, "trigger_version": _qt.TRIGGER_VERSION,
         "entry_price_source": ENTRY_PRICE_SOURCE_BOOK, "trigger_price_source": TRIGGER_PRICE_SOURCE_BOOK,
-        "rest_fill_model": "order_model.maker_rest_step", "rest_fill_basis": _om.REST_FILL_QUEUE_CLEAR,
+        "rest_fill_model": "paper_fill.maker_rest_fills", "rest_fill_basis": _pf.MAKER_REST_RULE,
         "rest_trigger_source": REST_TRIGGER_SOURCE, "direction": direction, "requested_qty": qty,
         "outcome": "UNSUPPORTED", "supported": False, "final_classification": "UNSUPPORTED",
         "filled_qty": 0.0, "fill_price": None, "fill_ts": None, "trigger_bucket_ts": None,
@@ -194,8 +194,8 @@ def book_limit_entry(direction: str, requested_qty: Any, chase_schedule: Sequenc
         queue0 = 0.0
         if remaining > _EPS:
             queue0 = _om.queue_ahead_at(side, limit, book(arrival))
-            rest = _om.maker_rest_step(side, limit, remaining, queue0, trades_between(arrival, t1),
-                                       _om.REST_FILL_QUEUE_CLEAR)
+            rest = _pf.maker_rest_fills(side, limit, remaining, queue0, trades_between(arrival, t1),
+                                        placement_ts=arrival)
             touches = _touch_ts(side, limit, arrival, t1, window["rows"])
             mask = int(gap_clause_at(touches)) if (touches and gap_clause_at is not None) else 0
             if touches and gap_clause_at is None:
@@ -203,7 +203,7 @@ def book_limit_entry(direction: str, requested_qty: Any, chase_schedule: Sequenc
             rest_mask |= mask
             attempt.update({"rest_from_ts": arrival, "rest_until_ts": t1, "rest_queue_ahead_start": queue0,
                             "rest_queue_ahead_end": rest["queue_ahead"], "rest_fills": [list(f) for f in rest["fills"]],
-                            "rest_touch_ts": touches[:20], "rest_touch_count": len(touches),
+                            "rest_fill_stamps": rest.get("fill_stamps") or [], "rest_touch_ts": touches[:20], "rest_touch_count": len(touches),
                             "rest_gap_clause": _gd.clause_label(mask)})
         rest_q = sum(f[2] for f in rest["fills"])
         raw = walk_q + rest_q

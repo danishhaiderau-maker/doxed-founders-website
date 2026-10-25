@@ -64,22 +64,23 @@ def test_entry_model_from_spec_and_cell():
 
 
 def test_maker_trade_through_fills_at_limit_capped_by_print():
-    st = om.maker_rest_step("LONG", 100.0, 2.0, 0.0, [{"ts": 1, "px": 100.5, "amt": -3},
+    st = paper_fill.maker_rest_fills("LONG", 100.0, 2.0, 0.0, [{"ts": 1, "px": 100.5, "amt": -3},
                                                       {"ts": 2, "px": 99.9, "amt": -0.5},
                                                       {"ts": 3, "px": 99.8, "amt": -5}])
     assert st["fills"] == [(2, 100.0, 0.5), (3, 100.0, 1.5)] and st["remaining"] == 0.0
 
 
-def test_maker_queue_depletes_before_fill_and_only_aggressor_side():
-    st = om.maker_rest_step("LONG", 100.0, 1.0, 2.0, [{"ts": 1, "px": 100.0, "amt": 1.5},   # buy aggressor: no
-                                                      {"ts": 2, "px": 100.0, "amt": -1.5},  # queue 2 -> 0.5
-                                                      {"ts": 3, "px": 100.0, "amt": -0.8}],  # 0.5 queue, 0.3 us
-                            om.REST_FILL_QUEUE_CLEAR)
+def test_maker_queue_ahead_is_consumed_by_through_volume_at_limit_prints_never_count():
+    # RK R0 (25 Oct, replaces queue_clear): filled = through volume after placement - visible queue ahead at placement
+    st = paper_fill.maker_rest_fills("LONG", 100.0, 1.0, 2.0, [{"ts": 1, "px": 100.0, "amt": -9.0},   # at limit: no
+                                                               {"ts": 2, "px": 99.9, "amt": -1.5},    # queue 2 -> 0.5
+                                                               {"ts": 3, "px": 99.9, "amt": -0.8}])   # 0.5 queue, 0.3 us
     assert st["queue_ahead"] == 0.0 and len(st["fills"]) == 1 and abs(st["fills"][0][2] - 0.3) < 1e-12
-    assert abs(st["remaining"] - 0.7) < 1e-12
-    sh = om.maker_rest_step("SHORT", 100.0, 1.0, 0.0, [{"ts": 1, "px": 100.0, "amt": -1}, {"ts": 2, "px": 100.2, "amt": 2}],
-                            om.REST_FILL_QUEUE_CLEAR)
+    assert abs(st["remaining"] - 0.7) < 1e-12 and st["fill_stamps"][0]["queue_ahead"] == 2.0
+    sh = paper_fill.maker_rest_fills("SHORT", 100.0, 1.0, 0.0, [{"ts": 1, "px": 100.0, "amt": -1},
+                                                                {"ts": 2, "px": 100.2, "amt": 2}])
     assert sh["fills"] == [(2, 100.0, 1.0)]
+    assert not hasattr(om, "maker_rest_step")  # HM 25 Oct: one shared maker fill model
 
 
 def test_entry_partial_walk_then_rest_and_no_fill():
@@ -116,37 +117,19 @@ def test_no_maker_take_profit_anywhere():
 
 
 def test_c1_default_is_trade_through_and_at_limit_prints_never_fill():
-    st = om.maker_rest_step("LONG", 100.0, 1.0, 0.0, [{"ts": 1, "px": 100.0, "amt": -5}])
+    st = paper_fill.maker_rest_fills("LONG", 100.0, 1.0, 0.0, [{"ts": 1, "px": 100.0, "amt": -5}])
     assert st["fills"] == [] and st["remaining"] == 1.0 and om.REST_FILL_DEFAULT == om.REST_FILL_TRADE_THROUGH
 
 
 def test_c1_unsized_through_print_fills_nothing_and_is_counted():
     for amt in (None, 0):
-        st = om.maker_rest_step("LONG", 100.0, 2.0, 0.0, [{"ts": 1, "px": 99.0, "amt": amt},
+        st = paper_fill.maker_rest_fills("LONG", 100.0, 2.0, 0.0, [{"ts": 1, "px": 99.0, "amt": amt},
                                                           {"ts": 2, "px": 100.0, "amt": amt},
                                                           {"ts": 3, "px": 99.5, "amt": -0.4}])
         assert st["fills"] == [(3, 100.0, 0.4)] and abs(st["remaining"] - 1.6) < 1e-12
-        assert st["unsized_prints"] == 2
-    # queue_clear: an unsized at-limit print neither depletes the queue nor fills us (no known aggressor)
-    qc = om.maker_rest_step("SHORT", 100.0, 1.0, 0.5, [{"ts": 1, "px": 100.0, "amt": None}], om.REST_FILL_QUEUE_CLEAR)
-    assert qc["fills"] == [] and qc["queue_ahead"] == 0.5 and qc["unsized_prints"] == 1
+        assert st["unsized_prints"] == 1  # RK R0: only through prints count; an at-limit print is ignored outright
 
 
 def test_c1_through_print_capped_at_printed_size():
-    st = om.maker_rest_step("SHORT", 100.0, 3.0, 0.0, [{"ts": 1, "px": 100.5, "amt": 1.2}])
+    st = paper_fill.maker_rest_fills("SHORT", 100.0, 3.0, 0.0, [{"ts": 1, "px": 100.5, "amt": 1.2}])
     assert st["fills"] == [(1, 100.0, 1.2)] and abs(st["remaining"] - 1.8) < 1e-12
-
-
-# ---------------------------------------------------------------- R1 item 5: maker rest = full size trade-through only
-def test_maker_rest_full_size_no_partial_at_limit_ignored_fills_at_completing_print():
-    trades = [{"ts": 1.0, "px": 100.0, "amt": -5.0},   # at the limit: never counts
-              {"ts": 2.0, "px": 99.9, "amt": -0.4},    # through, partial size: no fill yet
-              {"ts": 3.0, "px": 100.2, "amt": 3.0}]    # wrong side for a BUY limit
-    r = om.maker_rest_full_size("BUY", 100.0, 1.0, 0.0, trades)
-    assert r["filled"] is False and abs(r["through_seen"] - 0.4) < 1e-12
-    r2 = om.maker_rest_full_size("BUY", 100.0, 1.0, r["through_seen"], [{"ts": 4.0, "px": 99.95, "amt": -0.6},
-                                                                        {"ts": 5.0, "px": 99.9, "amt": -1.0}])
-    assert r2["filled"] is True and r2["fill_ts"] == 4.0
-    s = om.maker_rest_full_size("SELL", 100.0, 1.0, 0.0, [{"ts": 1.0, "px": 100.0, "amt": 9.0},
-                                                          {"ts": 2.0, "px": 100.1, "amt": 1.0}])
-    assert s["filled"] is True and s["fill_ts"] == 2.0

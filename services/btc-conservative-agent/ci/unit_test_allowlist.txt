@@ -671,3 +671,5 @@ test_market_segment_r3_consumers.py
 test_r3_legacy_xfail_scope.py
 test_ledger_scan_incremental_retired.py
 test_restart_initiator.py
+test_r0_maker_rest_fill.py
+test_r8_fresh_start_relabel.py

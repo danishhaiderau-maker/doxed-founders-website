@@ -1,5 +1,5 @@
 """RK R3/R4 + HM #848 C1-C3: book_limit_entry = marketable-at-placement walk (paper_fill) then a resting limit filled
-only on real prints with queue (order_model.maker_rest_step); countability from r17_exclusion's entry contract."""
+only on real prints with queue (paper_fill.maker_rest_fills); countability from r17_exclusion's entry contract."""
 import quote_trigger as _qt
 from book_limit_entry import EVALUATOR_VERSION, ENTRY_PRICE_SOURCE_BOOK, R17_UNPROVEN_ENTRY, book_limit_entry
 from book_walk_test_fixture import book_row as _book_row, entry_tape, quiet_boot_log
@@ -113,10 +113,10 @@ def test_p1_touch_inside_a_flagged_print_gap_is_unproven():
 
 
 def test_p4_at_limit_prints_fill_only_after_the_queue_ahead_and_at_the_limit():
-    # Our bid joins 0.3 already resting at 100.00.  Sell prints at 100.00: 0.2 (queue 0.3 -> 0.1), then 0.5
-    # (0.1 more queue, 0.4 to us).  No print -> no fill (queue-dependent, HM P4).
+    # RK R0 (25 Oct): our bid joins 0.3 already resting at 100.00.  A print AT 100.00 never fills us; through
+    # prints at 99.95: 0.2 (queue 0.3 -> 0.1), then 0.5 (0.1 more queue, 0.4 to us).  No print -> no fill.
     rows = lambda s: _book_row(s, 100.0, 100.05, size=0.3)  # noqa: E731
-    walk = _tape(rows, [_trade(1002_200, 100.0, -0.2), _trade(1003_300, 100.0, -0.5)])
+    walk = _tape(rows, [_trade(1002_000, 100.0, -5.0), _trade(1002_200, 99.95, -0.2), _trade(1003_300, 99.95, -0.5)])
     r = _call(walk, **MEASURED)
     assert r["fill_basis"] == "RESTING_AT_LIMIT_TRADES_QUEUE" and r["outcome"] == "PARTIAL_FILL"
     assert abs(r["filled_qty"] - 0.4) < 1e-9 and r["fill_price"] == 100.0 and r["fill_ts"] == 1003.3

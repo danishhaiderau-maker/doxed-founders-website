@@ -7677,12 +7677,13 @@ def _paper_entry_rest_finish(order: dict, direction: str, walk: dict, t0: float,
     remaining = max(0.0, req - float(walk.get("filled_qty") or 0))
     limit = float(walk["cap_px"])
     queue = _om.queue_ahead_at(direction, limit, walk.get("depth_snapshot_fill"))
-    step = _om.maker_rest_step(direction, limit, remaining, queue, _qt.trades_between(t0, t1),
-                               model.get("entry_rest_fill_basis") or _om.REST_FILL_DEFAULT) if t1 > t0 else \
-        {"fills": [], "remaining": remaining, "queue_ahead": queue}
+    import paper_fill as _pf
+    step = _pf.maker_rest_fills(direction, limit, remaining, queue, _qt.trades_between(t0, t1), placement_ts=t0) \
+        if t1 > t0 else {"fills": [], "remaining": remaining, "queue_ahead": queue, "fill_stamps": []}
     out = _om.combine_entry(walk, step["fills"], req, model=model, rest_end_ts=t1, rest_end_reason=why)
     out.update({"entry_rest_limit_px": limit, "entry_rest_queue_ahead_start": queue,
-                "entry_rest_start_ts": t0, **_rest_unsized_stamp(step.get("unsized_prints"))})
+                "entry_rest_start_ts": t0, "entry_rest_fill_rule": _pf.MAKER_REST_RULE,
+                "entry_rest_fill_stamps": step.get("fill_stamps") or [], **_rest_unsized_stamp(step.get("unsized_prints"))})
     return out
 
 
@@ -7691,10 +7692,12 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
     """REALISM_V2 PR2 MAKER_REST (B1 / B2 regime limits): the limit rests from signal + delay (sent) at
     order["limit_price"], which _process_family_regime_entry reprices at the LIMIT_UPDATED cadence; every reprice
     resets the queue position (queue ahead = book size at the new price, from the real 10-level book) and the price
-    age. RK R1 item 5: the rest fills ONLY on trade-through prints and ONLY for the FULL size
-    (order_model.maker_rest_full_size); nothing is booked before that, so a TOUCH taker fallback walks the whole order
-    from the book and a TTL DROP is NO_FILL. Queue ahead, book age and price age are stamped. Never priced from the
-    ticker."""
+    age. RK R0/R4 (25 Oct): fills come ONLY from paper_fill.maker_rest_fill - per placement, filled = min(remaining,
+    trade-through volume since placement - visible queue ahead at placement); partials stay filled across reprices and
+    the remainder goes to the TOUCH fallback / TTL drop as before. Every fill is stamped (print ts, queue ahead, qty).
+    The advance runs under paper_fill.MAKER_REST_LOCK, counts a print id once and caps at requested - filled (the
+    gb1-d365a7a17cb2 double-evaluation overfill). Never priced from the ticker.
+    """
     import order_model as _om
     import quote_trigger as _qt
     import paper_fill as _pf
@@ -7702,52 +7705,61 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
     rest_t0 = signal_ts + float(delay_s)
     if not force and now < rest_t0:
         return None
-    req = float(order.get("requested_qty") or order.get("qty") or 0)
-    st = order.setdefault("_entry_rest", {"cursor_ts": rest_t0, "limit_px": None, "queue_ahead": 0.0,
-                                          "fills": [], "remaining": req, "reprices": 0, "through_seen": 0.0})
-    limit = float(order.get("limit_price") or 0)
-    if limit <= 0:
-        return None
-    upto = now if force else now - PAPER_ENTRY_TAPE_LAG_S
-    if st["limit_px"] is None or abs(float(st["limit_px"]) - limit) > 1e-9:
-        if st["limit_px"] is not None:
-            st["reprices"] += 1
-        st["limit_px"] = limit
-        join_ts = max(float(st["cursor_ts"]), rest_t0)
-        book = _pf.book10l_at(join_ts)
-        st["queue_ahead"] = _om.queue_ahead_at(direction, limit, book)
-        st["queue_reset_ts"] = float(st["cursor_ts"])
-        st["book_age_s"] = (round(join_ts - (float(book["s"]) + 1.0), 3)
-                            if isinstance(book, dict) and book.get("s") is not None else None)
-        st["through_seen"] = 0.0  # a reprice starts a new order: through volume at the old price no longer counts
-    if order.get("regime_fallback_done"):
-        # TOUCH fallback: a marketable order for the remainder, walked from the book at send + delay.
-        sent = float(order.get("last_chase_ts") or now)
-        if not force and now < sent + float(delay_s):
+    with _pf.MAKER_REST_LOCK:  # two loops advance pending entries: one writer at a time (gb1-d365a7a17cb2)
+        req = float(order.get("requested_qty") or order.get("qty") or 0)
+        st = order.setdefault("_entry_rest", {"cursor_ts": rest_t0, "limit_px": None, "queue_ahead": 0.0,
+                                              "fills": [], "remaining": req, "reprices": 0, "through_seen": 0.0,
+                                              "fill_stamps": [], "seen_prints": []})
+        limit = float(order.get("limit_price") or 0)
+        if limit <= 0:
             return None
-        walk = _tf.entry_fill(direction, float(st["remaining"]), sent, delay_s, delay_source)
-        if walk.get("status") == "REJECT_NO_BOOK" and not force:
+        upto = now if force else now - PAPER_ENTRY_TAPE_LAG_S
+        if st["limit_px"] is None or abs(float(st["limit_px"]) - limit) > 1e-9:
+            if st["limit_px"] is not None:
+                st["reprices"] += 1
+            st["limit_px"] = limit
+            join_ts = max(float(st["cursor_ts"]), rest_t0)
+            book = _pf.book10l_at(join_ts)
+            st["queue_ahead"] = _om.queue_ahead_at(direction, limit, book)
+            st["queue_reset_ts"] = join_ts  # the replacement's placement: queue and through count restart here
+            st["book_age_s"] = (round(join_ts - (float(book["s"]) + 1.0), 3)
+                                if isinstance(book, dict) and book.get("s") is not None else None)
+            st["through_seen"] = 0.0  # a reprice is a new placement: through volume restarts; filled qty stays filled
+        if order.get("regime_fallback_done"):
+            # TOUCH fallback: a marketable order for the remainder, walked from the book at send + delay.
+            sent = float(order.get("last_chase_ts") or now)
+            if not force and now < sent + float(delay_s):
+                return None
+            walk = _tf.entry_fill(direction, float(st["remaining"]), sent, delay_s, delay_source)
+            if walk.get("status") == "REJECT_NO_BOOK" and not force:
+                return None
+            res = _om.combine_entry(walk, st["fills"], req, model=model, rest_end_ts=sent,
+                                    rest_end_reason="TOUCH_TAKER_FALLBACK")
+            res.update({"entry_rest_reprices": st["reprices"], "signal_ts": signal_ts, "delay_s": delay_s,
+                        "delay_source": delay_source, "side": direction, **_rest_unsized_stamp(st.get("unsized_prints")),
+                        **_rest_queue_stamp(st, None)})
+            order["paper_fill_result"] = res
+            return res
+        filled = sum(float(f[2]) for f in st["fills"])
+        st["remaining"] = round(max(0.0, req - filled), 12)  # derived from the fills: the cap can never be stale
+        if upto > float(st["cursor_ts"]) and st["remaining"] > 1e-12:
+            lo = max(float(st.get("queue_reset_ts") or rest_t0), rest_t0)
+            step = _pf.maker_rest_fill(direction, limit, st["remaining"], st["queue_ahead"],
+                                       st.get("through_seen") or 0.0,
+                                       _qt.trades_between(max(lo, float(st["cursor_ts"]) - _pf.MAKER_REST_LOOKBACK_S), upto),
+                                       placement_ts=lo, seen={tuple(k) for k in st.get("seen_prints") or ()})
+            st["unsized_prints"] = int(st.get("unsized_prints") or 0) + int(step.get("unsized_prints") or 0)
+            st["through_seen"] = step["through_seen"]
+            st["seen_prints"] = [list(k) for k in step["seen"]]
+            st["fills"] = list(st["fills"]) + [[f["print_ts"], f["px"], f["qty"]] for f in step["fills"]]
+            st["fill_stamps"] = list(st.get("fill_stamps") or ()) + [
+                {**f, "placement_ts": lo, "limit_px": limit, "reprice_n": st["reprices"]} for f in step["fills"]]
+            st["remaining"] = step["remaining"]
+            st["cursor_ts"] = upto
+        if st["remaining"] > 1e-12 and not force:
             return None
-        res = _om.combine_entry(walk, st["fills"], req, model=model, rest_end_ts=sent,
-                                rest_end_reason="TOUCH_TAKER_FALLBACK")
-        res.update({"entry_rest_reprices": st["reprices"], "signal_ts": signal_ts, "delay_s": delay_s,
-                    "delay_source": delay_source, "side": direction, **_rest_unsized_stamp(st.get("unsized_prints")),
-                    **_rest_queue_stamp(st, None)})
-        order["paper_fill_result"] = res
-        return res
-    if upto > float(st["cursor_ts"]) and st["remaining"] > 1e-12:
-        step = _om.maker_rest_full_size(direction, limit, req, st.get("through_seen") or 0.0,
-                                        _qt.trades_between(float(st["cursor_ts"]), upto))
-        st["unsized_prints"] = int(st.get("unsized_prints") or 0) + int(step.get("unsized_prints") or 0)
-        st["through_seen"] = step["through_seen"]
-        if step["filled"]:
-            st["fills"] = [[float(step["fill_ts"]), limit, req]]
-            st["remaining"] = 0.0
-        st["cursor_ts"] = upto
-    if st["remaining"] > 1e-12 and not force:
-        return None
-    return _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source, model,
-                                   "REST_FILLED" if st["remaining"] <= 1e-12 else "FORCED_CLOSE")
+        return _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source, model,
+                                       "REST_FILLED" if st["remaining"] <= 1e-12 else "FORCED_CLOSE")
 
 
 def _paper_entry_rest_close(order: dict, direction: str, signal_ts: float, delay_s, delay_source: str, model: dict,
@@ -7770,13 +7782,15 @@ def _paper_entry_rest_close(order: dict, direction: str, signal_ts: float, delay
 
 
 def _rest_queue_stamp(st: dict, fill_ts) -> dict:
-    """RK R1 item 5: queue ahead at the current limit, book age at join, price age (limit set -> fill)."""
-    import order_model as _om
+    """RK R0 / R17: the shared maker rule, queue ahead at the current placement, book age at join, price age
+    (placement -> last fill) and every fill's stamp (print ts, queue ahead, qty filled)."""
+    import paper_fill as _pf
     reset = st.get("queue_reset_ts")
-    return {"entry_rest_fill_rule": _om.MAKER_REST_FULL_SIZE_RULE,
+    return {"entry_rest_fill_rule": _pf.MAKER_REST_RULE, "entry_rest_fill_source": _pf.MAKER_REST_SOURCE,
             "entry_rest_queue_ahead": st.get("queue_ahead"),
             "entry_rest_book_age_s": st.get("book_age_s"),
             "entry_rest_through_vol": st.get("through_seen"),
+            "entry_rest_fill_stamps": [dict(f) for f in st.get("fill_stamps") or ()],
             "entry_rest_price_age_s": (round(float(fill_ts) - float(reset), 3)
                                        if fill_ts is not None and reset is not None else None)}
 
