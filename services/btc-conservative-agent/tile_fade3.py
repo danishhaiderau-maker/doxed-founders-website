@@ -195,7 +195,7 @@ def pool_ready(*legs: Mapping[str, Any]) -> bool:
 
 E8_REAL_PARITY_ENV = "GF3_E8_REAL_PARITY"  # PASS:<ref> only after E8 real-data parity passes; unset = no row counts
 REST_COUNTED_STATUSES = ("FILLED", "PARTIAL")
-STEP_CPU_BUDGET_S = 0.5  # measured per-step feature CPU budget (synthetic full 6 h window ~0.1 s/step); test-pinned
+STEP_CPU_BUDGET_S = 0.1  # per-step feature CPU alert budget (R8: incremental feed, see LiveFeatureFeed); test-pinned
 
 
 def e8_real_parity_passed(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -538,14 +538,21 @@ class _JsonlHistory:
         self._ino = None
         self._offset = 0
         self._partial = b""
+        self.gen = 0  # bumps on any content change (new / overwritten second, eviction, reset)
+        self.resets = 0  # bumps when rows were replaced wholesale (rotation)
+        self.new_secs: list = []  # seconds written by the last sync(), in file order (may repeat / go backwards)
+        self.floor: Optional[int] = None  # eviction floor applied by the last sync()
 
     def sync(self) -> None:
         try:
             st = os.stat(self.path)
         except OSError:
             return
+        self.new_secs = []
         if self._ino != st.st_ino or st.st_size < self._offset:
             self.rows, self._ino, self._partial = {}, st.st_ino, b""
+            self.resets += 1
+            self.gen += 1
             self._offset = max(0, st.st_size - self.tail_bytes)
             drop_first = self._offset > 0
         else:
@@ -567,10 +574,17 @@ class _JsonlHistory:
                 continue
             if val is not None:
                 self.rows[sec] = val
+                self.new_secs.append(sec)
+        if self.new_secs:
+            self.gen += 1
         if self.rows:
             floor = max(self.rows) - HISTORY_S
-            for sec in [k for k in self.rows if k < floor]:
+            self.floor = floor
+            stale = [k for k in self.rows if k < floor]
+            for sec in stale:
                 del self.rows[sec]
+            if stale:
+                self.gen += 1
 
 
 def _parse_book(r: dict):
@@ -591,34 +605,206 @@ def _parse_deriv(r: dict):
     return (float(d), float(sp)) if d and sp else None
 
 
+class _GrowBuf:
+    """Append-only, front-trimmable column store (amortised O(1) append, no per-tick rebuild / re-sort)."""
+
+    def __init__(self, shapes: Mapping[str, tuple]) -> None:
+        self.shapes = dict(shapes)
+        self.clear()
+
+    def clear(self) -> None:
+        self.cols = {k: np.empty((0,) + shp, dtype=np.int64 if k == "key" else float) for k, shp in self.shapes.items()}
+        self.lo, self.hi = 0, 0
+
+    def __len__(self) -> int:
+        return self.hi - self.lo
+
+    def view(self, k: str) -> np.ndarray:
+        return self.cols[k][self.lo:self.hi]
+
+    def set_all(self, data: Mapping[str, np.ndarray]) -> None:
+        self.cols = {k: np.array(data[k], dtype=np.int64 if k == "key" else float).reshape((-1,) + self.shapes[k])
+                     for k in self.shapes}
+        self.lo, self.hi = 0, len(self.cols["key"])
+
+    def append(self, data: Mapping[str, np.ndarray]) -> None:
+        n = len(data["key"])
+        if not n:
+            return
+        cap = len(self.cols["key"])
+        if self.hi + n > cap:
+            live = self.hi - self.lo
+            new_cap = max(64, 2 * (live + n))
+            for k, shp in self.shapes.items():
+                arr = np.empty((new_cap,) + shp, dtype=self.cols[k].dtype)
+                arr[:live] = self.cols[k][self.lo:self.hi]
+                self.cols[k] = arr
+            self.lo, self.hi = 0, live
+        for k in self.shapes:
+            self.cols[k][self.hi:self.hi + n] = np.asarray(data[k]).reshape((n,) + self.shapes[k])
+        self.hi += n
+
+    def keep(self, mask: np.ndarray) -> None:
+        """Drop rows where mask is False (prefix drop is O(1); otherwise one compaction)."""
+        if mask.all():
+            return
+        idx = np.flatnonzero(mask)
+        if idx.size and idx[-1] - idx[0] + 1 == idx.size:
+            self.lo, self.hi = self.lo + int(idx[0]), self.lo + int(idx[-1]) + 1
+            return
+        self.set_all({k: self.view(k)[mask] for k in self.shapes})
+
+
 class LiveFeatureFeed:
     """features_fn for the engine over PRICE_SOURCES in ``root``: the newest complete book second s (s + 1 <= now,
     receive_ts <= now), trade prints and deriv rows known by s + 1, then compute_features / entry_signals_e8 over
-    the last HISTORY_S seconds. Returns (s + 1, side or None, snapshot); (None, None, {}) before the first row."""
+    the last HISTORY_S seconds. Returns (s + 1, side or None, snapshot); (None, None, {}) before the first row.
+
+    Incremental (R8): the collector tails are mirrored into running numpy buffers that only append the new seconds
+    each sync (a full re-gather / re-sort happens only on rotation, an overwritten or out-of-order second, or an
+    out-of-order trade print). Features are recomputed only when the inputs changed (new book second, newly eligible
+    second, new prints / deriv rows, eviction); otherwise the cached result is returned. The inputs handed to
+    compute_features are identical, element for element, to the former full rebuild (``full_rebuild_inputs``), so
+    the features are bit-identical (test_tile_fade3_incremental_feed pins this on a recorded post-cutoff window)."""
 
     def __init__(self, root: str) -> None:
         self.book = _JsonlHistory(os.path.join(root, PRICE_SOURCES[0]), _parse_book, 48 << 20)
         self.trades = _JsonlHistory(os.path.join(root, PRICE_SOURCES[1]), _parse_trades, 32 << 20)
         self.deriv = _JsonlHistory(os.path.join(root, PRICE_SOURCES[2]), _parse_deriv, 16 << 20)
+        self._bbuf = _GrowBuf({"key": (), "B": (10, 2), "A": (10, 2), "rx": ()})
+        self._tbuf = _GrowBuf({"key": (), "T": (4,)})  # prints sorted by (ms, id); key = collector second
+        self._dbuf = _GrowBuf({"key": (), "D": (2,)})
+        self._seen = {"book": None, "trades": None, "deriv": None}  # resets counter mirrored per tail
+        self._cache_key = None
+        self._cache_val = (None, None, {})
+        self.last_features: Optional[dict] = None
+        self.recomputes = 0
+        self.full_rebuilds = 0
+        self._tmax = -1  # newest trade collector second mirrored into _tbuf
 
+    # -- buffer maintenance --------------------------------------------------------------------------------------
+    def _needs_rebuild(self, name: str, tail: "_JsonlHistory", buf: _GrowBuf) -> bool:
+        if self._seen[name] != tail.resets:
+            return True
+        if tail.new_secs and len(buf):
+            return min(tail.new_secs) <= int(buf.view("key")[-1]) if name != "trades" else \
+                min(tail.new_secs) <= self._tmax
+        return False
+
+    def _book_cols(self, keys):
+        rows = self.book.rows
+        return {"key": np.asarray(keys, dtype=np.int64),
+                "B": np.asarray([rows[k][0] for k in keys], dtype=float).reshape(-1, 10, 2),
+                "A": np.asarray([rows[k][1] for k in keys], dtype=float).reshape(-1, 10, 2),
+                "rx": np.asarray([np.nan if rows[k][2] is None else rows[k][2] for k in keys], dtype=float)}
+
+    def _sync_book(self) -> None:
+        t, buf = self.book, self._bbuf
+        if self._needs_rebuild("book", t, buf):
+            self.full_rebuilds += 1
+            buf.set_all(self._book_cols(sorted(t.rows)))
+            self._seen["book"] = t.resets
+        elif t.new_secs:
+            buf.append(self._book_cols(sorted(set(t.new_secs))))
+        if len(buf) and t.rows and t.floor is not None and int(buf.view("key")[0]) < t.floor:
+            buf.keep(buf.view("key") >= t.floor)
+
+    def _trade_rows(self, keys):
+        rows = self.trades.rows
+        T = [p for k in keys for p in rows[k]]
+        K = [k for k in keys for _ in rows[k]]
+        order = sorted(range(len(T)), key=lambda i: (T[i][1], T[i][0]))  # stable, == sorted(T, key=(ms, id))
+        return ({"key": np.asarray([K[i] for i in order], dtype=np.int64),
+                 "T": np.asarray([T[i] for i in order], dtype=float).reshape(-1, 4)})
+
+    def _sync_trades(self) -> None:
+        t, buf = self.trades, self._tbuf
+        if self._needs_rebuild("trades", t, buf):
+            self.full_rebuilds += 1
+            buf.set_all(self._trade_rows(list(t.rows)))  # dict order == the former generator order
+            self._seen["trades"] = t.resets
+            self._tmax = max(t.rows) if t.rows else -1
+        elif t.new_secs:
+            new = list(dict.fromkeys(t.new_secs))  # first-appearance order == dict insertion order
+            add = self._trade_rows(new)
+            if len(add["T"]) and len(buf):
+                last, first = buf.view("T")[-1], add["T"][0]
+                if (first[1], first[0]) <= (last[1], last[0]):  # a print older than the newest buffered: re-sort
+                    self.full_rebuilds += 1
+                    buf.set_all(self._trade_rows(list(t.rows)))
+                    add = None
+            if add is not None:
+                buf.append(add)
+            self._tmax = max(self._tmax, max(new))
+        if len(buf) and t.floor is not None:
+            buf.keep(buf.view("key") >= t.floor)
+
+    def _sync_deriv(self) -> None:
+        t, buf = self.deriv, self._dbuf
+
+        def cols(keys):
+            return {"key": np.asarray(keys, dtype=np.int64),
+                    "D": np.asarray([t.rows[k] for k in keys], dtype=float).reshape(-1, 2)}
+        if self._needs_rebuild("deriv", t, buf):
+            self.full_rebuilds += 1
+            buf.set_all(cols(sorted(t.rows)))
+            self._seen["deriv"] = t.resets
+        elif t.new_secs:
+            buf.append(cols(sorted(set(t.new_secs))))
+        if len(buf) and t.floor is not None and int(buf.view("key")[0]) < t.floor:
+            buf.keep(buf.view("key") >= t.floor)
+
+    # -- tick ------------------------------------------------------------------------------------------------------
     def __call__(self, now: float):
         for tail in (self.book, self.trades, self.deriv):
             tail.sync()
-        secs = sorted(k for k, v in self.book.rows.items() if k + 1 <= now and (v[2] is None or v[2] <= now))
-        if not secs:
+        self._sync_book()
+        self._sync_trades()
+        self._sync_deriv()
+        S_all = self._bbuf.view("key")
+        if not len(S_all):
             return None, None, {}
-        s_last = secs[-1]
-        S = np.asarray(secs, dtype=np.int64)
-        B = np.asarray([self.book.rows[k][0] for k in secs], dtype=float)
-        A = np.asarray([self.book.rows[k][1] for k in secs], dtype=float)
-        T = sorted((t for k, prints in self.trades.rows.items() if k + 1 <= s_last + 1 for t in prints),
-                   key=lambda t: (t[1], t[0]))
-        D = [[k, *v] for k, v in sorted(self.deriv.rows.items()) if k + 1 <= s_last + 1]
-        F = compute_features(S, B, A, np.asarray(T, dtype=float).reshape(-1, 4),
-                             np.asarray(D, dtype=float).reshape(-1, 3))
+        rx = self._bbuf.view("rx")
+        with np.errstate(invalid="ignore"):
+            elig = (S_all + 1 <= now) & (np.isnan(rx) | (rx <= now))
+        idx = np.flatnonzero(elig)
+        if not idx.size:
+            return None, None, {}
+        contiguous = idx[-1] - idx[0] + 1 == idx.size
+        s_last = int(S_all[idx[-1]])
+        key = (int(S_all[idx[0]]), s_last, int(idx.size), self.book.gen, self.trades.gen, self.deriv.gen)
+        if key == self._cache_key:
+            return self._cache_val
+        sl = slice(int(idx[0]), int(idx[-1]) + 1) if contiguous else idx
+        S, B, A = S_all[sl], self._bbuf.view("B")[sl], self._bbuf.view("A")[sl]
+        TK, T = self._tbuf.view("key"), self._tbuf.view("T")
+        if len(TK) and TK.max() > s_last:
+            T = T[TK <= s_last]
+        DK = self._dbuf.view("key")
+        nd = int(np.searchsorted(DK, s_last, "right"))
+        D = np.column_stack([DK[:nd].astype(float), self._dbuf.view("D")[:nd]]) if nd else np.empty((0, 3))
+        F = compute_features(S, B, A, T, D)
         L, Sh = entry_signals_e8(F)
         side = "LONG" if L[-1] else "SHORT" if Sh[-1] else None
         snap = {k: (float(F[k][-1]) if np.isfinite(F[k][-1]) else None)
                 for k in ("mid", "spread", "imb5", "z3", "mom5", "ATR30", "BZ")}
-        return float(s_last + 1), side, snap
+        self.recomputes += 1
+        self.last_features = F
+        self._cache_key, self._cache_val = key, (float(s_last + 1), side, snap)
+        return self._cache_val
 
+
+def full_rebuild_inputs(feed: "LiveFeatureFeed", now: float):
+    """Reference (pre-R8) full rebuild of compute_features inputs from the feed's synced tails; equivalence tests
+    and benchmarks only (never on the tick path). Returns None before the first eligible book second."""
+    secs = sorted(k for k, v in feed.book.rows.items() if k + 1 <= now and (v[2] is None or v[2] <= now))
+    if not secs:
+        return None
+    s_last = secs[-1]
+    S = np.asarray(secs, dtype=np.int64)
+    B = np.asarray([feed.book.rows[k][0] for k in secs], dtype=float)
+    A = np.asarray([feed.book.rows[k][1] for k in secs], dtype=float)
+    T = sorted((t for k, prints in feed.trades.rows.items() if k + 1 <= s_last + 1 for t in prints),
+               key=lambda t: (t[1], t[0]))
+    D = [[k, *v] for k, v in sorted(feed.deriv.rows.items()) if k + 1 <= s_last + 1]
+    return S, B, A, np.asarray(T, dtype=float).reshape(-1, 4), np.asarray(D, dtype=float).reshape(-1, 3)
