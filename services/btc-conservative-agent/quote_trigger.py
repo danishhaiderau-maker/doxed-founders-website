@@ -177,36 +177,66 @@ class TradesTail:
         self._lock = threading.Lock()
         self._by_s: dict = {}
         self._max_s: Optional[int] = None
+        self._ident: Optional[tuple] = None  # (st_dev, st_ino) of the file the offset belongs to
+        self._off = 0  # bytes of the file consumed (pending included)
+        self._pending = b""  # trailing bytes after the last newline (a row still being written)
+        self._skip_first = False  # full reload started mid-file: the first line is a fragment
 
     def _refresh(self) -> None:
+        """Read only what was appended since the last refresh (in-memory offset; nothing is written to disk).
+        Unchanged (inode, size) -> no read. A new inode or a shrink -> full reload of the last tail_bytes, as a
+        fresh tail would. A trailing line without its newline is kept as pending and re-read with the next append,
+        so a print row arriving in two partial writes is never lost; it is still parsed now if already complete."""
         try:
-            size = os.path.getsize(self.path)
-            with open(self.path, "rb") as fh:
-                fh.seek(max(0, size - self.tail_bytes))
-                chunk = fh.read()
+            st = os.stat(self.path)
         except OSError:
             return
-        lines = chunk.splitlines()
-        for line in (lines[1:] if size > self.tail_bytes else lines):
-            try:
-                r = json.loads(line)
-                sec = int(r["s"])
-            except (ValueError, KeyError, TypeError):
-                continue
-            prints = []
-            for tr in r.get("tr") or []:
-                try:
-                    ms, amt, px = float(tr[1]), float(tr[2]), float(tr[3])
-                except (TypeError, ValueError, IndexError):
-                    continue
-                if px > 0 and math.isfinite(px) and math.isfinite(ms):
-                    prints.append({"ts": ms / 1000.0, "px": px, "amt": amt, "id": tr[0], "recv_s": sec})
-            self._by_s[sec] = prints
+        ident = (st.st_dev, st.st_ino)
+        size = st.st_size
+        if ident == self._ident and size == self._off:
+            return
+        full = ident != self._ident or size < self._off
+        try:
+            with open(self.path, "rb") as fh:
+                if full:
+                    start = max(0, size - self.tail_bytes)
+                    fh.seek(start)
+                    chunk = fh.read(size - start)
+                else:
+                    fh.seek(self._off)
+                    chunk = self._pending + fh.read(size - self._off)
+        except OSError:
+            return
+        if full:
+            self._by_s, self._max_s, self._skip_first = {}, None, start > 0
+        self._ident, self._off = ident, size  # read exactly up to the stat'ed size
+        lines = chunk.split(b"\n")
+        self._pending = lines.pop()
+        if self._skip_first and lines:
+            lines, self._skip_first = lines[1:], False
+        for line in lines + ([self._pending] if self._pending and not self._skip_first else []):
+            self._ingest(line)
         if self._by_s:
             hi = max(self._by_s)
             for sec in [s for s in self._by_s if s < hi - self.keep_s]:
                 del self._by_s[sec]
             self._max_s = hi
+
+    def _ingest(self, line: bytes) -> None:
+        try:
+            r = json.loads(line)
+            sec = int(r["s"])
+        except (ValueError, KeyError, TypeError):
+            return
+        prints = []
+        for tr in r.get("tr") or []:
+            try:
+                ms, amt, px = float(tr[1]), float(tr[2]), float(tr[3])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if px > 0 and math.isfinite(px) and math.isfinite(ms):
+                prints.append({"ts": ms / 1000.0, "px": px, "amt": amt, "id": tr[0], "recv_s": sec})
+        self._by_s[sec] = prints
 
     def between(self, t0: float, t1: float) -> list:
         with self._lock:
