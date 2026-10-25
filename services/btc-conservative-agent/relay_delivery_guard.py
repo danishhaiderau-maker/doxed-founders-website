@@ -18,6 +18,12 @@ It is appended once to the append-only ``relay_outbox_retired.jsonl`` ledger and
 from then on is excluded from the pending/stale counts and the stale-owner alarm.
 The outbox record and the quarantine row are kept exactly as written; a retired
 event is never deliverable, armed or not.
+
+Cutoff (RK 25 Oct, R5/R17): any event whose ``created_at_unix`` is missing,
+unparseable or below ``CUTOFF_TS`` (18 Oct 06:01:11 AEDT) is hard-rejected on
+load (quarantine/retired ledger rows for it are ignored) and on send (dropped
+from every delivery batch, never POSTed, never re-recorded). Re-send safety
+comes from refusing old events, not from keeping them.
 """
 from __future__ import annotations
 
@@ -54,6 +60,20 @@ RETIRED_PRE_EPOCH_STALE_OWNER = "PRE_EPOCH_STALE_OWNER"
 HOLD_RETIRED = "RETIRED_PRE_EPOCH"
 RETIRABLE_HOLDS = frozenset({HOLD_STALE_OWNER, HOLD_MISSING_OWNER})
 
+CUTOFF_TS = 1792263671.0
+HOLD_PRE_CUTOFF = "PRE_CUTOFF_OR_UNSTAMPED"
+
+
+def is_pre_cutoff(record) -> bool:
+    """True when ``record`` has no usable ``created_at_unix`` or it is before ``CUTOFF_TS``."""
+    if not isinstance(record, dict):
+        return True
+    try:
+        created = float(record.get("created_at_unix"))
+    except (TypeError, ValueError):
+        return True
+    return not (created == created) or created < CUTOFF_TS
+
 
 def _created_at(record: dict) -> float:
     try:
@@ -85,6 +105,8 @@ def _owner_of(record: dict):
 
 def hold_reason(record: dict, *, owner_id, armed: bool, armed_at_ts) -> Optional[str]:
     """Return why ``record`` must not be delivered, or None when deliverable."""
+    if is_pre_cutoff(record):
+        return HOLD_PRE_CUTOFF
     owner = owner_id if isinstance(owner_id, str) else ""
     if not owner or owner != owner.strip():
         return HOLD_OWNER_UNVERIFIED
@@ -129,6 +151,8 @@ class RelayDeliveryGuard:
         self._retire_write_failures = 0
         self._retire_last_error = None
         self._last_retired_ts = 0.0
+        self._rejected_on_load = 0
+        self._pre_cutoff_rejected_since_boot = 0
         self._load()
         self._load_retired()
 
@@ -142,8 +166,10 @@ class RelayDeliveryGuard:
                         row = json.loads(line)
                     except (ValueError, json.JSONDecodeError):
                         continue
-                    if isinstance(row, dict) and row.get("event_id"):
+                    if isinstance(row, dict) and row.get("event_id") and not is_pre_cutoff(row):
                         self._quarantined.setdefault(str(row["event_id"]), str(row.get("reason") or ""))
+                    else:
+                        self._rejected_on_load += 1
         except OSError as exc:
             self._load_error = f"{type(exc).__name__}: {exc}"[:200]
 
@@ -158,7 +184,8 @@ class RelayDeliveryGuard:
                     except (ValueError, json.JSONDecodeError):
                         continue
                     if not isinstance(row, dict) or not row.get("event_id") \
-                            or row.get("schema") != RETIREMENT_SCHEMA:
+                            or row.get("schema") != RETIREMENT_SCHEMA or is_pre_cutoff(row):
+                        self._rejected_on_load += 1
                         continue
                     self._retired.setdefault(str(row["event_id"]), row)
                     try:
@@ -271,6 +298,9 @@ class RelayDeliveryGuard:
         deliverable = []
         with self._lock:
             for record in records or []:
+                if is_pre_cutoff(record):
+                    self._pre_cutoff_rejected_since_boot += 1
+                    continue  # hard reject: never sent, never re-recorded
                 reason = self._reason_locked(record, owner_id=owner_id, armed=armed, armed_at_ts=armed_at_ts)
                 if reason is None:
                     deliverable.append(record)
@@ -281,6 +311,8 @@ class RelayDeliveryGuard:
         return deliverable
 
     def _reason_locked(self, record: dict, *, owner_id, armed: bool, armed_at_ts) -> Optional[str]:
+        if is_pre_cutoff(record):
+            return HOLD_PRE_CUTOFF
         event_id = str(record.get("event_id") or "")
         if event_id and event_id in self._retired:
             return HOLD_RETIRED  # never deliverable, armed or not
@@ -300,11 +332,13 @@ class RelayDeliveryGuard:
         counts = {"pending_total": 0, "stale_owner_pending": 0, "missing_owner_pending": 0,
                   "owner_unverified_pending": 0, "pre_arming_pending": 0,
                   "quarantined_pending": 0, "unquarantined_held_pending": 0,
-                  "retired_pre_epoch_pending": 0, "retired_now": 0}
+                  "retired_pre_epoch_pending": 0, "retired_now": 0, "pre_cutoff_rejected_pending": 0}
         epoch_id, epoch_started = _epoch_bounds(epoch)
         oldest = None
         with self._lock:
-            pending = list(pending or [])
+            all_pending = list(pending or [])
+            pending = [record for record in all_pending if not is_pre_cutoff(record)]
+            counts["pre_cutoff_rejected_pending"] = len(all_pending) - len(pending)
             retire, quarantined_ok = [], {}
             for index, record in enumerate(pending):
                 reason = self._reason_locked(record, owner_id=owner_id, armed=armed, armed_at_ts=armed_at_ts)
@@ -418,8 +452,12 @@ class RelayDeliveryGuard:
             "retirement_write_failures": retire_failures,
             "retirement_last_error": retire_error,
             "retirement_load_error": self._retired_load_error,
+            "cutoff_ts": CUTOFF_TS,
+            "pre_cutoff_rejected_on_load": self._rejected_on_load,
+            "pre_cutoff_rejected_since_boot": self._pre_cutoff_rejected_since_boot,
             "retirement_rule": ("sticky STALE_OWNER/MISSING_OWNER AND owner != verified current owner AND "
                                 "created_at < data epoch start AND disarmed -> retired, never deliverable"),
             "arming_block_reason": self.arming_block_reason(now),
-            "delivery_rule": "current owner identity AND (disarmed OR created_at >= live_armed_at)",
+            "delivery_rule": ("created_at >= cutoff_ts AND current owner identity AND "
+                              "(disarmed OR created_at >= live_armed_at)"),
         }

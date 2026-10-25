@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import thread_health as th
-from relay_delivery_guard import RelayDeliveryGuard, STALE_OWNER_ALARM_SEC
+from relay_delivery_guard import CUTOFF_TS, RelayDeliveryGuard, STALE_OWNER_ALARM_SEC
 
 BOT = Path(__file__).with_name("bot.py")
 SOURCE = BOT.read_text(encoding="utf-8")
@@ -78,9 +78,9 @@ def test_never_implemented_funnel_hook_is_reported_not_alarmed():
 
 
 def test_relay_stale_owner_alarm_after_thirty_minutes(tmp_path):
-    clock = {"now": 10_000.0}
+    clock = {"now": CUTOFF_TS + 10_000.0}
     guard = RelayDeliveryGuard(tmp_path / "q.jsonl", clock=lambda: clock["now"])
-    stale = {"event_id": "e", "bot_instance_id": "old", "created_at_unix": 1.0}
+    stale = {"event_id": "e", "bot_instance_id": "old", "created_at_unix": CUTOFF_TS + 1.0}
     guard.observe([stale], owner_id="me", armed=False, armed_at_ts=None)
     assert "RELAY_OUTBOX_STALE_OWNER_PENDING" not in collection_ns(clock["now"], guard=guard)(clock["now"])["alarms"]
     clock["now"] += STALE_OWNER_ALARM_SEC + 1
@@ -89,10 +89,10 @@ def test_relay_stale_owner_alarm_after_thirty_minutes(tmp_path):
 
 
 def test_relay_stale_owner_alarm_clears_once_pre_epoch_backlog_retires(tmp_path):
-    clock = {"now": 10_000.0}
+    clock = {"now": CUTOFF_TS + 10_000.0}
     guard = RelayDeliveryGuard(tmp_path / "relay_outbox_quarantine.jsonl", clock=lambda: clock["now"])
-    epoch = {"epoch_id": "ce-test", "started_at_ts": 5_000.0}
-    backlog = [{"event_id": f"e{i}", "bot_instance_id": "old", "created_at_unix": 1.0 + i} for i in range(22)]
+    epoch = {"epoch_id": "ce-test", "started_at_ts": CUTOFF_TS + 5_000.0}
+    backlog = [{"event_id": f"e{i}", "bot_instance_id": "old", "created_at_unix": CUTOFF_TS + 1.0 + i} for i in range(22)]
     guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None)
     clock["now"] += STALE_OWNER_ALARM_SEC + 1
     guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None)
@@ -104,7 +104,7 @@ def test_relay_stale_owner_alarm_clears_once_pre_epoch_backlog_retires(tmp_path)
     assert status["stale_owner_pending"] == 0 and status["retired_pre_epoch_total"] == 22
     assert status["retirement_ledger"] == "relay_outbox_retired.jsonl" and status["last_retired_ts"] == clock["now"]
     # A new in-epoch stale-owner event still raises the alarm after 30 minutes.
-    fresh = {"event_id": "new", "bot_instance_id": "old", "created_at_unix": 9_000.0}
+    fresh = {"event_id": "new", "bot_instance_id": "old", "created_at_unix": CUTOFF_TS + 9_000.0}
     guard.observe(backlog + [fresh], owner_id="me", armed=False, armed_at_ts=None, epoch=epoch)
     clock["now"] += STALE_OWNER_ALARM_SEC + 1
     guard.observe(backlog + [fresh], owner_id="me", armed=False, armed_at_ts=None, epoch=epoch)

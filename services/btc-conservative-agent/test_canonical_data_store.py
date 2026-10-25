@@ -272,3 +272,96 @@ def test_cleanup_symlink_mutation_proof_contained_path_resolves_outside(tmp_path
         pytest.skip("symlink creation is unavailable on this host")
     with pytest.raises(CanonicalStoreError, match="PATH_OUTSIDE"):
         contained_path(root, link)
+
+
+# --- RK 25 Oct: genesis at the R5/R17 cutoff --------------------------------
+from research.canonical_data_store import (  # noqa: E402
+    GENESIS_FLOOR_TS,
+    build_genesis_manifest,
+    current_analyzer_dataset_identity,
+)
+
+_PRE = "2026-10-04T09:05:39.963965Z"
+_POST = "2026-10-17T19:20:35.6057361Z"  # 7 fractional digits, as PowerShell writes
+
+
+def _legacy_store(tmp_path):
+    src = tmp_path / "src"
+    append_manifest(src, _fields(dataset_epoch="epoch-old", collection_started_at=_PRE, dataset_checksum="o" * 64))
+    append_manifest(src, _fields(dataset_epoch="epoch-new", collection_started_at=_POST, dataset_checksum="n" * 64))
+    append_manifest(src, _fields(dataset_epoch="epoch-new", collection_started_at="2026-10-25T00:55:40Z", dataset_checksum="m" * 64))
+    return src
+
+
+def test_genesis_floor_is_the_cutoff():
+    assert GENESIS_FLOOR_TS == 1792263671
+
+
+def test_genesis_lists_only_post_cutoff_and_validates(tmp_path):
+    src = _legacy_store(tmp_path)
+    before = (src / "canonical_dataset_manifest.jsonl").read_bytes()
+    out = tmp_path / "genesis"
+    result = build_genesis_manifest(src, out)
+    assert (src / "canonical_dataset_manifest.jsonl").read_bytes() == before
+    assert result["datasets"] == 2 and result["excluded_pre_floor_entries"] == 1
+    assert {d["dataset_epoch"] for d in result["genesis"]["datasets"]} == {"epoch-new"}
+    rows = validate_manifest_chain(out)
+    assert rows[0]["genesis"] is True and rows[0]["previous_entry_hash"] is None
+    assert rows[1]["previous_entry_hash"] == rows[0]["entry_hash"]
+    identity = current_analyzer_dataset_identity(out)
+    assert identity["dataset_checksum"] == "m" * 64
+    # Further appends chain from the genesis head.
+    append_manifest(out, _fields(dataset_epoch="epoch-new", collection_started_at="2026-10-26T00:00:00Z"))
+    assert len(validate_manifest_chain(out)) == 3
+
+
+def test_genesis_validator_rejects_pre_floor_append(tmp_path):
+    out = tmp_path / "genesis"
+    build_genesis_manifest(_legacy_store(tmp_path), out)
+    append_manifest(out, _fields(collection_started_at=_PRE))
+    with pytest.raises(CanonicalStoreError, match="MANIFEST_PRE_GENESIS_ROW"):
+        validate_manifest_chain(out)
+
+
+def _rewrite_genesis(out, mutate):
+    journal = out / "canonical_dataset_manifest.jsonl"
+    lines = journal.read_text().splitlines()
+    row = json.loads(lines[0])
+    mutate(row)
+    row.pop("entry_hash")
+    row["entry_hash"] = hashlib.sha256(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    journal.write_text(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    (out / "canonical_dataset_current.json").write_text(json.dumps(row))
+
+
+@pytest.mark.parametrize("mutate,code", [
+    (lambda r: r.update(genesis_floor_ts=GENESIS_FLOOR_TS - 86400), "MANIFEST_GENESIS_FLOOR_MISMATCH"),
+    (lambda r: r["datasets"].append({"collection_started_at": _PRE}), "MANIFEST_GENESIS_PRE_FLOOR_DATASET"),
+    (lambda r: r["datasets"].append({"collection_started_at": None}), "MANIFEST_GENESIS_PRE_FLOOR_DATASET"),
+])
+def test_genesis_validator_rejects_bad_genesis(tmp_path, mutate, code):
+    out = tmp_path / "genesis"
+    build_genesis_manifest(_legacy_store(tmp_path), out)
+    _rewrite_genesis(out, mutate)
+    with pytest.raises(CanonicalStoreError, match=code):
+        validate_manifest_chain(out)
+
+
+def test_genesis_refuses_same_or_nonempty_output(tmp_path):
+    src = _legacy_store(tmp_path)
+    with pytest.raises(CanonicalStoreError, match="GENESIS_OUTPUT_MUST_BE_SEPARATE"):
+        build_genesis_manifest(src, src)
+    out = tmp_path / "genesis"
+    build_genesis_manifest(src, out)
+    with pytest.raises(CanonicalStoreError, match="GENESIS_OUTPUT_NOT_EMPTY"):
+        build_genesis_manifest(src, out)
+
+
+def test_genesis_with_no_post_cutoff_datasets_is_empty_but_valid(tmp_path):
+    src = tmp_path / "src"
+    append_manifest(src, _fields(collection_started_at=_PRE))
+    out = tmp_path / "genesis"
+    result = build_genesis_manifest(src, out)
+    assert result["datasets"] == 0
+    assert len(validate_manifest_chain(out)) == 1
+

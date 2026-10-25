@@ -13,6 +13,7 @@ from relay_delivery_guard import RelayDeliveryGuard, hold_reason
 from relay_event_outbox import RelayEventOutbox
 
 BOT = Path(__file__).with_name("bot.py")
+T0 = guard_mod.CUTOFF_TS  # every deliverable fixture is post-cutoff (RK 25 Oct)
 
 
 class _OutputView:
@@ -68,17 +69,19 @@ def drain_ns(box, guard, *, live=False, armed_at=None, active=True, epoch=None):
 
 
 @pytest.mark.parametrize("record, kwargs, expected", [
-    ({"bot_instance_id": "me", "created_at_unix": 5}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, None),
-    ({"bot_instance_id": "old", "created_at_unix": 5}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "STALE_OWNER"),
-    ({"payload": {"bot_instance_id": "old"}}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "STALE_OWNER"),
-    ({"created_at_unix": 5}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "MISSING_OWNER"),
-    ({"bot_instance_id": "me"}, {"owner_id": None, "armed": False, "armed_at_ts": None}, "OWNER_UNVERIFIED"),
-    ({"bot_instance_id": " me "}, {"owner_id": " me ", "armed": False, "armed_at_ts": None}, "OWNER_UNVERIFIED"),
-    ({"bot_instance_id": "me", "created_at_unix": 5}, {"owner_id": "me", "armed": True, "armed_at_ts": 10}, "PRE_ARMING"),
-    ({"bot_instance_id": "me", "created_at_unix": 0}, {"owner_id": "me", "armed": True, "armed_at_ts": 10}, "PRE_ARMING"),
-    ({"bot_instance_id": "me", "created_at_unix": 15}, {"owner_id": "me", "armed": True, "armed_at_ts": 10}, None),
-    ({"bot_instance_id": "me", "created_at_unix": 15}, {"owner_id": "me", "armed": True, "armed_at_ts": None}, "ARMING_TS_UNKNOWN"),
-    ({"bot_instance_id": "old", "created_at_unix": 15}, {"owner_id": "me", "armed": True, "armed_at_ts": 10}, "STALE_OWNER"),
+    ({"bot_instance_id": "me", "created_at_unix": T0 + 5}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, None),
+    ({"bot_instance_id": "old", "created_at_unix": T0 + 5}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "STALE_OWNER"),
+    ({"created_at_unix": T0 + 5, "payload": {"bot_instance_id": "old"}}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "STALE_OWNER"),
+    ({"created_at_unix": T0 + 5}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "MISSING_OWNER"),
+    ({"created_at_unix": T0 + 5, "bot_instance_id": "me"}, {"owner_id": None, "armed": False, "armed_at_ts": None}, "OWNER_UNVERIFIED"),
+    ({"created_at_unix": T0 + 5, "bot_instance_id": " me "}, {"owner_id": " me ", "armed": False, "armed_at_ts": None}, "OWNER_UNVERIFIED"),
+    ({"bot_instance_id": "me", "created_at_unix": T0 + 5}, {"owner_id": "me", "armed": True, "armed_at_ts": T0 + 10}, "PRE_ARMING"),
+    ({"bot_instance_id": "me", "created_at_unix": T0 + 0}, {"owner_id": "me", "armed": True, "armed_at_ts": T0 + 10}, "PRE_ARMING"),
+    ({"bot_instance_id": "me", "created_at_unix": T0 - 1}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "PRE_CUTOFF_OR_UNSTAMPED"),
+    ({"bot_instance_id": "me"}, {"owner_id": "me", "armed": False, "armed_at_ts": None}, "PRE_CUTOFF_OR_UNSTAMPED"),
+    ({"bot_instance_id": "me", "created_at_unix": T0 + 15}, {"owner_id": "me", "armed": True, "armed_at_ts": T0 + 10}, None),
+    ({"bot_instance_id": "me", "created_at_unix": T0 + 15}, {"owner_id": "me", "armed": True, "armed_at_ts": None}, "ARMING_TS_UNKNOWN"),
+    ({"bot_instance_id": "old", "created_at_unix": T0 + 15}, {"owner_id": "me", "armed": True, "armed_at_ts": T0 + 10}, "STALE_OWNER"),
 ])
 def test_hold_reason_matrix(record, kwargs, expected):
     assert hold_reason(record, **kwargs) == expected
@@ -106,7 +109,7 @@ def test_stale_owner_event_is_never_delivered_and_never_deleted(tmp_path, live):
 
 def test_quarantine_is_sticky_across_restart_and_owner_change(tmp_path):
     path = tmp_path / guard_mod.QUARANTINE_FILE
-    record = {"event_id": "e1", "bot_instance_id": "old-owner", "created_at_unix": 100.0}
+    record = {"event_id": "e1", "bot_instance_id": "old-owner", "created_at_unix": T0 + 100.0}
     guard = RelayDeliveryGuard(path)
     assert guard.filter_deliverable([record], owner_id="new-owner", armed=False, armed_at_ts=None) == []
     reloaded = RelayDeliveryGuard(path)
@@ -152,7 +155,7 @@ def test_armed_without_timestamp_holds_but_does_not_quarantine(tmp_path):
 
 
 def test_arming_gate_requires_fresh_verified_observation(tmp_path):
-    clock = {"now": 1000.0}
+    clock = {"now": T0 + 1000.0}
     guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE, clock=lambda: clock["now"])
     assert guard.arming_block_reason() == guard_mod.ARM_BLOCK_UNOBSERVED
     guard.observe([], owner_id=None, armed=False, armed_at_ts=None)
@@ -184,10 +187,10 @@ def test_quarantined_stale_backlog_does_not_block_arming(tmp_path):
 
 
 def test_stale_owner_alarm_and_health_fields(tmp_path):
-    clock = {"now": 10_000.0}
+    clock = {"now": T0 + 10_000.0}
     guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE, clock=lambda: clock["now"])
-    stale = {"event_id": "e1", "bot_instance_id": "old", "created_at_unix": 9_000.0}
-    guard.observe([stale], owner_id="me", armed=False, armed_at_ts=None, last_ack_ts=9_500.0)
+    stale = {"event_id": "e1", "bot_instance_id": "old", "created_at_unix": T0 + 9_000.0}
+    guard.observe([stale], owner_id="me", armed=False, armed_at_ts=None, last_ack_ts=T0 + 9_500.0)
     status = guard.status()
     assert status["stale_owner_pending"] == 1
     assert status["oldest_pending_age_sec"] == 1000.0
@@ -262,7 +265,7 @@ def test_status_and_ready_armable_apply_relay_gate():
 
 
 # ------------------------------------------------- pre-epoch retirement (relay_outbox_retirement_v1)
-EPOCH_START = 1_791_000_000.0  # data epoch start (final-e style)
+EPOCH_START = guard_mod.CUTOFF_TS + 7 * 86400.0  # data epoch start, after the R5 cutoff
 EPOCH = {"epoch_id": "ce-test-final-e", "started_at_ts": EPOCH_START}
 
 
@@ -299,7 +302,7 @@ def test_pre_epoch_stale_owner_backlog_retires_and_alarm_clears(tmp_path):
                             "data_epoch_started_at", "retired_at_unix"}
     assert {(r["schema"], r["retired_reason"], r["quarantine_reason"], r["data_epoch_id"]) for r in rows} == {
         (guard_mod.RETIREMENT_SCHEMA, "PRE_EPOCH_STALE_OWNER", "STALE_OWNER", "ce-test-final-e")}
-    assert rows[0]["data_epoch_started_at"] == "2026-10-03T04:00:00Z"
+    assert rows[0]["data_epoch_started_at"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(EPOCH_START))
 
 
 def test_in_epoch_stale_owner_event_still_alarms(tmp_path):

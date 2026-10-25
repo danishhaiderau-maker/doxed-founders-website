@@ -1600,6 +1600,30 @@ def _write_set_verification(store, writes, *, segment_refs=()) -> dict[str, Any]
     return store.verify_write_set(ledgers=tuple(dict.fromkeys(ledgers)), segment_refs=refs)
 
 
+def _order_intent_ts(submitted, observed) -> dict[str, Any]:
+    """RK 25 Oct (R5/R17): every new order_intent row carries numeric ``submitted_ts`` and ``observed_ts``.
+
+    Each falls back to the other when only one source time is known; when neither is, both are the write
+    time and ``order_intent_ts_basis`` says so (never a silent None that the epoch check cannot place).
+    """
+    def _num(value):
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if out > 0 else None
+    sub, obs = _num(submitted), _num(observed)
+    basis = "SOURCE"
+    if sub is None and obs is None:
+        sub = obs = time.time()
+        basis = "WRITE_TIME_FALLBACK"
+    elif sub is None:
+        sub, basis = obs, "SUBMITTED_FROM_OBSERVED"
+    elif obs is None:
+        obs, basis = sub, "OBSERVED_FROM_SUBMITTED"
+    return {"submitted_ts": sub, "observed_ts": obs, "order_intent_ts_basis": basis}
+
+
 def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
     """Write an actual paper order intent immediately, before path maturity."""
     event_id = str(_first(order.get("trade_id"), signal.get("trade_id")) or "")
@@ -1660,7 +1684,9 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     intent = store.append("order_intent", {
         "record_id": f"order-intent:{event_id}:paper-submit", "episode_id": identity["episode_id"], "event_id": event_id,
         "shared_ai_call_id": identity["shared_ai_call_id"],
-        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
+        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT",
+        **_order_intent_ts(_first(order.get("created_ts"), order.get("order_created_ts")),
+                           _first(order.get("created_ts"), order.get("order_created_ts"))),
         "signal_price": signal_price,
         "limit_price": limit_price,
         "requested_qty": _first(order.get("requested_qty"), order.get("qty")),
@@ -1778,8 +1804,8 @@ def dual_write_terminal_paper_schedule(
         "event_id": event_id,
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "intent_kind": "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
-        "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
-        "observed_ts": schedule.get("terminal_ts_exact") or schedule.get("terminal_ts"),
+        **_order_intent_ts(_first(order.get("created_ts"), order.get("order_created_ts")),
+                           schedule.get("terminal_ts_exact") or schedule.get("terminal_ts")),
         "signal_price": _first(order.get("signal_price"), signal.get("signal_price")),
         "limit_price": order.get("limit_price"),
         "requested_qty": requested_qty,
@@ -2468,6 +2494,8 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "record_id": f"order-intent:{event_id}",
         "episode_id": episode_id,
         "event_id": event_id,
+        **_order_intent_ts(
+            _first(record.get("order_created_ts"), record.get("created_ts"), signal_ts or None), signal_ts or None),
         "execution_basis": record.get("research_execution_basis") or envelope.get("research_execution_basis") or {},
         "chase_schedule": record.get("research_chase_schedule") or envelope.get("research_chase_schedule") or {},
         # R17 (23 Oct): the v22 hypothetical entry grid is retired. Only the
