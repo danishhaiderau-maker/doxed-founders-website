@@ -7,7 +7,7 @@ REVISION = "8dd73bd9c485a2d4470160667c3e636c3a53365e"
 EPOCH = "epoch-current"
 
 
-def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=EPOCH):
+def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=EPOCH, failed_report=None):
     manifest = {
         "generation_revision": REVISION,
         "generated_at": "2026-08-28T03:30:00+10:00",
@@ -23,6 +23,9 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
             )
         },
     }
+    if failed_report is not None:
+        manifest["required_report_status"][failed_report] = {
+            "available_in_generation": False, "generation_error": "MISSING"}
     compact = {
         "generated_at": manifest["generated_at"],
         "data_scope": "session",
@@ -265,3 +268,17 @@ def test_lane_ui_surfaces_stale_reason_and_neutralizes_performance_status(monkey
     assert "Evidence status: STALE ANALYZER GENERATION" in page
     assert "...(evidence.blockers || [])" in page
     assert "'STALE / UNAVAILABLE · stale since '" in page
+
+
+def test_grid_report_is_not_required_and_a_missing_required_report_still_blocks(monkeypatch):
+    """RK B4 #882: replaces the removed qualified_exit_policy_grid_report.json line with a stronger
+    fail-closed assert: the grid name is gone from the dashboard, and any remaining required
+    report missing from the generation blocks readiness."""
+    import inspect
+    assert "qualified_exit_policy_grid" not in inspect.getsource(dashboard)
+    for name in (dashboard.BEST_POLICY_RESEARCH_REPORT_FILE, dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE,
+                 "exit_reports_validation.json"):
+        _install_generation(monkeypatch, failed_report=name)
+        with dashboard.app.test_client() as client:
+            status = client.get("/api/status").get_json()
+        assert status["ok"] is status["ready"] is False, name
