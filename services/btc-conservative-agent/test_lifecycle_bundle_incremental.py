@@ -131,7 +131,7 @@ def test_bounded_scan_rotates_across_backlogged_ledgers(tmp_path):
     assert list(second["scan"]["ledgers"]) == ["decision"]
 
 
-@pytest.mark.parametrize("mutation", ["truncate", "prefix", "rotate"])
+@pytest.mark.parametrize("mutation", ["truncate", "prefix", "rotate", "rotate_empty"])
 def test_source_truncation_prefix_rewrite_and_rotation_fail_closed(tmp_path, mutation):
     now = time.time()
     key = LifecycleKey("epoch", "episode", "policy", "FIXED")
@@ -139,11 +139,20 @@ def test_source_truncation_prefix_rewrite_and_rotation_fail_closed(tmp_path, mut
     materialize_ready_bundles(tmp_path, now=now)
     original = source.read_bytes()
     if mutation == "truncate":
+        # Same inode shrinkage — true truncation (reset-authorized repair only).
         source.write_bytes(original[:10])
         expected = "SOURCE_LEDGER_TRUNCATED"
     elif mutation == "prefix":
         source.write_bytes(b"X" + original[1:])
         expected = "SOURCE_LEDGER_PREFIX_CHANGED"
+    elif mutation == "rotate_empty":
+        # Mirror V3EvidenceStore.rotate_ledger: seal prior bytes, empty successor.
+        # Must classify as ROTATED (auto-recovery), never TRUNCATED (terminal stall).
+        sealed = source.with_suffix(".jsonl.1")
+        os.replace(source, sealed)
+        source.open("xb").close()
+        assert source.stat().st_size == 0
+        expected = "SOURCE_LEDGER_ROTATED"
     else:
         replacement = source.with_suffix(".replacement")
         replacement.write_bytes(original)

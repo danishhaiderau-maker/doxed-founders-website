@@ -145,3 +145,34 @@ def test_parse_prior_tolerates_missing_or_invalid_state():
     assert resume.parse_prior("") == {}
     assert resume.parse_prior("not json") == {"captured": False}
     assert resume.parse_prior("[]") == {"captured": False}
+
+
+def test_tile_restore_retries_transient_503_then_succeeds(monkeypatch):
+    """Guaranteed resume must not go red on a post-ACTIVE /api/state 503 blip."""
+    calls = {"n": 0}
+    transient = urllib.error.HTTPError("https://x/api/state", 503, "SERVICE UNAVAILABLE", {}, io.BytesIO(b""))
+
+    def flaky(path, payload=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise transient
+        return {"ok": True, "path": path}
+
+    sleeps = []
+    monkeypatch.setattr(resume.time, "sleep", lambda sec: sleeps.append(sec))
+    wrapped = resume._retrying_request(flaky, attempts=10, budget_sec=60)
+    assert wrapped("/api/state", None) == {"ok": True, "path": "/api/state"}
+    assert calls["n"] == 3 and sleeps == [2, 4]
+
+
+def test_tile_restore_non_transient_401_is_not_retried(monkeypatch):
+    error = urllib.error.HTTPError("https://x/api/state", 401, "unauthorized", {}, io.BytesIO(b"{}"))
+
+    def always_401(path, payload=None):
+        raise error
+
+    monkeypatch.setattr(resume.time, "sleep", lambda sec: None)
+    wrapped = resume._retrying_request(always_401, attempts=5, budget_sec=30)
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        wrapped("/api/state", None)
+    assert caught.value.code == 401
