@@ -62,3 +62,19 @@ def test_since_label_reads_fresh_start_in_aedt(tmp_path, monkeypatch):
     assert label == "18 Oct 06:01 AEDT"
     text = eng._session_age_label({"data_start_hours": 1.0, "data_start_label": label, "data_start_utc": "x"})
     assert text == "~1.0h since fresh start 18 Oct 06:01 AEDT"
+
+
+def test_floor_hard_minimum_when_manifest_and_fresh_start_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(eng, "_agent_data_path", lambda name: str(tmp_path / name))
+    monkeypatch.setattr(eng, "_epoch_guard", lambda: _NoGuard())
+    assert eng._analyzer_floor_epoch_ts() == FRESH
+    assert eng._floor_ts(None).timestamp() == FRESH
+
+
+def test_row_exactly_at_floor_is_admitted(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(eng, "_epoch_admit", lambda rel, row: True)
+    out = eng._selector_trades(lambda _p: [{"id": "at", "close_ts": str(FRESH)}, {"id": "pre", "close_ts": str(FRESH - 1)}], "t.csv")
+    assert [r["id"] for r in out] == ["at"]
+    at = pd.Timestamp(FRESH, unit="s", tz="UTC")
+    assert eng._floor_ts(at) is at  # value == floor keeps the row's own ts (`<`, not `<=`)

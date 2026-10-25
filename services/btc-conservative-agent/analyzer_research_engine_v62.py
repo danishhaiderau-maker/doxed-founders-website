@@ -1432,10 +1432,13 @@ def _mirror_publish_freshness():
         return {"error": f"{type(exc).__name__}: {exc}"[:300], "publish_stale": None}
 
 
+ANALYZER_MIN_FLOOR_TS = 1792263671
+
+
 def _analyzer_floor_epoch_ts():
     """RK #882 12:48: analyzer floor = max(epoch manifest started_at_ts, fresh_start_epoch.json epoch_ts).
 
-    None when neither is declared.  DATA_EPOCH_ID is not involved.
+    Never below ANALYZER_MIN_FLOOR_TS (1792263671).  DATA_EPOCH_ID is not involved.
     """
     from research_segment_epoch import fresh_start_epoch
 
@@ -1446,7 +1449,9 @@ def _analyzer_floor_epoch_ts():
     doc = fresh_start_epoch(os.path.dirname(_agent_data_path("fresh_start_epoch.json")))
     if doc:
         candidates.append(float(doc["epoch_ts"]))
-    return max(candidates) if candidates else None
+    # RK/HM #882: hard minimum = the 12:20 credibility cutoff (18 Oct 06:01:11 AEDT), even when both are missing.
+    candidates.append(float(ANALYZER_MIN_FLOOR_TS))
+    return max(candidates)
 
 
 def _floor_ts(value):
