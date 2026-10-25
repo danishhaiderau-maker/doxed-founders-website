@@ -72,7 +72,7 @@ def test_baseline_is_invocation_bound_and_never_reloaded_by_report_mtime():
     assert "baseline_generation = generation_identity(" in source
     assert "if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:" in source
     assert 'raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")' in source
-    assert 'baseline_replay["generation"] = baseline_generation' in source
+    assert 'baseline_replay = build_entry_baseline_book_replay(policy_data_dir, baseline_generation)' in source
     assert "None if baseline_replay_error else baseline_replay" in source
     assert "baseline_report=baseline_report or {}" in helper
     assert "getmtime" not in helper

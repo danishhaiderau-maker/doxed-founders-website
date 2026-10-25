@@ -66,7 +66,7 @@ def _blockers():
 def _valid_generation(**over):
     t = table()
     kwargs = dict(
-        integrity={"report_status": "VALID"},                                                   # (a)
+        integrity={"report_status": "VALID", "checks": [{"check": "fixture", "passed": True}]},                                                   # (a)
         data_epoch={"declared": True, "epoch_id": EPOCH, "pre_epoch_rows_admitted": 0,          # (a) + (b)
                     "straddle_rows_unguarded": 0, "unstamped_rows_unguarded": 0},
         input_blockers=_blockers(),
