@@ -145,19 +145,35 @@ def test_bootstrap_status_observation_retries_only_transient_transport_failures(
         DEPLOY.index("- name: Complete receipt bootstrap inside exact-revision maintenance"):
         DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
     ]
+    assert "python scripts/fly_receipt_bootstrap_gate.py" in main
+    assert "id: receipt_bootstrap" in main
+    assert "timeout-minutes: 25" in main
+    assert 'BOOTSTRAP_TIMEOUT_SEC: "1200"' in main
+    assert "timeout-minutes: 95" not in main
+    gate = (Path(__file__).resolve().parent / "fly_receipt_bootstrap_gate.py").read_text(encoding="utf-8")
     continuation = BOOTSTRAP_HELPER
-    for block in (main, continuation):
+    assert "from fly_resume_bootstrap import _http_clients, _transient" in gate
+    assert "bootstrap_terminal_stall" in gate
+    assert "RECEIPT_BOOTSTRAP_TIMEOUT" in gate
+    assert "DEFAULT_BOOTSTRAP_TIMEOUT_SEC = 20 * 60" in gate
+    for block in (gate, continuation):
         assert "while " in block and "monotonic() <" in block
         assert "attempt += 1" in block
-        assert "urllib.error.URLError" in block and "TimeoutError" in block
         assert "- " in block and "monotonic()" in block
         assert "2 ** min(attempt - 1, 4)" in block
         assert 'raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")' in block
-    assert "if exc.code not in {502, 503, 504}:" in main
+    assert "urllib.error.URLError" in continuation and "TimeoutError" in continuation
     assert "exc.code in TRANSIENT_HTTP" in continuation
-    assert 'status = observe_status(deadline)' in main
+    assert "_transient(exc)" in gate
     assert 'until=bootstrap_deadline' in continuation
     assert 'until=deadline' in continuation
+    fr_idx = DEPLOY.index("- name: Guaranteed paper resume after failed guarded deploy")
+    failure_resume = DEPLOY[fr_idx:fr_idx + 1600]
+    assert "BOOTSTRAP_GATE_FAILED:" in failure_resume
+    assert "steps.receipt_bootstrap.outcome == 'failure'" in failure_resume
+    resume_helper = (Path(__file__).resolve().parent / "fly_failure_paper_resume.py").read_text(encoding="utf-8")
+    assert "def bootstrap_gate_failed()" in resume_helper
+    assert "bootstrap_gate_failed()" in resume_helper
 
 
 def test_bootstrap_continuation_program_is_valid_python():

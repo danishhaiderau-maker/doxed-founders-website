@@ -2458,7 +2458,7 @@ jobs:
         run: |
           python -m pytest test_deploy_maintenance_boundary_hardening.py test_fill_single_flight.py -q
           python -m pytest ../../scripts/test_fly_deploy_workflow_order.py -q
-          python -m pytest ../../scripts/test_fly_failure_paper_resume.py ../../scripts/test_fly_resume_bootstrap.py ../../scripts/test_fly_resume_predeploy_abort.py ../../scripts/test-fly-workflow-revision-contract.py -q
+          python -m pytest ../../scripts/test_fly_failure_paper_resume.py ../../scripts/test_fly_receipt_bootstrap_gate.py ../../scripts/test_fly_resume_bootstrap.py ../../scripts/test_fly_resume_predeploy_abort.py ../../scripts/test-fly-workflow-revision-contract.py -q
 
       - uses: actions/setup-node@v4
         with:
@@ -3468,131 +3468,21 @@ jobs:
           PY
 
       - name: Complete receipt bootstrap inside exact-revision maintenance
-        # A held maintenance deploy (clean-epoch boundary) must reach its
-        # 60-min boundary reset before the long first-boot bootstrap ends; the
-        # later resume (fly_failure_paper_resume.py) still requires bootstrap
-        # COMPLETE before paper can resume.
+        # Hard timeout falls through to Guaranteed paper resume (failure/cancelled).
+        # Terminal ledger stall (SOURCE_LEDGER_TRUNCATED, zero progress) fails
+        # immediately via fly_receipt_bootstrap_gate.py. keep_maintenance_pause
+        # skips this step (clean-epoch hold). Do not raise timeout-minutes without
+        # also raising BOOTSTRAP_TIMEOUT_SEC — Python must raise
+        # RECEIPT_BOOTSTRAP_TIMEOUT before the runner SIGKILLs the step.
+        id: receipt_bootstrap
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
+        timeout-minutes: 25
+        working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ github.sha }}
-        run: |
-          python - <<'PY'
-          import json, os, time, urllib.error, urllib.request
-
-          base = "https://doxed-btc-bot.fly.dev"
-          expected = os.environ["EXPECTED_REVISION"][:12].lower()
-          headers = {
-              "X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"],
-              "Cache-Control": "no-cache",
-          }
-
-          def call(path, payload=None, timeout=20):
-              data = None if payload is None else json.dumps(payload).encode("utf-8")
-              request = urllib.request.Request(
-                  base + path, data=data,
-                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
-                  method="POST" if data is not None else "GET",
-              )
-              with urllib.request.urlopen(request, timeout=timeout) as response:
-                  return json.load(response)
-
-          def observe_status(deadline):
-              last = None
-              attempt = 0
-              while time.monotonic() < deadline:
-                  attempt += 1
-                  try:
-                      return call("/api/status?fresh=1")
-                  except urllib.error.HTTPError as exc:
-                      if exc.code not in {502, 503, 504}:
-                          raise
-                      last = exc
-                  except (urllib.error.URLError, TimeoutError) as exc:
-                      last = exc
-                  delay = min(2 ** min(attempt - 1, 4), max(0.0, deadline - time.monotonic()))
-                  print(f"transient status observation attempt={attempt} error={type(last).__name__}", flush=True)
-                  if delay:
-                      time.sleep(delay)
-              raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")
-
-          # The audited current cohort has at least 21,353 legacy rows.  Each
-          # worker cycle now indexes up to 512 receipts behind ONE durability
-          # barrier (one directory fsync / one SQLite commit per batch; every
-          # receipt file is still fsynced before its rename) and stops early,
-          # cursor saved, before its wall deadline, so the scheduling floor is
-          # 42 cycles.  The 45-minute budget at 64 rows/cycle (two fsyncs per
-          # row plus a subprocess launch per cycle) expired on every deploy.
-          # Ninety minutes is headroom, not a latency guarantee; the cursor is
-          # durable per batch, so an expiry still fails safe in maintenance and
-          # mode=resume-bootstrap continues from the saved cursor.
-          observed_bootstrap_rows = 21_353
-          conservative_records_per_cycle = 512
-          backlog_interval_seconds = 1
-          bootstrap_timeout_seconds = 90 * 60
-          minimum_cycles = (
-              observed_bootstrap_rows + conservative_records_per_cycle - 1
-          ) // conservative_records_per_cycle
-          if bootstrap_timeout_seconds < minimum_cycles * backlog_interval_seconds:
-              raise SystemExit("configured bootstrap timeout cannot cover audited scheduling floor")
-          deadline = time.monotonic() + bootstrap_timeout_seconds
-          last = None
-          # The preceding postdeploy boundary is already paused.  Reassert it
-          # once, then observe read-only status so this gate cannot create a
-          # repeated persistent-config write/fsync loop.
-          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
-          while time.monotonic() < deadline:
-              # The lifecycle owner is independent of paper execution and
-              # continues bounded subprocess cycles while the pause remains.
-              status = observe_status(deadline)
-              last = status
-              pipeline = status.get("lifecycle_pipeline") or {}
-              bootstrap = pipeline.get("receipt_bootstrap") or {}
-              progress = status.get("strategy_progress") or {}
-              safe = (
-                  str(status.get("source_git_rev") or "").lower() == expected
-                  and status.get("force_paper_mode") is True
-                  and status.get("bitfinex_live_enabled") is False
-                  and status.get("live_armed") is False
-                  and status.get("execution_paused") is True
-                  and status.get("manual_admin_pause") is True
-                  and int(progress.get("open_positions") or 0) == 0
-                  and int(progress.get("pending_orders") or 0) == 0
-              )
-              if not safe:
-                  raise SystemExit("receipt bootstrap lost exact-revision flat maintenance")
-              if not (
-                  pipeline.get("owner") is True
-                  and pipeline.get("running") is True
-                  and pipeline.get("source_revision_match") is True
-              ):
-                  raise SystemExit(
-                      "receipt bootstrap worker is not running on the exact revision: "
-                      + json.dumps(pipeline, sort_keys=True)
-                  )
-              print(json.dumps({
-                  "receipt_bootstrap": bootstrap,
-                  "last_outcome": pipeline.get("last_outcome"),
-                  "revision": expected,
-              }, sort_keys=True), flush=True)
-              if bootstrap.get("blocked") is True or bootstrap.get("status") == "BLOCKED":
-                  raise SystemExit(
-                      "receipt bootstrap reported a fail-closed blocker: "
-                      + json.dumps(bootstrap, sort_keys=True)
-                  )
-              if (
-                  bootstrap.get("required") is True
-                  and bootstrap.get("status") == "COMPLETE"
-                  and bootstrap.get("complete") is True
-              ):
-                  print(f"Receipt bootstrap complete in maintenance on {expected}")
-                  raise SystemExit(0)
-              time.sleep(3)
-          raise SystemExit(
-              "receipt bootstrap did not complete before bounded maintenance timeout: "
-              + json.dumps((last or {}).get("lifecycle_pipeline") or {}, sort_keys=True)
-          )
-          PY
+          BOOTSTRAP_TIMEOUT_SEC: "1200"
+        run: python scripts/fly_receipt_bootstrap_gate.py
 
       - name: Resume paper execution after exact-revision acceptance
         id: paper_resume
@@ -3805,10 +3695,13 @@ jobs:
       - name: Guaranteed paper resume after failed guarded deploy
         # Paper must never sit idle after a deploy attempt. Runs last on every
         # failure or cancellation exit once a maintenance mutation started.
+        # BOOTSTRAP_GATE_FAILED waives bootstrap-complete when the hard-timeout
+        # bootstrap step failed so resume-paper is never left pending forever.
         if: ${{ (failure() || cancelled()) && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure') }}
         timeout-minutes: 15
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           PRIOR_OPERATOR_STATE: ${{ steps.paper_maintenance.outputs.prior_operator_state }}
+          BOOTSTRAP_GATE_FAILED: ${{ steps.receipt_bootstrap.outcome == 'failure' && '1' || '' }}
         run: python scripts/fly_failure_paper_resume.py

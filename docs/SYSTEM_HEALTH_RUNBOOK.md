@@ -113,9 +113,12 @@ use the guarded `fly-bot-deploy.yml` restart mode. Never use ad-hoc `flyctl depl
 <a id="fly-paused"></a>
 ### fly.paused
 Paper must be running. A `DEPLOY_MAINTENANCE` pause is AMBER for up to 45 minutes
-(guarded deploy). Any other owner, or a longer pause, is RED.
+(guarded deploy). Any other owner, or a longer pause, is RED. The laptop watcher,
+the Fly self-check (`/api/system-health` `fly_self_checks`), and the uptime strip
+(`PAUSED_DEPLOY`) all use the same 45-minute age gate — none may stay AMBER forever.
 Fix: identify the owner from `/api/status`. For a stuck deploy boundary, check the
-workflow run (`gh run list --workflow fly-bot-deploy.yml`); its failure path resumes paper.
+workflow run (`gh run list --workflow fly-bot-deploy.yml`); its failure path resumes paper
+(bootstrap hard-timeout / terminal stall falls through to guaranteed paper resume).
 For `THREAD_CRASH` or `SAFETY`, read `runtime_incident_history` before resuming through
 the authenticated `/api/resume`.
 

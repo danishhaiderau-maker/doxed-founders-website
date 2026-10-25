@@ -5,6 +5,13 @@ running when the job fails (the unchanged incumbent or a deployed candidate
 that missed a later acceptance check) is resumed through the normal
 deploy-owned /api/resume path, but only when it is provably paper-only,
 disarmed, and healthy.  Operator and safety pauses are always retained.
+
+When receipt bootstrap is required but terminal-stalled (e.g.
+SOURCE_LEDGER_TRUNCATED with zero progress), or when the upstream bootstrap
+gate already failed/timed out (``BOOTSTRAP_GATE_FAILED=1``), bootstrap
+completeness is waived so DEPLOY_MAINTENANCE is still released; the stall or
+timeout is logged with ``::error::`` / ``::warning::`` so the job fails
+loudly for repair while paper collects.
 """
 
 from __future__ import annotations
@@ -14,11 +21,17 @@ import os
 import re
 import time
 
+from fly_receipt_bootstrap_gate import bootstrap_terminal_stall
 from fly_resume_bootstrap import _http_clients, _transient
 
 RETAINED_OWNERS = frozenset({"OPERATOR", "SAFETY"})
 RESUME_PAYLOAD = {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}
 MAX_RESUME_POSTS = 3
+
+
+def bootstrap_gate_failed() -> bool:
+    """True when the Actions bootstrap step already failed/timed out (fall-through)."""
+    return str(os.environ.get("BOOTSTRAP_GATE_FAILED") or "").strip() in {"1", "true", "TRUE", "yes"}
 
 
 def parse_prior(raw: str) -> dict:
@@ -42,6 +55,17 @@ def readiness_failures(status: dict) -> list[str]:
     pipeline = status.get("lifecycle_pipeline") or {}
     bootstrap = pipeline.get("receipt_bootstrap") or {}
     revision = str(status.get("source_git_rev") or "").strip().lower()
+    bootstrap_done = bootstrap.get("required") is not True or (
+        bootstrap.get("status") == "COMPLETE" and bootstrap.get("complete") is True
+    )
+    # Terminal stall cannot self-heal inside the resume budget; waive the
+    # completeness gate so paper is released, and surface the stall loudly.
+    # Same waiver when the Actions bootstrap step already failed its hard
+    # timeout — paper must not sit idle behind a hung gate.
+    if not bootstrap_done and (
+        bootstrap_terminal_stall(status) is not None or bootstrap_gate_failed()
+    ):
+        bootstrap_done = True
     checks = {
         "revision_reported": bool(re.fullmatch(r"[0-9a-f]{12}|[0-9a-f]{40}", revision)),
         "process_alive": status.get("process_alive") is True,
@@ -49,9 +73,7 @@ def readiness_failures(status: dict) -> list[str]:
         "lifecycle_owner": pipeline.get("owner") is True,
         "lifecycle_running": pipeline.get("running") is True,
         "bootstrap_not_blocked": bootstrap.get("blocked") is not True and bootstrap.get("status") != "BLOCKED",
-        "bootstrap_complete_if_required": bootstrap.get("required") is not True or (
-            bootstrap.get("status") == "COMPLETE" and bootstrap.get("complete") is True
-        ),
+        "bootstrap_complete_if_required": bootstrap_done,
     }
     return sorted(name for name, passed in checks.items() if not passed)
 
@@ -101,6 +123,22 @@ def guaranteed_resume(request_json, prior: dict, *, monotonic=time.monotonic, sl
             print("failure-resume waiting for readiness: " + json.dumps(last_failed), flush=True)
             sleep(min(10, max(0.0, deadline - monotonic())))
             continue
+        stall = bootstrap_terminal_stall(status)
+        if stall is not None:
+            # Bootstrap gate already failed the deploy step loudly; here we still
+            # release paper and surface the stall as a warning annotation.
+            print(
+                "::warning::receipt bootstrap terminal stall; releasing DEPLOY_MAINTENANCE on "
+                "healthy paper-only revision: "
+                + json.dumps(stall, sort_keys=True, separators=(",", ":")),
+                flush=True,
+            )
+        elif bootstrap_gate_failed():
+            print(
+                "::warning::receipt bootstrap gate failed/timed out; releasing DEPLOY_MAINTENANCE "
+                "on healthy paper-only revision (bootstrap completeness waived)",
+                flush=True,
+            )
         if posts >= MAX_RESUME_POSTS:
             raise RuntimeError("failure-resume exhausted bounded resume attempts")
         posts += 1
