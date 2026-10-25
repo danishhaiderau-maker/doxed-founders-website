@@ -335,7 +335,7 @@ def test_runtime_retires_recorder_but_keeps_reset_inventory_r17():
     assert "ShadowExitRecorder(" not in BOT
     assert "\nimport shadow_exit_paths\n" not in BOT
     assert '"shadow_exit_recorder": shadow_exit_recorder_status_snapshot()' in BOT
-    wipe = BOT[BOT.index("def research_wipe_file_paths("):BOT.index("def _fresh_collection_derived_history_paths(")]
+    wipe = BOT[BOT.index("def research_wipe_file_paths("):BOT.index("def _research_wipe_rotated_jsonl_paths(")]
     assert "SHADOW_EXIT_PATH_FILE" in wipe
     import research_reset_inventory
     import data_retention_policy

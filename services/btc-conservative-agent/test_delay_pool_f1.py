@@ -62,8 +62,8 @@ def _ns(tmp, names, **extra):
     return ns
 
 
-POOL_NAMES = ["_DISLOC_DELAYS", "PAPER_DELAY_POOL_FILE", "_PAPER_DELAY_POOL_LOCK", "_paper_delay_pool_path",
-              "_paper_delay_sampler", "_paper_delay_pool_persist", "_paper_delay_pool_reset", "_disloc_delay",
+POOL_NAMES = ["_PAPER_DELAYS", "PAPER_DELAY_POOL_FILE", "_PAPER_DELAY_POOL_LOCK", "_paper_delay_pool_path",
+              "_paper_delay_sampler", "_paper_delay_pool_persist", "_paper_delay_pool_reset", "_paper_delay",
               "_paper_delay_meta", "_DELAY_STAMP_KEYS", "_paper_stamp_pool", "_PAPER_EXIT_TRIGGERS",
               "PAPER_EXIT_TRIGGERS_KEY", "PAPER_EXIT_TRIGGERS_CAP", "_paper_exit_triggers_restore", "_paper_note_exit_trigger", "_paper_delay_observe_report",
               "_CROSS_LANE_POOL", "_cross_lane_pool", "_iso_or_unix", "_fly_exit_send_record", "_paper_own_s2s_exit"]
@@ -129,7 +129,7 @@ def test_persist_reload_epoch_reject_and_reset(tmp_path, monkeypatch):
     # reset clears and persists empty
     ns2["_paper_delay_pool_reset"]()
     assert json.loads(path.read_text())["pools"] == {}
-    assert ns2["_disloc_delay"]("GS-01", "entry")[1] == "default_until_n10"
+    assert ns2["_paper_delay"]("GS-01", "entry")[1] == "default_until_n10"
 
 
 def test_observe_three_legs_and_duplicates(tmp_path, monkeypatch):

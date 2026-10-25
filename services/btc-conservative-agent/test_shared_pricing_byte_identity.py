@@ -1,8 +1,9 @@
-"""Tiles 6/7 removal (23 Oct 2026) R4 guard: the shared pricing code is byte-identical to base 51d926f93.
+"""Tiles 6/7 removal (23 Oct 2026) R4 guard: the shared pricing code is byte-identical to the reviewed pins below.
 
 HM review 20261023-tile67-removal C3: removing disloc_engine must not change how tiles 1-5 are priced.
-Pinned at base master 51d926f93 (sha256 of each top-level function's exact source segment):
-_disloc_delay (shared delay helper, kept), its callers, get_mark_price and the paper_fill pricing core.
+First pinned at base master 51d926f93; every later move is deliberate and listed in the comments (latest: R22 PR-A).
+Pins are the sha256 of each top-level function's exact source segment:
+_paper_delay (shared delay helper, kept; was _disloc_delay), its callers, get_mark_price and the paper_fill pricing core.
 If one of these functions changes on purpose later, update its sha here in the same PR, with the reason.
 """
 from __future__ import annotations
@@ -12,7 +13,7 @@ import hashlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-BASE = "51d926f93"
+BASE = "the reviewed pins (first set at 51d926f93, last moved by R22 PR-A)"
 # #839 F2/F3 (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result (realism-v2 shared trigger helper / entry quote stamping; R4 pricing intent unchanged for tiles 1-5 except the reviewed realism changes).
 # #840 order model (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core (live order-type model: resident stop, BOT_SENT market exits, model-time exits).
 # #841 RK fixes (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core, paper_fill.py:paper_fill (trades-only stops, first-row-at-or-after resident fill, BFX truncation, liquidation stamp).
@@ -23,13 +24,14 @@ BASE = "51d926f93"
 # #842 RK (3) FIRST_AFTER (24 Oct 2026, ff412bcfc): intentional pin move for paper_fill.py:_paper_fill_core (resident exchange-stop fill = the first trade print after the trigger; fill_ts = that row's rx).
 # #842 HM 02:55 N1 (24 Oct 2026): intentional pin move for bot.py:_disloc_delay (the per-lane B1 DelaySampler is stamps-only; every priced delay goes through the shared live_ack_pool definition; no pool key -> fail closed).
 # #842 HM 02:55 / RK (2) (24 Oct 2026): intentional pin move for bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay (paper BOT_SENT exits: own trigger -> send code point measured per row via the shared _paper_own_s2s_exit + pooled EXIT_RO_MKT send->ack; resident stays 0; missing -> fail closed).
+# R22 PR-A (25 Oct 2026): intentional pin move for bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_paper_delay (pure rename _disloc_delay->_paper_delay, _DISLOC_DELAYS->_PAPER_DELAYS; no behaviour change: each new source == the old source with only those identifiers renamed).
 PINNED = {
     "bot.py": {
         "get_mark_price": "b03f13d6030996983221371bede76b67fd2f610c03922e9aa3f142ece840b9c6",
         "_paper_lane_entry_result": "a227911677f4b9c9f80b0bec463171fe9e06e4190d2ddac5e1d51005193ef05d",
-        "_tp1_gate": "5d929c321af8744db1dc1ceb64496cc8e02562359bd8d48d45199eedb9cb9d1d",
-        "_paper_lane_exit": "e2f76f44b78728ad91d1ce1aa6ba0b14d77e22af7a86f3b23646713bdb487dd4",
-        "_disloc_delay": "6eb646e5e16589d44f6b11b635b6bd91a7fdcf23b55674a17b459d5e3852ce7a"
+        "_tp1_gate": "620841b04d0204973ece88513166af9c2439adc4ad81f43e51f4f22c2e52a42d",
+        "_paper_lane_exit": "53646f65a04f6136e5a833c01cd1e68dc62c5082f4b91fff7f711bf51920cb43",
+        "_paper_delay": "4cd4b08d3dedb3233d84bd7a167985841e338105937baa1af4a3b908b1de5254"
     },
     "paper_fill.py": {
         "_f": "c70d10da2af1181b4d56905d296e71c2b6da8603ab5d7e9a22c0ad0b0b6e303f",
@@ -67,6 +69,8 @@ def test_shared_pricing_functions_byte_identical_to_base():
             assert now[fn] == sha, f"{fname}:{fn} changed vs {BASE}; R4 requires it byte-identical"
 
 
-def test_disloc_delay_kept_and_engine_gone():
-    assert "_disloc_delay" in PINNED["bot.py"]
+def test_shared_paper_delay_kept_and_old_name_gone():
+    src = (HERE / "bot.py").read_text(encoding="utf-8")
+    assert "_paper_delay" in PINNED["bot.py"]
+    assert "_disloc_delay" not in src and "_DISLOC_DELAYS" not in src
     assert not (HERE / "disloc_engine.py").exists()

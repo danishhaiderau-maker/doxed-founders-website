@@ -54,7 +54,6 @@ def test_duplicate_suppression_requires_canonical_intent_not_price_proximity():
     assert "CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC" in canonical
     assert 'incoming.get("shared_ai_call_id")' in canonical
     assert "price_distance > 0.01" in canonical
-    assert "_limit_prices_near" not in duplicate_scan
     assert '"same_trade_replay": True' in duplicate_scan
     assert "CANONICAL_SIGNAL_REPLAY no-op" in SOURCE
     assert "duplicate_price_distance_usd" in SOURCE

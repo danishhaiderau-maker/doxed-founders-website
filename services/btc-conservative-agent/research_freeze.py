@@ -102,18 +102,9 @@ MID_EPOCH_ADDITIONS = (
      "approved_by": "Danish (owner), 2026-10-10 backlog batch: build Tile 14 GS-07 V07, then paper ON",
      "spec": "audit/TILE14-TILE15-DESIGN-20261008.md §2 (V07)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
-    # Historical registrations (R5 custody): Tile 13 · DISLOC and Tile 14 · DISLOC-FOI were retired and their
-    # code removed 23 Oct 2026 (owner R9); the entries stay as the record of what this epoch registered.
-    # Tile 13 · DISLOC (owner 2026-10-11; default OFF, paper only, relay-ineligible, self-simulated).
-    {"lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M", "tile_number": 13, "hypothesis_id": "GS-20261011-DISLOC",
-     "approved_by": "Danish (owner), 2026-10-11: build the 5 s-cancel dislocation tile as a paper tile",
-     "spec": "audit/STRATEGIST-AUDIT-20261011.md §4c",
-     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
-    # Tile 14 · DISLOC-FOI (owner 2026-10-11; Strategist C3; default OFF, paper only, long only).
-    {"lane": "FAMILY_DISLOC_FOI_LONG_1M", "tile_number": 14, "hypothesis_id": "GS-20261011-C3-DISLOC-FOI",
-     "approved_by": "Danish (owner), 2026-10-11: build Strategist C3 as Tile 14 DISLOC-FOI paper tile",
-     "spec": "grok-strategist/reports/DEEP-SEARCH-TILES-20261011.md §6 C3",
-     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # R22 PR-A (25 Oct 2026, RK ruling 1): the Tile 13 DISLOC / Tile 14 DISLOC-FOI historical registrations were
+    # deleted (code removed 23 Oct 2026, no spec left). check() reads MID_EPOCH_ADDITION_ROSTER only to allow
+    # TILE_ON, so a retired lane is now refused during the freeze; git history keeps the record (R5).
     # Tile 6 · GS-FADE3-TP30 (gf3; owner 25 Oct; RK PASS 06:24 AEDT; paper only, live refused, self-simulated).
     {"lane": "FAMILY_GS_FADE3_TP30", "tile_number": 6, "hypothesis_id": "GS-20261025-FADE3-TP30",
      "approved_by": "Danish (owner), 2026-10-25: build GS-FADE3-TP30 as the slot-6 PAPER tile (PR #877)",

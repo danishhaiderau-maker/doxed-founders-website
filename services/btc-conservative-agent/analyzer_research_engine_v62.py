@@ -555,9 +555,6 @@ try:
         COMPARISON_BENCHMARK_LANE,
         COMBO_CHASE_DELAY_LANES,
         COMBO_CHASE_DIRECT_REFERENCE,
-        ACTIVE_CHASE_ISOLATION_LANES,
-        ACTIVE_CHASE_ISOLATION_PAIRS,
-        COMBO_CHASE_ISOLATION_PAIRS,
         COMBO_LANE_SPECS,
         COMBO_EXECUTION_LANES,
         COMBO_LANE_LABELS as _COMBO_LANE_LABELS,
@@ -2013,11 +2010,6 @@ def _expectancy(pnl_series):
     avg_win = pnl[pnl > 0].mean() if (pnl > 0).any() else 0.0
     avg_loss = pnl[pnl < 0].mean() if (pnl < 0).any() else 0.0
     return wr * avg_win + (1 - wr) * avg_loss
-
-
-def _text_cols(df):
-    keys = ("comment", "reason", "full_comment", "ai_reason", "decision_ai_reason", "ai_input", "market_context")
-    return [c for c in df.columns if any(k in c.lower() for k in keys)]
 
 
 def _combine_row_text(row):
@@ -5377,12 +5369,6 @@ def _cohort_passes_chop(row, max_chop):
     return True
 
 
-def _cohort_passes_mtf_short(row):
-    if row.get("direction") != "SHORT":
-        return True
-    return row.get("mtf") == "BEAR_ALIGNED"
-
-
 def _cohort_passes_edge(row, min_edge):
     return float(row.get("edge_score") or 0) >= min_edge - 1e-9
 
@@ -6995,38 +6981,6 @@ def _enrich_trades_with_buckets(df):
             default="OTHER",
         )
     return work
-
-
-def _aggregate_lane_metric_blocks(blocks: list) -> dict:
-    """Sum lane metric dicts (approves, fills, pnl) for CONTINUOUS proxy."""
-    if not blocks:
-        return {}
-    approves = sum(int(b.get("approves") or 0) for b in blocks)
-    real_fills = sum(int(b.get("real_fills") or 0) for b in blocks)
-    shadow_filled = sum(int(b.get("shadow_filled") or 0) for b in blocks)
-    net_pnl_real = round(sum(float(b.get("net_pnl_real") or 0) for b in blocks), 2)
-    net_pnl_shadow_blocked = round(sum(float(b.get("net_pnl_shadow_blocked") or 0) for b in blocks), 2)
-    costly = round(sum(float(b.get("costly_blocks_usd") or 0) for b in blocks), 2)
-    good_saved = round(sum(float(b.get("good_blocks_saved_usd") or 0) for b in blocks), 2)
-    approve_to_fill_pct = round(100.0 * real_fills / approves, 1) if approves else 0.0
-    shadow_fill_pct = round(100.0 * shadow_filled / approves, 1) if approves else 0.0
-    per_approve_ev = round(net_pnl_real / approves, 2) if approves else 0.0
-    counterfactual_ev_per_approve = (
-        round(net_pnl_shadow_blocked / approves, 2) if approves else 0.0
-    )
-    return {
-        "approves": approves,
-        "real_fills": real_fills,
-        "approve_to_fill_pct": approve_to_fill_pct,
-        "shadow_filled": shadow_filled,
-        "shadow_fill_pct": shadow_fill_pct,
-        "net_pnl_real": net_pnl_real,
-        "net_pnl_shadow_blocked": net_pnl_shadow_blocked,
-        "per_approve_ev": per_approve_ev,
-        "counterfactual_ev_per_approve": counterfactual_ev_per_approve,
-        "costly_blocks_usd": costly,
-        "good_blocks_saved_usd": good_saved,
-    }
 
 
 def _normalize_entry_delay_min(df: pd.DataFrame) -> pd.Series:
@@ -10384,17 +10338,6 @@ def _lane_fills_pnl_from_trades(trade_df, lane: str) -> tuple[int, float]:
     fills = len(sub)
     pnl = round(float(pd.to_numeric(sub.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2)
     return fills, pnl
-
-
-def _all_time_lane_metrics(all_trades, lane: str) -> dict:
-    """Full CSV history stats — shown when session has no activity on a paused lane."""
-    fills, pnl = _lane_fills_pnl_from_trades(all_trades, lane)
-    ev = round(pnl / fills, 2) if fills else None
-    return {
-        "real_fills": fills,
-        "net_pnl_real": pnl if fills else None,
-        "ev_usd": ev,
-    }
 
 
 def _ordered_lane_catalog(lanes_with_approves, trade_df=None) -> list:
@@ -15687,31 +15630,6 @@ def chase_effectiveness_report(trades=None, session=None, chase_payload=None):
     return payload
 
 
-def _cumulative_chase_threshold_stats(attributions, min_chase: int) -> dict:
-    rows = []
-    for row in attributions or []:
-        if row.get("net_pnl_usd") is None and row.get("win") is None:
-            continue
-        try:
-            cc = int(row.get("chase_count") or row.get("limit_chase_count") or 0)
-        except (TypeError, ValueError):
-            cc = 0
-        if cc >= min_chase:
-            rows.append(row)
-    n = len(rows)
-    if not n:
-        return {"trades": 0, "wins": 0, "wr": 0.0, "ev": 0.0, "pnl": 0.0}
-    pnl = sum(float(r.get("net_pnl_usd") or 0) for r in rows)
-    wins = sum(1 for r in rows if r.get("win") or float(r.get("net_pnl_usd") or 0) > 0)
-    return {
-        "trades": n,
-        "wins": wins,
-        "wr": round(100.0 * wins / n, 1),
-        "ev": round(pnl / n, 2),
-        "pnl": round(pnl, 2),
-    }
-
-
 def _exact_chase_bucket_stats(attributions):
     """Exact limit_chase_count buckets: 0, 1, 2, 3, 4, 5+."""
     return _chase_bucket_stats(attributions)
@@ -17742,9 +17660,6 @@ def pathway_survival_report(trades=None, session=None):
         print(f"  ✅ Wrote {PATHWAY_SURVIVAL_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {PATHWAY_SURVIVAL_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
     return payload
 
 

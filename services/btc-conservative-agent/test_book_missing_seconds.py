@@ -71,7 +71,7 @@ def test_exit_retry_loop_rereads_the_same_model_time_never_current_time(monkeypa
     clock = {"t": 1000.0}
     monkeypatch.setattr(bot.time, "time", lambda: clock["t"])
     monkeypatch.setattr(bot.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
-    monkeypatch.setattr(bot, "_disloc_delay", lambda *a, **k: (1.5, "lane_p50"))
+    monkeypatch.setattr(bot, "_paper_delay", lambda *a, **k: (1.5, "lane_p50"))
     monkeypatch.setattr(bot, "_is_paper_book_lane", lambda p: False)
     monkeypatch.setattr(bot, "_paper_exit_missing_book_seconds", lambda t0: 0)
     monkeypatch.setattr(bot, "_paper_exit_sim", lambda res, pos, d, q, marks: {"price": res["price"]})
@@ -118,7 +118,7 @@ def _run_exit_with_book_back_at(monkeypatch, back_at):
     clock = {"t": 3000.0}
     monkeypatch.setattr(bot.time, "time", lambda: clock["t"])
     monkeypatch.setattr(bot.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
-    monkeypatch.setattr(bot, "_disloc_delay", lambda *a, **k: (1.5, "lane_p50"))
+    monkeypatch.setattr(bot, "_paper_delay", lambda *a, **k: (1.5, "lane_p50"))
     monkeypatch.setattr(bot, "_is_paper_book_lane", lambda p: False)
     monkeypatch.setattr(bot, "_paper_exit_missing_book_seconds", lambda t0: 0)
     monkeypatch.setattr(bot, "_paper_exit_sim", lambda res, pos, d, q, marks: {"price": res["price"]})
