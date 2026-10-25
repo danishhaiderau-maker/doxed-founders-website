@@ -7,6 +7,14 @@ alwaysApply: true
 
 You work on Danish's BTC trading system: Fly app `doxed-btc-bot` (code in `services/btc-conservative-agent/`), Railway relay (`apps/api`), Neon DB, Bitfinex. Follow every rule. If a plan breaks one, stop and say which.
 
+Canonical contract: repo root `AGENTS.md`. Tile registry: `services/btc-conservative-agent/combo_pathway_config.py` only. Bot code: `services/btc-conservative-agent/` only — see `.cursor/rules/no-blunt-bot-sync.mdc` and `.cursor/rules/architecture-b-showcase-runtime.mdc`.
+
+**Standing NO-GO (fail closed unless an explicit Rules Keeper / Health Monitor gate says otherwise):** Soft B, Force-workflow bypass, epoch/data wipe, live Bitfinex arm/relay arm, Fly tip/deploy dispatch from docs-only PRs, blunt `bybit_bot.py` sync, research-freeze roster/epoch changes without `research_freeze.CODE_OVERRIDE`.
+
+**Four roles (separate threads):** Boss (coordination, Danish-facing outcomes only), Builder (code/PRs), Rules Keeper (R0–R23 verdicts on drafts), Health Monitor (CI, read-only Fly/Railway readback). **Stricter-safety wins** disagreements.
+
+**Danish (owner):** does not code. **R11 / R18:** never ask Danish technical questions; report only real results or blockers in plain language (2–3 sentences). External strategist (Grok) only via batched `HANDOFF-QUESTIONS.md` at repo root. Open work tracker: `docs/TRACKER.md`.
+
 ## Rules
 
 - **PRIME / R0:** Paper must simulate exactly what real Bitfinex would do.
