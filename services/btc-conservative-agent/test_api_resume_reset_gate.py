@@ -117,13 +117,33 @@ def test_normal_resume_contract_is_unchanged(resume_runtime, completed_pointer):
     with bot.app.test_client() as client:
         response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"})
     assert response.status_code == 200
-    assert response.get_json() == {"status": "resumed", "execution_paused": False,
-                                   "pause_owner": None, "active_pause_reason": None}
+    body = response.get_json()
+    # Resume invariants (unchanged). pause_accounting is additive pause_accounting_v1.
+    assert body["status"] == "resumed"
+    assert body["execution_paused"] is False
+    assert body["pause_owner"] is None
+    assert body["active_pause_reason"] is None
+    assert set(body) == {
+        "status",
+        "execution_paused",
+        "pause_owner",
+        "active_pause_reason",
+        "pause_accounting",
+    }
+    acct = body["pause_accounting"]
+    assert acct["schema"] == "pause_accounting_v1"
+    assert acct["active"] is False
+    assert acct["owner"] is None
+    assert acct["started_at"] is None
+    assert acct["total_pause_sec"] == 0
+    assert acct["attempt_count"] == 0
     assert calls == {"readiness": 1, "save": 1, "resume": 1, "cache": 1}
     with bot.state_lock:
         assert bot.state["execution_paused"] is False
         assert bot.state["execution_reason"] == ""
         assert bot.state["manual_admin_pause"] is False
+        assert bot.state.get("pause_started_at") in (None, 0, 0.0)
+        assert int(bot.state.get("pause_attempt_count") or 0) == 0
 
 
 def test_large_terminal_operation_allows_resume_and_fresh_reset_noop(

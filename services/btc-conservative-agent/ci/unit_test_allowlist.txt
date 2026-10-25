@@ -353,6 +353,7 @@ test_paper_policy_family_premium_reversion_60m.py
 test_paper_policy_family_random_control_taker_90.py
 test_past_analysis.py
 test_past_analysis_archive_card.py
+test_pause_accounting.py
 test_path_replay_v1.py
 test_pathway_receipt_publication.py
 test_pathway_specs_atomic.py
