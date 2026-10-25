@@ -39,5 +39,9 @@ def test_dashboard_source_has_no_double_encoded_separator():
 def test_fresh_collection_banner_explains_truthful_empty_sections():
     source = SOURCE.read_text(encoding="utf-8")
 
-    assert "Empty sections may truthfully mean no eligible evidence" in source
+    # RK5 (#882): ALL-DATA / reports/all_data fallback banner is deleted.
+    assert "all_data_fallback_active" not in source
+    assert "Using fresh-collection window from reports/all_data/" not in source
+    assert "Empty sections may truthfully mean no eligible evidence" not in source
+    # Do not revive the old restart nag that this test originally replaced.
     assert "Run analyzer after bot restart if sections look empty" not in source

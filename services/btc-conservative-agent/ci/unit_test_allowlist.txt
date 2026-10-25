@@ -681,3 +681,5 @@ test_relay_guard_cutoff.py
 test_analyzer_r1_rk_ruling.py
 test_baseline_schema_fail_closed.py
 test_rk5_all_data_mode_deleted.py
+test_analyzer_floor_epoch.py
+test_fill_book_stamp_r3.py

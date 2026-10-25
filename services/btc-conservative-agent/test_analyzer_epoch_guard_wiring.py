@@ -9,7 +9,8 @@ from research.generation_receipt import build_generation_receipt
 from strategy_lab.export import generation_health
 
 EPOCH = "ce-20261004-v31-clean"
-START = 1_791_100_000.0
+# Must sit at/above ANALYZER_MIN_FLOOR_TS (1792263671); older fixtures lose to the hard floor.
+START = float(engine.ANALYZER_MIN_FLOOR_TS)
 PRE, POST = START - 3600, START + 3600
 
 
