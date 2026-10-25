@@ -127,10 +127,23 @@ the authenticated `/api/resume`.
 
 <a id="fly-revision"></a>
 ### fly.revision
-Fly `git_rev` compared with `origin/master`. A Fly revision behind master is normal
-while deploys queue (see WALL). It turns AMBER when the last guarded deploy did not
-conclude `success`.
-Fix: read the failed run and requeue it in `diagnostics/WALL-STATUS-FLY.md`.
+Fly `git_rev` compared with `origin/master`. A Fly tip behind master is normal while
+deploys queue (see WALL). The check attaches the **serving revision's** guarded
+deploy facts (not merely the chronologically last run):
+
+| Field | Meaning |
+|-------|---------|
+| `deploy_run_id` | Actions run id of `fly-bot-deploy.yml` whose `headSha` matches the tip |
+| `conclusion` | That run's conclusion (`success` / `failure` / …) |
+| `failed_steps` | Step names that concluded failure/cancelled/timed_out |
+| `paper_resumed_by` | `acceptance` (happy path), `guaranteed` (failure-path Guaranteed resume), or `resume-paper` |
+
+AMBER when that serving deploy did not conclude `success` (paper may still be live via
+Guaranteed resume). GREEN when the tip's deploy succeeded, even if a newer queued
+deploy later failed.
+Fix: open the `deploy_run_id` in Actions; repair the `failed_steps`; confirm
+`paper_resumed_by` released paper. Requeue only when tip repair is required
+(`diagnostics/WALL-STATUS-FLY.md`).
 
 <a id="fly-platform_status"></a>
 ### fly.platform_status

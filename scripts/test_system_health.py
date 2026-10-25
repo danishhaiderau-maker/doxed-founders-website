@@ -99,7 +99,25 @@ def healthy(now: float) -> dict:
                            "reconciliation": {"signedExchangePositionQty": 0, "alert": False},
                            "exchangeOrderAudit": {"activeOrderCount": 0},
                            "relayExecutor": {"status": "PAUSED_HEALTHY", "healthy": True, "heartbeatAgeMs": 30000}},
-        "deploy_runs": {"runs": [{"status": "completed", "conclusion": "success", "createdAt": "2026-10-01T20:00:00Z"}]},
+        "deploy_runs": {
+            "runs": [{
+                "databaseId": 1001, "status": "completed", "conclusion": "success",
+                "createdAt": "2026-10-01T20:00:00Z", "headSha": "a76a52a0dd50ffffffff",
+                "event": "push",
+            }],
+            "serving_deploy": {
+                "databaseId": 1001, "status": "completed", "conclusion": "success",
+                "createdAt": "2026-10-01T20:00:00Z", "headSha": "a76a52a0dd50ffffffff",
+                "event": "push",
+                "jobs": [{
+                    "name": "test-and-deploy", "conclusion": "success",
+                    "steps": [
+                        {"name": "Resume paper execution after exact-revision acceptance",
+                         "conclusion": "success"},
+                    ],
+                }],
+            },
+        },
         "analyzer_status": {"lastCompletedGenerationAt": sh.iso(now - 600), "state": "COMPLETED", "exitCode": 0},
         "analyzer_receipt": {"generated_at": sh.iso(now - 600), "level": "GREEN", "reasons": [],
                              "studies": [{"name": "best_policy_research_report.json", "status": "OK"}],
@@ -476,6 +494,66 @@ def test_ws_stale_and_paused_states():
     inputs = healthy(now)
     inputs["fly_status"].update(execution_paused=True, pause_owner="THREAD_CRASH")
     assert by_id(sh.evaluate(inputs, {}))["fly.paused"]["status"] == sh.RED
+
+
+def test_fly_revision_serving_deploy_fields_and_amber_on_failure():
+    """Boss 22:20 AEDT (3): serving rev deploy_run_id/conclusion/failed_steps/paper_resumed_by."""
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    check = by_id(sh.evaluate(inputs, {}))["fly.revision"]
+    assert check["status"] == sh.GREEN
+    fields = check["observed_fields"]
+    assert fields["deploy_run_id"] == 1001
+    assert fields["conclusion"] == "success"
+    assert fields["paper_resumed_by"] == "acceptance"
+    assert fields["failed_steps"] == []
+    assert "deploy_run_id=1001" in check["observed"]
+
+    # Newer failed deploy for a different SHA must not AMBER the serving tip.
+    inputs = healthy(now)
+    inputs["deploy_runs"]["runs"] = [
+        {"databaseId": 2002, "status": "completed", "conclusion": "failure",
+         "createdAt": "2026-10-02T02:00:00Z", "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+        inputs["deploy_runs"]["runs"][0],
+    ]
+    assert by_id(sh.evaluate(inputs, {}))["fly.revision"]["status"] == sh.GREEN
+
+    # Serving tip's own failed deploy → AMBER + four fields.
+    inputs = healthy(now)
+    inputs["deploy_runs"] = {
+        "serving_deploy": {
+            "databaseId": 40184559814, "status": "completed", "conclusion": "failure",
+            "headSha": "a76a52a0dd50ffffffff", "event": "push",
+            "jobs": [{
+                "name": "test-and-deploy", "conclusion": "failure",
+                "steps": [
+                    {"name": "Complete receipt bootstrap inside exact-revision maintenance",
+                     "conclusion": "failure"},
+                    {"name": "Resume paper execution after exact-revision acceptance",
+                     "conclusion": "skipped"},
+                    {"name": "Guaranteed paper resume after failed guarded deploy",
+                     "conclusion": "success"},
+                ],
+            }],
+        },
+        "runs": [],
+    }
+    check = by_id(sh.evaluate(inputs, {}))["fly.revision"]
+    assert check["status"] == sh.AMBER
+    fields = check["observed_fields"]
+    assert fields["deploy_run_id"] == 40184559814
+    assert fields["conclusion"] == "failure"
+    assert fields["failed_steps"] == [
+        "Complete receipt bootstrap inside exact-revision maintenance"
+    ]
+    assert fields["paper_resumed_by"] == "guaranteed"
+    report = sh.summarize(sh.evaluate(inputs, {}), {}, now)
+    failing = next(c for c in report["failing"] if c["id"] == "fly.revision")
+    assert failing["observed_fields"]["paper_resumed_by"] == "guaranteed"
+    banner = sh.banner_payload(report)
+    assert next(c for c in banner["failing"] if c["id"] == "fly.revision")["observed_fields"][
+        "deploy_run_id"
+    ] == 40184559814
 
 
 def test_pull_and_ack_lag():

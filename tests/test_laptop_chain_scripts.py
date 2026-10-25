@@ -594,7 +594,10 @@ def test_deploy_runs_snapshot_is_read_only_and_feeds_the_proof():
     deploys = source[source.index("New-Snapshot 'fly_deploy_runs_snapshot_v1'"):]
     assert "gh run list --repo $deployRepo --workflow fly-bot-deploy.yml" in deploys
     assert "fly_deploy_runs_snapshot_v1.json" in deploys and "$deploys.error = 'OFFLINE'" in deploys
-    for verb in ("gh workflow run", "gh run rerun", "gh run cancel", "gh pr merge", "gh api"):
+    # Serving tip enrichment for fly.revision (read-only jobs GET only).
+    assert "serving_deploy" in deploys
+    assert 'gh api "repos/$deployRepo/actions/runs/' in deploys
+    for verb in ("gh workflow run", "gh run rerun", "gh run cancel", "gh pr merge"):
         assert verb not in source
 
 

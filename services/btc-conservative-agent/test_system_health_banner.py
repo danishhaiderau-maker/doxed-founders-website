@@ -39,6 +39,34 @@ def test_sanitize_rejects_foreign_payloads_and_drops_unknown_fields():
     assert len(shb.sanitize_report(big)["failing"][0]["observed"]) <= 240
 
 
+def test_sanitize_keeps_fly_revision_observed_fields():
+    """Boss 22:20 AEDT (3): deploy_run_id/conclusion/failed_steps/paper_resumed_by survive push."""
+    raw = _report("AMBER")
+    raw["failing"] = [{
+        "id": "fly.revision", "status": "AMBER",
+        "observed": "fly=e8303023949c master=ec0aafda42c6; deploy_run_id=40184559814 conclusion=failure",
+        "threshold": "Fly tip's guarded deploy concluded success",
+        "hint": "serving deploy failed",
+        "runbook": "docs/SYSTEM_HEALTH_RUNBOOK.md#fly-revision",
+        "observed_fields": {
+            "deploy_run_id": 40184559814,
+            "conclusion": "failure",
+            "failed_steps": ["Complete receipt bootstrap inside exact-revision maintenance"],
+            "paper_resumed_by": "guaranteed",
+            "secret_nested": {"x": 1},
+        },
+    }]
+    clean = shb.sanitize_report(raw)
+    fields = clean["failing"][0]["observed_fields"]
+    assert fields["deploy_run_id"] == 40184559814
+    assert fields["conclusion"] == "failure"
+    assert fields["failed_steps"] == [
+        "Complete receipt bootstrap inside exact-revision maintenance"
+    ]
+    assert fields["paper_resumed_by"] == "guaranteed"
+    assert "secret_nested" not in fields
+
+
 def test_staleness_downgrades_green_and_flags_missing():
     missing = shb.with_staleness(None)
     assert missing["stale"] and missing["verdict"] == "AMBER"
