@@ -18,6 +18,11 @@ TOP_N = 25
 HISTOGRAM_EVERY = 6  # with a 600 s interval: hourly
 KEEP = 12  # snapshots kept for growth deltas
 _CONTAINERS = (dict, list, set, frozenset, collections.deque, collections.OrderedDict, collections.defaultdict)
+# A named structure must explain at least this share of the RSS growth (and >= 1 MiB) to be blamed for a leak;
+# otherwise the growth is reported as UNATTRIBUTED_ANON_OR_NATIVE (malloc arenas, native buffers).
+ATTRIBUTION_MIN_FRACTION = 0.10
+ATTRIBUTION_MIN_BYTES = 1 << 20
+UNATTRIBUTED = "UNATTRIBUTED_ANON_OR_NATIVE"
 
 
 def rss_kb() -> int | None:
@@ -269,12 +274,35 @@ def module_containers(modules=None, top: int = TOP_N) -> list[dict]:
                 try:
                     n = len(val)
                     if n >= 50:
-                        rows.append({"name": f"{mname}.{name}", "type": type(val).__name__, "len": n,
-                                     "shallow_bytes": sys.getsizeof(val)})
+                        row = {"name": f"{mname}.{name}", "type": type(val).__name__, "len": n,
+                               "shallow_bytes": sys.getsizeof(val)}
+                        maxlen = getattr(val, "maxlen", None) if isinstance(val, collections.deque) else None
+                        if maxlen is not None:
+                            row["maxlen"] = int(maxlen)
+                            row["capped_filling"] = n < maxlen   # bounded: growth toward maxlen is not a leak
+                        rows.append(row)
                 except Exception:  # noqa: BLE001 - a racing mutation must not break diagnostics
                     continue
-    rows.sort(key=lambda r: r["len"], reverse=True)
+    rows.sort(key=lambda r: r["shallow_bytes"], reverse=True)   # rank by bytes, not element count
     return rows[:top]
+
+
+def attribute_growth(containers: list, types_: list, base_bytes: dict, tbase: dict, rss_growth_kb: int | None) -> dict:
+    """Name the structure behind RSS growth by BYTES. Capped deques still filling toward maxlen are skipped. If the
+    best candidate explains < ATTRIBUTION_MIN_FRACTION of the RSS growth (or < 1 MiB), report UNATTRIBUTED."""
+    rss_growth_bytes = max(0, int(rss_growth_kb or 0)) * 1024
+    need = max(ATTRIBUTION_MIN_BYTES, ATTRIBUTION_MIN_FRACTION * rss_growth_bytes)
+    cands = [("container:" + r["name"], r["shallow_bytes"] - base_bytes.get(r["name"], r["shallow_bytes"]))
+             for r in containers if not r.get("capped_filling") and r["name"] in base_bytes]
+    cands += [("type:" + r["type"], r["shallow_bytes"] - tbase.get(r["type"], r["shallow_bytes"]))
+              for r in types_ if r["type"] in tbase]
+    cands.sort(key=lambda c: c[1], reverse=True)
+    best = cands[0] if cands else (None, 0)
+    named = best[0] if best[0] is not None and best[1] >= need else None
+    return {"structure": named or UNATTRIBUTED, "bytes_growth": int(best[1]) if named else None,
+            "best_candidate": best[0], "best_candidate_bytes_growth": int(best[1]),
+            "rss_growth_bytes": rss_growth_bytes,
+            "fraction_of_rss_growth": round(best[1] / rss_growth_bytes, 4) if named and rss_growth_bytes else None}
 
 
 def type_histogram(top: int = TOP_N) -> list[dict]:
@@ -381,15 +409,10 @@ class Tracker:
         first = self.history[0]
         base = {r["name"]: r["len"] for r in first["containers"]}
         tbase = {r["type"]: r["shallow_bytes"] for r in first["types"]}
-        growth_c = sorted(({"name": r["name"], "len_growth": r["len"] - base.get(r["name"], 0)} for r in snap["containers"]),
-                          key=lambda r: r["len_growth"], reverse=True)
-        growth_t = sorted(({"type": r["type"], "growth": r["shallow_bytes"] - tbase.get(r["type"], 0)} for r in snap["types"]),
-                          key=lambda r: r["growth"], reverse=True)
-        leak_name = None
-        if growth_c and growth_c[0]["len_growth"] > 0:
-            leak_name = "container:" + growth_c[0]["name"]
-        elif growth_t and growth_t[0]["growth"] > 0:
-            leak_name = "type:" + growth_t[0]["type"]
+        base_bytes = {r["name"]: r["shallow_bytes"] for r in first["containers"]}
+        attribution = attribute_growth(snap["containers"], snap["types"], base_bytes, tbase,
+                                       (snap["rss_kb"] or 0) - (first["rss_kb"] or 0))
+        leak_name = attribution["structure"]
         shipper_raw_kb = process_rss_kb()
         shipper_kb = self.smooth_shipper(now, shipper_raw_kb)
         doc = {"schema": "memory_structures_v1", "latest": snap, "boot_ts": self.boot_ts,
@@ -401,10 +424,14 @@ class Tracker:
                "rss_series_full": [[round(t, 1), v] for t, v in self.series],
                "rss_series": [[round(h["ts"]), h["rss_kb"]] for h in self.history], "samples": len(self.history),
                "window_sec": round(now - first["ts"], 1), "rss_growth_kb": (snap["rss_kb"] or 0) - (first["rss_kb"] or 0),
+               "leak_attribution": attribution,
                "container_growth": sorted(
                    ({"name": r["name"], "len_now": r["len"], "len_growth": r["len"] - base.get(r["name"], 0),
+                     "bytes_now": r["shallow_bytes"],
+                     "bytes_growth": r["shallow_bytes"] - base_bytes.get(r["name"], 0),
+                     "capped_filling": bool(r.get("capped_filling")),
                      "new_in_top": r["name"] not in base}
-                    for r in snap["containers"]), key=lambda r: r["len_growth"], reverse=True)[:10],
+                    for r in snap["containers"]), key=lambda r: r["bytes_growth"], reverse=True)[:10],
                "type_growth_bytes": sorted(
                    ({"type": r["type"], "growth": r["shallow_bytes"] - tbase.get(r["type"], 0)}
                     for r in snap["types"]), key=lambda r: r["growth"], reverse=True)[:10]}

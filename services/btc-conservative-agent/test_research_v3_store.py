@@ -460,3 +460,43 @@ class ResearchV3StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResearchV3StoreCapTests(unittest.TestCase):
+    def test_path_lock_map_is_bounded_and_never_evicts_a_held_or_waited_lock(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(research_v3_store, "PATH_LOCK_CACHE_MAX", 8):
+            research_v3_store._locks.clear()
+            held_path = Path(tmp) / "held"
+            held = research_v3_store._path_lock(held_path)
+            held.acquire()
+            try:
+                for i in range(50):
+                    with research_v3_store._path_lock(Path(tmp) / f"p{i}"):
+                        pass
+                self.assertLessEqual(len(research_v3_store._locks), 8)
+                # the held lock survived churn: a second lookup returns the same object, so mutual exclusion holds
+                again = research_v3_store._path_lock(held_path)
+                self.assertIs(again, held)
+                got = []
+                t = threading.Thread(target=lambda: got.append(again.acquire(blocking=False)))
+                t.start(); t.join()
+                self.assertEqual(got, [False])  # other thread is excluded; failed acquire dropped its pin
+            finally:
+                held.release()
+            self.assertEqual(held.pins, 0)
+            research_v3_store._locks.clear()
+
+    def test_segment_hash_cache_is_lru_bounded_and_eviction_only_forces_a_rehash(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(research_v3_store, "SEGMENT_HASH_CACHE_MAX", 4):
+            _segment_hash_cache.clear()
+            paths = []
+            for i in range(10):
+                p = Path(tmp) / f"s{i}.jsonl"
+                p.write_text(f'{{"i": {i}}}\n')
+                paths.append(p)
+            first = [V3EvidenceStore._cached_segment_hash(p) for p in paths]
+            self.assertLessEqual(len(_segment_hash_cache), 4)
+            again = [V3EvidenceStore._cached_segment_hash(p) for p in paths]
+            self.assertEqual(first, again)
+            self.assertEqual(first[0], V3EvidenceStore._hash_segment(paths[0]))
+            _segment_hash_cache.clear()
