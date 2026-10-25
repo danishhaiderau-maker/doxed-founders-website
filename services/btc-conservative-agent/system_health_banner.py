@@ -22,6 +22,8 @@ STALE_AFTER_SEC = 20 * 60
 MAX_REPORT_BYTES = 256 * 1024
 MAX_FAILING = 25
 _STATUSES = ("GREEN", "AMBER", "RED", "SKIP")
+_RANK = {"GREEN": 0, "SKIP": 0, "PENDING": 0, "UNKNOWN": 0, "AMBER": 1, "RED": 2}
+_COUNT_STATUSES = ("GREEN", "AMBER", "RED")
 
 
 def _parse_ts(value) -> float | None:
@@ -101,6 +103,71 @@ def with_staleness(report: dict | None, now: float | None = None) -> dict:
         }]
         if out.get("verdict") == "GREEN":
             out["verdict"] = "AMBER"
+    return out
+
+
+def _failing_row(check: dict) -> dict:
+    row = {"id": check.get("id"), "status": check.get("status"),
+           "observed": check.get("observed"), "threshold": check.get("threshold")}
+    for key in ("hint", "runbook", "last_good_at"):
+        if check.get(key) is not None:
+            row[key] = check[key]
+    return row
+
+
+def merge_fly_self_checks(report: dict, self_checks: list) -> dict:
+    """Fold Fly self-checks into the laptop report without duplicate check ids.
+
+    Laptop ``failing`` already includes ``fly.paused``. Naive append produced two
+    rows (often RED from the laptop age clock and AMBER from a reasserted Fly
+    shed clock). One row per id; worst status wins. Counts only add Fly-only ids.
+    """
+    out = dict(report)
+    out["fly_self_checks"] = list(self_checks or [])
+    failing = [dict(c) for c in (out.get("failing") or []) if isinstance(c, dict) and c.get("id")]
+    index = {str(c["id"]): i for i, c in enumerate(failing)}
+    counts = {k: int(v) for k, v in dict(out.get("counts") or {}).items()
+              if k in _COUNT_STATUSES}
+    for raw in self_checks or []:
+        if not isinstance(raw, dict) or not raw.get("id"):
+            continue
+        status = raw.get("status")
+        cid = str(raw["id"])
+        if cid in index:
+            existing = failing[index[cid]]
+            old = existing.get("status")
+            if _RANK.get(status, -1) > _RANK.get(old, -1):
+                if old in _COUNT_STATUSES:
+                    counts[old] = max(0, int(counts.get(old) or 0) - 1)
+                if status in _COUNT_STATUSES:
+                    counts[status] = int(counts.get(status) or 0) + 1
+                merged = _failing_row(raw)
+                for key in ("hint", "runbook", "last_good_at"):
+                    if merged.get(key) is None and existing.get(key) is not None:
+                        merged[key] = existing[key]
+                failing[index[cid]] = merged
+            elif _RANK.get(status, -1) == _RANK.get(old, -1):
+                # Same severity: prefer live Fly observed/threshold text.
+                merged = dict(existing)
+                for key in ("observed", "threshold"):
+                    if raw.get(key) is not None:
+                        merged[key] = raw[key]
+                failing[index[cid]] = merged
+            # else: laptop already worse — keep it, do not double-count
+            continue
+        if status in _COUNT_STATUSES:
+            counts[status] = int(counts.get(status) or 0) + 1
+        if status != "GREEN":
+            failing.append(_failing_row(raw))
+            index[cid] = len(failing) - 1
+    failing.sort(key=lambda c: -_RANK.get(c.get("status"), -1))
+    out["failing"] = failing
+    out["counts"] = counts
+    rated = [c.get("status") for c in failing if c.get("status") in ("AMBER", "RED")]
+    if rated:
+        worst = max(rated, key=lambda s: _RANK.get(s, 0))
+        if _RANK.get(worst, 0) > _RANK.get(out.get("verdict"), 0):
+            out["verdict"] = worst
     return out
 
 
