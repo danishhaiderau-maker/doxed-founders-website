@@ -50,31 +50,34 @@ PENDING_EXPOSURE_SEC = 300.0      # same bound the guardian uses for a sent-but-
 INFLIGHT_APPROVAL_SEC = 180.0     # relay placement bound (FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC): approved, not yet reported
 MIRROR_MAX_AGE_SEC = 20.0
 
-# HM G6 daily REALISED live loss caps (RK 02:25 24 Oct: ALL THREE caps (per tile, account-wide total, and the guardian's
-# live_guardian.DAILY_LOSS_CAP_USD, which is DAILY_LOSS_CAP_TOTAL_USD) come from ONE source):
-#   grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND3-20261023.md line 22 (D3), sha256 CAP_PREREG_SHA256:
-#   "Daily loss cap: $0.05 per tile and $0.10 in total (UTC day). At most 20 live entries per tile per day."
-# FROZEN: there is no env override. These values change ONLY through a NEW frozen prereg amendment with RK PASS, and the
-# pin below (CAP_PREREG_FILE / CAP_PREREG_LINE / CAP_PREREG_SHA256 / CAP_PREREG_LINE_TEXT) must be updated in the same
-# commit. test_live_tile_gate.test_loss_caps_pinned_to_frozen_amend3 parses the values out of CAP_PREREG_LINE_TEXT, pins
-# the sha and line, and when the prereg file is present it re-hashes it and re-reads line 22, so a silent edit fails CI.
-# Breach response (AMEND4 E1, sha256 AMEND4_SHA256 below, L12): the caps are an ENTRY BLOCK ONLY, never a close and never a
-# disarm. admit_entry refuses a new live entry (LIVE_SKIPPED_DAILY_CAP, AMBER; the signal stays a normal paper row) while the
-# tile's (or the account's) UTC-day realised trade loss (REAL Bitfinex fill prices; no funding, no fees: RK D3 06:26) plus the open mark-to-book loss (full-size
-# exit-side walk through the shared paper_fill book helper) is >= the cap. HM N1: a closed live trade of the day whose pnl is
-# unreadable, or a book older than 2 s, is NOT skipped: it blocks entries (AMBER). The caps never SIZE an entry. The one
-# switchable response is cap_breach_response() (== CAP_RESPONSE_ENTRY_BLOCK under AMEND4).
-CAP_PREREG_FILE = "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND3-20261023.md"
-CAP_PREREG_LINE = 22
-CAP_PREREG_SHA256 = "632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9"
-CAP_PREREG_LINE_TEXT = ("- Daily loss cap: $0.05 per tile and $0.10 in total (UTC day). "
-                        "At most 20 live entries per tile per day.")
-DAILY_LOSS_CAP_PER_TILE_USD = 0.05
-DAILY_LOSS_CAP_TOTAL_USD = 0.10
-DAILY_LOSS_CAP_SOURCE = (
-    f"{CAP_PREREG_FILE} L{CAP_PREREG_LINE} (D3: \"Daily loss cap: $0.05 per tile and $0.10 in total (UTC day)\") "
-    f"sha256 {CAP_PREREG_SHA256}; HM grokbot/health-monitor/LIVE-CHECK-RECIPE.md L94-107 (G6)"
-)
+# R20 live-loss limit (Danish 25 Oct 14:27 AEDT, relayed by RK; replaces the AMEND3 D3 caps $0.05/tile, $0.10/day and the
+# interim LIVE_TOTAL_LOSS_CAP $0.10): "$10 per day and $10 in total, across all live tiles combined". Hitting either limit
+# disarms EVERY live tile and forces flat (live_guardian DAILY_CAP_DISARM_CODES / LIVE_TOTAL_LOSS_RED_CODES, RED latched).
+# R4: ONE shared constant. Every loss limit (daily total, the guardian's rolling-24 h daily cap, the all-time total) reads
+# R20_LIVE_LOSS_LIMIT_USD through r20_loss_limit_usd(). Bots may not raise or remove it: the env LIVE_LOSS_LIMIT_USD can only
+# LOWER it (same pattern as the $0.25 tile margin cap); a missing/bad/negative/higher value yields the frozen $10.00.
+# The amount changes ONLY by a code PR carrying Danish's own words. The per-tile daily cap no longer exists as a separate
+# figure: the limit is account-wide, so DAILY_LOSS_CAP_PER_TILE_USD equals the combined limit (a tile can never exceed it).
+R20_LIVE_LOSS_LIMIT_USD = 10.00
+R20_LIVE_LOSS_LIMIT_ENV = "LIVE_LOSS_LIMIT_USD"
+
+
+def r20_loss_limit_usd(environ: Mapping[str, str] | None = None) -> float:
+    """R20 live-loss limit in USD: the frozen $10.00, or a LOWER env value (never higher; bad values fall back)."""
+    env = os.environ if environ is None else environ
+    try:
+        x = float(str(env.get(R20_LIVE_LOSS_LIMIT_ENV, "")).strip())
+    except (TypeError, ValueError):
+        return R20_LIVE_LOSS_LIMIT_USD
+    if x != x or x < 0:
+        return R20_LIVE_LOSS_LIMIT_USD
+    return min(x, R20_LIVE_LOSS_LIMIT_USD)
+
+
+DAILY_LOSS_CAP_TOTAL_USD = r20_loss_limit_usd()
+DAILY_LOSS_CAP_PER_TILE_USD = DAILY_LOSS_CAP_TOTAL_USD
+DAILY_LOSS_CAP_SOURCE = ("R20 (Danish 25 Oct 14:27 AEDT): $10 per day and $10 in total, across all live tiles combined; "
+                         "env LIVE_LOSS_LIMIT_USD may only lower it")
 VIOL_TILE_LOSS_CAP = "LIVE_TILE_DAILY_LOSS_CAP"
 VIOL_TOTAL_LOSS_CAP = "LIVE_TOTAL_DAILY_LOSS_CAP"
 

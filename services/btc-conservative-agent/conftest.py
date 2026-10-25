@@ -63,3 +63,16 @@ def _no_runtime_state_written_to_source_dir():
 from r3_legacy_xfail import (  # noqa: E402,F401
     pytest_collection_modifyitems, pytest_runtest_makereport, pytest_runtest_setup,
 )
+
+
+@pytest.fixture
+def small_loss_limit(monkeypatch):
+    """R20 (25 Oct 14:27): the live-loss limit is $10. Legacy guardian/gate LOGIC tests were written at the old small caps;
+    they run at an env-style LOWERED limit ($0.05 per tile / $0.10 total) so their fixtures still exercise each code path.
+    The real $10 values, the $9.99/$10.00 boundary and the lower-only env are pinned in test_r20_live_loss_limit.py."""
+    import live_guardian as _lg
+    import live_tile_gate as _ltg
+    monkeypatch.setattr(_ltg, "DAILY_LOSS_CAP_PER_TILE_USD", 0.05)
+    monkeypatch.setattr(_ltg, "DAILY_LOSS_CAP_TOTAL_USD", 0.10)
+    monkeypatch.setattr(_lg, "DAILY_LOSS_CAP_USD", 0.10)
+    monkeypatch.setattr(_lg, "LIVE_TOTAL_LOSS_CAP_USD", 0.10)

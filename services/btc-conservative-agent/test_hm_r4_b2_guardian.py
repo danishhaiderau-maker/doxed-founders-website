@@ -13,6 +13,9 @@ import pathlib
 import live_guardian as g
 import live_tile_gate as ltg
 
+import pytest as _pytest_r20
+pytestmark = _pytest_r20.mark.usefixtures("small_loss_limit")   # R20: legacy logic at a lowered limit (see conftest)
+
 _SRC = pathlib.Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
 NOW = 1_800_000_000.0
 MIR = {"ok": True, "positions": [], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.79}}

@@ -9,7 +9,7 @@ orphans) and its own small state, and returns violations. The bot calls ``_disar
 turns Fly's live output OFF, resets every per-tile switch, cancels managed pending entries and marks open positions exit-only,
 and then (RK ruling 24 Oct) ``_live_guardian_force_flat``, which asks the relay to pause the instance and emergency-close
 every open copy lot (fire-and-forget; never waits for flat). This module itself places or closes nothing. No fee and no
-funding term gates anything (RK D3/R7, 24 Oct). HM G6 daily loss caps ($0.05/tile, $0.10 total, UTC day; prereg AMEND3 D3) come from live_tile_gate.
+funding term gates anything (RK D3/R7, 24 Oct). R20 loss limits ($10/day and $10 total, all live tiles combined; Danish 25 Oct 14:27) come from live_tile_gate.
 """
 from __future__ import annotations
 
@@ -19,10 +19,7 @@ from typing import Any, Iterable, Mapping
 STOP_MISSING_SEC = 5.0          # HM: stop must be confirmed within 5 s of the fill
 import live_tile_gate as _ltg_caps  # noqa: E402
 
-# HM C1 (24 Oct): aligned with the G6 account-wide cap pinned in live_tile_gate (prereg AMEND3 line 22 (D3), sha256 632dcf34...
-# = live_tile_gate.CAP_PREREG_SHA256, $0.10). Was $1.00. FROZEN: changes only via a new frozen amendment (see live_tile_gate). This
-# rolling-24 h check runs on the ledger (live_tile_gate.trade_realised_pnl_usd); the Derivatives balance is a non-gating reconcile (RK 07:57); the UTC-day G6 checks
-# (per tile $0.05, total $0.10) run on the ledger in live_tile_gate.daily_loss_violations.
+# R20 (Danish 25 Oct 14:27 AEDT): rolling-24 h ledger cap = the one shared R20 limit (live_tile_gate.r20_loss_limit_usd).
 DAILY_LOSS_CAP_USD = _ltg_caps.DAILY_LOSS_CAP_TOTAL_USD
 LEDGER_GRACE_SEC = 10.0         # fill/close propagation grace before a position-count mismatch counts
 BALANCE_DRIFT_USD = 0.50        # RK 07:57: WARNING threshold only for the non-gating balance reconcile (balance-vs-D3 gap / flat drift); never a gate
@@ -35,15 +32,12 @@ LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only l
 # flatten (disarm ALL + force-flat, as every disarming violation) AND RED.
 STOP_ORDER_ID_NOT_RESIDENT = "STOP_ORDER_ID_NOT_RESIDENT"
 STOP_UNPROTECTED_RED_CODES = frozenset({"STOP_MISSING_GT_5S", "STOP_PLACEMENT_FAILED", STOP_ORDER_ID_NOT_RESIDENT})
-# R20 rule (Danish 25 Oct 06:21): a hard TOTAL (cumulative, all-time, all live tiles) live realised-loss limit. Hitting it (or
-# failing to evaluate it) disarms ALL live tiles + force-flats (RED, latched: arming is refused until FLAT_NO_STOPS read-back
-# and a human clears it). FROZEN constant: no env override, no bot/admin route reads or writes it; Danish sets the amount
-# in code review. The amount changes ONLY by a code PR that carries Danish's own words (quoted verbatim). Pending Danish it equals the D3 daily total cap (live_tile_gate.DAILY_LOSS_CAP_TOTAL_USD = $0.10).
-LIVE_TOTAL_LOSS_CAP_USD = 0.10
-# Amount source: NOT Danish's figure - AMEND3 D3 ($0.10 total per UTC day) reused via RK 06:29, pending Danish.
-# Scope (HM R3 nit): CLOSED chains' realised P&L only; an open position is NOT marked to the book here. The open leg is
-# bounded by the daily D3 path (open mark, row age <= 2 s, else entry block) and, at $0.25 margin, a -35 bp stop ~ $0.0009.
-LIVE_TOTAL_LOSS_CAP_SOURCE = "rule: R20 (Danish 25 Oct 06:21 AEDT); amount: AMEND3 D3 via RK 06:29, pending Danish"
+# R20 rule (Danish 25 Oct 06:21; amount set 25 Oct 14:27 AEDT: "$10 in total, across all live tiles combined"): a hard
+# TOTAL (cumulative, all-time, all live tiles) live realised-loss limit. Hitting it (or failing to evaluate it) disarms ALL
+# live tiles + force-flats (RED, latched). R4: the same shared constant as the daily limit; env can only LOWER it.
+# Scope (HM R3 nit): CLOSED chains' realised P&L only; the open leg is bounded by the daily path (open mark).
+LIVE_TOTAL_LOSS_CAP_USD = _ltg_caps.r20_loss_limit_usd()
+LIVE_TOTAL_LOSS_CAP_SOURCE = "rule + amount: R20 (Danish 25 Oct 14:27 AEDT, $10 total all live tiles combined)"
 VIOL_LIVE_TOTAL_LOSS_CAP = "LIVE_TOTAL_LOSS_CAP"
 VIOL_LIVE_TOTAL_LOSS_CAP_ERROR = "LIVE_TOTAL_LOSS_CAP_ERROR"
 VIOL_LIVE_TOTAL_LOSS_UNREADABLE = "LIVE_TOTAL_LOSS_UNREADABLE"

@@ -673,3 +673,4 @@ test_ledger_scan_incremental_retired.py
 test_restart_initiator.py
 test_trade_count_id_diff.py
 test_trade_tombstone_external_delete.py
+test_r20_live_loss_limit.py
