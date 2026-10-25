@@ -180,3 +180,21 @@ def test_analyzer_measures_signal_to_fill_from_the_trigger_not_signal_creation()
     fills_slow = [tpc._fill_row(_trade(xvs_policy.LANE, 1_790_921_000.0 + i * 600, lat))
                   for i, lat in enumerate((9.0, 9.4))]
     assert tpc._session_side_extra_stats(fills_slow, pre)["median_signal_to_fill_sec"] == pytest.approx(9.2)
+
+
+def test_r1_item5_maker_rest_entries_get_no_taker_target(monkeypatch):
+    monkeypatch.setattr(bot, "_xvl_lane_runtime", {})
+    base = time.time() - 3600
+    for i in range(bot.XVL_LATENCY_MIN_FILLS):
+        tid = f"mk-{i}"
+        s = base + i * 10
+        bot._xvl_latency_mark(xvs_policy.LANE, tid, "attempt_ts", s + 0.1, signal_ts=s)
+        bot._xvl_latency_mark_order(xvs_policy.LANE, {"shared_ai_call_id": tid}, "submit_ts", s + 0.5)
+        bot._xvl_latency_mark_order(xvs_policy.LANE, {"shared_ai_call_id": tid,
+                                                      "paper_fill_result": {"entry_order_model": "MAKER_REST"}},
+                                    "fill_ts", s + 300.0)
+    latency = bot.xvl_evaluator_snapshot()["lanes"][xvs_policy.LANE]["latency"]
+    assert latency["status"] == "N/A_MAKER"  # a 300 s maker rest is never judged SLOW against the 2 s taker target
+    assert latency["maker_entry_rest"]["target_s"] is None
+    assert latency["maker_entry_rest"]["n"] == bot.XVL_LATENCY_MIN_FILLS
+    assert latency["maker_entry_rest"]["p50_s"] == pytest.approx(300.0, abs=1e-3)

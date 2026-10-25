@@ -135,3 +135,18 @@ def test_c1_unsized_through_print_fills_nothing_and_is_counted():
 def test_c1_through_print_capped_at_printed_size():
     st = om.maker_rest_step("SHORT", 100.0, 3.0, 0.0, [{"ts": 1, "px": 100.5, "amt": 1.2}])
     assert st["fills"] == [(1, 100.0, 1.2)] and abs(st["remaining"] - 1.8) < 1e-12
+
+
+# ---------------------------------------------------------------- R1 item 5: maker rest = full size trade-through only
+def test_maker_rest_full_size_no_partial_at_limit_ignored_fills_at_completing_print():
+    trades = [{"ts": 1.0, "px": 100.0, "amt": -5.0},   # at the limit: never counts
+              {"ts": 2.0, "px": 99.9, "amt": -0.4},    # through, partial size: no fill yet
+              {"ts": 3.0, "px": 100.2, "amt": 3.0}]    # wrong side for a BUY limit
+    r = om.maker_rest_full_size("BUY", 100.0, 1.0, 0.0, trades)
+    assert r["filled"] is False and abs(r["through_seen"] - 0.4) < 1e-12
+    r2 = om.maker_rest_full_size("BUY", 100.0, 1.0, r["through_seen"], [{"ts": 4.0, "px": 99.95, "amt": -0.6},
+                                                                        {"ts": 5.0, "px": 99.9, "amt": -1.0}])
+    assert r2["filled"] is True and r2["fill_ts"] == 4.0
+    s = om.maker_rest_full_size("SELL", 100.0, 1.0, 0.0, [{"ts": 1.0, "px": 100.0, "amt": 9.0},
+                                                          {"ts": 2.0, "px": 100.1, "amt": 1.0}])
+    assert s["filled"] is True and s["fill_ts"] == 2.0

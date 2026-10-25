@@ -294,6 +294,41 @@ def maker_rest_step(direction: Any, limit_px: Any, remaining: float, queue_ahead
     return {"fills": fills, "remaining": round(rem, 12), "queue_ahead": q, "unsized_prints": unsized}
 
 
+MAKER_REST_FULL_SIZE_RULE = "TRADE_THROUGH_FULL_SIZE_ONLY"  # RK R1 item 5: B1/B2 maker entry rest
+
+
+def maker_rest_full_size(direction: Any, limit_px: Any, requested_qty: float, through_seen: float,
+                         trades: Iterable[Mapping[str, Any]]) -> dict:
+    """RK R1 item 5: a resting MAKER entry fills ONLY on trade-through prints, and ONLY for the FULL size.
+
+    Prints strictly through the limit (sell below a buy limit / buy above a sell limit) with a printed |amt| add to
+    ``through_seen``; at-limit prints, touches and book crosses never count (no queue_clear credit). When the
+    cumulative through volume covers ``requested_qty`` the whole order fills at the limit, stamped at the print
+    that completed it; until then nothing is booked (no partials). Unsized prints fill nothing and are counted.
+    Returns {"filled": bool, "fill_ts", "through_seen", "unsized_prints"}."""
+    d, lp = _dir(direction), _f(limit_px)
+    need = max(0.0, float(requested_qty or 0))
+    seen = max(0.0, float(through_seen or 0))
+    unsized = 0
+    if d is None or lp is None or need <= 0:
+        return {"filled": False, "fill_ts": None, "through_seen": seen, "unsized_prints": 0}
+    for tr in sorted((t for t in trades or () if _f(t.get("ts")) is not None), key=lambda t: float(t["ts"])):
+        px, ts, amt = _f(tr.get("px")), _f(tr.get("ts")), _f(tr.get("amt"))
+        if px is None:
+            continue
+        through = px < lp - 1e-9 if d == "LONG" else px > lp + 1e-9
+        if not through:
+            continue
+        size = abs(amt) if amt else 0.0
+        if size <= 0:
+            unsized += 1
+            continue
+        seen += size
+        if seen + 1e-12 >= need:
+            return {"filled": True, "fill_ts": ts, "through_seen": round(seen, 12), "unsized_prints": unsized}
+    return {"filled": False, "fill_ts": None, "through_seen": round(seen, 12), "unsized_prints": unsized}
+
+
 def vwap(fills: Iterable) -> tuple:
     q = sum(f[2] for f in fills)
     return (sum(f[1] * f[2] for f in fills) / q if q > 0 else None), q

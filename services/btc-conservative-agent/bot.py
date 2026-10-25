@@ -7690,9 +7690,11 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
                             now: float, *, force: bool = False):
     """REALISM_V2 PR2 MAKER_REST (B1 / B2 regime limits): the limit rests from signal + delay (sent) at
     order["limit_price"], which _process_family_regime_entry reprices at the LIMIT_UPDATED cadence; every reprice
-    resets the queue position (queue ahead = book size at the new price). Fills come only from trade-through or
-    queue-depleting prints at the limit (partials allowed). A TOUCH taker fallback walks the remainder from the book;
-    TTL DROP closes the entry with whatever filled (NO_FILL when nothing). Never priced from the ticker."""
+    resets the queue position (queue ahead = book size at the new price, from the real 10-level book) and the price
+    age. RK R1 item 5: the rest fills ONLY on trade-through prints and ONLY for the FULL size
+    (order_model.maker_rest_full_size); nothing is booked before that, so a TOUCH taker fallback walks the whole order
+    from the book and a TTL DROP is NO_FILL. Queue ahead, book age and price age are stamped. Never priced from the
+    ticker."""
     import order_model as _om
     import quote_trigger as _qt
     import paper_fill as _pf
@@ -7702,7 +7704,7 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
         return None
     req = float(order.get("requested_qty") or order.get("qty") or 0)
     st = order.setdefault("_entry_rest", {"cursor_ts": rest_t0, "limit_px": None, "queue_ahead": 0.0,
-                                          "fills": [], "remaining": req, "reprices": 0})
+                                          "fills": [], "remaining": req, "reprices": 0, "through_seen": 0.0})
     limit = float(order.get("limit_price") or 0)
     if limit <= 0:
         return None
@@ -7711,8 +7713,13 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
         if st["limit_px"] is not None:
             st["reprices"] += 1
         st["limit_px"] = limit
-        st["queue_ahead"] = _om.queue_ahead_at(direction, limit, _pf.book10l_at(max(float(st["cursor_ts"]), rest_t0)))
+        join_ts = max(float(st["cursor_ts"]), rest_t0)
+        book = _pf.book10l_at(join_ts)
+        st["queue_ahead"] = _om.queue_ahead_at(direction, limit, book)
         st["queue_reset_ts"] = float(st["cursor_ts"])
+        st["book_age_s"] = (round(join_ts - (float(book["s"]) + 1.0), 3)
+                            if isinstance(book, dict) and book.get("s") is not None else None)
+        st["through_seen"] = 0.0  # a reprice starts a new order: through volume at the old price no longer counts
     if order.get("regime_fallback_done"):
         # TOUCH fallback: a marketable order for the remainder, walked from the book at send + delay.
         sent = float(order.get("last_chase_ts") or now)
@@ -7724,17 +7731,18 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
         res = _om.combine_entry(walk, st["fills"], req, model=model, rest_end_ts=sent,
                                 rest_end_reason="TOUCH_TAKER_FALLBACK")
         res.update({"entry_rest_reprices": st["reprices"], "signal_ts": signal_ts, "delay_s": delay_s,
-                    "delay_source": delay_source, "side": direction, **_rest_unsized_stamp(st.get("unsized_prints"))})
+                    "delay_source": delay_source, "side": direction, **_rest_unsized_stamp(st.get("unsized_prints")),
+                    **_rest_queue_stamp(st, None)})
         order["paper_fill_result"] = res
         return res
-    if upto > float(st["cursor_ts"]):
-        step = _om.maker_rest_step(direction, limit, st["remaining"], st["queue_ahead"],
-                                   _qt.trades_between(float(st["cursor_ts"]), upto),
-                                   model.get("entry_rest_fill_basis") or _om.REST_FILL_DEFAULT)
-        st["fills"] = list(st["fills"]) + [list(f) for f in step["fills"]]
+    if upto > float(st["cursor_ts"]) and st["remaining"] > 1e-12:
+        step = _om.maker_rest_full_size(direction, limit, req, st.get("through_seen") or 0.0,
+                                        _qt.trades_between(float(st["cursor_ts"]), upto))
         st["unsized_prints"] = int(st.get("unsized_prints") or 0) + int(step.get("unsized_prints") or 0)
-        st["remaining"] = step["remaining"]
-        st["queue_ahead"] = step["queue_ahead"]
+        st["through_seen"] = step["through_seen"]
+        if step["filled"]:
+            st["fills"] = [[float(step["fill_ts"]), limit, req]]
+            st["remaining"] = 0.0
         st["cursor_ts"] = upto
     if st["remaining"] > 1e-12 and not force:
         return None
@@ -7755,9 +7763,22 @@ def _paper_entry_rest_close(order: dict, direction: str, signal_ts: float, delay
     res.update({"entry_rest_reprices": st.get("reprices"), "entry_rest_limit_px": st.get("limit_px"),
                 "signal_ts": signal_ts, "delay_s": delay_s, "delay_source": delay_source, "side": direction,
                 "price_source": "MAKER_REST_LIMIT" if res.get("filled_qty") else None,
-                **_rest_unsized_stamp(st.get("unsized_prints"))})
+                **_rest_unsized_stamp(st.get("unsized_prints")),
+                **_rest_queue_stamp(st, res.get("fill_ts") if res.get("filled_qty") else None)})
     order["paper_fill_result"] = res
     return res
+
+
+def _rest_queue_stamp(st: dict, fill_ts) -> dict:
+    """RK R1 item 5: queue ahead at the current limit, book age at join, price age (limit set -> fill)."""
+    import order_model as _om
+    reset = st.get("queue_reset_ts")
+    return {"entry_rest_fill_rule": _om.MAKER_REST_FULL_SIZE_RULE,
+            "entry_rest_queue_ahead": st.get("queue_ahead"),
+            "entry_rest_book_age_s": st.get("book_age_s"),
+            "entry_rest_through_vol": st.get("through_seen"),
+            "entry_rest_price_age_s": (round(float(fill_ts) - float(reset), 3)
+                                       if fill_ts is not None and reset is not None else None)}
 
 
 def _rest_unsized_stamp(n) -> dict:
@@ -34056,9 +34077,11 @@ _xvl_status = {
 }
 _xvl_lane_runtime = {}
 
-# Signal->submit->fill telemetry for IMMEDIATE (taker-at-signal) cross-venue
-# tiles. "signal" is the evaluator's evaluated_ts (the shared_ai_call_ts of the
-# trigger), the clock the tiles' pre-registered median signal->fill gate uses.
+# Signal->submit->fill telemetry for cross-venue tiles. "signal" is the evaluator's
+# evaluated_ts (the shared_ai_call_ts of the trigger). The pre-registered median
+# signal->fill target applies ONLY to taker-at-signal entries; a MAKER_REST entry
+# (B1/B2 regime limits) rests on the book by design, so its signal->fill is published
+# separately as maker_entry_rest with status N/A_MAKER and no target (R1 item 5).
 XVL_LATENCY_SCHEMA = "xvl_signal_latency_v1"
 XVL_LATENCY_WINDOW = 200
 XVL_LATENCY_MIN_FILLS = 10
@@ -34090,7 +34113,8 @@ def _xvl_latency_target_sec(lane: str) -> float:
         return XVL_LATENCY_DEFAULT_TARGET_SEC
 
 
-def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, signal_ts: float = None) -> None:
+def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, signal_ts: float = None,
+                      entry_kind: str = None) -> None:
     """Stamp one stage for one trigger; never raises into the order path."""
     lane = str(lane or "").upper()
     key = str(trigger_id or "")
@@ -34109,6 +34133,8 @@ def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, si
                     open_rows.pop(next(iter(open_rows)))
                 row = open_rows[key] = {"trigger_id": key, "signal_ts": float(signal_ts)}
             row.setdefault(stage, stamp)
+            if entry_kind:
+                row["entry_kind"] = entry_kind
             if stage == "submit_ts" and not row.get("_sampled"):
                 row["_sampled"] = True
                 lane_state["latency_samples"].append(row)
@@ -34118,11 +34144,24 @@ def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, si
         logger.warning(f"[XVL] latency mark failed lane={lane} stage={stage}: {exc} [PIPELINE ENFORCEMENT]")
 
 
+XVL_ENTRY_MAKER = "MAKER_REST"
+XVL_ENTRY_TAKER = "TAKER"
+
+
+def _xvl_entry_kind(record: dict) -> str:
+    """MAKER_REST when the paper entry rested on the book (order_model MAKER_REST), else TAKER."""
+    for src in (record.get("paper_fill_result"), record.get("_entry_order_model")):
+        if isinstance(src, dict) and src.get("entry_order_model") == XVL_ENTRY_MAKER:
+            return XVL_ENTRY_MAKER
+    return XVL_ENTRY_TAKER
+
+
 def _xvl_latency_mark_order(lane, record: dict, stage: str, ts=None) -> None:
     if not isinstance(record, dict):
         return
     _xvl_latency_mark(lane or record.get("research_lane"), record.get("shared_ai_call_id"), stage,
-                      _buf_float(ts, 0.0) or None)
+                      _buf_float(ts, 0.0) or None,
+                      entry_kind=_xvl_entry_kind(record) if stage == "fill_ts" else None)
 
 
 def _xvl_quantile(values: list, q: float):
@@ -34132,7 +34171,7 @@ def _xvl_quantile(values: list, q: float):
     return round(ordered[min(len(ordered) - 1, int(q * len(ordered)))], 3)
 
 
-def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
+def _xvl_stage_stats(samples: list) -> dict:
     stages = {}
     for name, start, end in XVL_LATENCY_STAGES:
         deltas = [
@@ -34144,24 +34183,40 @@ def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
             "p50_s": round(statistics.median(deltas), 3) if deltas else None,
             "p90_s": _xvl_quantile(deltas, 0.9),
         }
+    return stages
+
+
+def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
+    """Taker entries: stages + status against the taker target. Maker-rest entries: their own block, N/A_MAKER."""
+    maker = [r for r in samples if r.get("entry_kind") == XVL_ENTRY_MAKER]
+    taker = [r for r in samples if r.get("entry_kind") != XVL_ENTRY_MAKER]
+    stages = _xvl_stage_stats(taker)
     target = _xvl_latency_target_sec(lane)
     fill = stages["signal_to_fill"]
-    if fill["n"] < XVL_LATENCY_MIN_FILLS:
+    if maker and not taker:
+        status = "N/A_MAKER"
+    elif fill["n"] < XVL_LATENCY_MIN_FILLS:
         status = "INSUFFICIENT_FILLS"
     elif fill["p50_s"] > target:
         status = "SLOW"
     else:
         status = "OK"
+    rest = _xvl_stage_stats(maker)["signal_to_fill"]
     last = samples[-1] if samples else {}
     return {
         "schema": XVL_LATENCY_SCHEMA,
         "status": status,
+        "stage": "taker_entry_signal_to_fill",
         "target_median_signal_to_fill_s": target,
+        "target_applies_to": "TAKER entries only",
         "min_fills": XVL_LATENCY_MIN_FILLS,
         "window": XVL_LATENCY_WINDOW,
         "signal_clock": "TRIGGER_EVALUATED_TS",
         "stages": stages,
-        "last": {k: last.get(k) for k in ("trigger_id", "signal_ts", "attempt_ts", "evidence_ts", "submit_ts", "fill_ts")},
+        "maker_entry_rest": {"status": "N/A_MAKER", "stage": "maker_entry_signal_to_fill_rest",
+                             "target_s": None, **rest},
+        "last": {k: last.get(k) for k in ("trigger_id", "signal_ts", "attempt_ts", "evidence_ts", "submit_ts",
+                                          "fill_ts", "entry_kind")},
     }
 
 
@@ -34919,7 +34974,8 @@ def xvl_evaluator_snapshot() -> dict:
                    "shadow_file": getattr(_XVL_EVALUATORS.get(lane), "SHADOW_FILE", None),
                    "paper": runtime.get(lane, {}),
                    "latency": {**_xvl_latency_snapshot(lane, latency_samples.get(lane, [])),
-                               "signal_to_fill_trades_ms": _signal_to_fill_trades_ms().get(lane)}}
+                               "signal_to_fill_trades_ms": _signal_to_fill_trades_ms().get(lane),
+                               "exit_trigger_to_fill_trades": _exit_trigger_to_fill_trades().get(lane)}}
             for lane in lanes
         },
         **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
@@ -34953,6 +35009,27 @@ def _signal_to_fill_trades_ms(hours: float = 24.0) -> dict:
     except Exception as exc:  # noqa: BLE001 - observation only
         out = {"error": type(exc).__name__}
     _S2F_TRADES_CACHE["v"] = (now, out)
+    return out
+
+
+_E2F_TRADES_CACHE: dict = {}
+
+
+def _exit_trigger_to_fill_trades(hours: float = 24.0) -> dict:
+    """R1 item 5: per lane EXIT leg p50 (timing.exit_trigger_to_fill_sec) from persisted closed rows, cached 30 s."""
+    now = time.time()
+    hit = _E2F_TRADES_CACHE.get("v")
+    if hit and 0.0 <= now - hit[0] < 30.0:
+        return hit[1]
+    out: dict = {}
+    try:
+        import data_gaps as _dg
+        scope = {"lanes": list(ACTIVE_TILE_ORDER), "epoch": _current_epoch_id_for_display(),
+                 "since": now - hours * 3600, "until": None, "be_band_bp": 0.0, "include_forced": True}
+        out = _dg.exit_trigger_to_fill_by_lane(_monitor_tiles_rows(scope, ("closed",)), since=now - hours * 3600)
+    except Exception as exc:  # noqa: BLE001 - observation only
+        out = {"error": type(exc).__name__}
+    _E2F_TRADES_CACHE["v"] = (now, out)
     return out
 
 
@@ -41487,9 +41564,11 @@ DASHBOARD_JS = """(function () {
           const xvlSec = (v) => (v === null || v === undefined) ? '—' : (Number(v).toFixed(2) + ' s');
           const xvlLatColor = xvlLat.status === 'OK' ? '#3fb950' : (xvlLat.status === 'SLOW' ? '#f85149' : '#8b949e');
           const xvlLatency = xvlLane && xvlLat.schema
-            ? ('<div style="margin-top:4px;"><strong style="color:' + xvlLatColor + ';">Signal→fill latency ' + (xvlLat.status || 'UNKNOWN') + ':</strong> '
-              + 'median ' + xvlSec((xvlStages.signal_to_fill || {}).p50_s) + ' (p90 ' + xvlSec((xvlStages.signal_to_fill || {}).p90_s) + ', n=' + Number((xvlStages.signal_to_fill || {}).n || 0) + ')'
-              + ' · target ≤' + xvlSec(xvlLat.target_median_signal_to_fill_s)
+            ? ('<div style="margin-top:4px;"><strong style="color:' + xvlLatColor + ';">Latency ' + (xvlLat.status || 'UNKNOWN') + ':</strong> '
+              + 'taker entry median ' + xvlSec((xvlStages.signal_to_fill || {}).p50_s) + ' (p90 ' + xvlSec((xvlStages.signal_to_fill || {}).p90_s) + ', n=' + Number((xvlStages.signal_to_fill || {}).n || 0) + ')'
+              + ' · taker target ≤' + xvlSec(xvlLat.target_median_signal_to_fill_s)
+              + ' · maker entry rest median ' + xvlSec((xvlLat.maker_entry_rest || {}).p50_s) + ' (n=' + Number((xvlLat.maker_entry_rest || {}).n || 0) + ', no target)'
+              + ' · exit trigger→fill median ' + xvlSec((xvlLat.exit_trigger_to_fill_trades || {}).p50_s)
               + ' · signal→submit ' + xvlSec((xvlStages.signal_to_submit || {}).p50_s)
               + ' · evidence ' + xvlSec((xvlStages.attempt_to_evidence || {}).p50_s)
               + ' · submit→fill ' + xvlSec((xvlStages.submit_to_fill || {}).p50_s) + '</div>')
@@ -48967,8 +49046,10 @@ def _monitor_summary_payload(now: float) -> dict:
                 "on": row.get("on"),
                 "closes": row.get("closes"),
                 "net_usd": row.get("net_usd"),
-                "latency_p50_s": (row.get("latency") or {}).get("signal_to_fill_p50_s"),
-                "latency_n": (row.get("latency") or {}).get("n"),
+                "taker_entry_signal_to_fill_p50_s": (row.get("latency") or {}).get("taker_entry_signal_to_fill_p50_s"),
+                "taker_entry_n": (row.get("latency") or {}).get("taker_entry_n"),
+                "maker_entry_rest_p50_s": (row.get("latency") or {}).get("maker_entry_rest_p50_s"),
+                "exit_trigger_to_fill_p50_s": (row.get("latency") or {}).get("exit_trigger_to_fill_p50_s"),
             }
             for row in lanes.get("lanes") or []
         ],
