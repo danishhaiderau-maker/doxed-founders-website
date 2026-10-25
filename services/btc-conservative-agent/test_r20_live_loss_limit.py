@@ -125,3 +125,40 @@ def test_r20_production_loads_ten_with_no_fixture_and_no_env():
     out = subprocess.run([sys.executable, "-c", code], cwd=HERE, env=env, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-500:]
     assert out.stdout.split() == ["10.0"] * 3
+
+
+def _r20_book(now, bid, size=1.0):
+    return {"s": now - 1.5, "b": [[bid, size]], "a": [[bid + 10.0, size]]}
+
+
+def _r20_open_long(entry, amount=0.001):
+    # LONG exit walks bids; mark loss = (entry - bid_vwap) * amount (no funding, no fees).
+    return {"symbol": "tBTCF0:USTF0", "amount": amount, "base_price": entry,
+            "liq_price": 50_000.0, "liq_read_at": NOW - 1}
+
+
+def test_r20_open_mark_to_book_999_allowed_1000_trips():
+    """Test-only R20 pin: open position marked to the book — $9.99 under, $10.00 trips TOTAL+tile caps."""
+    bid = 100_000.0
+    amt = 0.001
+    book = _r20_book(NOW, bid)
+    under_entry = bid + 9.99 / amt   # mark loss $9.99
+    at_entry = bid + 10.00 / amt     # mark loss $10.00
+    under_m = {"ok": True, "read_age_s": 1.0, "fetched_at_ts": NOW,
+               "positions": [_r20_open_long(under_entry, amt)], "open_orders": []}
+    at_m = {"ok": True, "read_age_s": 1.0, "fetched_at_ts": NOW,
+            "positions": [_r20_open_long(at_entry, amt)], "open_orders": []}
+    loss_u, walk_u = ltg.open_mark_to_book_loss(under_m["positions"][0], book, NOW)
+    loss_a, walk_a = ltg.open_mark_to_book_loss(at_m["positions"][0], book, NOW)
+    assert walk_u["ok"] and walk_a["ok"]
+    assert abs(loss_u - 9.99) < 1e-9 and abs(loss_a - 10.00) < 1e-9
+    vu, iu = ltg.d3_cap_violations([], under_m, book, NOW)
+    va, ia = ltg.d3_cap_violations([], at_m, book, NOW)
+    assert iu["open_mark_loss"] == 9.99 and ia["open_mark_loss"] == 10.00
+    assert ltg.VIOL_TOTAL_LOSS_CAP not in _codes(vu) and ltg.VIOL_TILE_LOSS_CAP not in _codes(vu)
+    assert {ltg.VIOL_TOTAL_LOSS_CAP, ltg.VIOL_TILE_LOSS_CAP} <= _codes(va)
+    # admit_entry path (same shared open-mark helper)
+    bu, _ = ltg.daily_cap_entry_block([], under_m, book, NOW, "gs1")
+    ba, _ = ltg.daily_cap_entry_block([], at_m, book, NOW, "gs1")
+    assert ltg.VIOL_TOTAL_LOSS_CAP not in _codes(bu)
+    assert ltg.VIOL_TOTAL_LOSS_CAP in _codes(ba) and ltg.VIOL_TILE_LOSS_CAP in _codes(ba)
