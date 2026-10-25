@@ -53,12 +53,28 @@ def test_health_is_per_baseline_not_summed():
     assert health["reason_code"] == "BASELINE_REPLAY_ZERO_FILLS"
 
 
-def test_input_blockers_item_degrades_the_level(tmp_path):
-    (tmp_path / ib.ENTRY_BASELINE_REPLAY_REPORT).write_text(json.dumps(_report(a=_summary(3, 3))))
+def _book(**summaries):
+    return {"schema": "entry_baseline_book_replay_v1", "summaries": summaries, "non_book_reason_counts": {}}
+
+
+def _bs(opps, full=0, partial=0, no=0, non_book=0):
+    return {"opportunities": opps, "full_fills": full, "partial_fills": partial, "no_fills": no, "non_book": non_book}
+
+
+def test_input_blockers_item_reads_the_book_replay_layout(tmp_path):
+    # RK R1: input_blockers reads entry_baseline_book_replay_v1 only (no legacy summaries/health shape, R22).
+    path = tmp_path / ib.ENTRY_BASELINE_REPLAY_REPORT
+    path.write_text(json.dumps(_book(a=_bs(3, non_book=3))))
     item = ib.entry_baseline_replay_item(tmp_path)
-    assert item["status"] == "DEGRADED" and item["reason_code"] == "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"
-    (tmp_path / ib.ENTRY_BASELINE_REPLAY_REPORT).write_text(json.dumps(_report(a=_summary(3, 1, full=2))))
+    assert (item["status"], item["reason_code"]) == ("DEGRADED", "NO_BOOK_PRICED_RESULTS")
+    path.write_text(json.dumps(_book(a=_bs(3, no=3), b=_bs(2, full=1, no=1))))
+    item = ib.entry_baseline_replay_item(tmp_path)
+    assert (item["status"], item["reason_code"]) == ("DEGRADED", "BASELINE_ZERO_FILLS")
+    assert item["evidence"]["degraded_baselines"] == ["a"]
+    path.write_text(json.dumps(_book(a=_bs(3, full=2, no=1, non_book=0))))
     assert ib.entry_baseline_replay_item(tmp_path)["status"] == "OK"
+    path.write_text(json.dumps(_report(a=_summary(3, 1, full=2))))  # legacy shape is refused, never read
+    assert ib.entry_baseline_replay_item(tmp_path)["reason_code"] == "BASELINE_REPLAY_SCHEMA_INVALID"
     missing = ib.entry_baseline_replay_item(tmp_path / "missing")  # HM #847 N2
     assert (missing["status"], missing["reason_code"]) == ("DEGRADED", "REPORT_MISSING")
 

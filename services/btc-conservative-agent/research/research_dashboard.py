@@ -5240,7 +5240,7 @@ def api_research_design():
         }
         row["replay_summary"] = replay_summaries.get(definition["baseline_id"]) or {
             "opportunities": None, "full_fills": None, "partial_fills": None,
-            "no_fills": None, "unknown": None,
+            "no_fills": None, "non_book": None,
         }
         baselines.append(row)
     available = (
@@ -5249,19 +5249,11 @@ def api_research_design():
     )
     shadow, shadow_source = _declared_atomic_generation_report("conservative_shadow_terminal_report.json")
     shadow_freshness = _generation_freshness_meta(shadow_source.get("manifest") or {})
-    if isinstance(baseline_replay, dict) and isinstance(baseline_replay.get("episode_receipts"), list):
-        # Per-episode receipts are ~50 KB each (150 MB per generation); the page
-        # renders only the summaries. The full receipts stay in the report file.
-        receipts = baseline_replay["episode_receipts"]
-        baseline_replay = {k: v for k, v in baseline_replay.items() if k != "episode_receipts"}
-        baseline_replay["episode_receipt_count"] = len(receipts)
-        baseline_replay["episode_receipts_omitted"] = True
-        baseline_replay["episode_receipts_url"] = "/api/report/entry_baseline_replay_report.json"
-    elif isinstance(baseline_replay, dict) and isinstance(baseline_replay.get("episode_receipts_sidecar"), dict):
-        binding = baseline_replay.pop("episode_receipts_sidecar")
-        baseline_replay["episode_receipt_count"] = binding.get("count")
-        baseline_replay["episode_receipts_omitted"] = True
-        baseline_replay["episode_receipts_url"] = "/api/report/entry_baseline_replay_report.json"
+    if isinstance(baseline_replay, dict):
+        # Book-walk layout: per-row results/non-book lists stay in the report file; the page renders summaries.
+        baseline_replay = {k: v for k, v in baseline_replay.items()
+                           if k not in ("results", "non_book_rows", "other_epoch_rejected")}
+        baseline_replay["rows_url"] = "/api/report/entry_baseline_replay_report.json"
     return jsonify({
         "shadow_tiers": _shadow_tier_projection(shadow, shadow_freshness.get("current") is True, shadow_source.get("manifest")),
         "schema": "research_design_dashboard_v1",
@@ -5438,11 +5430,6 @@ def api_report(filename):
     if path is None:
         abort(404)
     try:
-        if safe == "entry_baseline_replay_report.json":
-            # Receipts live in a verified gzip sidecar; serve the full report shape.
-            from research.entry_baseline_replay import load_replay_report
-
-            return jsonify(load_replay_report(Path(path)))
         with open(path, encoding="utf-8") as f:
             return jsonify(json.load(f))
     except Exception:
@@ -9298,7 +9285,7 @@ async function loadResearchDesign() {
       `<td>${escape((row.required_evidence || []).join(', '))}</td>` +
       `<td>RESEARCH ONLY · relay ${row.relay_eligible ? 'eligible' : 'disabled'} · places order ${row.places_order ? 'yes' : 'no'}</td>` +
       `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}<br><small>` +
-      `N ${row.replay_summary?.opportunities ?? 'UNKNOWN'} · full ${row.replay_summary?.full_fills ?? 'UNKNOWN'} · partial ${row.replay_summary?.partial_fills ?? 'UNKNOWN'} · no-fill ${row.replay_summary?.no_fills ?? 'UNKNOWN'} · UNKNOWN ${row.replay_summary?.unknown ?? 'UNKNOWN'}</small></td></tr>`
+      `N ${row.replay_summary?.opportunities ?? 'UNKNOWN'} · full ${row.replay_summary?.full_fills ?? 'UNKNOWN'} · partial ${row.replay_summary?.partial_fills ?? 'UNKNOWN'} · no-fill ${row.replay_summary?.no_fills ?? 'UNKNOWN'} · not book-priced ${row.replay_summary?.non_book ?? 'UNKNOWN'}</small></td></tr>`
     ).join('') || '<tr><td colspan="6">No signed baseline definitions are available; baseline outcomes remain UNKNOWN.</td></tr>';
     coverageBody.innerHTML = (coverage.dimensions || []).map(row =>
       `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 'UNKNOWN'}</td><td>${row.unknown_rows ?? 'UNKNOWN'}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`

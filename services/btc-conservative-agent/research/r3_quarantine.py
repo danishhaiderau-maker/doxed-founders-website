@@ -71,8 +71,6 @@ QUARANTINE: dict[str, dict[str, Any]] = {
         "producer": "conservative_limit_fill.evaluate_limit_fill callers (see INVENTORY['LIMIT_FILL_1S'])",
         "price_source": "market_microstructure_1s bid/ask (evaluate_limit_fill / evaluate_conditional_limit_fill)",
         "files": (
-            "entry_baseline_replay_report.json",
-            "entry_baseline_replay_episode_receipts.jsonl.gz",
             "conservative-results.jsonl.gz",
             "conservative_fill_descriptive_report.json",
         ),

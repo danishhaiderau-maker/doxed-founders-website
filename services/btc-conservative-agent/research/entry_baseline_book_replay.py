@@ -52,7 +52,8 @@ def _row_epoch(row: Mapping[str, Any]) -> str:
 def _ids(row: Mapping[str, Any]) -> dict[str, Any]:
     return {"episode_id": row.get("episode_id"),
             "opportunity_id": row.get("opportunity_id") or row.get("record_id"),
-            "trade_id": row.get("trade_id") or row.get("linked_trade_id")}
+            "trade_id": row.get("trade_id") or row.get("linked_trade_id"),
+            "signal_ts": row.get("signal_ts")}
 
 
 def _intervals(schedule: Any) -> list[dict[str, Any]]:
@@ -180,9 +181,19 @@ def build_entry_baseline_book_replay(
         for reason in item["reasons"]:
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
     summaries: dict[str, dict[str, int]] = {}
+
+    def bucket(baseline_id):
+        return summaries.setdefault(str(baseline_id), {
+            "opportunities": 0, "full_fills": 0, "partial_fills": 0, "no_fills": 0, "non_book": 0})
     for item in results:
-        bucket = summaries.setdefault(item["baseline_id"], {k: 0 for k in sorted(OUTCOMES)})
-        bucket[item["outcome_state"]] += 1
+        b = bucket(item["baseline_id"])
+        b["opportunities"] += 1
+        b[{"FULL_FILL": "full_fills", "PARTIAL_FILL": "partial_fills", "NO_FILL": "no_fills"}[item["outcome_state"]]] += 1
+    for item in non_book:
+        if item.get("baseline_id") is not None:
+            b = bucket(item["baseline_id"])
+            b["opportunities"] += 1
+            b["non_book"] += 1
     return {
         "schema": SCHEMA, "status": "OK" if results else "NO_BOOK_PRICED_RESULTS",
         "epoch_id": epoch, "price_source": PRICE_SOURCE, "helper": "book_limit_entry",
@@ -191,6 +202,34 @@ def build_entry_baseline_book_replay(
         "opportunities_read": len(rows), "current_epoch_opportunities": len(current),
         "same_opportunity_count": len({(r["episode_id"], r["opportunity_id"]) for r in results}),
         "other_epoch_rejected": rejected_epoch, "other_epoch_rejected_count": len(rejected_epoch),
-        "results": results, "summaries": summaries,
+        "results": results, "summaries": dict(sorted(summaries.items())),
         "non_book_rows": non_book, "non_book_reason_counts": dict(sorted(reason_counts.items())),
     }
+
+
+def book_replay_health(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Health of an ``entry_baseline_book_replay_v1`` report (the only layout; no legacy shape is read).
+
+    OK only when the report is this schema, every baseline was book-priced at least once and has at least one
+    fill.  Non-book rows are disclosed by reason, never counted as fills or as NO_FILL.
+    """
+    if not isinstance(report, Mapping) or report.get("schema") != SCHEMA:
+        return {"status": "DEGRADED", "reason_code": "BASELINE_REPLAY_SCHEMA_INVALID", "fills": 0,
+                "book_priced": 0, "non_book": 0, "degraded_baselines": [], "non_book_reason_counts": {}}
+    summaries = report.get("summaries") if isinstance(report.get("summaries"), Mapping) else {}
+    fills = sum(int(v.get("full_fills", 0)) + int(v.get("partial_fills", 0)) for v in summaries.values())
+    book_priced = sum(int(v.get("opportunities", 0)) - int(v.get("non_book", 0)) for v in summaries.values())
+    non_book = sum(int(v.get("non_book", 0)) for v in summaries.values())
+    degraded = sorted(k for k, v in summaries.items()
+                      if int(v.get("full_fills", 0)) + int(v.get("partial_fills", 0)) == 0)
+    reason = None
+    if not summaries:
+        reason = "NO_BASELINES_EVALUATED"
+    elif book_priced == 0:
+        reason = "NO_BOOK_PRICED_RESULTS"
+    elif degraded:
+        reason = "BASELINE_ZERO_FILLS"
+    return {"status": "OK" if reason is None else "DEGRADED", "reason_code": reason, "fills": fills,
+            "book_priced": book_priced, "non_book": non_book, "degraded_baselines": degraded,
+            "non_book_reason_counts": dict(report.get("non_book_reason_counts") or {}),
+            "other_epoch_rejected_count": report.get("other_epoch_rejected_count", 0)}

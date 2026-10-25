@@ -75,8 +75,6 @@ def test_readers_refuse_retired_files():
 import importlib
 
 LIMIT_FILES = (
-    "entry_baseline_replay_report.json",
-    "entry_baseline_replay_episode_receipts.jsonl.gz",
     "conservative-results.jsonl.gz",
     "conservative_fill_descriptive_report.json",
 )
@@ -132,13 +130,13 @@ def test_limit_fill_1s_readers_refuse(tmp_path):
     from research import input_blockers, research_dashboard
     for f in LIMIT_FILES:
         assert r3_quarantine.quarantined_file(f"/x/{f}")
+    # RK R1: the entry baseline replay is rebuilt on book_limit_entry, so it is no longer a LIMIT_FILL_1S
+    # output; a stale (non book-replay) report is refused by schema instead of being read.
+    assert not r3_quarantine.quarantined_file("/x/entry_baseline_replay_report.json")
     (tmp_path / "entry_baseline_replay_report.json").write_text('{"schema":"stale"}')
-    assert analyzer._load_json_report(str(tmp_path / "entry_baseline_replay_report.json")) == {}
     item = input_blockers.entry_baseline_replay_item(tmp_path)
-    assert item["status"] == input_blockers.RETIRED and item["reason_code"] == input_blockers.SOURCE_RETIRED_R17
+    assert item["status"] == "DEGRADED" and item["reason_code"] == "BASELINE_REPLAY_SCHEMA_INVALID"
     assert research_dashboard._pick_best_payload("conservative_fill_descriptive_report.json", {"d": 1}) == {"d": 1}
-    payload, _meta = research_dashboard._declared_atomic_generation_report("entry_baseline_replay_report.json")
-    assert payload is None
 
 
 def _row_pricer_callers() -> set[str]:

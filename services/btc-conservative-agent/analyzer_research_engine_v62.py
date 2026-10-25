@@ -22437,9 +22437,6 @@ def write_report_manifest(
             "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"
         ),
     }
-    if any(row.get("file") == ENTRY_BASELINE_REPLAY_REPORT_FILE and row.get("episode_receipts_sidecar")
-           for row in reports):
-        manifest["text_artifacts"].append(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
     manifest["generation_id"] = hashlib.sha256(
         json.dumps(
             {

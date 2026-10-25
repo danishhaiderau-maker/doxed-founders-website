@@ -132,7 +132,8 @@ def test_book_replay_calls_book_limit_entry_with_measured_delay(monkeypatch):
     assert seen["delay_s"] == 0.4 and seen["qty"] == 0.01 and seen["delay_source"] == "measured_latency_sec"
     (res,) = rep["results"]
     assert res["outcome_state"] == "FULL_FILL" and res["price_age_ms"] == 250 and res["epoch_id"] == "ep1"
-    assert rep["summaries"]["MARKET_ENTRY_AT_SIGNAL"]["FULL_FILL"] == 1
+    assert rep["summaries"]["MARKET_ENTRY_AT_SIGNAL"] == {
+        "opportunities": 1, "full_fills": 1, "partial_fills": 0, "no_fills": 0, "non_book": 0}
 
 
 def test_book_replay_requires_epoch():
@@ -144,3 +145,32 @@ def test_book_replay_requires_epoch():
 def test_evidence_coverage_interim_error_names_retired_source():
     src = open("analyzer_research_engine_v62.py", encoding="utf-8").read()
     assert "CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17" in src
+
+
+def test_book_replay_health_is_native_to_the_new_layout():
+    from research.entry_baseline_book_replay import book_replay_health
+    rep = {"schema": "entry_baseline_book_replay_v1", "non_book_reason_counts": {"NO_BOOK": 1}, "summaries": {
+        "A": {"opportunities": 2, "full_fills": 1, "partial_fills": 0, "no_fills": 0, "non_book": 1}}}
+    h = book_replay_health(rep)
+    assert (h["status"], h["fills"], h["book_priced"], h["non_book"]) == ("OK", 1, 1, 1)
+    rep["summaries"]["B"] = {"opportunities": 1, "full_fills": 0, "partial_fills": 0, "no_fills": 1, "non_book": 0}
+    assert book_replay_health(rep)["degraded_baselines"] == ["B"]
+    assert book_replay_health({"summaries": {}})["reason_code"] == "BASELINE_REPLAY_SCHEMA_INVALID"
+
+
+def test_dashboard_research_design_ships_book_replay_summaries_not_rows(monkeypatch):
+    from research import research_dashboard as dashboard
+    monkeypatch.setattr(dashboard, "_API_RESPONSE_CACHE", {})
+    rows = [{"pad": "x" * 1000} for _ in range(50)]
+    def report(name):
+        value = ({"schema": "entry_baseline_book_replay_v1", "same_opportunity_count": 50, "results": rows,
+                  "non_book_rows": rows, "summaries": {"A": {"opportunities": 100, "full_fills": 50,
+                  "partial_fills": 0, "no_fills": 0, "non_book": 50}}}
+                 if name == "entry_baseline_replay_report.json" else {})
+        return value, {"manifest": {"generation_id": "t", "generated_at": "2026-10-03T00:00:00+00:00"}}
+    monkeypatch.setattr(dashboard, "_declared_atomic_generation_report", report)
+    monkeypatch.setattr(dashboard, "_generation_freshness_meta", lambda *_: {"current": True})
+    replay = dashboard.app.test_client().get("/api/research-design").get_json()["entry_baseline_replay"]
+    assert "results" not in replay and "non_book_rows" not in replay and "episode_receipts" not in replay
+    assert replay["summaries"]["A"]["non_book"] == 50
+    assert replay["rows_url"] == "/api/report/entry_baseline_replay_report.json"
