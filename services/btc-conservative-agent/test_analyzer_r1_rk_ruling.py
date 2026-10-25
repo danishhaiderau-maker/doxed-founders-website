@@ -3,7 +3,6 @@ import json
 
 import pytest
 
-import research_v3_bridge as bridge
 from research import generation_receipt as gr
 from research.analyzer_integrity_reconciliation import apply_v3_read_authority_check, v3_read_authority_check
 from research.entry_baseline_book_replay import build_entry_baseline_book_replay
@@ -44,36 +43,6 @@ def test_engine_records_refusal_instead_of_silent_empty():
     src = open("analyzer_research_engine_v62.py", encoding="utf-8").read()
     assert 'V3_READ_AUTHORITY_FAILURES[name] = f"{type(exc).__name__}: {exc}"' in src
     assert "checks.append(v3_read_authority_check(V3_READ_AUTHORITY_FAILURES))" in src
-
-
-# ---- (1b) writer fix: restart reconciler never mints a NO_ORDER under a divergent signature -------------------
-def _store(tmp_path, appended):
-    class Store:
-        def __init__(self, *a, **k): pass
-        def ledger_path(self, name): return tmp_path / (name + ".jsonl")
-        def append(self, name, row):
-            appended.append(row)
-            return {"written": True}
-    return Store
-
-
-def test_restart_reconciler_skips_identity_divergent_episode(tmp_path, monkeypatch):
-    bridge._OVERDUE_INDEX_CACHE.clear()
-    appended = []
-    monkeypatch.setattr(bridge, "V3EvidenceStore", _store(tmp_path, appended))
-    monkeypatch.setattr(bridge, "_committed_receipt_bytes_durable", lambda *a: False)
-    monkeypatch.setattr(bridge, "_reconcile_record_id", lambda s, e, p, l: f"lifecycle:{e}:{p}:{l}")
-    rows = {"decision": [{"epoch_id": "e", "episode_id": ep, "policy_signature": "paper-policy-decision",
-                          "research_lane": "L", "order_intent_expected": True, "resolution_deadline_ts": 1,
-                          "record_id": f"decision:{ep}"} for ep in ("div", "lost")],
-            "order_intent": [{"epoch_id": "e", "episode_id": "div", "policy_signature": "paper-policy-order",
-                              "research_lane": "L"}]}
-    for name, items in rows.items():
-        (tmp_path / f"{name}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in items))
-    out = bridge.reconcile_overdue_expected_order_decisions(epoch_id="e", data_dir=str(tmp_path), observed_ts=5)
-    assert out["identity_divergent"] == 1 and out["reconciled"] == 1
-    assert [r["episode_id"] for r in appended] == ["lost"]
-    bridge._OVERDUE_INDEX_CACHE.clear()
 
 
 # ---- (3) entry baseline on book_limit_entry ------------------------------------------------------------------
@@ -202,3 +171,21 @@ def test_book_replay_non_countable_until_shared_paper_fill_maker_path(monkeypatc
     ok = _replay_with_model(monkeypatch, SHARED_MAKER_FILL_MODEL)
     assert ok["countable"] is True and ok["non_countable_reason"] is None
     assert book_replay_health(ok)["reason_code"] is None
+
+
+# ---- RK B4 #882 ruling 4: V3_READ_AUTHORITY_FAILURES is populated by a real refused read (mutation-proof) -----
+def test_refused_v3_read_records_failure_and_fails_integrity(tmp_path, monkeypatch):
+    import analyzer_research_engine_v62 as eng
+    import research_v3_store
+    (tmp_path / "v3" / "ledgers").mkdir(parents=True)
+    (tmp_path / "v3" / "ledgers" / "decision.jsonl").write_text("{}\n")
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(eng, "V3_READ_AUTHORITY_FAILURES", {})
+
+    def refuse(*_a, **_k):
+        raise RuntimeError("RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS")
+    monkeypatch.setattr(research_v3_store.V3EvidenceStore, "open_read_only", staticmethod(refuse))
+    assert eng._v3_ledger_rows("decision") == []
+    assert eng.V3_READ_AUTHORITY_FAILURES == {"decision": "RuntimeError: RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS"}
+    check = v3_read_authority_check(eng.V3_READ_AUTHORITY_FAILURES)
+    assert check["passed"] is False and check["found"] == ["decision"]

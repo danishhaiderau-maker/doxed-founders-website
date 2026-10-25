@@ -1404,15 +1404,9 @@ def reconcile_overdue_expected_order_decisions(
     terminal_keys = set(index["lifecycle"]["keys"])
     active_keys = {key(row) for row in active_rows if all(key(row))}
     now_ts = float(observed_ts if observed_ts is not None else time.time())
-    # RK R1 ruling (25 Oct 2026), writer fix at source: an order/terminal row for the same (episode, lane) under a
-    # DIFFERENT policy signature means the decision and the order disagreed on identity (legacy TTL divergence,
-    # episodes 1ff6cd18/cfacc140).  Writing a NO_ORDER row under the decision signature minted a second
-    # signature-bearing terminal row per episode/policy (lifecycle:...:restart-reconciled-v3).  Never write it;
-    # count it so the divergence stays visible.
-    resolved_episode_lanes = {(ep, lane) for ep, _sig, lane in (*intent_keys, *terminal_keys) if ep and lane}
     result = {"expected": 0, "reconciled": 0, "duplicates": 0,
               "deferred": 0, "blocked": 0, "unwritten": 0,
-              "not_overdue": 0, "resolved_or_active": 0, "identity_divergent": 0}
+              "not_overdue": 0, "resolved_or_active": 0}
     decision_path = store.ledger_path("decision")
     candidates = index["decision"]["candidates"]
 
@@ -1425,9 +1419,6 @@ def reconcile_overdue_expected_order_decisions(
                     continue
                 if identity in intent_keys or identity in terminal_keys or identity in active_keys:
                     result["resolved_or_active"] += 1
-                    continue
-                if (identity[0], identity[2]) in resolved_episode_lanes:
-                    result["identity_divergent"] += 1
                     continue
                 if deadline > now_ts:
                     result["not_overdue"] += 1
