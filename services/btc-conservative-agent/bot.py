@@ -46193,6 +46193,10 @@ def _external_analyzer_response(endpoint: str):
 def api_analyzer_summary():
     """Proxy to research dashboard /api/summary — full-session PnL/WR/trade count."""
     if (os.getenv("FLY_APP_NAME") or "").strip():
+        if _active_analyzer_mirror_dir() is None:
+            resp = jsonify({"ok": False, "error": _ANALYZER_BUNDLE_NO_VALID})
+            resp.headers["Cache-Control"] = "no-store"
+            return resp, 503
         return _external_analyzer_response("summary")
     status, body = _analyzer_proxy_fetch("/api/summary")
     if status is None:
@@ -46817,7 +46821,8 @@ def _build_dashboard_truth(snap: dict, now: float | None = None) -> dict:
         "emergency_wal": wal_summary,
         "operating": _dashboard_operating_truth(snap, current, wal_summary),
         "process_boot_time": float(process_boot_time),
-        "session_start_time": float(snap.get("bot_start_time") or 0.0) or None,
+        "session_start_time": float(FRESH_START_TS),
+        "bot_start_time": float(snap.get("bot_start_time") or 0.0) or None,
         "trade_scope": snap.get("trade_scope"),
         "trade_count_session": snap.get("trade_count_session"),
     }
@@ -48981,7 +48986,8 @@ def _monitor_summary_payload(now: float) -> dict:
         "epoch": {
             "data_epoch_id": epoch.get("epoch_id"),
             "data_epoch_declared": epoch.get("declared"),
-            "data_epoch_started_at": epoch.get("started_at_utc"),
+            "data_epoch_started_at": FRESH_START_UTC,
+            "data_epoch_manifest_started_at": epoch.get("started_at_utc"),
             "collection_epoch_id": _monitor_part(_bound_collection_epoch_id),
             "canonical_epoch_id": _monitor_part(_canonical_epoch_public).get("canonical_epoch_id"),
         },
@@ -55767,6 +55773,43 @@ def _analyzer_current_pointer_path() -> Path:
     return _data_sync_volume_root() / "analyzer_current.json"
 
 
+# RK PASS 12:48 (R8): an analyzer bundle is served only if it was cut on the real fresh epoch and the epoch audit
+# placed every row. fresh_epoch.cutoff_utc earlier than the floor (or missing), or any straddle/unstamped row left
+# unguarded in the generation receipt, rejects the bundle at install AND at serve (/analysis, /api/analyzer/summary
+# then answer 503 "no valid bundle"). Fail closed.
+_ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671  # 2026-10-18 06:01:11 AEDT, the real fresh start
+# RK PASS 12:48 (R8 B): the operator-facing "data epoch started" / session start is the real fresh start, not the
+# 4 Oct DATA_EPOCH manifest stamp (DATA_EPOCH_ID itself is unchanged; the manifest stamp stays visible beside it).
+FRESH_START_TS = _ANALYZER_BUNDLE_FRESH_FLOOR_TS
+FRESH_START_UTC = datetime.fromtimestamp(FRESH_START_TS, timezone.utc).isoformat()
+_ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
+
+
+def _analyzer_bundle_fresh_gate(report_manifest) -> None:
+    """Raise ValueError unless the report manifest passes the R8 fresh-epoch install gate."""
+    if not isinstance(report_manifest, dict):
+        raise ValueError("analyzer bundle report manifest missing")
+    raw = (report_manifest.get("fresh_epoch") or {}).get("cutoff_utc")
+    try:
+        cutoff = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if cutoff.tzinfo is None:
+            raise ValueError("naive cutoff_utc")
+        cutoff_ts = cutoff.timestamp()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"analyzer bundle fresh_epoch.cutoff_utc unusable: {raw!r}") from exc
+    if cutoff_ts < _ANALYZER_BUNDLE_FRESH_FLOOR_TS:
+        raise ValueError(f"analyzer bundle fresh_epoch.cutoff_utc {raw} precedes the fresh floor "
+                         f"{_ANALYZER_BUNDLE_FRESH_FLOOR_TS}")
+    epoch = (report_manifest.get("generation_receipt") or {}).get("data_epoch") or {}
+    for key in ("straddle_rows_unguarded", "unstamped_rows_unguarded"):
+        try:
+            n = int(epoch.get(key) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"analyzer bundle receipt {key} unreadable") from exc
+        if n > 0:
+            raise ValueError(f"analyzer bundle receipt {key}={n} > 0")
+
+
 def _valid_analyzer_generation(candidate: Path) -> bool:
     """Accept only a complete, hash-bound bundle-v2 generation on disk."""
     try:
@@ -55782,6 +55825,8 @@ def _valid_analyzer_generation(candidate: Path) -> bool:
             and isinstance(manifest.get("files"), list)
         ):
             return False
+        _analyzer_bundle_fresh_gate(
+            json.loads((candidate / "report_manifest.json").read_text(encoding="utf-8")))
         declared = {}
         for row in manifest["files"]:
             rel = str((row or {}).get("path") or "").replace("\\", "/")
@@ -55992,6 +56037,7 @@ def _validated_analyzer_bundle_manifest(archive: zipfile.ZipFile, members: list)
         raise ValueError(f"invalid source report manifest: {exc}") from exc
     if hashlib.sha256(report_payload).hexdigest() != str(manifest["source_report_manifest_sha256"]).lower():
         raise ValueError("source report manifest hash does not match bundle provenance")
+    _analyzer_bundle_fresh_gate(report_manifest)
     provenance = report_manifest.get("analysis_provenance") or {}
     comparisons = {
         "analyzer_run_id": report_manifest.get("analyzer_sync_id"),
@@ -56185,7 +56231,8 @@ def analyzer_mirror_dashboard_index():
     active = _active_analyzer_mirror_dir()
     if active is None:
         return jsonify({
-            "error": "no complete validated analyzer bundle is available",
+            "error": _ANALYZER_BUNDLE_NO_VALID,
+            "detail": "no complete validated analyzer bundle is available",
             "next": "run the bundle-v2 local analyzer publisher while the PC is online",
         }), 503
     report = active / "analysis_dashboard.html"
@@ -61019,7 +61066,8 @@ def _research_freeze_public() -> dict:
 def _data_epoch_public() -> dict:
     manifest = _DATA_EPOCH_MANIFEST or {}
     return {"declared": bool(manifest), "configured": DATA_EPOCH_ID, "epoch_id": manifest.get("epoch_id"),
-            "started_at_utc": manifest.get("started_at_utc"), "stamp_field": _data_epoch.STAMP_FIELD,
+            "started_at_utc": FRESH_START_UTC, "manifest_started_at_utc": manifest.get("started_at_utc"),
+            "stamp_field": _data_epoch.STAMP_FIELD,
             "segment_prefix": manifest.get("segment_prefix"), "fingerprint": manifest.get("fingerprint"),
             "boundary": _data_epoch_boundary_status(manifest),
             "fingerprint_changes": len(manifest.get("fingerprint_changes") or [])}

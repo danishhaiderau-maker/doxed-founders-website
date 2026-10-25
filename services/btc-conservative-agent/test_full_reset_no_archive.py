@@ -953,7 +953,8 @@ def test_c4b_bitfinex_named_reports_are_analyzer_derived_with_file_line_evidence
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _BOT_MIRROR_FUNCS = ("_data_sync_runtime_root", "_data_sync_volume_root", "_analyzer_mirror_dir",
                      "_analyzer_generations_dir", "_analyzer_current_pointer_path", "_valid_analyzer_generation",
-                     "_recover_latest_analyzer_generation", "_active_analyzer_mirror_dir")
+                     "_recover_latest_analyzer_generation", "_active_analyzer_mirror_dir",
+                     "_analyzer_bundle_fresh_gate")
 
 
 def _bot_mirror_namespace():
@@ -967,7 +968,8 @@ def _bot_mirror_namespace():
     ns = {"Path": Path, "os": os, "json": json, "re": re, "hashlib": hashlib,
           "_ANALYZER_BUNDLE_MANIFEST": "bundle_manifest.json", "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
           "_ANALYZER_BUNDLE_ALLOWED_SUFFIXES": frozenset((".html", ".txt", ".json", ".log")),
-          "_ANALYZER_BUNDLE_MAX_MEMBER_BYTES": 50 * 1024 * 1024}
+          "_ANALYZER_BUNDLE_MAX_MEMBER_BYTES": 50 * 1024 * 1024, "_ANALYZER_BUNDLE_FRESH_FLOOR_TS": 1792263671,
+          "datetime": __import__("datetime").datetime}
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), ns)
     return ns
 
@@ -975,7 +977,8 @@ def _bot_mirror_namespace():
 def _fly_mirror(vol: Path) -> Path:
     files = {"analysis_dashboard.html": b"<html>dash</html>",
              "reports/tile_paired_comparison_report.json": b'{"tile": 6}',
-             "reports/tile_evidence_points_report.json": b'{"tile": 7}'}
+             "reports/tile_evidence_points_report.json": b'{"tile": 7}',
+             "report_manifest.json": b'{"fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"}}'}
     gen = vol / "analyzer_generations" / "generation-20261024T000000Z-abc"
     for rel, data in files.items():
         (gen / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -1020,7 +1023,7 @@ def test_c3_plan_lists_exactly_the_three_fly_scopes_and_nothing_else_outside_run
     assert "@data/analyzer_mirror/live_flags.json" in rels
     assert "@data/analyzer_generations/generation-20261024T000000Z-abc/reports/tile_paired_comparison_report.json" in rels
     assert "@data/analyzer_generations/.staging-x/partial.json" in rels
-    assert len(rels) == 10  # 5 generation files + 1 staging + 3 legacy mirror + the pointer
+    assert len(rels) == 11  # 6 generation files + 1 staging + 3 legacy mirror + the pointer
     assert {c["reason"] for c in outside} == {"FLY_ANALYZER_MIRROR", "FLY_ANALYZER_GENERATION",
                                               "FLY_ANALYZER_CURRENT_POINTER"}
     assert plan["delete_by_class"]["FLY_ANALYZER_CURRENT_POINTER"]["files"] == 1
@@ -1060,8 +1063,8 @@ def test_c3_readback_failure_records_completed_false(vol, capsys):
     assert "FLY_ANALYZER_READBACK_FAILED" in capsys.readouterr().out
     receipt = json.loads(next((vol / "runtime" / frna.RECEIPTS_DIRNAME).glob("*/receipt-complete.json")).read_text())
     rb = receipt["fly_analyzer_readback"]
-    assert receipt["completed"] is False and rb["leftover_file_count"] == 6
-    assert rb["leftover_count"] == 6 + rb["leftover_kinds"]["dir"] and rb["leftover_kinds"]["dir"] >= 1
+    assert receipt["completed"] is False and rb["leftover_file_count"] == 7
+    assert rb["leftover_count"] == 7 + rb["leftover_kinds"]["dir"] and rb["leftover_kinds"]["dir"] >= 1
     assert frna.completed_receipt(vol / "runtime" / frna.RECEIPTS_DIRNAME, receipt["plan_sha256"]) is None
 
 
