@@ -72,3 +72,25 @@ def test_system_health_parity_amber_then_red_then_green(tmp_path, monkeypatch): 
     assert _parity_check(2000.0)["status"] == "GREEN"
     monkeypatch.setattr(bot, "CSV_TRADES", str(tmp_path / "missing.csv"))
     assert "UNREADABLE" in _parity_check(3000.0)["observed"]
+
+
+def test_monitor_route_status_amber_then_red_then_green(tmp_path, monkeypatch):  # kills RED -> AMBER on the route
+    import bot
+    path = "/api/monitor/trade-count"
+    p = _csv(tmp_path, ["a"])
+    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "t" * 24)
+    monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    monkeypatch.setattr(bot, "monitor_integrity_authorized", lambda: True)
+    monkeypatch.setattr(bot, "CSV_TRADES", p)
+    monkeypatch.setattr(bot, "trades", [{"trade_id": "a"}, {"trade_id": "gone"}])
+    monkeypatch.setitem(bot.state, "analytics", {"total_trades": 2})
+    a._mismatch_since.pop(p, None)
+    body = bot.app.test_client().get(path).get_json()
+    assert body["status"] == "AMBER" and body["memory_only_ids"] == ["gone"] and body["persistent"] is False
+    a._mismatch_since[p] -= 2 * a.MISMATCH_PERSIST_S
+    body = bot.app.test_client().get(path).get_json()
+    assert body["status"] == "RED" and body["persistent"] is True
+    monkeypatch.setattr(bot, "trades", [{"trade_id": "a"}])
+    monkeypatch.setitem(bot.state, "analytics", {"total_trades": 1})
+    body = bot.app.test_client().get(path).get_json()
+    assert body["status"] == "GREEN" and body["mismatch_since_ts"] is None

@@ -52760,9 +52760,13 @@ def _tombstone_external_live_blockers() -> list:
     blockers = []
     if CSV_TRADES in _csv_fallback_pending_targets or os.path.basename(CSV_TRADES) in _csv_fallback_pending_targets:
         blockers.append("CSV_FALLBACK_PENDING")
-    with state_lock:
-        if bool(state.get("live_armed")):
-            blockers.append("LIVE_ARMED")
+    # Plain dict reads (no state_lock): this runs under csv_lock, and taking state_lock inside it would add a new
+    # csv_lock -> state_lock edge. Fly-direct arm is retired, so the relay account view is the real arm signal.
+    relay = _relay_armed_view()
+    if bool(state.get("live_armed")) or relay["live_armed"] or relay["live_copy_output_enabled"]:
+        blockers.append("LIVE_ARMED")
+    elif not relay["relay_reachable"]:
+        blockers.append("LIVE_STATE_UNKNOWN")  # relay arm state never fetched / unreachable: fail closed
     with trade_lock:
         if open_positions:
             blockers.append("OPEN_POSITIONS")
@@ -52843,6 +52847,16 @@ def api_admin_trades_tombstone_external_delete():
                 out.update(_tombstone_external_delete(ids, body["list_sha256"]))
             except TombstoneUnavailable as e:
                 return _refuse(str(e), 500)
+            except Exception as e:  # noqa: BLE001 - a PENDING receipt must always reach a terminal outcome
+                logger.error(f"[TRADE-TOMBSTONE-EXTERNAL] apply failed after PENDING receipt: {e!r} "
+                             f"[PIPELINE ENFORCEMENT]")
+                try:
+                    _write_tombstone_external_receipt({**base_rec, "outcome": "APPLY_FAILED",
+                                                       "error": type(e).__name__ + ":" + str(e)[:200]})
+                except OSError:
+                    pass
+                return jsonify({"ok": False, "error": "APPLY_FAILED", "applied": "UNKNOWN",
+                                "detail": type(e).__name__, **out}), 500
         with trade_lock:
             snap = list(trades)
     out["after"] = {k: v for k, v in _asa.id_diff(snap, CSV_TRADES, time.time()).items()

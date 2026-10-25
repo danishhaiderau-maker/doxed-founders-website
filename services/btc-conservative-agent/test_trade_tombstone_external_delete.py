@@ -44,7 +44,15 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "open_positions", [])
     monkeypatch.setattr(bot, "pending_orders", [])
     monkeypatch.setitem(bot.state, "live_armed", False)
+    set_relay(monkeypatch)
     return p, tomb
+
+
+def set_relay(monkeypatch, armed=(), output=False, reachable=True):
+    """The Fly-direct arm is retired; the relay account view is the live arm signal."""
+    monkeypatch.setattr(bot, "_relay_armed_view", lambda: {
+        "live_armed": bool(armed), "relay_armed_accounts": list(armed), "live_copy_output_enabled": output,
+        "relay_reachable": reachable})
 
 
 def r21_receipt(ids, path=None):
@@ -278,3 +286,85 @@ def test_refusal_receipt_failure_is_not_swallowed(env, monkeypatch):
     r = _post(sha="0" * 64)
     assert r.status_code == 500 and r.get_json()["error"] == "REFUSAL_RECEIPT_WRITE_FAILED"
     assert r.get_json()["refused"] == "LIST_SHA_MISMATCH" and not tomb.exists()
+
+
+# ---- #888 R21 first pass: relay arm is the real live arm; PENDING always reaches a terminal outcome ----
+
+def test_refuses_relay_armed(env, monkeypatch):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    set_relay(monkeypatch, armed=["acct-1"])
+    _assert_refused(p, tomb, "LIVE_ARMED")
+    _assert_refused(p, tomb, "LIVE_ARMED", dry_run=True)
+
+
+def test_refuses_live_copy_output_enabled(env, monkeypatch):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    set_relay(monkeypatch, output=True)
+    _assert_refused(p, tomb, "LIVE_ARMED")
+
+
+def test_refuses_when_relay_arm_state_unknown(env, monkeypatch):  # fail closed
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    set_relay(monkeypatch, reachable=False)
+    _assert_refused(p, tomb, "LIVE_STATE_UNKNOWN")
+
+
+def test_live_state_read_does_not_take_state_lock_under_csv_lock(env, monkeypatch):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+
+    class Boom:
+        def __enter__(self):
+            raise AssertionError("state_lock taken inside csv_lock")
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(bot, "state_lock", Boom())
+    assert _post(dry_run=True).status_code == 200
+
+
+@pytest.mark.parametrize("val", ["false", 0, None, "", "False", [], "no"])
+def test_only_json_false_applies(env, val):  # any non-boolean-false value stays a dry run
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    body = {"ids": DEL, "list_sha256": m.list_sha256(DEL), "dry_run": val, "actor": "rk-test", "reason": "x",
+            "r21_receipt": r21_receipt(DEL)}
+    r = bot.app.test_client().post(URL, json=body, headers=AUTH)
+    assert r.status_code == 200 and r.get_json()["dry_run"] is True
+    assert not tomb.exists() and len(bot.trades) == len(ALL)
+
+
+def test_apply_failure_after_pending_leaves_terminal_receipt(env, monkeypatch):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+
+    def boom(ids, sha):
+        raise RuntimeError("reload exploded")
+    monkeypatch.setattr(bot, "_tombstone_external_delete", boom)
+    r = _post()
+    assert r.status_code == 500 and r.get_json()["error"] == "APPLY_FAILED" and r.get_json()["applied"] == "UNKNOWN"
+    assert [x["outcome"] for x in _receipts()] == ["PENDING", "APPLY_FAILED"]
+    assert _receipts()[0]["receipt_id"] == _receipts()[1]["receipt_id"]
+
+
+def test_blockers_checked_before_pending_receipt_and_dry_run_never_applies(env):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    bot.open_positions.append({"trade_id": "open-1"})
+    _assert_refused(p, tomb, "OPEN_POSITIONS")
+    assert [x["outcome"] for x in _receipts()] == ["REFUSED"]  # never a PENDING for a refused request
+
+
+def test_census_note_has_no_unverifiable_route_count():
+    import json as _j
+    from pathlib import Path
+    root = Path(bot.__file__).resolve().parent
+    note = _j.loads((root / "ci" / "route_census_fields.json").read_text())["note"]
+    assert "913 -> 914" not in note and "#888" in note
+    contract = _j.loads((root / "cleanup_characterization_contract.fixture").read_text())
+    assert ["POST", "/api/admin/trades/tombstone-external-delete",
+            "api_admin_trades_tombstone_external_delete"] in contract["routes"]
+    assert "routes 149 -> 150" in note and len(contract["routes"]) >= 150
