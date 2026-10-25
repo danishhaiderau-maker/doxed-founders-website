@@ -42,16 +42,63 @@ def test_existing_safety_and_exact_revision_gates_remain_in_order():
 def test_failure_cleanup_only_runs_after_mutation_started(maintenance, deploy):
     block = WORKFLOW.split("      - name: Best-effort preserve safe paper maintenance after failed guarded deploy\n", 1)[1]
     expression = next(line.strip()[4:] for line in block.splitlines() if line.strip().startswith("if: "))
-    expected = ("failure() && (steps.paper_maintenance.outcome == 'success' || "
-                "steps.paper_maintenance.outcome == 'failure' || "
-                "steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure')")
-    assert expression == expected
-    evaluated = expression.replace("failure()", "True").replace("&&", "and").replace("||", "or")
+    # Strip ${{ }} wrapper if present so the boolean body can be eval'd.
+    body = expression[4:-2].strip() if expression.startswith("${{") and expression.endswith("}}") else expression
+    expected_body = (
+        "(failure() || cancelled() || steps.receipt_bootstrap.outcome == 'failure') && "
+        "(steps.paper_maintenance.outcome == 'success' || "
+        "steps.paper_maintenance.outcome == 'failure' || "
+        "steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure')"
+    )
+    assert body == expected_body
+    evaluated = (
+        body.replace("failure()", "True")
+        .replace("cancelled()", "False")
+        .replace("steps.receipt_bootstrap.outcome == 'failure'", "False")
+        .replace("&&", "and")
+        .replace("||", "or")
+    )
     evaluated = evaluated.replace("steps.paper_maintenance.outcome", repr(maintenance))
     evaluated = evaluated.replace("steps.deploy_source.outcome", repr(deploy))
     assert eval(evaluated, {"__builtins__": {}}) == (maintenance in {"success", "failure"} or deploy in {"success", "failure"})
     assert "id: paper_maintenance" in WORKFLOW.split("      - name: Enter durable authenticated paper maintenance boundary\n", 1)[1].split("      - name:", 1)[0]
     assert "id: deploy_source" in WORKFLOW.split("      - name: Deploy the exact source revision\n", 1)[1].split("      - name:", 1)[0]
+
+
+def test_soft_bootstrap_failure_plus_guaranteed_success_can_yield_job_success():
+    """Pin the Actions job-conclusion fix for runs like 40184559814.
+
+    Receipt bootstrap uses continue-on-error so Guaranteed resume can turn the
+    job green; a finalizer restores fail-closed when Guaranteed itself misses.
+    """
+    bootstrap = WORKFLOW.split(
+        "      - name: Complete receipt bootstrap inside exact-revision maintenance\n", 1
+    )[1].split("      - name:", 1)[0]
+    assert "continue-on-error: true" in bootstrap
+    assert "id: receipt_bootstrap" in bootstrap
+    resume = WORKFLOW.split(
+        "      - name: Resume paper execution after exact-revision acceptance\n", 1
+    )[1].split("      - name:", 1)[0]
+    assert "steps.receipt_bootstrap.outcome == 'success'" in resume
+    guaranteed = WORKFLOW.split(
+        "      - name: Guaranteed paper resume after failed guarded deploy\n", 1
+    )[1].split("      - name:", 1)[0]
+    assert "id: guaranteed_resume" in guaranteed
+    assert "steps.receipt_bootstrap.outcome == 'failure'" in guaranteed
+    # Guaranteed itself must remain hard-fail (comment may mention continue-on-error).
+    assert "\n        continue-on-error:" not in guaranteed
+    finalizer = WORKFLOW.split(
+        "      - name: Fail closed when Guaranteed paper resume did not clear paper\n", 1
+    )[1].split("      - name:", 1)[0]
+    assert "steps.receipt_bootstrap.outcome == 'failure'" in finalizer
+    assert "steps.guaranteed_resume.outcome != 'success'" in finalizer
+    assert "always()" in finalizer
+    # Finalizer is after Guaranteed (job-colour decision comes last).
+    assert WORKFLOW.index(
+        "Guaranteed paper resume after failed guarded deploy"
+    ) < WORKFLOW.index(
+        "Fail closed when Guaranteed paper resume did not clear paper"
+    )
 
 
 def test_offline_seal_repair_proves_hold_then_sleeps_then_restores_in_order():

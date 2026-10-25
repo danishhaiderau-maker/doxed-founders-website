@@ -196,8 +196,11 @@ def _step_block(name):
 
 def test_guaranteed_resume_is_the_final_step_on_every_failure_exit():
     block = _step_block("Guaranteed paper resume after failed guarded deploy")
-    assert WORKFLOW.rstrip().endswith("run: python scripts/fly_failure_paper_resume.py")
-    assert "(failure() || cancelled())" in block
+    finalizer = _step_block("Fail closed when Guaranteed paper resume did not clear paper")
+    # Guaranteed remains the last resume action; the fail-closed finalizer decides job colour.
+    assert "run: python scripts/fly_failure_paper_resume.py" in block
+    assert WORKFLOW.rstrip().endswith("exit 1\n") or "exit 1" in finalizer
+    assert "(failure() || cancelled() || steps.receipt_bootstrap.outcome == 'failure')" in block
     assert "inputs.keep_maintenance_pause == true" in block
     assert "steps.paper_maintenance.outcome == 'failure'" in block
     assert "steps.deploy_source.outcome == 'success'" in block
@@ -205,10 +208,15 @@ def test_guaranteed_resume_is_the_final_step_on_every_failure_exit():
     # Bootstrap hard-timeout fallthrough: waive completeness so paper resumes.
     assert "BOOTSTRAP_GATE_FAILED:" in block
     assert "steps.receipt_bootstrap.outcome == 'failure'" in block
+    assert "id: guaranteed_resume" in block
     assert "timeout-minutes: 15" in block
-    assert "continue-on-error" not in block
+    # Guaranteed itself must remain hard-fail (comments may mention continue-on-error).
+    assert "\n        continue-on-error:" not in block
+    assert "steps.guaranteed_resume.outcome != 'success'" in finalizer
     assert WORKFLOW.index("Best-effort preserve safe paper maintenance after failed guarded deploy") < WORKFLOW.index(
         "Guaranteed paper resume after failed guarded deploy")
+    assert WORKFLOW.index("Guaranteed paper resume after failed guarded deploy") < WORKFLOW.index(
+        "Fail closed when Guaranteed paper resume did not clear paper")
 
 
 

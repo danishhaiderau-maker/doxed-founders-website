@@ -3468,14 +3468,17 @@ jobs:
           PY
 
       - name: Complete receipt bootstrap inside exact-revision maintenance
-        # Hard timeout falls through to Guaranteed paper resume (failure/cancelled).
-        # Terminal ledger stall (SOURCE_LEDGER_TRUNCATED, zero progress) fails
-        # immediately via fly_receipt_bootstrap_gate.py. keep_maintenance_pause
-        # skips this step (clean-epoch hold). Do not raise timeout-minutes without
-        # also raising BOOTSTRAP_TIMEOUT_SEC — Python must raise
-        # RECEIPT_BOOTSTRAP_TIMEOUT before the runner SIGKILLs the step.
+        # Hard timeout / terminal stall intentionally fall through to Guaranteed
+        # paper resume. continue-on-error is required so a later successful
+        # Guaranteed resume can yield job SUCCESS (GHA paints the job red for
+        # any required step failure; see runs 40184559814 / 40181367061).
+        # Happy-path resume steps below require outcome == success; Guaranteed
+        # + the fail-closed finalizer fire on outcome == failure. Do not raise
+        # timeout-minutes without also raising BOOTSTRAP_TIMEOUT_SEC — Python
+        # must raise RECEIPT_BOOTSTRAP_TIMEOUT before the runner SIGKILLs.
         id: receipt_bootstrap
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
+        continue-on-error: true
         timeout-minutes: 25
         working-directory: ${{ github.workspace }}
         env:
@@ -3486,7 +3489,7 @@ jobs:
 
       - name: Resume paper execution after exact-revision acceptance
         id: paper_resume
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
+        if: ${{ steps.receipt_bootstrap.outcome == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ github.sha }}
@@ -3527,7 +3530,7 @@ jobs:
           PY
 
       - name: Assert paper active with advancing AI cadence and restored operator state
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && steps.paper_resume.outputs.operator_pause_retained != 'true' }}
+        if: ${{ steps.receipt_bootstrap.outcome == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && steps.paper_resume.outputs.operator_pause_retained != 'true' }}
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
@@ -3540,7 +3543,7 @@ jobs:
         # Danish's standing rule: every deploy force-flattens, then live comes back
         # automatically. Retired tiles are never restored. Fails the run if any
         # restored lane is not eligible + live-orders after restore.
-        if: ${{ success() && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
+        if: ${{ steps.receipt_bootstrap.outcome == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           LIVE_SNAPSHOT_OK: ${{ steps.live_set.outputs.snapshot_ok }}
@@ -3662,7 +3665,9 @@ jobs:
         # Preserve maintenance once either mutation step actually starts.
         # Skip re-assert when paper is already safely resumed (sticky-lease fix):
         # a mid-bootstrap /api/resume must not be undone by this failure-path pause.
-        if: failure() && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure')
+        # Include receipt_bootstrap.outcome == 'failure' because that step uses
+        # continue-on-error (failure() alone is false after a soft bootstrap miss).
+        if: ${{ (failure() || cancelled() || steps.receipt_bootstrap.outcome == 'failure') && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure') }}
         continue-on-error: true
         working-directory: ${{ github.workspace }}
         env:
@@ -3671,10 +3676,12 @@ jobs:
 
       - name: Guaranteed paper resume after failed guarded deploy
         # Paper must never sit idle after a deploy attempt. Runs last on every
-        # failure or cancellation exit once a maintenance mutation started.
+        # failure or cancellation exit once a maintenance mutation started, and
+        # also when the soft receipt-bootstrap gate failed (continue-on-error).
         # BOOTSTRAP_GATE_FAILED waives bootstrap-complete when the hard-timeout
         # bootstrap step failed so resume-paper is never left pending forever.
-        if: ${{ (failure() || cancelled()) && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure') }}
+        id: guaranteed_resume
+        if: ${{ (failure() || cancelled() || steps.receipt_bootstrap.outcome == 'failure') && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure') }}
         timeout-minutes: 15
         working-directory: ${{ github.workspace }}
         env:
@@ -3682,3 +3689,11 @@ jobs:
           PRIOR_OPERATOR_STATE: ${{ steps.paper_maintenance.outputs.prior_operator_state }}
           BOOTSTRAP_GATE_FAILED: ${{ steps.receipt_bootstrap.outcome == 'failure' && '1' || '' }}
         run: python scripts/fly_failure_paper_resume.py
+
+      - name: Fail closed when Guaranteed paper resume did not clear paper
+        # Soft bootstrap (continue-on-error) must not hide a real resume miss:
+        # job stays FAILURE unless Guaranteed itself succeeded after the gate miss.
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && steps.receipt_bootstrap.outcome == 'failure' && steps.guaranteed_resume.outcome != 'success' }}
+        run: |
+          echo "::error::Receipt bootstrap gate failed and Guaranteed paper resume did not succeed (outcome=${{ steps.guaranteed_resume.outcome }}). Paper may still be paused — fail closed."
+          exit 1
