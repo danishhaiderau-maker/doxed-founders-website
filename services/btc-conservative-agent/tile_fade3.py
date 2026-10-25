@@ -196,6 +196,7 @@ def pool_ready(*legs: Mapping[str, Any]) -> bool:
 E8_REAL_PARITY_ENV = "GF3_E8_REAL_PARITY"  # PASS:<ref> only after E8 real-data parity passes; unset = no row counts
 REST_COUNTED_STATUSES = ("FILLED", "PARTIAL")
 STEP_CPU_BUDGET_S = 0.1  # per-step feature CPU alert budget (R8: incremental feed, see LiveFeatureFeed); test-pinned
+STEP_CPU_CI_CEILING_S = 0.5  # pytest only: shared CI runners; bot still warns at STEP_CPU_BUDGET_S
 
 
 def e8_real_parity_passed(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -792,19 +793,3 @@ class LiveFeatureFeed:
         self.last_features = F
         self._cache_key, self._cache_val = key, (float(s_last + 1), side, snap)
         return self._cache_val
-
-
-def full_rebuild_inputs(feed: "LiveFeatureFeed", now: float):
-    """Reference (pre-R8) full rebuild of compute_features inputs from the feed's synced tails; equivalence tests
-    and benchmarks only (never on the tick path). Returns None before the first eligible book second."""
-    secs = sorted(k for k, v in feed.book.rows.items() if k + 1 <= now and (v[2] is None or v[2] <= now))
-    if not secs:
-        return None
-    s_last = secs[-1]
-    S = np.asarray(secs, dtype=np.int64)
-    B = np.asarray([feed.book.rows[k][0] for k in secs], dtype=float)
-    A = np.asarray([feed.book.rows[k][1] for k in secs], dtype=float)
-    T = sorted((t for k, prints in feed.trades.rows.items() if k + 1 <= s_last + 1 for t in prints),
-               key=lambda t: (t[1], t[0]))
-    D = [[k, *v] for k, v in sorted(feed.deriv.rows.items()) if k + 1 <= s_last + 1]
-    return S, B, A, np.asarray(T, dtype=float).reshape(-1, 4), np.asarray(D, dtype=float).reshape(-1, 3)

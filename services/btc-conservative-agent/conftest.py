@@ -32,6 +32,18 @@ def _remove_runtime_state(path):
         os.remove(path)
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "cpu_budget: advisory gf3 step CPU ceiling (set PYTEST_SKIP_CPU_BUDGET=1 to skip)")
+
+
+def pytest_collection_modifyitems(config, items):
+    if os.environ.get("PYTEST_SKIP_CPU_BUDGET") == "1":
+        skip = pytest.mark.skip(reason="PYTEST_SKIP_CPU_BUDGET=1")
+        for item in items:
+            if "cpu_budget" in item.keywords:
+                item.add_marker(skip)
+
+
 def pytest_sessionstart(session):
     _SESSION_PREEXISTING.update(path for path in _runtime_state_paths() if os.path.exists(path))
 
