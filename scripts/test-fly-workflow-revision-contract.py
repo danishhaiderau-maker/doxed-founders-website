@@ -168,9 +168,18 @@ def test_bootstrap_status_observation_retries_only_transient_transport_failures(
     assert 'until=bootstrap_deadline' in continuation
     assert 'until=deadline' in continuation
     fr_idx = DEPLOY.index("- name: Guaranteed paper resume after failed guarded deploy")
-    failure_resume = DEPLOY[fr_idx:fr_idx + 1600]
+    failure_resume = DEPLOY[fr_idx:fr_idx + 2200]
     assert "BOOTSTRAP_GATE_FAILED:" in failure_resume
     assert "steps.receipt_bootstrap.outcome == 'failure'" in failure_resume
+    assert "id: guaranteed_resume" in failure_resume
+    assert "(failure() || cancelled() || steps.receipt_bootstrap.outcome == 'failure')" in failure_resume
+    assert "Fail closed when Guaranteed paper resume did not clear paper" in failure_resume
+    assert "steps.guaranteed_resume.outcome != 'success'" in failure_resume
+    bootstrap_main = DEPLOY[
+        DEPLOY.index("- name: Complete receipt bootstrap inside exact-revision maintenance"):
+        DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
+    ]
+    assert "continue-on-error: true" in bootstrap_main
     resume_helper = (Path(__file__).resolve().parent / "fly_failure_paper_resume.py").read_text(encoding="utf-8")
     assert "def bootstrap_gate_failed()" in resume_helper
     assert "bootstrap_gate_failed()" in resume_helper
@@ -424,7 +433,9 @@ def test_failed_deploy_preserves_pause_and_never_resumes_unaccepted_revision():
     # Slice only this step — Guaranteed paper resume follows and legitimately POSTs /api/resume.
     nxt = DEPLOY.find("\n      - name: ", failure_pause + 10)
     block = DEPLOY[failure_pause:] if nxt == -1 else DEPLOY[failure_pause:nxt]
-    assert "if: failure()" in block
+    # Soft bootstrap (continue-on-error) does not trip failure(); include its outcome.
+    assert "steps.receipt_bootstrap.outcome == 'failure'" in block
+    assert "(failure() || cancelled() || steps.receipt_bootstrap.outcome == 'failure')" in block
     assert "continue-on-error: true" in block
     assert "python scripts/fly_preserve_maintenance.py" in block
     # Sticky-lease fix: no blind inline /api/pause; helper skips when already resumed.

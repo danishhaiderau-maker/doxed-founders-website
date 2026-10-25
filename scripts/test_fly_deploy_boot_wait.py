@@ -29,6 +29,15 @@ def test_held_maintenance_deploy_skips_bootstrap_wait_but_resume_requires_it():
     assert "inputs.keep_maintenance_pause == true" in step["if"]
     assert step["if"].strip().startswith("${{ !(")
     assert "python scripts/fly_receipt_bootstrap_gate.py" in step["run"]
+    # Soft-fail so Guaranteed success can yield overall SUCCESS; finalizer
+    # keeps fail-closed when Guaranteed itself misses.
+    assert step.get("continue-on-error") is True
+    guaranteed = _step(job, "Guaranteed paper resume after failed guarded deploy")
+    assert guaranteed.get("id") == "guaranteed_resume"
+    assert "steps.receipt_bootstrap.outcome == 'failure'" in guaranteed["if"]
+    assert guaranteed.get("continue-on-error") in (None, False)
+    finalizer = _step(job, "Fail closed when Guaranteed paper resume did not clear paper")
+    assert "steps.guaranteed_resume.outcome != 'success'" in finalizer["if"]
     resume = (Path(__file__).resolve().parent / "fly_failure_paper_resume.py").read_text(encoding="utf-8")
     assert '"bootstrap_complete_if_required"' in resume
     assert "bootstrap_terminal_stall" in resume

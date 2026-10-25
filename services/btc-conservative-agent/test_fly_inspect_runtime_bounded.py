@@ -120,6 +120,8 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert 'BOOTSTRAP_TIMEOUT_SEC: "1200"' in section
     assert "timeout-minutes: 95" not in section
     assert "id: receipt_bootstrap" in section
+    # Soft-fail so a later successful Guaranteed resume can yield job SUCCESS.
+    assert "continue-on-error: true" in section
 
     gate = (Path(__file__).resolve().parents[2] / "scripts" / "fly_receipt_bootstrap_gate.py").read_text(
         encoding="utf-8"
@@ -164,6 +166,9 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert "python scripts/fly_failure_paper_resume.py" in failure_resume
     assert "BOOTSTRAP_GATE_FAILED:" in failure_resume
     assert "steps.receipt_bootstrap.outcome == 'failure'" in failure_resume
+    assert "id: guaranteed_resume" in failure_resume
+    assert "Fail closed when Guaranteed paper resume did not clear paper" in failure_resume
+    assert "steps.guaranteed_resume.outcome != 'success'" in failure_resume
     resume_helper = (
         Path(__file__).resolve().parents[2] / "scripts" / "fly_failure_paper_resume.py"
     ).read_text(encoding="utf-8")
