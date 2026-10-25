@@ -15,8 +15,24 @@ def _entries(name):
     return out
 
 
+def _deploy_step_script_tests():
+    """Every ../../scripts test file the Fly deploy job's pytest/python commands reference (runner cwd = ROOT)."""
+    wf = (ROOT.parent.parent / ".github" / "workflows" / "fly-bot-deploy.yml").read_text(encoding="utf-8")
+    return sorted(set(re.findall(r"\.\./\.\./scripts/(?:[\w-]+/)*test[_-][\w-]+\.py", wf)))
+
+
 def _all_test_files():
-    return sorted({p.relative_to(ROOT).as_posix() for p in list(ROOT.glob("test_*.py")) + list(ROOT.glob("tests/test_*.py"))})
+    local = {p.relative_to(ROOT).as_posix() for p in list(ROOT.glob("test_*.py")) + list(ROOT.glob("tests/test_*.py"))}
+    return sorted(local | set(_deploy_step_script_tests()))
+
+
+def test_fly_deploy_step_tests_run_in_pr_ci():
+    """Deploy run 40147646292 (25 Oct 2026) died on a scripts/ test PR CI never ran: every deploy-step test is allowlisted."""
+    scripts = _deploy_step_script_tests()
+    assert "../../scripts/test_fly_postdeploy_active_gate.py" in scripts, scripts
+    assert all((ROOT / f).is_file() for f in scripts), scripts
+    missing = sorted(set(scripts) - set(_entries("unit_test_allowlist.txt")))
+    assert not missing, f"Fly deploy-step tests missing from ci/unit_test_allowlist.txt: {missing}"
 
 
 def test_every_test_file_is_allowlisted_or_known_red():

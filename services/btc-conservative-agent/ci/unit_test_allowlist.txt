@@ -685,3 +685,18 @@ test_rk5_all_data_mode_deleted.py
 test_analyzer_floor_epoch.py
 test_fill_book_stamp_r3.py
 test_tile_fade3_deriv_rotation.py
+# Fly deploy-job pytest tests (fly-bot-deploy.yml, all steps before flyctl deploy), added 2026-10-25 after deploy
+# run 40147646292 failed on a scripts/ test PR CI never ran. Paths are relative to this service dir (runner cwd).
+../../scripts/r2_backup/test_r2_backup.py
+../../scripts/test-fly-workflow-revision-contract.py
+../../scripts/test_fly_deploy_ci_coverage.py
+../../scripts/test_fly_deploy_reset_proof.py
+../../scripts/test_fly_deploy_workflow_order.py
+../../scripts/test_fly_failure_paper_resume.py
+../../scripts/test_fly_full_reset_gate.py
+../../scripts/test_fly_postdeploy_active_gate.py
+../../scripts/test_fly_preserve_maintenance.py
+../../scripts/test_fly_receipt_bootstrap_gate.py
+../../scripts/test_fly_resume_bootstrap.py
+../../scripts/test_fly_resume_predeploy_abort.py
+../../scripts/test_live_flat_verify.py
