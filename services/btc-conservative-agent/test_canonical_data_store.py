@@ -256,3 +256,19 @@ def test_cleanup_refuses_symlink_without_removing_source(tmp_path):
         archive_before_cleanup(root, link, reason="must refuse symlink")
     assert link.exists()
     assert outside.read_text(encoding="utf-8") == "keep"
+
+
+def test_cleanup_symlink_mutation_proof_contained_path_resolves_outside(tmp_path):
+    """Mutant: rely on contained_path() alone -> PATH_OUTSIDE, not SYMLINK_FORBIDDEN."""
+    project = tmp_path / "project"
+    project.mkdir()
+    root = initialize_store(default_store_root(project), project)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    link = root / "linked.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this host")
+    with pytest.raises(CanonicalStoreError, match="PATH_OUTSIDE"):
+        contained_path(root, link)

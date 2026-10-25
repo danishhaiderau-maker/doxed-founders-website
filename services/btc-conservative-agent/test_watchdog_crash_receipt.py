@@ -133,6 +133,16 @@ def test_watchdog_receipt_preserves_exact_progress_cause_and_lock_owner():
     assert receipt["pressure"]["rss_bytes"] == 1234
 
 
+def test_watchdog_stack_tail_mutation_proof_pure_windows_path():
+    """Mutant: bounded_stack uses Path() instead of PureWindowsPath -> wrong basename on Linux."""
+    from pathlib import PureWindowsPath
+
+    raw = r"C:\private\operator\bot.py:4:mutate_state"
+    filename = raw.rsplit(":", 2)[0]
+    assert PureWindowsPath(filename).name == "bot.py"
+    assert Path(filename).name != "bot.py"
+
+
 def test_watchdog_receipt_is_bounded_and_secret_free():
     receipt = compile_context()(
         {

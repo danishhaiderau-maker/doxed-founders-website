@@ -98,7 +98,9 @@ jobs:
             deselect="$deselect --deselect $node"
           done < ci/known_red_tests.txt
           files="$(grep -v '^#' ci/unit_test_allowlist.txt | grep -v '^$' | tr '\n' ' ')"
-          python -m pytest $files $deselect -q -p no:cacheprovider
+          # --rootdir . pins node ids to this service dir. Without it the ../../scripts/ entries move the
+          # rootdir to the repo root, the known_red_tests.txt node ids stop matching and nothing is deselected.
+          python -m pytest $files $deselect --rootdir . -q -p no:cacheprovider
       - name: Run script-style safety and contract files as `python file` (ci/script_style_tests.txt)
         # These files have no pytest collection (module-level checks / __main__), so pytest never runs them.
         # Each must exit 0; a failure here is a real red. The deploy job runs some of them the same way.

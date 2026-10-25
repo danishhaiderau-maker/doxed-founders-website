@@ -1,12 +1,4 @@
 # Individual red tests inside allowlisted files, deselected in CI. Format: node id | owner | date | reason
-test_fly_data_sync_contract.py::test_legacy_html_publication_is_rejected_and_status_discloses_quarantine | Boss | 2026-10-16 | fails on master baseline: analyzer-mirror status returns 500 instead of 404
-test_shadow_exit_paths.py::test_all_tiles_score_the_full_registry_catalog_under_their_own_guards | Boss | 2026-10-16 | fixture roster stale vs registry (FAMILY_PREMIUM_REVERSION_60M no longer registered)
-test_shadow_exit_paths.py::test_registry_rejects_an_untranslatable_shadow_exit_family | Boss | 2026-10-16 | KeyError FAMILY_PREMIUM_REVERSION_60M: lane removed from registry, test stale
-test_shadow_exit_paths.py::test_late_breakeven_arms_then_books_worse_of_trigger_and_post_latency_mark | Boss | 2026-10-16 | expects backstop_sec 5400, policy now returns 7200 (policy constant changed, test not updated)
-test_shadow_exit_paths.py::test_giveback_ladder_and_first_trigger_wins_composite | Boss | 2026-10-16 | expects tile source CARD_SHADOW, registry now reports CATALOG
 test_experimental_tile_contract.py::test_only_registry_candidates_are_registered_for_execution | Boss | 2026-10-16 | asserts a stale registered-lane set; registry carries extra FAMILY_* lanes
 test_clean_epoch_reset_plan.py::test_active_reset_gate_predicts_execute_binding | Boss | 2026-10-16 | expects UNREGISTERED_ACTIVE_POINTER, gets COMPLETE (fixture not isolated from the checked-in pointer)
-test_research_deletion_preflight_contract.py::test_shared_admission_rejects_identically_before_any_hash[parent_file-UNSAFE_RECEIPT_PATH] | Boss | 2026-10-16 | NotADirectoryError: tmp fixture path creation (parent-file/deletion.json) fails on this layout before the guard is reached; the other 8 parametrised rejection cases still run
-test_canonical_data_store.py::test_cleanup_refuses_symlink_without_removing_source | Boss | 2026-10-16 | raises PATH_OUTSIDE_CANONICAL_STORE instead of SYMLINK_FORBIDDEN when tmp is under a symlinked dir; still refuses (no removal), message differs; the other 11 tests run
 test_policy_evidence_bindings.py::test_publication_symlink_is_rejected_without_modifying_target | Boss | 2026-10-16 | raises GENERATION_IDENTITY_MISSING:deployed_revision before reaching the symlink check (needs deploy-revision env); other 16 tests run
-test_watchdog_crash_receipt.py::test_watchdog_receipt_preserves_exact_progress_cause_and_lock_owner | Boss | 2026-10-16 | asserts Windows path string C:\private\operator\bot.py is normalised; runs on Linux and fails

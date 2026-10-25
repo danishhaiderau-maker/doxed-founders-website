@@ -39569,13 +39569,16 @@ def _bounded_process_pressure_snapshot() -> dict:
 def _watchdog_crash_context(progress=None, incident=None, *, trigger="UNSPECIFIED", restart_allowed=False):
     """Return a bounded, secret-free watchdog receipt from existing snapshots."""
     def bounded_stack(value):
+        from pathlib import PureWindowsPath
         frames = []
         for raw in list(value or [])[-12:]:
             parts = str(raw).rsplit(":", 2)
             if len(parts) != 3:
                 continue
             filename, line, function = parts
-            frames.append(f"{Path(filename).name}:{line}:{function}")
+            # PureWindowsPath splits on both "\\" and "/", so a Windows frame path from the laptop
+            # is reduced to its basename on Linux too (Path() kept the private directory).
+            frames.append(f"{PureWindowsPath(filename).name}:{line}:{function}")
         return frames
 
     def bounded_reasons(value):
