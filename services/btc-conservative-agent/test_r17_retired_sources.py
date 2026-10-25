@@ -36,7 +36,7 @@ def test_inventory_matches_ast_and_counts_21():
         mod = "analyzer_research_engine_v62" if p.parent == HERE else f"research.{p.stem}"
         lf |= {f"{mod}.{c}" for c in _callers(p, names)}
     assert lf == set(r3_quarantine.INVENTORY["LIMIT_FILL_1S"])
-    assert len(tick) + len(lf) == 20  # qualified_exit_policy_grid_report deleted (RK R1)
+    assert len(tick) + len(lf) == 20  # one retired exit-grid producer removed (RK R1)
 
 
 def test_every_tick_sim_producer_is_retired_or_quarantined():
