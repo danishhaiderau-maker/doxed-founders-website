@@ -145,7 +145,7 @@ def test_dashboard_research_design_ships_book_replay_summaries_not_rows(monkeypa
     assert replay["rows_url"] == "/api/report/entry_baseline_replay_report.json"
 
 
-# ---- RK B4 #882 ruling 3: no second pricer; non-shared maker model => non-countable -----------------------------
+# ---- RK B4 #882 ruling 3: no second pricer; countable only on shared paper_fill maker path (#883) -------------
 def _replay_with_model(monkeypatch, model):
     import book_limit_entry as ble
 
@@ -157,20 +157,21 @@ def _replay_with_model(monkeypatch, model):
                                             opportunities=[_opp()], tape_loader=lambda d, w: _Tape())
 
 
-def test_book_replay_non_countable_until_shared_paper_fill_maker_path(monkeypatch):
+def test_book_replay_countable_only_on_shared_paper_fill_maker_path(monkeypatch):
     from research.entry_baseline_book_replay import (NON_COUNTABLE_MAKER_MODEL, SHARED_MAKER_FILL_MODEL,
                                                      book_replay_health)
     import book_limit_entry as ble
-    # the current helper still stamps order_model.maker_rest_step (pre-#883): the real stamp is not the shared one
-    assert ble._base("LONG", 0.01)["rest_fill_model"] != SHARED_MAKER_FILL_MODEL
-    rep = _replay_with_model(monkeypatch, "order_model.maker_rest_step")
-    assert rep["countable"] is False and rep["non_countable_reason"] == NON_COUNTABLE_MAKER_MODEL
-    assert rep["results"][0]["countable"] is False
-    health = book_replay_health(rep)
-    assert health["status"] == "DEGRADED" and health["reason_code"] == NON_COUNTABLE_MAKER_MODEL
+    # #883 on master: book_limit_entry stamps the shared paper_fill maker path; countable flips on.
+    assert ble._base("LONG", 0.01)["rest_fill_model"] == SHARED_MAKER_FILL_MODEL
     ok = _replay_with_model(monkeypatch, SHARED_MAKER_FILL_MODEL)
     assert ok["countable"] is True and ok["non_countable_reason"] is None
     assert book_replay_health(ok)["reason_code"] is None
+    # Wrong stamp remains fail-closed (mutation: dropping the shared-model gate must fail).
+    bad = _replay_with_model(monkeypatch, "order_model.maker_rest_step")
+    assert bad["countable"] is False and bad["non_countable_reason"] == NON_COUNTABLE_MAKER_MODEL
+    assert bad["results"][0]["countable"] is False
+    health = book_replay_health(bad)
+    assert health["status"] == "DEGRADED" and health["reason_code"] == NON_COUNTABLE_MAKER_MODEL
 
 
 # ---- RK B4 #882 ruling 4: V3_READ_AUTHORITY_FAILURES is populated by a real refused read (mutation-proof) -----
