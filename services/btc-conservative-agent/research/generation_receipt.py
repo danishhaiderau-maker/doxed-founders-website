@@ -67,6 +67,52 @@ def _window_level(window: Mapping[str, Any]) -> str:
     return RED if eligible and selected / eligible < 0.5 else AMBER
 
 
+
+INTEGRITY_CHECK_UNNAMED = "INTEGRITY_CHECK_UNNAMED"
+INTEGRITY_CHECK_UNCHECKED = "INTEGRITY_CHECK_UNCHECKED"
+
+
+def _check_name(check: Any) -> str:
+    """Integrity checks are written as ``{"check": name, ...}``; ``name`` is accepted for older payloads."""
+    if isinstance(check, Mapping):
+        raw = check.get("check")
+        if raw in (None, ""):
+            raw = check.get("name")
+    else:
+        raw = check
+    text = "" if raw is None else str(raw).strip()
+    return text if text and text.lower() != "none" else ""
+
+
+def integrity_verdict(integrity: Mapping | None) -> tuple[str, list[str]]:
+    """(status, failing check names), fail closed (RK R1 ruling 25 Oct 2026).
+
+    VALID only when the report says VALID, every check carries a name and every check's ``passed`` is exactly
+    True.  An unnamed check is INVALID with ``INTEGRITY_CHECK_UNNAMED``; a check whose ``passed`` is None/unknown
+    is INVALID with ``INTEGRITY_CHECK_UNCHECKED:<name>``.  Failing checks are always reported by name.
+    """
+    payload = integrity if isinstance(integrity, Mapping) else {}
+    status = str(payload.get("report_status") or "MISSING").upper()
+    checks = [c for c in (payload.get("checks") or []) if c is not None]
+    failed = list(payload.get("failed_checks") or [])
+    names: list[str] = []
+    for check in failed + [c for c in checks if not isinstance(c, Mapping) or c.get("passed") is not True]:
+        name = _check_name(check)
+        passed = check.get("passed") if isinstance(check, Mapping) else None
+        if not name:
+            label = INTEGRITY_CHECK_UNNAMED
+        elif passed is None or (isinstance(check, Mapping) and not isinstance(passed, bool)):
+            label = f"{INTEGRITY_CHECK_UNCHECKED}:{name}"
+        else:
+            label = name
+        if label not in names:
+            names.append(label)
+    if status == "VALID" and (names or not checks):
+        status = "INVALID"
+        if not checks and not names:
+            names.append(INTEGRITY_CHECK_UNCHECKED + ":NO_CHECKS")
+    return status, names
+
 def build_generation_receipt(
     manifest: Mapping[str, Any],
     *,
@@ -92,7 +138,7 @@ def build_generation_receipt(
             "level": AMBER if error else GREEN,
         })
 
-    integrity_status = str((integrity or {}).get("report_status") or "MISSING").upper()
+    integrity_status, integrity_failed_names = integrity_verdict(integrity)
     integrity_level = GREEN if integrity_status == "VALID" else RED
 
     # Exit-ladder sim (quarantined) and cross-world evidence (optional) are listed, never gating.
@@ -134,8 +180,7 @@ def build_generation_receipt(
     if failed_required:
         reasons.append("required studies failed: " + ", ".join(failed_required))
     if integrity_status != "VALID":
-        failed_checks = [str(c.get("name") if isinstance(c, Mapping) else c)
-                         for c in (integrity or {}).get("failed_checks") or []]
+        failed_checks = integrity_failed_names
         reasons.append(f"integrity {integrity_status}"
                        + (f" (failed: {', '.join(failed_checks[:8])})" if failed_checks else ""))
     if failed_optional:
@@ -203,6 +248,7 @@ def build_generation_receipt(
         "failed_required_studies": failed_required,
         "failed_optional_studies": failed_optional,
         "integrity_status": integrity_status,
+        "integrity_failed_checks": integrity_failed_names,
         "studies": studies,
         "protection_replay_window": window or None,
         "input_blockers": dict(input_blockers) if input_blockers else None,

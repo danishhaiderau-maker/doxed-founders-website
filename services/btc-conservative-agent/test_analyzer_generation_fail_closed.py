@@ -19,7 +19,6 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
             for name in (
                 dashboard.BEST_POLICY_RESEARCH_REPORT_FILE,
                 dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE,
-                "qualified_exit_policy_grid_report.json",
                 "exit_reports_validation.json",
             )
         },

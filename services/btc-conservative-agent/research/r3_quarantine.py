@@ -61,7 +61,6 @@ QUARANTINE: dict[str, dict[str, Any]] = {
         "files": (
             "fast_cut_survivor_report.json",
             "fast_cut_sweep_report.json",
-            "qualified_exit_policy_grid_report.json",
         ),
     },
     # RK #847 cond 4 (24 Oct 2026 AEDT): labels alone are not enough.  None of the six evaluate_limit_fill callers
@@ -111,7 +110,6 @@ INVENTORY: dict[str, tuple[str, ...]] = {
         "stop_thesis_wide_sweep_all_replays",
         "stop_ladder_2d_grid_sweep_all_replays",
         "stop_ladder_mfe_3d_sweep_all_replays",
-        "qualified_exit_policy_grid_report",
         "_aggregate_cohort_replay_pnl",
         "entry_gate_replay_sweeps",
         "pullback_replay_fill_sweep",

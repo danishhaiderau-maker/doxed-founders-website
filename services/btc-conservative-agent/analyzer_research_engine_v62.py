@@ -145,7 +145,6 @@ CONFIDENCE_BAND_CROSS_REPORT_FILE = "confidence_band_cross_report.json"
 EDGE_VALIDATION_REPORT_FILE = "edge_validation_report.json"
 BENCHMARK_CONTRIBUTION_REPORT_FILE = "benchmark_contribution_report.json"
 FAST_CUT_SWEEP_REPORT_FILE = "fast_cut_sweep_report.json"
-QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE = "qualified_exit_policy_grid_report.json"
 TOP_COMBINATIONS_REPORT_FILE = "top_combinations_report.json"
 CHASE_EFFICIENCY_MATRIX_REPORT_FILE = "chase_efficiency_matrix_report.json"
 CHASE_THRESHOLD_REPORT_FILE = "chase_threshold_report.json"
@@ -698,7 +697,6 @@ ANALYZER_JSON_REPORT_FILES = (
     EDGE_PREDICTIVENESS_REPORT_FILE,
     EDGE_SCORE_DECILE_REPORT_FILE,
     FAST_CUT_SURVIVOR_REPORT_FILE,
-    QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE,
     FILL_QUALITY_REPORT_FILE,
     FIRST_15M_OUTCOME_REPORT_FILE,
     HORIZON_COUNTERFACTUAL_REPORT_FILE,
@@ -828,7 +826,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Exit Combinations", EXIT_COMBINATIONS_REPORT_FILE, "Exit reason × entry combo — leakage and best exit paths"),
     ("Exit Leakage by Reason", EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "Which exit reasons destroy the most value"),
     ("Exit Ladder Simulator", EXIT_LADDER_SIMULATOR_REPORT_FILE, "Replay tick sim — alternate ladder rungs vs live"),
-    ("Qualified Exit Policy Grid", QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE, "Fail-closed real-copy thesis, ladder, and MFE holdout grid"),
     ("Correlated Price Clusters", CORRELATED_PRICE_CLUSTER_REPORT_FILE, "Research-only price clustering with qualified 120m replay"),
     ("AI Scan Independence", "ai_scan_independence_report.json", "AI pipeline vs production tile ON/OFF"),
     ("Lane Memory", "lane_memory_validation.json", "Retired lane exposure + bucket bounds"),
@@ -4179,7 +4176,7 @@ def _simulate_ticks_fast_cut_ladder(
 
     R3 WARNING: this walks signal_replay ticker/BBO ticks. exit_ladder_simulator_report is
     quarantined (research/r3_quarantine.py EXIT_LADDER_SIM); the other callers (stop_* sweeps,
-    qualified_exit_policy_grid_report, _sim_replay_pnl_*, fast_cut_* reports) are flagged for the
+    _sim_replay_pnl_*, fast_cut_* reports) are flagged for the
     RK rebuild on paper_fill + quote_trigger and must not feed countable evidence."""
     if not ticks or not entry or entry <= 0:
         return None
@@ -4732,243 +4729,6 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
         print(mfe_slice[["mfe_protect_%", "sum_pnl_usd", "win_rate_pct", "thesis_exits"]].to_string(index=False))
 
     return float(best["sum_pnl_usd"])
-
-
-@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
-def qualified_exit_policy_grid_report():
-    """Costed, chronological, real-copy-only thesis/ladder/MFE grid.
-
-    The physical hard stop is an invariant (30%), not an optimisation axis.
-    Actual exchange results remain separate from counterfactual simulations.
-    """
-    from research.runtime_identity_incidents import load_incident_input, REASON
-    incident_input = load_incident_input()
-    all_replays = _load_jsonl_replays()
-    cohort_assessments = {}
-    for cohort_name in (
-        SHOWCASE_STRATEGY,
-        BITFINEX_COPY_FIDELITY,
-        REAL_COPY_PARAMETER_OPTIMISATION,
-    ):
-        ids, reason_counts, cohort_evidence_rows = _analysis_eligible_trade_ids(cohort_name)
-        cohort_assessments[cohort_name] = {
-            "included_row_count": len(ids),
-            "evidence_row_count": cohort_evidence_rows,
-            "exclusion_reason_counts": reason_counts,
-        }
-    eligible_ids, exclusions, evidence_rows = _analysis_eligible_trade_ids(
-        REAL_COPY_PARAMETER_OPTIMISATION
-    )
-    evidence = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
-    qualified = []
-    local_exclusions = Counter()
-    def has_executable_horizons(replay, origin, phase=None):
-        if origin is None:
-            return False
-        side_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
-        ticks = [tick for tick in (replay.get("ticks") or []) if isinstance(tick, dict)]
-        for seconds in HORIZON_PROFIT_HORIZONS.values():
-            if not any(
-                (phase is None or str(tick.get("phase") or "") == phase)
-                and float(tick.get("t") or -1) >= float(origin) + seconds
-                and (_cluster_float(tick.get(side_key)) or 0) > 0
-                for tick in ticks
-            ):
-                return False
-        return True
-    for trade_id in sorted(eligible_ids):
-        replay = all_replays.get(trade_id)
-        row = evidence.get(trade_id) or {}
-        if incident_input.enabled and (
-            incident_input.affected(row) or incident_input.affected({
-                key: value for key, value in (replay or {}).items() if key != "ticks"
-            })
-        ):
-            # Tick t values in this legacy replay are relative offsets, not
-            # absolute UTC proof. Missing absolute replay timing stays UNKNOWN.
-            local_exclusions[REASON] += 1
-            continue
-        if not replay:
-            local_exclusions["REPLAY_ROW_MISSING"] += 1
-            continue
-        if replay.get("replay_complete") is not True:
-            local_exclusions["REPLAY_INCOMPLETE"] += 1
-            continue
-        if row.get("required_entry_horizons_complete") is not True:
-            local_exclusions["REQUIRED_ENTRY_HORIZON_INCOMPLETE"] += 1
-            continue
-        if row.get("required_post_exit_horizons_complete") is not True:
-            local_exclusions["REQUIRED_POST_EXIT_HORIZON_INCOMPLETE"] += 1
-            continue
-        if not has_executable_horizons(replay, replay.get("virtual_fill_t")):
-            local_exclusions["ENTRY_BBO_HORIZON_EVIDENCE_INCOMPLETE"] += 1
-            continue
-        if not has_executable_horizons(replay, replay.get("exit_t_rel"), "post_exit"):
-            local_exclusions["POST_EXIT_BBO_HORIZON_EVIDENCE_INCOMPLETE"] += 1
-            continue
-        costs = row.get("actual_costs") or (row.get("bitfinex_evidence") or {}).get("actual_costs") or {}
-        total_cost = costs.get("total_cost_usd")
-        if total_cost is None:
-            parts = [costs.get(key) for key in ("fees_usd", "funding_usd", "slippage_usd")]
-            if any(value is None for value in parts):
-                local_exclusions["COST_EVIDENCE_INCOMPLETE"] += 1
-                continue
-            total_cost = sum(float(value) for value in parts)
-        actual_pnl = row.get("actual_bitfinex_realized_pnl_usd")
-        if actual_pnl is None:
-            local_exclusions["BITFINEX_ACTUAL_PNL_MISSING"] += 1
-            continue
-        try:
-            total_cost = float(total_cost)
-            actual_pnl = float(actual_pnl)
-        except (TypeError, ValueError):
-            local_exclusions["NONFINITE_PNL_OR_COST"] += 1
-            continue
-        if not (np.isfinite(total_cost) and np.isfinite(actual_pnl)):
-            local_exclusions["NONFINITE_PNL_OR_COST"] += 1
-            continue
-        policy_key = row.get("policy_comparability_key")
-        if not policy_key:
-            local_exclusions["POLICY_COMPARABILITY_KEY_MISSING"] += 1
-            continue
-        qualified.append((trade_id, replay, total_cost, actual_pnl, str(policy_key)))
-
-    policy_group_counts = Counter(item[4] for item in qualified)
-    selected_policy_key = (
-        sorted(policy_group_counts, key=lambda key: (-policy_group_counts[key], key))[0]
-        if policy_group_counts else None
-    )
-    if selected_policy_key:
-        mismatches = sum(count for key, count in policy_group_counts.items() if key != selected_policy_key)
-        if mismatches:
-            local_exclusions["POLICY_COMPARABILITY_KEY_MISMATCH"] += mismatches
-        qualified = [item for item in qualified if item[4] == selected_policy_key]
-
-    qualified.sort(key=lambda item: str(item[1].get("start_ts") or ""))
-    split_at = max(1, int(len(qualified) * 0.7)) if qualified else 0
-    train = qualified[:split_at]
-    holdout = qualified[split_at:]
-    cells = []
-    for thesis_stop in (-6, -8, -10, -12):
-        for trigger, lock in ((4, 2), (5, 3), (8, 5), (12, 10)):
-            ladder = _build_ladder_with_first_rung(trigger, lock)
-            for mfe_floor in (0, 2, 4, 6, 8, 10):
-                cell = {
-                    "hard_stop_margin_pct": HARD_STOP_MARGIN_PCT,
-                    "thesis_fast_cut_pct": thesis_stop,
-                    "ladder_first_trigger_pct": trigger,
-                    "ladder_first_lock_pct": lock,
-                    "mfe_protect_pct": mfe_floor,
-                }
-                for label, cohort_rows in (("train", train), ("holdout", holdout)):
-                    outcomes = []
-                    simulation_missing = 0
-                    for _tid, replay, cost, _actual_pnl, _policy_key in cohort_rows:
-                        entry = _replay_entry_price(replay)
-                        simulated = _simulate_ticks_fast_cut_ladder(
-                            replay.get("ticks") or [], entry, replay.get("direction"),
-                            int(replay.get("leverage") or 100),
-                            float(replay.get("margin_usdt") or 20), thesis_stop, ladder,
-                            THESIS_EXIT_ABOVE_DEFAULT, fill_t=replay.get("virtual_fill_t"),
-                            mfe_protect_pct=None if mfe_floor == 0 else mfe_floor,
-                        )
-                        if simulated is not None:
-                            outcomes.append(float(simulated[0]) - cost)
-                        else:
-                            simulation_missing += 1
-                    mean = (sum(outcomes) / len(outcomes)) if outcomes else None
-                    ci95 = None
-                    if len(outcomes) >= 2:
-                        half = 1.96 * float(np.std(outcomes, ddof=1)) / np.sqrt(len(outcomes))
-                        ci95 = [round(mean - half, 4), round(mean + half, 4)]
-                    cell[label] = {
-                        "n": len(outcomes),
-                        "simulation_missing": simulation_missing,
-                        "counterfactual_net_pnl_usd": round(sum(outcomes), 4),
-                        "counterfactual_avg_net_pnl_usd": round(mean, 4) if mean is not None else None,
-                        "confidence_interval_95_avg_net_pnl_usd": ci95,
-                    }
-                cells.append(cell)
-
-    ranked = sorted(
-        (cell for cell in cells if cell["train"]["n"] > 0),
-        key=lambda cell: cell["train"]["counterfactual_net_pnl_usd"],
-        reverse=True,
-    )
-    selected = ranked[0] if ranked else None
-    conclusions_allowed = bool(
-        selected and selected["train"]["n"] >= 30 and selected["holdout"]["n"] >= 20
-        and selected["holdout"]["confidence_interval_95_avg_net_pnl_usd"] is not None
-        and selected["holdout"]["confidence_interval_95_avg_net_pnl_usd"][0] > 0
-    )
-    report = {
-        "schema": "qualified_exit_policy_grid_v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "generation_revision": (
-            os.getenv("SOURCE_GIT_REV") or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-            or os.getenv("GIT_REVISION") or os.getenv("GIT_SHA") or "UNKNOWN"
-        ),
-        "cohort": REAL_COPY_PARAMETER_OPTIMISATION,
-        "cohort_schema": "analysis_cohorts_v1",
-        "cohorts": cohort_assessments,
-        "evidence_rows": evidence_rows,
-        "eligible_ids": len(eligible_ids),
-        "qualified_costed_replays": len(qualified),
-        "selected_policy_comparability_key": selected_policy_key,
-        "policy_group_counts": dict(policy_group_counts),
-        "cohort_exclusion_reason_counts": exclusions,
-        "grid_exclusion_reason_counts": dict(local_exclusions),
-        "physical_hard_stop_invariant_pct": HARD_STOP_MARGIN_PCT,
-        "chronological_split": {"train_n": len(train), "holdout_n": len(holdout), "train_pct": 70},
-        "actual_bitfinex": {
-            "n": len(qualified),
-            "realized_pnl_usd": round(sum(item[3] for item in qualified), 4),
-        },
-        "counterfactual_grid": cells,
-        "selected_on_train": selected,
-        "conclusions_allowed": conclusions_allowed,
-        "live_policy_change_allowed": conclusions_allowed,
-        # HM C9 (R17): signal_replay and counterfactual writers are retired, so with no replay rows the grid
-        # is "source retired (R17)", never INSUFFICIENT_QUALIFIED_HOLDOUT.
-        "verdict": ("QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed
-                    else "SOURCE_RETIRED_R17" if not all_replays and not qualified
-                    else "INSUFFICIENT_QUALIFIED_HOLDOUT"),
-        "source_status": "source retired (R17)" if not all_replays and not qualified else None,
-        "preliminary_descriptive_estimate": {
-            "status": "DESCRIPTIVE_ONLY" if selected else "NO_ESTIMATE",
-            "selected_on_train": selected,
-            "sample_size": len(qualified),
-            "warning": "Train-selected counterfactuals are not live recommendations unless the qualified chronological holdout gate passes.",
-        },
-        "qualified_live_recommendation": {
-            "status": "AVAILABLE" if conclusions_allowed else "NOT_AVAILABLE",
-            "parameters": ({
-                "hard_stop_margin_pct": selected["hard_stop_margin_pct"],
-                "thesis_fast_cut_pct": selected["thesis_fast_cut_pct"],
-                "ladder_first_trigger_pct": selected["ladder_first_trigger_pct"],
-                "ladder_first_lock_pct": selected["ladder_first_lock_pct"],
-                "mfe_protect_pct": selected["mfe_protect_pct"],
-            } if conclusions_allowed else None),
-            "note": (
-                f"The physical hard stop remains the fixed {HARD_STOP_MARGIN_PCT:g}% "
-                "invariant; this report never widens it."
-            ),
-        },
-        "question_outputs": {
-            "hard_stop": {"status": "FIXED_SAFETY_INVARIANT", "value_pct": HARD_STOP_MARGIN_PCT},
-            "thesis_fast_cut": {"status": "QUALIFIED" if conclusions_allowed else "PRELIMINARY_ONLY" if selected else "NO_EVIDENCE"},
-            "scenario_c_ladder": {"status": "QUALIFIED" if conclusions_allowed else "PRELIMINARY_ONLY" if selected else "NO_EVIDENCE"},
-            "chase": {"status": "NOT_EVALUATED_BY_THIS_REPORT", "recommendation": None},
-        },
-        "note": "Actual Bitfinex P&L is never overwritten by counterfactual outcomes. Missing replay, costs, horizons, or cohort evidence fails closed.",
-    }
-    if incident_input.enabled:
-        report["runtime_identity_incident_input"] = incident_input.provenance()
-    incident_input.assert_unchanged()
-    with open(analyzer_report_path(QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE), "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2)
-    return report
 
 
 def qualified_chase_policy_report():
@@ -7900,7 +7660,6 @@ def run_v55_analysis(df, decisions, blocked, ai_log):
     _safe_replay_sweep("thesis stop wide sweep", stop_thesis_wide_sweep_all_replays, df if not df.empty else None)
     _safe_replay_sweep("stop x ladder 2D grid sweep", stop_ladder_2d_grid_sweep_all_replays, df if not df.empty else None)
     _safe_replay_sweep("stop x ladder x MFE 3D sweep", stop_ladder_mfe_3d_sweep_all_replays, df if not df.empty else None)
-    _safe_replay_sweep("qualified exit policy grid", qualified_exit_policy_grid_report)
     entry_gate_replay_sweeps(blocked)
     entry_gate_mtf_chop_sweet_spot_sweep(blocked)
     pullback_replay_fill_sweep(blocked)
@@ -13771,9 +13530,16 @@ def _v3_ledger_rows(name):
                         rows.append(row)
                 return rows
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                # RK R1 ruling (25 Oct 2026): fail closed.  The refusal is recorded and surfaces as the named
+                # integrity check ``v3_read_authority`` (INVALID), never as a silent empty ledger.
+                V3_READ_AUTHORITY_FAILURES[name] = f"{type(exc).__name__}: {exc}"
                 print(f"  ⚠️ V3 ledger authority unavailable for {name}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
                 return []
     return []
+
+
+# ledger name -> refusal ("<ExcType>: <message>") for every V3 read refused in this process (fail closed).
+V3_READ_AUTHORITY_FAILURES = {}
 
 
 def _compressed_shadow_rows(session=None):
@@ -14960,6 +14726,11 @@ def run_integrity_checks(
                 f"≥{min(5, len(sample) // 2)} of {len(sample)} sample trades linked",
                 f"linked={linked}",
             )
+
+    from research.analyzer_integrity_reconciliation import v3_read_authority_check
+    checks.append(v3_read_authority_check(V3_READ_AUTHORITY_FAILURES))
+    if not checks[-1]["passed"]:
+        valid = False
 
     scope = _shadow_scope_label(session) if session else "SESSION"
     payload = {
@@ -21104,6 +20875,12 @@ def _write_evidence_coverage_triage_report(canonical_root, binding_status, conse
     root = Path(canonical_root).resolve()
     if root.name != "canonical-research-data":
         raise ValueError("EVIDENCE_COVERAGE_ROOT_NOT_CANONICAL")
+    from research.r3_quarantine import is_retired_payload
+    if is_retired_payload(conservative_status):
+        # RK R1 ruling (25 Oct 2026): honest interim error.  The conservative results this report reconciles
+        # are retired (R17, 1 s evaluate_limit_fill) until rebuilt on book_limit_entry; the retired stub carries
+        # no generation, which used to surface as the misleading EVIDENCE_COVERAGE_GENERATION_MISMATCH.
+        raise ValueError("CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17: evidence coverage awaits the book_limit_entry rebuild")
     binding_generation = binding_status.get("generation") or {}
     conservative_generation = conservative_status.get("generation") or {}
     if not binding_generation or binding_generation != conservative_generation:
@@ -22113,6 +21890,10 @@ def write_report_manifest(
             analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE),
             policy_reports,
         )
+        from research.analyzer_integrity_reconciliation import apply_v3_read_authority_check
+        reconciled_integrity = apply_v3_read_authority_check(
+            analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE), V3_READ_AUTHORITY_FAILURES,
+        )
         print(
             f"  Integrity after policy cycle: {reconciled_integrity['report_status']} "
             f"({len(reconciled_integrity['failed_checks'])} failed) {PIPELINE_ENFORCEMENT_TAG}"
@@ -22154,14 +21935,6 @@ def write_report_manifest(
         analysis_provenance = dict(analysis_provenance)
         analysis_provenance["shadow_model_input"] = shadow_model_input.provenance()
     generation_revision = analysis_provenance["generation_revision"]
-    # This grid must belong to this run or be explicitly absent. A stale file
-    # from an earlier revision must never appear current merely because it is
-    # still on disk.
-    qualified_grid_error = None
-    try:
-        qualified_exit_policy_grid_report()
-    except Exception as exc:
-        qualified_grid_error = f"{type(exc).__name__}: {exc}"
     reports = []
     dynamic_policy_error = None
     dynamic_policy_report = None
@@ -22179,7 +21952,10 @@ def write_report_manifest(
     baseline_replay_error = None
     baseline_replay = None
     try:
-        from research.entry_baseline_replay import materialize_v3_opportunity_replay
+        # RK R1 ruling (25 Oct 2026): rebuilt on the shared book_limit_entry helper -- full size at the real
+        # best bid/ask plus measured delay, price age recorded, current epoch only, non-book rows listed by reason
+        # and trade id, stamped with book/trades path + sha256 + epoch.  The 1 s evaluate_limit_fill path stays retired.
+        from research.entry_baseline_book_replay import build_entry_baseline_book_replay
         from research.policy_evidence_schema import generation_identity
 
         baseline_manifest_path = Path(policy_data_dir) / "canonical_dataset_current.json"
@@ -22189,49 +21965,32 @@ def write_report_manifest(
             baseline_manifest,
             analyzer_revision=str(generation_revision),
         )
-        baseline_replay = materialize_v3_opportunity_replay(
-            policy_data_dir, incident_input=incident_input,
-            generation=baseline_generation, canonical_manifest=baseline_manifest,
-        )
-        from research.r3_quarantine import is_retired_payload as _r3q_is_retired
-
-        if _r3q_is_retired(baseline_replay):
-            # RK #847 cond 4: priced on market_microstructure_1s -> source retired (R17); no report, no sidecar.
-            raise _R3RetiredSection(baseline_replay)
+        baseline_replay = build_entry_baseline_book_replay(policy_data_dir, baseline_generation)
         if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
             raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
-        baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
-        from research.entry_baseline_replay import replay_health, write_replay_report
-
-        baseline_replay["health"] = replay_health(baseline_replay)
-
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
-        replay_sidecar = write_replay_report(
-            baseline_replay, target, sidecar_name=ENTRY_BASELINE_REPLAY_RECEIPTS_FILE,
-        )
-        _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
+        temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        temp.write_text(json.dumps(baseline_replay, indent=2, default=str), encoding="utf-8")
+        os.replace(temp, target)
         replay_mirror = _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_REPORT_FILE)
         reports.append({
-            "title": "Same-Opportunity Entry Baseline Replay",
+            "title": "Same-Opportunity Entry Baseline Replay (book walk)",
             "file": ENTRY_BASELINE_REPLAY_REPORT_FILE,
             "category": "Chase",
-            "description": "Signed baseline outcomes and truthful UNKNOWN schedule coverage",
+            "description": "Baselines walked on the 10-level book via book_limit_entry; non-book rows listed by reason",
             "size_bytes": replay_mirror.stat().st_size,
             "modified_at": datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat(),
             "analysis_provenance": analysis_provenance,
             "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
             "summaries": baseline_replay.get("summaries"),
-            "status": baseline_replay["health"]["status"],
-            "health": baseline_replay["health"],
-            "episode_receipts_sidecar": replay_sidecar,
+            "status": baseline_replay["status"],
+            "source_provenance": baseline_replay["source_provenance"],
+            "non_book_reason_counts": baseline_replay["non_book_reason_counts"],
         })
-    except _R3RetiredSection as retired_section:
-        baseline_replay = None
-        print(f"  Same-Opportunity Entry Baseline Replay: {retired_section.payload['label']} "
-              f"({retired_section.payload['status']} {retired_section.payload['quarantine']}) — not written")
     except Exception as exc:
+        baseline_replay = None
         baseline_replay_error = f"{type(exc).__name__}: {exc}"
     try:
         if lifecycle_bundle_inventory is None and lifecycle_bundle_inventory_error is None:
@@ -22650,13 +22409,6 @@ def write_report_manifest(
                     for row in reports
                 ),
                 "generation_error": policy_cycle_error,
-            },
-            QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE: {
-                "available_in_generation": any(
-                    row.get("file") == QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE
-                    for row in reports
-                ),
-                "generation_error": qualified_grid_error,
             },
             DYNAMIC_POLICY_ANALYSIS_REPORT_FILE: {
                 "available_in_generation": any(

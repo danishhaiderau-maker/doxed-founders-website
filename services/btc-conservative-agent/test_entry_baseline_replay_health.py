@@ -65,8 +65,9 @@ def test_input_blockers_item_degrades_the_level(tmp_path):
 
 def test_analyzer_stamps_health_on_the_report_row():
     src = (HERE / "analyzer_research_engine_v62.py").read_text("utf-8")
-    assert 'baseline_replay["health"] = replay_health(baseline_replay)' in src
-    assert '"status": baseline_replay["health"]["status"]' in src
+    # RK R1: the report is rebuilt on book_limit_entry; its row carries the book-replay status + provenance.
+    assert "build_entry_baseline_book_replay(policy_data_dir, baseline_generation)" in src
+    assert '"status": baseline_replay["status"]' in src
 
 
 def test_zero_evaluation_baseline_degrades_only_itself_not_the_report():

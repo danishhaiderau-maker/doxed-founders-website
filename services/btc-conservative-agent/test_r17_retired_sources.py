@@ -36,7 +36,7 @@ def test_inventory_matches_ast_and_counts_21():
         mod = "analyzer_research_engine_v62" if p.parent == HERE else f"research.{p.stem}"
         lf |= {f"{mod}.{c}" for c in _callers(p, names)}
     assert lf == set(r3_quarantine.INVENTORY["LIMIT_FILL_1S"])
-    assert len(tick) + len(lf) == 21
+    assert len(tick) + len(lf) == 20  # qualified_exit_policy_grid_report deleted (RK R1)
 
 
 def test_every_tick_sim_producer_is_retired_or_quarantined():
@@ -50,13 +50,13 @@ def test_every_tick_sim_producer_is_retired_or_quarantined():
 def test_retired_report_writers_write_nothing_and_label_section(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(analyzer, "DATA_DIR", str(tmp_path), raising=False)
-    for name in ("qualified_exit_policy_grid_report", "fast_cut_survivor_report", "fast_cut_sweep_report"):
+    for name in ("fast_cut_survivor_report", "fast_cut_sweep_report"):
         rep = getattr(analyzer, name)()
         assert rep["status"] == r3_quarantine.STATUS and rep["countable"] is False
         assert rep["label"] == r3_quarantine.RETIRED_LABEL
     assert list(tmp_path.rglob("*.json")) == []
     out = capsys.readouterr().out
-    assert out.count("source retired (R17)") == 3
+    assert out.count("source retired (R17)") == 2
 
 
 def test_retired_sweeps_return_none_and_print_label(capsys):
@@ -66,7 +66,7 @@ def test_retired_sweeps_return_none_and_print_label(capsys):
 
 
 def test_readers_refuse_retired_files():
-    for f in ("fast_cut_survivor_report.json", "fast_cut_sweep_report.json", "qualified_exit_policy_grid_report.json"):
+    for f in ("fast_cut_survivor_report.json", "fast_cut_sweep_report.json"):
         assert r3_quarantine.quarantined_file(f"/x/{f}")
     json.dumps(r3_quarantine.disabled_payload("TICK_SIM"))
 

@@ -188,3 +188,53 @@ def reconcile_analyzer_integrity_from_files(
     root = Path(report_dir)
     reports = [(name, _load_json(root / name)) for name in report_names]
     return reconcile_analyzer_integrity_with_policy_reports(integrity_path, reports)
+
+
+V3_READ_AUTHORITY_CHECK = "v3_read_authority"
+
+
+def v3_read_authority_check(failures: Mapping[str, str]) -> dict[str, Any]:
+    """Named integrity check for V3 ledger reads (RK R1 ruling 25 Oct 2026): any refused read fails closed."""
+    failures = {str(k): str(v) for k, v in (failures or {}).items()}
+    return {
+        "check": V3_READ_AUTHORITY_CHECK,
+        "passed": not failures,
+        "expected": "every V3 ledger opened through one read authority identity",
+        "found": sorted(failures) or [],
+        "detail": "; ".join(f"{name}={reason[:300]}" for name, reason in sorted(failures.items())),
+    }
+
+
+def apply_v3_read_authority_check(
+    integrity_path: str | os.PathLike[str],
+    failures: Mapping[str, str],
+) -> dict[str, Any]:
+    """Replace the ``v3_read_authority`` check in the on-disk receipt and recompute the status (never upgrades
+    an UNCHECKED/INVALID receipt to VALID)."""
+    target = Path(integrity_path)
+    payload = _load_json(target) or {
+        "schema": "analyzer_integrity_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "checks": [],
+    }
+    checks = [
+        check for check in (payload.get("checks") or [])
+        if not (isinstance(check, Mapping) and check.get("check") == V3_READ_AUTHORITY_CHECK)
+    ]
+    checks.append(v3_read_authority_check(failures))
+    failed = [check for check in checks if not (isinstance(check, Mapping) and check.get("passed") is True)]
+    prior = str(payload.get("report_status") or "").upper()
+    status = prior if prior == "UNCHECKED" else ("INVALID" if failed else "VALID")
+    payload.update({
+        "valid": status == "VALID",
+        "report_status": status,
+        "checks": checks,
+        "failed_checks": failed,
+    })
+    if status != "VALID" and not payload.get("banner"):
+        payload["banner"] = "⚠ REPORT INVALID — V3 read authority refused one or more ledgers"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temp, target)
+    return payload

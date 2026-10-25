@@ -421,25 +421,6 @@ def test_legacy_optimizer_shared_eligibility_keeps_clean_trade_and_blocks_ambigu
     assert count == 4
 
 
-def test_legacy_exit_grid_requires_absolute_replay_timing(tmp_path, monkeypatch):
-    from test_analyzer_atomic_publication import _load, AGENT
-    analyzer = _load("incident_exit_analyzer", AGENT / "analyzer_research_engine_v62.py")
-    # legacy tick-sim grid math; production has TICK_SIM retired (R17), covered by test_r17_retired_sources.py
-    monkeypatch.setattr(_r3q_r17, "ACTIVE", set(_r3q_r17.ACTIVE) - {"TICK_SIM", "LIMIT_FILL_1S"})
-    path, digest = _receipt(tmp_path)
-    monkeypatch.setenv(PATH_ENV, str(path))
-    monkeypatch.setenv(HASH_ENV, digest)
-    monkeypatch.setattr(analyzer, "_analysis_eligible_trade_ids", lambda cohort: ({"trade"}, {}, 1))
-    monkeypatch.setattr(analyzer, "_load_jsonl_replays", lambda: {"trade": {"ticks": [{"t": 10, "price": 100}]}})
-    monkeypatch.setattr(analyzer, "_load_jsonl_by_trade_id", lambda path: {"trade": {"timestamp": "2026-09-05T05:00:00Z"}})
-    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
-    report = analyzer.qualified_exit_policy_grid_report()
-    assert report["grid_exclusion_reason_counts"][REASON] == 1
-    assert report["qualified_costed_replays"] == 0
-    assert report["live_policy_change_allowed"] is False
-    assert report["runtime_identity_incident_input"]["receipt_sha256"] == digest
-
-
 import pytest as _pytest_r17
 from research import r3_quarantine as _r3q_r17
 
