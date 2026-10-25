@@ -33,6 +33,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "ext-test-token")
     monkeypatch.setattr(bot, "CSV_TRADES", p)
     monkeypatch.setattr(bot, "DELETED_TRADE_IDS_FILE", str(tomb))
+    monkeypatch.setattr(bot, "TOMBSTONE_EXTERNAL_RECEIPTS_FILE", str(tmp_path / "receipts.jsonl"))
     monkeypatch.setattr(bot, "_DELETED_TRADE_IDS", set())
     monkeypatch.setattr(bot, "_UNTOMBSTONED", set())
     monkeypatch.setattr(bot, "_DELETED_TRADE_TOMBSTONE", {**bot._DELETED_TRADE_TOMBSTONE, "status": "OK", "error": None})
@@ -81,3 +82,50 @@ def test_auth_sha_and_corrupt_refusals(env):
     bot._DELETED_TRADE_TOMBSTONE["status"] = "CORRUPT"
     assert _post().get_json()["refused"] == "TOMBSTONE_CORRUPT"
     assert not tomb.exists() and len(bot.trades) == len(ALL)
+
+
+def _receipts():
+    try:
+        return [json.loads(l) for l in open(bot.TOMBSTONE_EXTERNAL_RECEIPTS_FILE)]
+    except FileNotFoundError:
+        return []
+
+
+def _assert_sha_guard_and_receipts(p, tomb):
+    """Gate: only the id list + its caller-supplied sha is accepted; every decision leaves a receipt."""
+    r21_row_sha_delete(p, DEL)
+    bad = _post(sha="0" * 64)
+    assert bad.status_code == 409 and bad.get_json()["refused"] == "LIST_SHA_MISMATCH"
+    assert not tomb.exists() and len(bot.trades) == len(ALL)
+    # sha of a different (superset) list must not authorise this list
+    assert _post(sha=m.list_sha256(DEL + ["extra"])).get_json()["refused"] == "LIST_SHA_MISMATCH"
+    body = {"ids": DEL, "dry_run": False, "actor": "rk-test", "reason": "x"}  # sha omitted
+    r = bot.app.test_client().post(URL, json=body, headers=AUTH)
+    assert r.get_json()["refused"] == "LIST_SHA_MISMATCH" and not tomb.exists()
+    ok = _post()
+    assert ok.status_code == 200 and ok.get_json()["receipt"] == bot.TOMBSTONE_EXTERNAL_RECEIPTS_FILE
+    rec = _receipts()
+    assert [x["outcome"] for x in rec] == ["REFUSED", "REFUSED", "REFUSED", "APPLIED"]
+    assert all(x["refused"] == "LIST_SHA_MISMATCH" for x in rec[:3])
+    last = rec[-1]
+    assert last["ids"] == DEL and last["list_sha256_expected"] == last["list_sha256_computed"] == m.list_sha256(DEL)
+    assert last["actor"] == "rk-test" and last["in_memory_dropped"] == 3 and last["after"]["memory_only_count"] == 0
+
+
+def test_sha_guard_and_receipts(env):
+    _assert_sha_guard_and_receipts(*env)
+
+
+def test_mutation_proof_sha_guard_removed_is_caught(env, monkeypatch):
+    """Mutant: sha check accepts anything (list_sha256 echoes the caller's value) -> the gate must fail."""
+    real = m.list_sha256
+    monkeypatch.setattr(m, "list_sha256", lambda ids: (bot.request.get_json() or {}).get("list_sha256") or real(ids))
+    with pytest.raises(AssertionError):
+        _assert_sha_guard_and_receipts(*env)
+
+
+def test_mutation_proof_receipt_removed_is_caught(env, monkeypatch):
+    """Mutant: receipt writer is a no-op -> the gate must fail."""
+    monkeypatch.setattr(bot, "_write_tombstone_external_receipt", lambda rec: bot.TOMBSTONE_EXTERNAL_RECEIPTS_FILE)
+    with pytest.raises(AssertionError):
+        _assert_sha_guard_and_receipts(*env)

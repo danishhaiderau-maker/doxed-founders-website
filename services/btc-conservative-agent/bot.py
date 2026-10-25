@@ -52708,6 +52708,22 @@ def api_admin_trades_delete_by_id():
     return jsonify({"ok": True, **out})
 
 
+TOMBSTONE_EXTERNAL_RECEIPTS_FILE = "trade_tombstone_external_receipts.jsonl"
+
+
+def _write_tombstone_external_receipt(rec: dict) -> str:
+    """RK 25 Oct: append-only receipt (one JSON line, fsync) for every tombstone-external-delete decision."""
+    path = os.path.abspath(TOMBSTONE_EXTERNAL_RECEIPTS_FILE)
+    line = json.dumps({"ts": time.time(), **rec}, sort_keys=True, default=str) + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, line.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return path
+
+
 @app.route('/api/admin/trades/tombstone-external-delete', methods=['POST'])
 def api_admin_trades_tombstone_external_delete():
     """RK 25 Oct (a): after an R21 out-of-band row delete of CSV_TRADES, tombstone the ids (deleted_trade_ids.json)
@@ -52730,16 +52746,28 @@ def api_admin_trades_tombstone_external_delete():
     if (not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids)
             or len(set(ids)) != len(ids)):
         return jsonify({"ok": False, "refused": "BAD_IDS"}), 400
-    if body.get("list_sha256") != _tdi.list_sha256(ids):
-        return jsonify({"ok": False, "refused": "LIST_SHA_MISMATCH"}), 409
     dry_run = body.get("dry_run", True) is not False
+    expected_sha = body.get("list_sha256")
+    computed_sha = _tdi.list_sha256(ids)
+    base_rec = {"actor": actor, "reason": reason[:500], "ids": list(ids), "list_sha256_expected": expected_sha,
+                "list_sha256_computed": computed_sha, "dry_run": dry_run}
+
+    def _refuse(code, status, **extra):
+        try:
+            _write_tombstone_external_receipt({**base_rec, "outcome": "REFUSED", "refused": code, **extra})
+        except OSError as e:
+            logger.error(f"[TRADE-TOMBSTONE-EXTERNAL] refusal receipt write failed: {e}")
+        return jsonify({"ok": False, "refused": code, **extra}), status
+
+    if not isinstance(expected_sha, str) or expected_sha != computed_sha:
+        return _refuse("LIST_SHA_MISMATCH", 409)
     if _DELETED_TRADE_TOMBSTONE["status"] == "CORRUPT":
-        return jsonify({"ok": False, "refused": "TOMBSTONE_CORRUPT"}), 409
+        return _refuse("TOMBSTONE_CORRUPT", 409)
     research_gate = globals().get("_research_write_gate") or threading.RLock()
     with research_gate, csv_lock:
         still = sorted(_trade_ids_present(CSV_TRADES, ids))
         if still:
-            return jsonify({"ok": False, "refused": "IDS_STILL_ON_DISK", "ids_on_disk": still}), 409
+            return _refuse("IDS_STILL_ON_DISK", 409, ids_on_disk=still)
         with trade_lock:
             in_mem = sorted({str(t.get("trade_id") or "") for t in trades if isinstance(t, dict)} & set(ids))
         out = {"dry_run": dry_run, "ids": sorted(ids), "in_memory_matches": in_mem,
@@ -52748,11 +52776,18 @@ def api_admin_trades_tombstone_external_delete():
             try:
                 out.update(_tombstone_external_delete(ids, body["list_sha256"]))
             except TombstoneUnavailable as e:
-                return jsonify({"ok": False, "error": str(e)}), 500
+                return _refuse(str(e), 500)
         with trade_lock:
             snap = list(trades)
     out["after"] = {k: v for k, v in _asa.id_diff(snap, CSV_TRADES, time.time()).items()
                     if k in ("memory_only_ids", "memory_only_count", "disk_only_ids", "disk_only_count")}
+    try:
+        out["receipt"] = _write_tombstone_external_receipt(
+            {**base_rec, **{k: v for k, v in out.items() if k not in ("ids", "list_sha256")},
+             "outcome": "DRY_RUN" if dry_run else "APPLIED"})
+    except OSError as e:
+        logger.error(f"[TRADE-TOMBSTONE-EXTERNAL] receipt write failed: {e}")
+        return jsonify({"ok": False, "error": "RECEIPT_WRITE_FAILED", **out}), 500
     logger.warning(f"[TRADE-TOMBSTONE-EXTERNAL] actor={actor} reason={reason[:120]!r} dry_run={dry_run} "
                    f"ids={len(ids)} in_memory={len(in_mem)} list_sha={body['list_sha256']} [PIPELINE ENFORCEMENT]")
     return jsonify({"ok": True, **out})
