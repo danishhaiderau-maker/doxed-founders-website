@@ -22911,6 +22911,8 @@ def _record_tile_decision_and_dispatch(
     else:
         disposition = "ORDER_ELIGIBLE"
         decision_reason = admission_reason or accept_reason
+    if disposition != "ORDER_ELIGIBLE":
+        monitor_tiles.record_lane_refusal(lane, decision_reason)
     # Keep the operator-facing AI History joined to the same signed
     # per-family decision that is written to the V3 ledger below.  The
     # ledger was complete, but without this stamp genuine family

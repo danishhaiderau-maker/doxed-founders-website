@@ -846,3 +846,31 @@ def test_gf3_route_a5_count_is_ledger_derived_not_engine(bot, monkeypatch, tmp_p
     closed = r.get_json()["closed"]
     assert len(closed) == 1 and "A5_NOT_VERIFIED" not in closed[0]["non_countable_reasons"]
     assert "E8_REAL_PARITY_UNPROVEN" in closed[0]["non_countable_reasons"]
+
+
+def test_lane_admission_refusals_go_through_one_shared_helper_and_reach_counters(monkeypatch):
+    monkeypatch.setattr(mt, "_refusals", {})
+    for _ in range(3):
+        mt.record_lane_refusal("ctrl", "NO_COMMITTED_CALL")
+    mt.record_lane_refusal("CTRL", "FADE_SESSION_GATED")
+    mt.record_lane_refusal("GS-06", "RAW_AI_COMMITTED")
+    out = mt.counters_view("CTRL", rows=[], route_counts={}, xvl_lane={"paper": {"skips": {"STALE": 2}}},
+                           opportunity={}, boot_id="b")
+    sb = out["since_boot"]
+    assert sb["admission_refusals"] == {"NO_COMMITTED_CALL": 3, "FADE_SESSION_GATED": 1}
+    assert sb["rejects_and_skips"] == {"STALE": 2, "ADMISSION:NO_COMMITTED_CALL": 3, "ADMISSION:FADE_SESSION_GATED": 1}
+    assert mt.lane_refusal_counts("GS-06") == {"RAW_AI_COMMITTED": 1}
+
+
+def test_refusal_reasons_per_lane_are_capped(monkeypatch):
+    monkeypatch.setattr(mt, "_refusals", {})
+    monkeypatch.setattr(mt, "REFUSAL_REASONS_PER_LANE_MAX", 2)
+    for r in ("A", "B", "C", "D"):
+        mt.record_lane_refusal("L", r)
+    assert mt.lane_refusal_counts("L") == {mt.REFUSAL_OTHER: 2, "A": 1, "B": 1}
+
+
+def test_bot_counts_every_non_order_disposition_via_the_shared_helper():
+    src = (Path(__file__).parent / "bot.py").read_text()
+    assert src.count("monitor_tiles.record_lane_refusal(") == 1
+    assert 'if disposition != "ORDER_ELIGIBLE":\n        monitor_tiles.record_lane_refusal(lane, decision_reason)' in src
