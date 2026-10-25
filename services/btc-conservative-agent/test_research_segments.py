@@ -606,6 +606,77 @@ def test_oversized_member_blocks_only_its_own_stream(tmp_path):
     assert result["backlog_mode"] is False
 
 
+def test_append_inode_remount_adopts_identity_instead_of_oversized_rewrite(tmp_path):
+    """Remount/dev drift must not latch FLY_OVERSIZED_PATHS on multi-GB ledgers."""
+    env = Env(tmp_path, max_segment_bytes=200, max_member_bytes=500)
+    body = _rows(0, 40)
+    assert len(body) > 500  # would trip the member cap if rewritten whole
+    path = env.write("v3/ledgers/order_intent.jsonl", body)
+    env.ship_all()
+    state = json.loads((env.state_dir / "state.json").read_text())
+    tracked = state["files"]["v3/ledgers/order_intent.jsonl"]
+    assert tracked["offset"] == len(body)
+    # Simulate a volume remount: same bytes, new inode identity in the checkpoint.
+    tracked["inode"] = int(tracked["inode"]) + 999_999
+    tracked["dev"] = int(tracked["dev"]) + 1
+    (env.state_dir / "state.json").write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    result = env.shipper().cycle()
+    status = json.loads((env.state_dir / "status.json").read_text())
+    assert status.get("oversized_paths") in ([], None)
+    assert result["shipped"] is None and result["deferred_bytes"] == 0
+    adopted = json.loads((env.state_dir / "state.json").read_text())["files"]["v3/ledgers/order_intent.jsonl"]
+    live = path.stat()
+    assert (adopted["inode"], adopted["dev"]) == (int(live.st_ino), int(live.st_dev))
+    assert adopted["offset"] == len(body)
+    # Growth after adoption must append, not rewrite the whole file.
+    env.write("v3/ledgers/order_intent.jsonl", _rows(40, 5), append=True)
+    env.ship_all()
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_append_class_rewrite_clamps_instead_of_permanent_oversized(tmp_path):
+    """Diverged append prefixes rewrite in member-sized chunks, not one giant deny."""
+    env = Env(tmp_path, max_segment_bytes=120, max_member_bytes=400)
+    first = _rows(0, 10, tag="a")
+    path = env.write("v3/ledgers/decision.jsonl", first)
+    env.ship_all()
+    # Corrupt the shipped prefix so anchors fail, forcing REWRITE of a file larger
+    # than the member cap if taken whole.
+    huge = _rows(0, 80, tag="b")
+    assert len(huge) > 400
+    path.write_bytes(huge)
+    shipper = env.shipper()
+    result = shipper.cycle()
+    status = json.loads((env.state_dir / "status.json").read_text())
+    assert "v3/ledgers/decision.jsonl" not in (status.get("oversized_paths") or [])
+    assert result["shipped"] is not None
+    manifest = json.loads(env.store.get(fmt.manifest_key("v1", result["shipped"]["seq"])))
+    member = manifest["members"][0]
+    assert member["kind"] == "REWRITE" and member["size"] <= 400
+    # Catch up the remainder via APPEND chunks, then the laptop matches Fly.
+    env.ship_all()
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_clamp_ships_single_record_between_segment_budget_and_member_cap(tmp_path):
+    env = Env(tmp_path, max_segment_bytes=50, max_member_bytes=500)
+    env.write("v3/ledgers/lifecycle.jsonl", _rows(0, 3))
+    env.ship_all()
+    # One record larger than the segment budget but under the member cap.
+    big = json.dumps({"i": 99, "blob": "x" * 200}).encode() + b"\n"
+    assert 50 < len(big) <= 500
+    env.write("v3/ledgers/lifecycle.jsonl", big + _rows(100, 3), append=True)
+    result = env.shipper().cycle()
+    status = json.loads((env.state_dir / "status.json").read_text())
+    assert status.get("oversized_paths") in ([], None)
+    assert result["shipped"] is not None
+    manifest = json.loads(env.store.get(fmt.manifest_key("v1", result["shipped"]["seq"])))
+    member = next(m for m in manifest["members"] if m["path"] == "v3/ledgers/lifecycle.jsonl")
+    assert member["kind"] == "APPEND" and member["size"] == len(big)
+
+
 def test_derived_research_db_is_not_shipped_or_counted_as_lag(tmp_path):
     env = Env(tmp_path)
     env.write("research.db", b"SQLite format 3\x00" + b"x" * 100)
