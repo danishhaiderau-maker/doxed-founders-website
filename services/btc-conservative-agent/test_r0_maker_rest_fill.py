@@ -136,3 +136,37 @@ def test_b1_b2_maker_rest_fills_only_through_the_shared_paper_fill_helper():
     assert not {a for _, a in calls} & {"maker_rest_step", "maker_rest_full_size"}
     import order_model as om
     assert not hasattr(om, "maker_rest_full_size")  # the all-or-nothing rule (RK: R0 violation) is gone
+
+
+def test_a5_rest_fill_is_the_shared_maker_fill_with_partials():
+    """R4: paper_fill.rest_fill (FADE3 A5) delegates to maker_rest_fill; partial fills, cap, window, print dedup."""
+    rows = [_p(1.0, 99.0, -0.3, 1), _p(1.5, 99.0, -0.3, 1),  # same print id twice: counted once
+            _p(2.0, 100.0, -9.0, 2),                          # at the limit: never fills
+            _p(5.0, 99.0, -9.0, 3)]                           # outside (t0, t0 + ttl]: never fills
+    r = pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0)
+    assert r["status"] == "PARTIAL" and r["filled_qty"] == pytest.approx(0.3) and r["price"] == 100.0
+    assert r["fill_ts"] == 1.0 and r["evidence_status"] == "INCOMPLETE" and r["fill_stamps"][0]["qty"] == pytest.approx(0.3)
+    full = pf.rest_fill("SHORT", 0.2, 100.0, 0.0, [_p(1.0, 100.5, 0.15, 7), _p(2.0, 100.4, 0.5, 8)], ttl_s=3.0)
+    assert full["status"] == "FILLED" and full["filled_qty"] == pytest.approx(0.2) and full["fill_ts"] == 2.0
+    src = ast.parse((ROOT / "paper_fill.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(src) if isinstance(n, ast.FunctionDef) and n.name == "rest_fill")
+    assert any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == "maker_rest_fill" for n in ast.walk(fn))
+
+
+def test_a5_rest_fill_mutation_proof(monkeypatch):
+    """Each new assert above fails on a mutant: all-or-nothing, no dedup, no window."""
+    rows = [_p(1.0, 99.0, -0.3, 1), _p(1.5, 99.0, -0.3, 1), _p(5.0, 99.0, -9.0, 3)]
+    real = pf.maker_rest_fill
+
+    def all_or_nothing(d, lim, rem, q0, seen_vol, trades, **kw):
+        r = real(d, lim, rem, q0, seen_vol, trades, **kw)
+        return r if r["remaining"] <= 1e-12 else {**r, "fills": [], "filled_qty": 0.0, "remaining": rem}
+    monkeypatch.setattr(pf, "maker_rest_fill", all_or_nothing)
+    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0)["status"] != "PARTIAL"
+
+    def no_dedup(d, lim, rem, q0, seen_vol, trades, **kw):
+        return real(d, lim, rem, q0, seen_vol, [{**t, "id": i} for i, t in enumerate(trades)], **kw)
+    monkeypatch.setattr(pf, "maker_rest_fill", no_dedup)
+    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0)["filled_qty"] != pytest.approx(0.3)
+    monkeypatch.setattr(pf, "maker_rest_fill", real)
+    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=10.0)["status"] == "FILLED"  # window widened -> differs

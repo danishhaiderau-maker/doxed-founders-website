@@ -1204,31 +1204,24 @@ def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, 
     base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "leg": "entry_rest",
             "rest_rule": REST_RULE_A5, "rest_ttl_s": float(ttl_s), "rest_t_start": t0, "rest_t_end": t1,
             "side": str(side).upper(), "qty": q, "limit_px": lim, "price_source": None}
-    beyond = []
-    for p in trades or ():
-        ts, px, amt = _f((p or {}).get("ts")), _f((p or {}).get("px")), _f((p or {}).get("amt"))
-        if ts is None or px is None or amt is None or lim is None:
-            continue
-        if not (t0 < ts <= t1):
-            continue
-        if (px < lim) if buy else (px > lim):
-            beyond.append((ts, abs(amt)))
-    vol = sum(a for _, a in beyond)
-    base.update(trades_n=len(beyond), trade_vol_beyond=round(vol, 8))
-    if q <= 0 or lim is None or vol <= 0:
+    # R4 (RK 25 Oct, #883 item 5): the fill itself comes from THE shared maker fill (maker_rest_fill), the same
+    # queue-ahead / trade-through / partial rule B1 / B2 / WALK_THEN_REST / book_limit_entry / research_v3 use. A5
+    # rests join behind no visible queue (the remainder of a marketable order sits at the touch it just cleared), so
+    # queue_ahead = 0; only prints inside (t_start, t_start + ttl_s] are offered.
+    window = [p for p in trades or () if isinstance(p, Mapping) and _f(p.get("ts")) is not None
+              and t0 < float(_f(p.get("ts"))) <= t1]
+    step = maker_rest_fill(side, lim, q, 0.0, 0.0, window, placement_ts=t0) if lim is not None else None
+    vol = float(step["through_seen"]) if step else 0.0
+    base.update(trades_n=(len(step["seen"]) - int(step["unsized_prints"])) if step else 0,
+                trade_vol_beyond=round(vol, 8))
+    filled = float(step["filled_qty"]) if step else 0.0
+    if q <= 0 or filled <= 1e-12:
         return {**base, "status": NO_FILL_REST_TTL, "price": None, "filled_qty": 0.0, "fill_ts": None,
                 "evidence_status": "NO_FILL"}
-    filled = min(q, vol)
-    # the fill completes at the print that exhausts the remaining qty (or the last beyond print)
-    acc, fill_ts = 0.0, beyond[-1][0]
-    for ts, a in sorted(beyond):
-        acc += a
-        if acc + 1e-12 >= filled:
-            fill_ts = ts
-            break
     full = filled + 1e-12 >= q
     return {**base, "status": "FILLED" if full else "PARTIAL", "price": lim, "filled_qty": round(filled, 8),
-            "fill_ts": fill_ts, "price_source": REST_SOURCE, "evidence_status": "COMPLETE" if full else "INCOMPLETE"}
+            "fill_ts": step["fills"][-1]["print_ts"], "price_source": REST_SOURCE,
+            "evidence_status": "COMPLETE" if full else "INCOMPLETE", "fill_stamps": step["fills"]}
 
 
 # lane -> the registered rest sites (each must be a single `return paper_fill.rest_fill(...)` over trades_between)
