@@ -308,6 +308,7 @@ export class TradingAgentsController {
     @Headers('authorization') authorization: string | undefined,
     @Body() body: { confirmation?: string; reason?: string },
   ) {
+    assertBotAdminToken(adminHeader, authorization);
     const status = await this.tradingAgents.getOpsRelayStatus(
       slug, userId, adminHeader, authorization,
     );
@@ -340,6 +341,7 @@ export class TradingAgentsController {
     @Headers('x-bot-admin-token') adminHeader?: string,
     @Headers('authorization') authorization?: string,
   ) {
+    assertBotAdminToken(adminHeader, authorization);
     await this.tradingAgents.getOpsRelayStatus(
       slug, body?.userId, adminHeader, authorization,
     );

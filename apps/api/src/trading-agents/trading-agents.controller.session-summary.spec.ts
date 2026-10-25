@@ -75,14 +75,11 @@ test('public API cannot start or stop the sole Fly risk-manager machine', () => 
 });
 
 test('ops already-flat recovery authenticates before execution and requires exact confirmation', async () => {
+  const prevAdmin = process.env.BOT_ADMIN_TOKEN;
+  process.env.BOT_ADMIN_TOKEN = 'valid-token';
   let executions = 0;
   const tradingAgents = {
-    getOpsRelayStatus: async (
-      _slug: string, _userId: string, token: string,
-    ) => {
-      if (token !== 'valid-token') throw new Error('Invalid BOT_ADMIN_TOKEN');
-      return { status: 'PAUSED' };
-    },
+    getOpsRelayStatus: async () => ({ status: 'PAUSED' }),
   };
   const execution = {
     recoverAlreadyFlatPendingEntries: async () => {
@@ -114,6 +111,8 @@ test('ops already-flat recovery authenticates before execution and requires exac
     { recovered: 2 },
   );
   assert.equal(executions, 1);
+  if (prevAdmin === undefined) delete process.env.BOT_ADMIN_TOKEN;
+  else process.env.BOT_ADMIN_TOKEN = prevAdmin;
 });
 
 test('ops pause authenticates before all mutation and uses canonical pause settlement', async () => {
@@ -215,6 +214,8 @@ test('ops flat-audit refresh refuses armed state before dispatch', async () => {
 });
 
 test('ops emergency reconcile requires admin-scoped paused mismatch and explicit confirmation', async () => {
+  const prevAdmin = process.env.BOT_ADMIN_TOKEN;
+  process.env.BOT_ADMIN_TOKEN = 'secret';
   const calls: unknown[][] = [];
   const tradingAgents = {
     getOpsRelayStatus: async (...args: unknown[]) => {
@@ -267,9 +268,13 @@ test('ops emergency reconcile requires admin-scoped paused mismatch and explicit
     'conservative-btc',
     'incident-2026-08-16',
   ]);
+  if (prevAdmin === undefined) delete process.env.BOT_ADMIN_TOKEN;
+  else process.env.BOT_ADMIN_TOKEN = prevAdmin;
 });
 
 test('ops emergency reconcile refuses an unpaused or unevidenced instance', async () => {
+  const prevAdmin = process.env.BOT_ADMIN_TOKEN;
+  process.env.BOT_ADMIN_TOKEN = 'secret';
   let emergencyCalls = 0;
   const execution = {
     requestExecutorEmergencyReconcile: async () => {
@@ -300,4 +305,6 @@ test('ops emergency reconcile refuses an unpaused or unevidenced instance', asyn
     );
   }
   assert.equal(emergencyCalls, 0);
+  if (prevAdmin === undefined) delete process.env.BOT_ADMIN_TOKEN;
+  else process.env.BOT_ADMIN_TOKEN = prevAdmin;
 });
