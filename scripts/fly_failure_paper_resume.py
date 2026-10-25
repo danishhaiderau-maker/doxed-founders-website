@@ -160,21 +160,56 @@ def guaranteed_resume(request_json, prior: dict, *, monotonic=time.monotonic, sl
     raise RuntimeError("failure-resume deadline expired: " + json.dumps(last_failed))
 
 
+def _retrying_request(request_json, *, attempts: int = 200, budget_sec: float = 900.0):
+    """Retry transient 502/503/504 (and transport blips) for tile restore.
+
+    Guaranteed resume posts ACTIVE successfully, then ``restore_registry_tiles``
+    hits ``/api/state`` while the machine is still warming after unpause. A bare
+    client fails the Actions step red even though paper is already clear
+    (runs 40177239599 / 40177322210). Match the postdeploy gate's retry budget.
+    """
+
+    def wrapped(path, payload=None):
+        deadline = time.monotonic() + budget_sec
+        last = None
+        for attempt in range(1, attempts + 1):
+            if attempt > 1 and time.monotonic() >= deadline:
+                break
+            try:
+                return request_json(path, payload)
+            except Exception as exc:
+                if not _transient(exc):
+                    raise
+                last = exc
+                print(
+                    f"failure-resume tile-restore retry attempt={attempt} "
+                    f"path={path} error={type(exc).__name__}",
+                    flush=True,
+                )
+                time.sleep(min(2 * attempt, 10))
+        raise RuntimeError(
+            f"failure-resume tile-restore transient failure persisted: {type(last).__name__}"
+        ) from last
+
+    return wrapped
+
+
 def main() -> int:
     token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("BOT_ADMIN_TOKEN is missing")
     prior = parse_prior(os.environ.get("PRIOR_OPERATOR_STATE", ""))
     timeout = int(os.environ.get("FAILURE_RESUME_TIMEOUT_SEC") or 12 * 60)
+    request_json = _http_clients(token)
     try:
-        result = guaranteed_resume(_http_clients(token), prior, timeout=timeout)
+        result = guaranteed_resume(request_json, prior, timeout=timeout)
     except Exception as exc:
         print(f"::error::paper was NOT resumed after the failed deploy: {exc}", flush=True)
         raise
     print("failure-resume " + json.dumps(result, sort_keys=True), flush=True)
     if result["status"] == "ACTIVE":
         from fly_postdeploy_active_gate import restore_registry_tiles
-        restore_registry_tiles(_http_clients(token))
+        restore_registry_tiles(_retrying_request(request_json))
     return 0
 
 

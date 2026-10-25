@@ -332,14 +332,22 @@ def _exclusive_index_lock(root: Path):
 
 
 def _validate_source_identity(path: Path, cursor: sqlite3.Row | None) -> os.stat_result:
+    """Fail closed on ledger identity drift; classify rotation before truncation.
+
+    ``V3EvidenceStore.rotate_ledger`` seals the prior generation and creates an
+    empty successor at the same path (new inode, size 0). Checking ``st_size``
+    before identity misclassified that cutover as ``SOURCE_LEDGER_TRUNCATED``,
+    which has no auto-recovery and stalls receipt bootstrap forever. Same-inode
+    shrinkage remains ``SOURCE_LEDGER_TRUNCATED`` (reset-authorized repair only).
+    """
     stat = path.stat()
     if cursor is None:
         return stat
     offset = int(cursor["byte_offset"])
-    if stat.st_size < offset:
-        raise ValueError(f"SOURCE_LEDGER_TRUNCATED:{path.name}")
     if int(stat.st_dev) != int(cursor["source_dev"]) or int(stat.st_ino) != int(cursor["source_ino"]):
         raise ValueError(f"SOURCE_LEDGER_ROTATED:{path.name}")
+    if stat.st_size < offset:
+        raise ValueError(f"SOURCE_LEDGER_TRUNCATED:{path.name}")
     if _source_anchor(path, offset) != cursor["source_anchor_sha256"]:
         raise ValueError(f"SOURCE_LEDGER_PREFIX_CHANGED:{path.name}")
     return stat

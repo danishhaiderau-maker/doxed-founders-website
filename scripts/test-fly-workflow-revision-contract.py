@@ -174,6 +174,10 @@ def test_bootstrap_status_observation_retries_only_transient_transport_failures(
     resume_helper = (Path(__file__).resolve().parent / "fly_failure_paper_resume.py").read_text(encoding="utf-8")
     assert "def bootstrap_gate_failed()" in resume_helper
     assert "bootstrap_gate_failed()" in resume_helper
+    # Guaranteed resume must retry transient /api/state 503 during tile restore
+    # so a post-ACTIVE warm-up blip cannot leave the Actions run red.
+    assert "def _retrying_request(" in resume_helper
+    assert "restore_registry_tiles(_retrying_request(request_json))" in resume_helper
 
 
 def test_bootstrap_continuation_program_is_valid_python():
