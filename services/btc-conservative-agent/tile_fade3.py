@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -531,7 +532,8 @@ def dashboard_policy() -> dict:
 class _JsonlHistory:
     """Incremental byte-offset reader of one collector jsonl keeping HISTORY_S seconds of parsed rows by "s".
 
-    A shrink / inode change (rotation) resets to the new file's tail; the tile then re-warms (z needs ~4.8 h)."""
+    A shrink / inode change (rotation) resets to the new file's tail; book/trades re-warm (z needs ~4.8 h). Deriv uses
+    ``_RotatingDerivHistory`` to back-fill numbered rotations for the 360-min BZ window."""
 
     def __init__(self, path: str, parse: Callable[[dict], Any], tail_bytes: int) -> None:
         self.path, self.parse, self.tail_bytes = path, parse, tail_bytes
@@ -586,6 +588,86 @@ class _JsonlHistory:
                 del self.rows[sec]
             if stale:
                 self.gen += 1
+
+
+# ------------------------------------------------------------------ deriv history across rotations (RK 25 Oct, BZ R1)
+DERIV_FLOOR_TS = 1792263671  # fresh-start epoch: never read deriv rows older than this
+DERIV_MAX_GAP_S = 60  # a hole longer than this at a rotation boundary invalidates BZ over any window spanning it
+BZ_WINDOW_S = 6 * 3600
+
+
+def _rotations_newest_first(path: str) -> list:
+    """rotate_log renames base -> base.N with N = max + 1, so the highest N is the newest rotation."""
+    d, base = os.path.split(path)
+    pat = re.compile(r"^" + re.escape(base) + r"\.(\d+)$")
+    try:
+        names = os.listdir(d or ".")
+    except OSError:
+        return []
+    found = sorted(((int(m.group(1)), n) for n in names for m in [pat.match(n)] if m), reverse=True)
+    return [os.path.join(d, n) for _, n in found]
+
+
+def _read_tail_rows(path: str, parse: Callable[[dict], Any], tail_bytes: int) -> dict:
+    out: dict = {}
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, 2)
+            off = max(0, size - tail_bytes)
+            fh.seek(off)
+            lines = fh.read().split(b"\n")
+    except OSError:
+        return out
+    for line in lines[1:] if off > 0 else lines:
+        try:
+            r = json.loads(line)
+            sec = int(r["s"])
+            val = parse(r)
+        except (ValueError, KeyError, TypeError, IndexError):
+            continue
+        if val is not None and sec >= DERIV_FLOOR_TS:
+            out[sec] = val
+    return out
+
+
+class _RotatingDerivHistory(_JsonlHistory):
+    """Deriv tail that, on first sync and after every rotation, back-fills from base.N (newest first) until the
+    full HISTORY_S window is covered. Any hole > DERIV_MAX_GAP_S at a file boundary is recorded in ``gap_end``;
+    the feed returns BZ = NaN while that hole lies inside the 360-min z window. Rows before DERIV_FLOOR_TS are
+    never used."""
+
+    def __init__(self, path: str, parse: Callable[[dict], Any], tail_bytes: int) -> None:
+        super().__init__(path, parse, tail_bytes)
+        self.gap_end: Optional[int] = None
+        self.backfilled_files = 0
+
+    def sync(self) -> None:
+        ino_before = self._ino
+        super().sync()
+        for sec in [k for k in self.rows if k < DERIV_FLOOR_TS]:
+            del self.rows[sec]
+        if self._ino is not None and self._ino != ino_before:
+            self._backfill()
+
+    def _backfill(self) -> None:
+        self.gap_end, self.backfilled_files = None, 0
+        if not self.rows:
+            return
+        need_from = max(max(self.rows) - HISTORY_S, DERIV_FLOOR_TS)
+        for rp in _rotations_newest_first(self.path):
+            oldest = min(self.rows)
+            if oldest <= need_from:
+                break
+            older = {k: v for k, v in _read_tail_rows(rp, self.parse, self.tail_bytes).items() if k < oldest}
+            self.backfilled_files += 1
+            if not older:
+                continue
+            if oldest - max(older) > DERIV_MAX_GAP_S:
+                self.gap_end = max(self.gap_end or 0, oldest)
+                break  # never stitch across a hole
+            for k, v in older.items():
+                if k >= need_from:
+                    self.rows[k] = v
 
 
 def _parse_book(r: dict):
@@ -671,7 +753,7 @@ class LiveFeatureFeed:
     def __init__(self, root: str) -> None:
         self.book = _JsonlHistory(os.path.join(root, PRICE_SOURCES[0]), _parse_book, 48 << 20)
         self.trades = _JsonlHistory(os.path.join(root, PRICE_SOURCES[1]), _parse_trades, 32 << 20)
-        self.deriv = _JsonlHistory(os.path.join(root, PRICE_SOURCES[2]), _parse_deriv, 16 << 20)
+        self.deriv = _RotatingDerivHistory(os.path.join(root, PRICE_SOURCES[2]), _parse_deriv, 16 << 20)
         self._bbuf = _GrowBuf({"key": (), "B": (10, 2), "A": (10, 2), "rx": ()})
         self._tbuf = _GrowBuf({"key": (), "T": (4,)})  # prints sorted by (ms, id); key = collector second
         self._dbuf = _GrowBuf({"key": (), "D": (2,)})
@@ -773,7 +855,8 @@ class LiveFeatureFeed:
             return None, None, {}
         contiguous = idx[-1] - idx[0] + 1 == idx.size
         s_last = int(S_all[idx[-1]])
-        key = (int(S_all[idx[0]]), s_last, int(idx.size), self.book.gen, self.trades.gen, self.deriv.gen)
+        gap_end = getattr(self.deriv, "gap_end", None)
+        key = (int(S_all[idx[0]]), s_last, int(idx.size), self.book.gen, self.trades.gen, self.deriv.gen, gap_end)
         if key == self._cache_key:
             return self._cache_val
         sl = slice(int(idx[0]), int(idx[-1]) + 1) if contiguous else idx
@@ -785,6 +868,8 @@ class LiveFeatureFeed:
         nd = int(np.searchsorted(DK, s_last, "right"))
         D = np.column_stack([DK[:nd].astype(float), self._dbuf.view("D")[:nd]]) if nd else np.empty((0, 3))
         F = compute_features(S, B, A, T, D)
+        if gap_end is not None and gap_end > s_last + 1 - BZ_WINDOW_S:
+            F["BZ"] = np.full(len(F["BZ"]), np.nan)  # rotation-boundary hole inside the z window: no BZ
         L, Sh = entry_signals_e8(F)
         side = "LONG" if L[-1] else "SHORT" if Sh[-1] else None
         snap = {k: (float(F[k][-1]) if np.isfinite(F[k][-1]) else None)
