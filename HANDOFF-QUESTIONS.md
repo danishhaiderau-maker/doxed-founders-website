@@ -10,7 +10,7 @@
 
 ## Danish / operator blockers
 
-1. **Simplified dashboard PR** (Boss: overdue since 16 Oct) — no matching open PR/branch found. Please send the **PR number or branch name**.
+1. **Simplified dashboard PR** (Boss/Strategist 00:10 audit item 5; overdue since ~16 Oct) — re-searched open PRs/branches (`dashboard` / `simplify` / `fly ui` / etc.): still **no match**. Please send the **PR number or branch name** (no tokens).
 
 ~~Cancelled: hung run `40169802400` — completed failure; paper unpaused on `#900` tip `f99681380830`.~~
 ~~`#904` sticky merge `5c94ca96c` — done on master (not tipped).~~
