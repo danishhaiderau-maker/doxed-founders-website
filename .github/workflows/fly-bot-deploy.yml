@@ -1,4 +1,5 @@
 name: Deploy Fly BTC bot
+# deploy-trigger: land #910+#913 tip fa4c4c6d5
 
 on:
   push:
