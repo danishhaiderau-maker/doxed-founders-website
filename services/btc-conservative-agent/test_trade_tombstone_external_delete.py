@@ -40,12 +40,28 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "trades", mem)
     monkeypatch.setattr(bot, "load_session_trades_from_csv", lambda *a, **k: None)
     monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    monkeypatch.setattr(bot, "_csv_fallback_pending_targets", set())
+    monkeypatch.setattr(bot, "open_positions", [])
+    monkeypatch.setattr(bot, "pending_orders", [])
+    monkeypatch.setitem(bot.state, "live_armed", False)
     return p, tomb
 
 
-def _post(ids=DEL, dry_run=False, token=AUTH, sha=None):
+def r21_receipt(ids, path=None):
+    """Caller-supplied R21 sha-listed delete receipt (one row sha per id, for CSV_TRADES)."""
+    entries = [{"trade_id": i, "path": path or bot.CSV_TRADES, "row_sha256": hashlib.sha256(i.encode()).hexdigest()}
+               for i in ids]
+    return {"entries": entries, "receipt_sha256": bot.r21_receipt_sha256(entries)}
+
+
+_NO = object()
+
+
+def _post(ids=DEL, dry_run=False, token=AUTH, sha=None, receipt=_NO):
     body = {"ids": ids, "list_sha256": sha or m.list_sha256(ids), "dry_run": dry_run, "actor": "rk-test",
-            "reason": "r21 episode"}
+            "reason": "r21 episode", "r21_receipt": r21_receipt(ids) if receipt is _NO else receipt}
+    if dry_run is None:
+        body.pop("dry_run")
     return bot.app.test_client().post(URL, json=body, headers=token, environ_base={"REMOTE_ADDR": "198.51.100.9"})
 
 
@@ -99,13 +115,13 @@ def _assert_sha_guard_and_receipts(p, tomb):
     assert not tomb.exists() and len(bot.trades) == len(ALL)
     # sha of a different (superset) list must not authorise this list
     assert _post(sha=m.list_sha256(DEL + ["extra"])).get_json()["refused"] == "LIST_SHA_MISMATCH"
-    body = {"ids": DEL, "dry_run": False, "actor": "rk-test", "reason": "x"}  # sha omitted
+    body = {"ids": DEL, "dry_run": False, "actor": "rk-test", "reason": "x", "r21_receipt": r21_receipt(DEL)}  # no sha
     r = bot.app.test_client().post(URL, json=body, headers=AUTH)
     assert r.get_json()["refused"] == "LIST_SHA_MISMATCH" and not tomb.exists()
     ok = _post()
     assert ok.status_code == 200 and ok.get_json()["receipt"] == bot.TOMBSTONE_EXTERNAL_RECEIPTS_FILE
     rec = _receipts()
-    assert [x["outcome"] for x in rec] == ["REFUSED", "REFUSED", "REFUSED", "APPLIED"]
+    assert [x["outcome"] for x in rec] == ["REFUSED", "REFUSED", "REFUSED", "PENDING", "APPLIED"]
     assert all(x["refused"] == "LIST_SHA_MISMATCH" for x in rec[:3])
     last = rec[-1]
     assert last["ids"] == DEL and last["list_sha256_expected"] == last["list_sha256_computed"] == m.list_sha256(DEL)
@@ -129,3 +145,136 @@ def test_mutation_proof_receipt_removed_is_caught(env, monkeypatch):
     monkeypatch.setattr(bot, "_write_tombstone_external_receipt", lambda rec: bot.TOMBSTONE_EXTERNAL_RECEIPTS_FILE)
     with pytest.raises(AssertionError):
         _assert_sha_guard_and_receipts(*env)
+
+
+# ---- HM #888 B1: live / fallback / position / order / R21-receipt refusals (each checked to change nothing) ----
+
+def _assert_refused(p, tomb, code, **kw):
+    r = _post(**kw)
+    assert r.status_code == 409 and r.get_json()["refused"] == code, r.get_json()
+    assert not tomb.exists() and len(bot.trades) == len(ALL)
+    assert _receipts()[-1]["outcome"] == "REFUSED" and _receipts()[-1]["refused"] == code
+
+
+def test_refuses_csv_fallback_pending(env):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    bot._csv_fallback_pending_targets.add(bot.CSV_TRADES)
+    _assert_refused(p, tomb, "CSV_FALLBACK_PENDING")
+    _assert_refused(p, tomb, "CSV_FALLBACK_PENDING", dry_run=True)
+
+
+def test_refuses_live_armed(env):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    bot.state["live_armed"] = True
+    _assert_refused(p, tomb, "LIVE_ARMED")
+
+
+def test_refuses_open_position(env):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    bot.open_positions.append({"trade_id": "open-1"})
+    _assert_refused(p, tomb, "OPEN_POSITIONS")
+
+
+def test_refuses_open_order(env):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    bot.pending_orders.append({"order_id": "o-1"})
+    _assert_refused(p, tomb, "OPEN_ORDERS")
+
+
+def test_refuses_without_r21_receipt(env):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    _assert_refused(p, tomb, "R21_RECEIPT_MISSING", receipt=None)
+    bad = r21_receipt(DEL)
+    bad["receipt_sha256"] = "0" * 64
+    _assert_refused(p, tomb, "R21_RECEIPT_SHA_MISMATCH", receipt=bad)
+    _assert_refused(p, tomb, "R21_RECEIPT_IDS_NOT_LISTED", receipt=r21_receipt(DEL[:-1]))
+    _assert_refused(p, tomb, "R21_RECEIPT_IDS_NOT_LISTED", receipt=r21_receipt(DEL, path="/app/data/other.csv"))
+    e = r21_receipt(DEL)["entries"]
+    e[0]["row_sha256"] = "nothex"
+    _assert_refused(p, tomb, "R21_RECEIPT_BAD_ENTRY", receipt={"entries": e, "receipt_sha256": bot.r21_receipt_sha256(e)})
+
+
+# ---- HM #888 B2 survivors ----
+
+def test_dry_run_is_the_default(env):  # kills S5 (default flipped to False)
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    r = _post(dry_run=None)
+    assert r.status_code == 200 and r.get_json()["dry_run"] is True
+    assert not tomb.exists() and len(bot.trades) == len(ALL) and _receipts()[-1]["outcome"] == "DRY_RUN"
+
+
+def _fail_writes_on(monkeypatch, outcome):
+    real = bot._write_tombstone_external_receipt
+
+    def w(rec):
+        if rec.get("outcome") == outcome:
+            raise OSError("disk full")
+        return real(rec)
+    monkeypatch.setattr(bot, "_write_tombstone_external_receipt", w)
+
+
+def test_final_receipt_failure_is_500_and_pending_receipt_stands(env, monkeypatch):  # kills S3
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    _fail_writes_on(monkeypatch, "APPLIED")
+    r = _post()
+    assert r.status_code == 500 and r.get_json()["error"] == "RECEIPT_WRITE_FAILED"
+    rec = _receipts()
+    assert rec[-1]["outcome"] == "PENDING" and rec[-1]["ids"] == DEL and rec[-1]["receipt_id"] == r.get_json()["receipt_id"]
+
+
+def test_receipts_are_fsynced(env, monkeypatch):  # kills S4 (fsync removed)
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    synced = []
+    real_fsync, real_write = bot.os.fsync, bot.os.write
+    pending = {}
+    monkeypatch.setattr(bot.os, "write", lambda fd, b: pending.__setitem__(fd, b) or real_write(fd, b))
+    monkeypatch.setattr(bot.os, "fsync", 
+                        lambda fd: (fd in pending and synced.append(json.loads(pending.pop(fd))["outcome"])) or real_fsync(fd))
+    assert _post(sha="0" * 64).status_code == 409
+    assert _post().status_code == 200
+    assert synced == ["REFUSED", "PENDING", "APPLIED"] and not pending
+
+
+# ---- HM #888 B3: PENDING receipt before apply ----
+
+def test_pending_receipt_written_before_any_state_change(env, monkeypatch):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    seen = []
+    real = bot._tombstone_external_delete
+
+    def apply(ids, sha):
+        seen.append([x["outcome"] for x in _receipts()])
+        assert not tomb.exists() and len(bot.trades) == len(ALL)
+        return real(ids, sha)
+    monkeypatch.setattr(bot, "_tombstone_external_delete", apply)
+    assert _post().status_code == 200
+    assert seen == [["PENDING"]]
+    assert [x["outcome"] for x in _receipts()] == ["PENDING", "APPLIED"]
+    assert _receipts()[0]["receipt_id"] == _receipts()[1]["receipt_id"]
+
+
+def test_pending_receipt_failure_refuses_without_applying(env, monkeypatch):
+    p, tomb = env
+    r21_row_sha_delete(p, DEL)
+    _fail_writes_on(monkeypatch, "PENDING")
+    r = _post()
+    assert r.status_code == 500 and r.get_json()["error"] == "PENDING_RECEIPT_WRITE_FAILED"
+    assert r.get_json()["applied"] is False
+    assert not tomb.exists() and len(bot.trades) == len(ALL) and _receipts() == []
+
+
+def test_refusal_receipt_failure_is_not_swallowed(env, monkeypatch):
+    p, tomb = env
+    _fail_writes_on(monkeypatch, "REFUSED")
+    r = _post(sha="0" * 64)
+    assert r.status_code == 500 and r.get_json()["error"] == "REFUSAL_RECEIPT_WRITE_FAILED"
+    assert r.get_json()["refused"] == "LIST_SHA_MISMATCH" and not tomb.exists()

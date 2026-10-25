@@ -1,6 +1,6 @@
 {
   "schema": "route_census_fields_v1",
-  "note": "HM R16 census: fields each monitored route must return (added 25 Oct for M1/M2/M3 + Q3). HM R2 (25 Oct): red_streams/allowlist/warnings + per-ledger red_reason/retirement_flags. 25 Oct: /api/monitor/tiles/gf3 (Tile 6 GS-FADE3-TP30 paper status; route census 906 -> 907).",
+  "note": "HM R16 census: fields each monitored route must return (added 25 Oct for M1/M2/M3 + Q3). HM R2 (25 Oct): red_streams/allowlist/warnings + per-ledger red_reason/retirement_flags. 25 Oct: /api/monitor/tiles/gf3 (Tile 6 GS-FADE3-TP30 paper status; route census 906 -> 907). 25 Oct #888: POST /api/admin/trades/tombstone-external-delete + trade_count id-diff fields (route census 913 -> 914).",
   "routes": {
     "/api/monitor/ledger-unstamped": {
       "top": [
@@ -69,6 +69,7 @@
         "total_trades_disk",
         "total_trades_source",
         "total_trades_mismatch",
+        "disk_status",
         "memory_only_ids",
         "memory_only_count",
         "disk_only_ids",

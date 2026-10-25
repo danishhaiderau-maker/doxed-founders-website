@@ -22,7 +22,7 @@ def disk_trade_rows(path: str) -> int | None:
         st = os.stat(path)
     except OSError:
         return None
-    key = (st.st_size, st.st_mtime_ns)
+    key = (st.st_ino, st.st_size, st.st_mtime_ns)
     with _lock:
         hit = _cache.get(path)
         if hit and hit[0] == key:
@@ -51,19 +51,24 @@ def overlay(live_analytics: Any, analytics_ts: Any, csv_path: str) -> tuple[dict
     return a, analytics_ts
 
 
-_ids_cache: dict[str, tuple[tuple[int, int], frozenset]] = {}
+_ids_cache: dict[str, tuple[tuple[int, int, int], frozenset]] = {}
 _mismatch_since: dict[str, float] = {}
 MISMATCH_PERSIST_S = 120.0  # a mismatch older than this is RED in system-health (writes land in <1 s)
 MAX_DIFF_IDS = 50
 
 
 def disk_trade_ids(path: str) -> frozenset | None:
-    """trade_id set of the CSV data rows (cached on size/mtime like disk_trade_rows); None when unreadable."""
+    """trade_id set of the CSV data rows; None when unreadable.
+
+    Cached on (inode, size, mtime_ns), so health/monitor polls re-read nothing while the file is unchanged. A change
+    triggers one full re-read (HM #888 nit). Not made incremental on purpose: CSV_TRADES is rewritten in place by
+    delete-by-id/R21 tools as well as appended, and an append-only tail could silently miss a removed row, which is
+    exactly the defect this check exists to catch. Measured: ~1.5 ms per re-read of a 341-row x 41-col CSV, ~1.4 us cached."""
     try:
         st = os.stat(path)
     except OSError:
         return None
-    key = (st.st_size, st.st_mtime_ns)
+    key = (st.st_ino, st.st_size, st.st_mtime_ns)
     with _lock:
         hit = _ids_cache.get(path)
         if hit and hit[0] == key:
@@ -85,8 +90,8 @@ def id_diff(memory_trades, csv_path: str, now: float) -> dict[str, Any]:
     the mismatch has persisted. Capped at MAX_DIFF_IDS per side; counts are exact."""
     disk = disk_trade_ids(csv_path)
     mem = {str(t.get("trade_id") or "") for t in (memory_trades or []) if isinstance(t, dict)}
-    if disk is None:
-        only_mem, only_disk = sorted(mem), []
+    if disk is None:  # HM #888 nit: label it, don't list every memory id as a mismatch
+        only_mem, only_disk = [], []
     else:
         only_mem, only_disk = sorted(mem - disk), sorted(disk - mem)
     mismatch = bool(disk is None or only_mem or only_disk)
@@ -97,7 +102,8 @@ def id_diff(memory_trades, csv_path: str, now: float) -> dict[str, Any]:
             _mismatch_since.pop(csv_path, None)
             since = None
     age = (now - since) if since is not None else 0.0
-    return {"memory_only_ids": only_mem[:MAX_DIFF_IDS], "memory_only_count": len(only_mem),
+    return {"disk_status": "UNREADABLE" if disk is None else "OK",
+            "memory_only_ids": only_mem[:MAX_DIFF_IDS], "memory_only_count": len(only_mem),
             "disk_only_ids": only_disk[:MAX_DIFF_IDS], "disk_only_count": len(only_disk),
             "mismatch_since_ts": since, "mismatch_age_s": round(age, 1),
             "persistent": bool(mismatch and age >= MISMATCH_PERSIST_S)}
