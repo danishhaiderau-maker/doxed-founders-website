@@ -33,7 +33,7 @@ def _setup(tmp_path):
 def test_dry_run_changes_nothing_and_reports_counts(tmp_path):
     root, now, sha, doc = _setup(tmp_path)
     before = _snapshot(root)
-    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C1", "C2", "C3a", "C3b", "C4"), execute=False, sleep_s=0, now=now)
+    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C1", "C2", "C3b", "C4"), execute=False, sleep_s=0, now=now)
     assert res["status"] == "DONE" and _snapshot(root) == before
     assert res["totals"]["C1"]["removed"] == 1 and "C3b" not in res["totals"]      # tape excluded without --include-tape
 
@@ -53,19 +53,15 @@ def test_execute_removes_only_planned_pre_epoch_items_and_keeps_current_and_prot
     keep = [f"{rec}/decision/{'2'*64}.json", f"{rec}/decision/{'3'*64}.json", f"{rec}/decision/complete.json", f"{rec}/decision/bootstrap.json",
             f"{rec}/round_robin.json", f"{rec}/append_heads/{'4'*64}.json", f"{rec}/evidence_failure/{'5'*64}.json",
             f"{v3}/signal_snapshots_v1/{'7'*64}.json", f"{v3}/signal_snapshots_v1/{'8'*64}.json",
-            f"{v3}/lifecycle_transfer_bundles/aa/transfer-{'9'*64}/b.json", f"{v3}/lifecycle_transfer_bundles/cc/transfer-{'c'*64}/b.json",
+            f"{v3}/lifecycle_bundles/aa/lifecycle-{'9'*64}/b.json",
             f"{root}/tape_1s/new.jsonl.gz", f"{root}/tape_1s/old.jsonl.gz", f"{root}/runtime/relay_switch.json"]
-    gone = [f"{rec}/decision/{'1'*64}.json", f"{v3}/signal_snapshots_v1/{'6'*64}.json",
-            f"{v3}/lifecycle_transfer_bundles/bb/transfer-{'b'*64}/b.json"]
-    for d in (f"{v3}/lifecycle_transfer_bundles/bb/transfer-{'b'*64}", f"{v3}/lifecycle_transfer_bundles/bb"):
-        os.utime(d, (EPOCH - 500, EPOCH - 500))          # an old bundle dir untouched since before the epoch
+    gone = [f"{rec}/decision/{'1'*64}.json", f"{v3}/signal_snapshots_v1/{'6'*64}.json"]
     res = ex.run(root, EPOCH, sha, fake_get(), execute=True, confirm_sha=sha, sleep_s=0, batch=1, now=now)
     assert res["status"] == "DONE", res
     assert all(os.path.exists(p) for p in keep) and not any(os.path.exists(p) for p in gone)
-    assert not os.path.exists(f"{v3}/lifecycle_transfer_bundles/bb")                    # emptied dir removed (rmdir only)
     assert res["current_bundle_dirs_before"] == res["current_bundle_dirs_after"] == 1
     t = res["totals"]
-    assert (t["C1"]["removed"], t["C2"]["removed"], t["C3a"]["removed"], t["C4"]["removed"]) == (1, 1, 1, 3)
+    assert (t["C1"]["removed"], t["C2"]["removed"], t["C4"]["removed"]) == (1, 1, 3) and "C3a" not in t
     lines = [json.loads(x) for f in ("relay_outbox_retired.jsonl", "relay_outbox_quarantine.jsonl") for x in open(f"{root}/runtime/{f}")]
     assert [x["created_at_unix"] for x in lines] == [EPOCH + 5]                          # only the current-epoch line survives
 
@@ -126,30 +122,19 @@ def test_executor_source_has_no_archive_or_rmtree_and_no_order_calls():
         assert tok not in src, tok
 
 
-def test_c3a_rmdir_skips_dirs_touched_at_or_after_the_epoch_and_never_dirs_outside_planned_items(tmp_path):
-    root, now, sha, _ = _setup(tmp_path)
-    b = f"{root}/runtime/v3/lifecycle_transfer_bundles"
-    # dir mtimes are fresh (>= epoch) in this fixture: the planned file goes, the (touched) dirs stay
-    unrelated = f"{b}/zz/empty-unplanned-dir"
-    os.makedirs(unrelated)
-    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C3a",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
-    assert res["status"] == "DONE" and os.path.isdir(f"{b}/bb/transfer-{'b'*64}") and os.path.isdir(unrelated)
-
-
 def test_symlinked_component_and_bad_names_are_rejected(tmp_path):
     root, now, sha, _ = _setup(tmp_path)
     v3 = f"{root}/runtime/v3"
     assert ex._path_ok(f"{v3}/signal_snapshots_v1", f"{v3}/signal_snapshots_v1/{'6'*64}.json")
     outside = tmp_path / "outside"; outside.mkdir(); (outside / "x.json").write_text("x")
-    link = f"{v3}/lifecycle_transfer_bundles/ln"
+    link = f"{v3}/signal_snapshots_v1/ln"
     os.symlink(str(outside), link)
-    assert not ex._path_ok(f"{v3}/lifecycle_transfer_bundles", f"{link}/x.json")
-    assert not ex._path_ok(f"{v3}/lifecycle_transfer_bundles", f"{v3}/lifecycle_transfer_bundles/../x.json")
+    assert not ex._path_ok(f"{v3}/signal_snapshots_v1", f"{link}/x.json")
+    assert not ex._path_ok(f"{v3}/signal_snapshots_v1", f"{v3}/signal_snapshots_v1/../x.json")
     with pytest.raises(ex.Abort):
-        ex._file_targets("C3a", root, [("aa/not-a-transfer/b.json", 1, 1)])
+        ex._file_targets("C2", root, [("not-hex.json", 1, 1)])
     with pytest.raises(ex.Abort):
-        ex._file_targets("C3a", root, [(f"aa/transfer-{'9'*64}/../../x.json", 1, 1)])
-    assert ex._file_targets("C3a", root, [(f"aa/transfer-{'9'*64}/b.json", 1, 1)])
+        ex._file_targets("C3a", root, [(f"aa/transfer-{'9'*64}/b.json", 1, 1)])  # R22: class retired
     # a symlink swapped in at the planned file path is skipped, never followed
     p = f"{v3}/signal_snapshots_v1/{'6'*64}.json"
     keep = tmp_path / "victim.json"; keep.write_text("v")
@@ -200,7 +185,6 @@ def test_c4_pending_rechecked_right_before_the_replace(tmp_path):
 
 def test_current_dirs_shrink_is_checked_per_class(tmp_path):
     root, now, sha, _ = _setup(tmp_path)
-    cur = f"{root}/runtime/v3/lifecycle_transfer_bundles/cc"
     orig = ex.current_bundle_dirs
     n = {"c": 0}
 
@@ -269,7 +253,7 @@ def test_bundle_dirs_walked_once_per_class_not_per_batch(tmp_path):
         res = ex.run(root, EPOCH, sha, fake_get(), execute=True, confirm_sha=sha, sleep_s=0, batch=1, now=now)
     finally:
         ex.current_bundle_dirs = orig
-    assert res["status"] == "DONE" and n["c"] == 1 + 4 + 1     # before + one per class (C1,C2,C3a,C4) + final
+    assert res["status"] == "DONE" and n["c"] == 1 + 3 + 1     # before + one per class (C1,C2,C4) + final
 
 
 def test_cli_exits_nonzero_on_aborted_and_zero_on_done(tmp_path, monkeypatch):

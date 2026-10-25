@@ -248,52 +248,6 @@ def queue_ahead_at(direction: Any, limit_px: Any, book: Optional[Mapping[str, An
     return tot
 
 
-def maker_rest_step(direction: Any, limit_px: Any, remaining: float, queue_ahead: float,
-                    trades: Iterable[Mapping[str, Any]], fill_basis: str = REST_FILL_DEFAULT) -> dict:
-    """Advance a resting entry limit over trade prints (oldest first). A print THROUGH the limit (sell below a buy
-    limit / buy above a sell limit) fills us (trade-through), capped at that print's printed |amt|; with
-    ``fill_basis`` trade_through (default, HM C1) at-limit prints never fill us; with queue_clear (opt-in) a print AT
-    the limit on the aggressor side first depletes the queue ahead, then fills us. HM C1: a print whose amt is None
-    or 0 has no known size or aggressor: it fills NOTHING and is counted in ``unsized_prints`` (the caller stamps
-    UNSIZED_PRINT_UNVERIFIED). Partials allowed. Returns fills [(ts, px, qty)], remaining, queue_ahead,
-    unsized_prints."""
-    d, lp = _dir(direction), _f(limit_px)
-    rem = max(0.0, float(remaining or 0))
-    q = max(0.0, float(queue_ahead or 0))
-    fills = []
-    unsized = 0
-    if d is None or lp is None or rem <= 0:
-        return {"fills": fills, "remaining": rem, "queue_ahead": q, "unsized_prints": 0}
-    for tr in trades or ():
-        px, ts, amt = _f(tr.get("px")), _f(tr.get("ts")), _f(tr.get("amt"))
-        if px is None or ts is None or rem <= 0:
-            continue
-        size = abs(amt) if amt else 0.0
-        through = px < lp - 1e-9 if d == "LONG" else px > lp + 1e-9
-        at = abs(px - lp) <= 1e-9
-        if size <= 0:
-            # HM C1: no printed size -> size 0 (never the whole remainder) and no known aggressor (never "hits us").
-            if through or at:
-                unsized += 1
-            continue
-        # aggressor: Bitfinex signed amount, negative = sell aggressor (hits bids), positive = buy aggressor
-        hits_us = amt < 0 if d == "LONG" else amt > 0
-        if through:
-            take = min(rem, size)  # capped at the print's printed |amt|
-            fills.append((ts, lp, take))
-            rem -= take
-        elif at and hits_us and size > 0 and fill_basis != REST_FILL_TRADE_THROUGH:
-            if q >= size:
-                q -= size
-                continue
-            avail = size - q
-            q = 0.0
-            take = min(rem, avail)
-            fills.append((ts, lp, take))
-            rem -= take
-    return {"fills": fills, "remaining": round(rem, 12), "queue_ahead": q, "unsized_prints": unsized}
-
-
 def vwap(fills: Iterable) -> tuple:
     q = sum(f[2] for f in fills)
     return (sum(f[1] * f[2] for f in fills) / q if q > 0 else None), q

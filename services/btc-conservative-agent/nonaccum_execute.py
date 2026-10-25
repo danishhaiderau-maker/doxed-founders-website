@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GUARDED executor for the C1-C4 non-accumulation clean-up (HM 19 Oct). DRY-RUN BY DEFAULT.
 
-    python3 nonaccum_execute.py ROOT EPOCH_TS --expected-sha <sha> [--classes C1,C2,C3a,C4] [--execute --confirm-sha <sha>]
+    python3 nonaccum_execute.py ROOT EPOCH_TS --expected-sha <sha> [--classes C1,C2,C4] [--execute --confirm-sha <sha>]
 
 Rules (all enforced in code, covered by tests):
   * re-builds the plans (nonaccum_plans.build_all) and REQUIRES plan_sha256 == --expected-sha. A different sha is accepted only
@@ -11,8 +11,8 @@ Rules (all enforced in code, covered by tests):
     with --accept-baseline-red NAME; any NEW or worsened check aborts);
   * C1 touches only <64hex>.json under the 7 ledger dirs with mtime < epoch; protected names can never be unlinked;
     every file is re-stat'ed right before unlink (same size + mtime_ns as planned, mtime < epoch, inside ROOT), else skipped;
-  * C3a never touches a transfer dir that has any file newer than the epoch (the current dirs are counted before/after and
-    must not shrink); only empty dirs are rmdir'ed (no recursive delete); C3b (tape) is never executed (HM 19 Oct; no --include-tape flag);
+  * current-epoch lifecycle bundle dirs are counted before/after and must not shrink; C3b (tape) is never executed
+    (HM 19 Oct; no --include-tape flag); the transfer-bundle class C3a was retired with transfer bundles (R22);
   * C4 rewrites the two relay-outbox JSONL files atomically, dropping ONLY planned pre-epoch lines (matched by content sha),
     refusing if the relay outbox shows any pending event or the file changed between read and replace;
   * rate limited batches (--batch files, --sleep seconds); abort on the first failed gate; no archive/copy of anything;
@@ -24,7 +24,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import stat
 import sys
 import time
@@ -37,8 +36,7 @@ _RANK = {"GREEN": 0, "INFO": 0, "AMBER": 1, "UNKNOWN": 1, "RED": 2}
 RSS_CEILING_BYTES = 2 * 1024 ** 3
 RSS_GROWTH_ABORT_BYTES = 400 * 1024 ** 2
 API_LATENCY_ABORT_S = 5.0   # /api/status must answer within this at every gate, else abort
-C3A_RE = re.compile(r"^[0-9A-Za-z_-]{1,16}/transfer-[0-9a-f]{64}(/[0-9A-Za-z._-]{1,128}){1,4}$")
-CLASS_ORDER = ("C1", "C2", "C3a", "C3b", "C4")
+CLASS_ORDER = ("C1", "C2", "C3b", "C4")
 
 
 class Abort(Exception):
@@ -107,10 +105,6 @@ def _file_targets(cls: str, root: str, items: list) -> list:
             path = os.path.join(v3, "signal_snapshots_v1", rel)
             if not P.HEX64.match(rel):
                 raise Abort(f"C2 item outside the allowed set: {rel}")
-        elif cls == "C3a":
-            path = os.path.join(v3, "lifecycle_transfer_bundles", rel)
-            if not C3A_RE.match(rel) or ".." in rel.split("/"):
-                raise Abort(f"C3a item outside the allowed set: {rel}")
         elif cls == "C3b":
             path = os.path.join(root, rel)
             if not rel.startswith("tape_1s/") or not rel.endswith(".jsonl.gz"):
@@ -124,7 +118,7 @@ def _file_targets(cls: str, root: str, items: list) -> list:
 def _class_dir(cls: str, root: str) -> str:
     v3 = os.path.join(root, "runtime", "v3")
     return {"C1": os.path.join(v3, "receipts", "emergency_record_idempotency_v1"), "C2": os.path.join(v3, "signal_snapshots_v1"),
-            "C3a": os.path.join(v3, "lifecycle_transfer_bundles"), "C3b": os.path.join(root, "tape_1s")}[cls]
+            "C3b": os.path.join(root, "tape_1s")}[cls]
 
 
 def _path_ok(class_dir: str, path: str) -> bool:
@@ -147,7 +141,7 @@ def _path_ok(class_dir: str, path: str) -> bool:
 
 
 def current_bundle_dirs(root: str, epoch_ts: float) -> int:
-    b = os.path.join(root, "runtime", "v3", "lifecycle_transfer_bundles")
+    b = os.path.join(root, "runtime", "v3", "lifecycle_bundles")
     n = 0
     for shard in os.listdir(b) if os.path.isdir(b) else []:
         sd = os.path.join(b, shard)
@@ -167,20 +161,6 @@ def delete_files(cls, root, epoch_ts, items, execute, batch, sleep_s, check, log
     targets = _file_targets(cls, root, items)
     rr = os.path.realpath(root)
     cdir = _class_dir(cls, root)
-    # C3a: the ONLY directories that may be rmdir'ed are those derived from planned items (file parent chain up to the shard),
-    # and only if their own mtime was before the epoch when the class started (a dir touched since is skipped).
-    derived: dict = {}
-    if cls == "C3a":
-        for path, _sz, _mt in targets:
-            d = os.path.dirname(path)
-            while len(d) > len(cdir) and d.startswith(cdir + os.sep):
-                derived.setdefault(d, None)
-                d = os.path.dirname(d)
-        for d in list(derived):
-            try:
-                derived[d] = os.lstat(d).st_mtime
-            except OSError:
-                derived.pop(d)
     for i in range(0, len(targets), batch):
         removed = skipped = nbytes = 0
         for path, size, mtime_ns in targets[i:i + batch]:
@@ -215,14 +195,6 @@ def delete_files(cls, root, epoch_ts, items, execute, batch, sleep_s, check, log
         check()
         if execute and sleep_s:
             time.sleep(sleep_s)
-    if cls == "C3a" and execute:   # remove only EMPTY dirs derived from planned items (no recursive delete)
-        for d in sorted(derived, key=lambda x: -len(x)):
-            if derived[d] >= epoch_ts or not _path_ok(cdir, d):
-                continue
-            try:
-                os.rmdir(d)
-            except OSError:
-                pass
 
 
 def rewrite_c4(root, epoch_ts, items, execute, log, totals, pending_fn):
@@ -281,7 +253,7 @@ def rewrite_c4(root, epoch_ts, items, execute, log, totals, pending_fn):
         log({"event": "c4_file", "file": name, "execute": execute, "lines_removed": drop, "bytes": dbytes, "lines_kept": len(keep)})
 
 
-def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2", "C3a", "C4"), execute=False, confirm_sha=None,
+def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2", "C4"), execute=False, confirm_sha=None,
         batch=2000, sleep_s=1.0, accepted_red=(), expected_counts: dict | None = None, include_tape=False, log_path=None, now=None) -> dict:
     lines = []
 
@@ -355,7 +327,7 @@ def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2",
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("root"); ap.add_argument("epoch_ts", type=float); ap.add_argument("--expected-sha", required=True)
-    ap.add_argument("--classes", default="C1,C2,C3a,C4"); ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--classes", default="C1,C2,C4"); ap.add_argument("--execute", action="store_true")
     ap.add_argument("--confirm-sha"); ap.add_argument("--batch", type=int, default=2000); ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--accept-baseline-red", default=""); ap.add_argument("--expected-counts-json")
     ap.add_argument("--log")

@@ -92,3 +92,21 @@ def signal_to_fill_ms_by_lane(by_lane: Mapping[str, Iterable[Mapping[str, Any]]]
                      "max_ms": round(max(vals), 1) if vals else None, "window_h": 24,
                      "basis": "persisted closed rows (event_timestamps)"}
     return out
+
+
+def exit_trigger_to_fill_by_lane(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], *, since: float) -> dict:
+    """R1 item 5: per lane EXIT leg latency (timing.exit_trigger_to_fill_sec), closed rows since ``since``."""
+    out = {}
+    for lane, rows in by_lane.items():
+        vals = []
+        for r in rows:
+            if r.get("status") != "CLOSED":
+                continue
+            if (_num((r.get("exit") or {}).get("close_ts")) or 0.0) < since:
+                continue
+            sec = _num((r.get("timing") or {}).get("exit_trigger_to_fill_sec"))
+            if sec is not None and sec >= 0:
+                vals.append(sec)
+        out[lane] = {"n": len(vals), "p50_s": _pct(vals, 0.5), "p95_s": _pct(vals, 0.95), "window_h": 24,
+                     "stage": "exit_trigger_to_fill", "basis": "persisted closed rows (event_timestamps)"}
+    return out

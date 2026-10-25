@@ -1,4 +1,4 @@
-"""Snapshot dependencies survive transfer without becoming market segments."""
+"""Snapshot dependencies survive bundling without becoming market segments."""
 import copy
 import hashlib
 import json
@@ -9,7 +9,7 @@ import pytest
 
 import lifecycle_bundles as bundles
 from collector_signal_snapshot import freeze_signal_snapshot
-from test_lifecycle_bundle_materialization import row, transfer_assessment
+from test_lifecycle_bundle_materialization import row
 
 NOW = 20_000.0
 KEY = bundles.LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
@@ -25,9 +25,8 @@ def source_row(root):
 
 
 def publish(root, rows, mode):
-    if mode == "qualification":
-        return bundles.materialize_bundle(root, KEY, rows, now=NOW)
-    return bundles.materialize_transfer_bundle(root, KEY, rows, transfer_assessment(NOW))
+    assert mode == "qualification"  # R22: transfer bundles retired
+    return bundles.materialize_bundle(root, KEY, rows, now=NOW)
 
 
 def rewrite_manifest(bundle, mutate):
@@ -39,7 +38,7 @@ def rewrite_manifest(bundle, mutate):
     path.write_text(bundles.canonical_json(manifest) + "\n", encoding="utf-8")
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 def test_snapshot_copied_as_distinct_pinned_role_and_verifies_without_source(tmp_path, mode):
     event, ref = source_row(tmp_path)
     result = publish(tmp_path, [event], mode)
@@ -48,7 +47,7 @@ def test_snapshot_copied_as_distinct_pinned_role_and_verifies_without_source(tmp
     snapshots = [r for r in manifest["files"] if "SIGNAL_SNAPSHOT" in r["role"]]
     assert len(snapshots) == 1
     receipt = snapshots[0]
-    assert receipt["role"] == ("SIGNAL_SNAPSHOT" if mode == "qualification" else "TRANSFER_SIGNAL_SNAPSHOT")
+    assert receipt["role"] == "SIGNAL_SNAPSHOT"
     assert receipt["source_relative_path"] == ref["relative_path"]
     assert receipt["sha256"] == ref["sha256"] and receipt["size"] == ref["bytes"]
     assert receipt["row_count"] == 1 and receipt["snapshot_identity"] == ref["identity"]
@@ -58,25 +57,20 @@ def test_snapshot_copied_as_distinct_pinned_role_and_verifies_without_source(tmp
     verified = bundles.verify_bundle(result["path"])
     assert verified["passed"] is True
     assert verified["manifest"]["source_cleanup_authorized"] is False
-    if mode == "transfer":
-        assert manifest["qualification_ready"] is False
-        assert manifest["profitability_supported"] is False
-        assert manifest["ranking_eligible"] is False
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 def test_legacy_no_reference_keeps_original_content_id(tmp_path, mode):
     event = row(KEY, "life-1", NOW)
     result = publish(tmp_path, [event], mode)
     manifest = result["manifest"]
-    evidence = manifest["completion"] if mode == "qualification" else manifest["transfer_receipt"]
-    expected = bundles._bundle_content_id(KEY, [event], evidence, [], prefix="lifecycle-" if mode == "qualification" else "transfer-")
+    expected = bundles._bundle_content_id(KEY, [event], manifest["completion"], [], prefix="lifecycle-")
     assert result["bundle_id"] == expected
     assert len(manifest["files"]) == 1
     assert bundles.verify_bundle(result["path"])["passed"]
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 @pytest.mark.parametrize("fault", ["null", "empty", "schema", "bool_bytes", "size", "sha", "path", "event", "epoch", "signal", "missing_row_signal"])
 def test_malformed_snapshot_reference_cannot_be_silently_skipped(tmp_path, mode, fault):
     event, ref = source_row(tmp_path)
@@ -96,7 +90,7 @@ def test_malformed_snapshot_reference_cannot_be_silently_skipped(tmp_path, mode,
     assert not list(tmp_path.glob("v3/lifecycle*/*/*/manifest.json"))
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 @pytest.mark.parametrize("fault", ["missing", "tamper", "wrong_schema", "wrong_identity", "wrong_fields", "capture_bool", "availability"])
 def test_missing_or_invalid_snapshot_content_blocks_publication(tmp_path, mode, fault):
     event, ref = source_row(tmp_path)
@@ -119,7 +113,7 @@ def test_missing_or_invalid_snapshot_content_blocks_publication(tmp_path, mode, 
         publish(tmp_path, [event], mode)
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 @pytest.mark.parametrize("fault", ["delete_member", "remove_receipt", "source_path", "role", "size_bool", "snapshot_identity", "duplicate_receipt", "extra_file", "bytes", "timestamp"])
 def test_bundle_verifier_rejects_dependency_tampering_even_with_rehashed_manifest(tmp_path, mode, fault):
     event, ref = source_row(tmp_path)
@@ -144,7 +138,7 @@ def test_bundle_verifier_rejects_dependency_tampering_even_with_rehashed_manifes
     assert bundles.verify_bundle(bundle)["passed"] is False
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 def test_repeated_reference_is_one_dependency(tmp_path, mode):
     event, ref = source_row(tmp_path)
     second = copy.deepcopy(event)
@@ -155,7 +149,7 @@ def test_repeated_reference_is_one_dependency(tmp_path, mode):
     assert len([r for r in result["manifest"]["files"] if "SIGNAL_SNAPSHOT" in r["role"]]) == 1
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 def test_source_mutation_at_copy_is_checked_against_original_pin(tmp_path, mode, monkeypatch):
     event, ref = source_row(tmp_path)
     original = shutil.copyfile
@@ -180,7 +174,7 @@ def test_snapshot_material_changes_content_id(tmp_path):
     assert first_result["bundle_id"] != second_result["bundle_id"]
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 @pytest.mark.parametrize("fault", ["duplicate_json", "nonfinite_evidence", "exponent_overflow", "huge_timestamp", "capture_before_signal"])
 def test_hash_valid_payload_cannot_relax_snapshot_writer_contract(tmp_path, mode, fault):
     event, ref = source_row(tmp_path)
@@ -203,7 +197,7 @@ def test_hash_valid_payload_cannot_relax_snapshot_writer_contract(tmp_path, mode
         publish(tmp_path, [event], mode)
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 def test_two_different_snapshots_for_same_event_are_not_merged(tmp_path, mode):
     event, _ = source_row(tmp_path)
     record = {"event_id": "signal-event", "epoch_id": KEY.collection_epoch_id,
@@ -217,7 +211,7 @@ def test_two_different_snapshots_for_same_event_are_not_merged(tmp_path, mode):
         publish(tmp_path, [event, other], mode)
 
 
-@pytest.mark.parametrize("mode", ["qualification", "transfer"])
+@pytest.mark.parametrize("mode", ["qualification"])
 def test_linked_snapshot_source_is_refused_before_copy(tmp_path, mode, monkeypatch):
     event, ref = source_row(tmp_path)
     source = (tmp_path / ref["relative_path"]).absolute()

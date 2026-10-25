@@ -158,3 +158,13 @@ def test_field_completeness_and_s2f_stats():
     assert out["lanes"]["L"]["sample_missing_trade_ids"]["regime_at_signal"] == ["b"]
     s = data_gaps.signal_to_fill_ms_by_lane({"L": [full, empty]}, since=0)
     assert s["L"]["n"] == 1 and s["L"]["p50_ms"] == 500.0
+
+
+def test_r1_item5_exit_trigger_to_fill_by_lane_closed_rows_since_only():
+    rows = [{"status": "CLOSED", "exit": {"close_ts": 200}, "timing": {"exit_trigger_to_fill_sec": 0.4}},
+            {"status": "CLOSED", "exit": {"close_ts": 210}, "timing": {"exit_trigger_to_fill_sec": 0.8}},
+            {"status": "CLOSED", "exit": {"close_ts": 50}, "timing": {"exit_trigger_to_fill_sec": 9.0}},
+            {"status": "OPEN", "timing": {"exit_trigger_to_fill_sec": 7.0}}]
+    out = data_gaps.exit_trigger_to_fill_by_lane({"L": rows}, since=100)
+    assert out["L"]["n"] == 2 and out["L"]["stage"] == "exit_trigger_to_fill"
+    assert 0.4 <= out["L"]["p50_s"] <= 0.8

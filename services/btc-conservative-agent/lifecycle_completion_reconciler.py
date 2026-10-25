@@ -19,7 +19,6 @@ from lifecycle_completion_receipts import (
     EVIDENCE_COLLECTED_SCHEMA,
     build_evidence_collected_receipt,
     build_lifecycle_completion_receipt,
-    build_lifecycle_transfer_ready_receipt,
 )
 from research_v3_contract import canonical_json
 from research_v3_store import V3EvidenceStore, _collection_provenance
@@ -287,39 +286,6 @@ def evaluate_lifecycle_completion(
         "provenance": provenance,
         "event_id": next(iter(event_ids)) if len(event_ids) == 1 else None,
         "terminal_proof": proof,
-        "receipt": built["receipt"] if not blockers else None,
-    }
-
-
-def evaluate_lifecycle_transfer_ready(
-    key: LifecycleKey, rows: Iterable[Mapping[str, Any]], *, now: float,
-    lifecycle_horizon_sec: float = 7200.0,
-    reconciliation_allowance_sec: float = 180.0,
-) -> dict[str, Any]:
-    """Evaluate early immutable transfer without relaxing qualification."""
-    qualification = evaluate_lifecycle_completion(
-        key, rows, now=now,
-        lifecycle_horizon_sec=lifecycle_horizon_sec,
-        reconciliation_allowance_sec=reconciliation_allowance_sec,
-    )
-    built = build_lifecycle_transfer_ready_receipt(
-        qualification["terminal_proof"], now=now,
-        lifecycle_horizon_sec=lifecycle_horizon_sec,
-        reconciliation_allowance_sec=reconciliation_allowance_sec,
-    )
-    blockers = sorted(set(
-        list(qualification["structural_blockers"]) + list(built["blockers"])
-    ))
-    return {
-        "schema": "lifecycle_transfer_ready_reconciliation_v1",
-        "identity": key.as_dict(),
-        "ready": not blockers and built["receipt"] is not None,
-        "classification": built["classification"],
-        "blockers": blockers,
-        "qualification_ready": qualification["ready"],
-        "qualification_blockers": qualification["blockers"],
-        "provenance": qualification["provenance"],
-        "event_id": qualification["event_id"],
         "receipt": built["receipt"] if not blockers else None,
     }
 

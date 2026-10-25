@@ -246,3 +246,16 @@ def test_summary_is_small_public_and_complete(bot, monkeypatch):
         assert key in body["counters_since_boot"]
     assert set(body["custody"]) >= {"shipped_seq", "laptop_acked_seq"}
     assert "truncated" not in body
+
+
+def test_r1_item5_latency_brief_separate_taker_maker_exit_labels():
+    import monitor_api as ma
+    lat = {"status": "N/A_MAKER", "target_median_signal_to_fill_s": 2.0,
+           "stages": {"signal_to_fill": {"n": 0}},
+           "maker_entry_rest": {"status": "N/A_MAKER", "target_s": None, "n": 3, "p50_s": 120.0, "p90_s": 400.0},
+           "exit_trigger_to_fill_trades": {"n": 4, "p50_s": 0.6}}
+    b = ma.latency_brief(lat)
+    assert b["maker_entry_rest_p50_s"] == 120.0 and b["maker_entry_status"] == "N/A_MAKER"
+    assert b["taker_entry_n"] == 0 and b["taker_entry_signal_to_fill_p50_s"] is None
+    assert b["exit_trigger_to_fill_p50_s"] == 0.6 and "signal_to_fill_p50_s" not in b
+    assert ma.latency_brief(None) is None

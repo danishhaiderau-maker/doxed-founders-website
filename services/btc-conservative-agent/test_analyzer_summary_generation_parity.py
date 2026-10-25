@@ -138,19 +138,6 @@ def test_summary_exposes_current_lifecycle_bundle_counts_as_audit_evidence(
             "fresh_epoch_id": CURRENT_EPOCH,
         },
         "qualification": {"unique_lifecycle_count": 3},
-        "transfer": {
-            "unique_lifecycle_count": 5,
-            "audit_only": True,
-            "ranking_eligible": False,
-            "profitability_supported": False,
-            "source_cleanup_authorized": False,
-        },
-        "parity": {
-            "intersection_count": 3,
-            "qualification_only_count": 0,
-            "transfer_only_count": 2,
-            "complete": True,
-        },
         "invalid_manifest_count": 1,
     }
     client = _summary_client(
@@ -162,16 +149,10 @@ def test_summary_exposes_current_lifecycle_bundle_counts_as_audit_evidence(
 
     assert payload["status"] == "AVAILABLE_CURRENT_GENERATION"
     assert payload["qualification_count"] == 3
-    assert payload["transfer_audit_count"] == 5
     assert payload["invalid_count"] == 1
-    assert payload["parity"]["intersection_count"] == 3
+    assert not any(key.startswith("transfer") or key == "parity" for key in payload)  # R22
     assert payload["qualification_label"] == "manifest-verified qualification bundles"
     assert payload["payload_verification_status"] == "UNKNOWN_NOT_SCANNED"
-    assert payload["transfer_label"] == "transfer-ready audit copies"
-    assert payload["transfer_audit_only"] is True
-    assert payload["transfer_ranking_eligible"] is False
-    assert payload["transfer_profitability_supported"] is False
-    assert payload["transfer_source_cleanup_authorized"] is False
     assert not any(
         word in payload for word in ("trades", "fills", "winners", "pnl", "ev")
     )
@@ -186,7 +167,6 @@ def test_summary_exposes_current_lifecycle_bundle_counts_as_audit_evidence(
     truncated = truncated_client.get("/api/summary").get_json()["lifecycle_bundles"]
     assert truncated["status"] == "UNAVAILABLE_CURRENT_GENERATION"
     assert truncated["qualification_count"] is None
-    assert truncated["transfer_audit_count"] is None
     dashboard._API_RESPONSE_CACHE.clear()
 
 
@@ -206,13 +186,6 @@ def test_summary_rejects_stale_or_undeclared_lifecycle_inventory(
             "fresh_epoch_id": "epoch-stale",
         },
         "qualification": {"unique_lifecycle_count": 99},
-        "transfer": {
-            "unique_lifecycle_count": 99,
-            "audit_only": True,
-            "ranking_eligible": False,
-            "profitability_supported": False,
-            "source_cleanup_authorized": False,
-        },
         "invalid_manifest_count": 0,
     }
     stale_client = _summary_client(
@@ -222,7 +195,6 @@ def test_summary_rejects_stale_or_undeclared_lifecycle_inventory(
     stale_payload = stale_client.get("/api/summary").get_json()["lifecycle_bundles"]
     assert stale_payload["status"] == "UNAVAILABLE_CURRENT_GENERATION"
     assert stale_payload["qualification_count"] is None
-    assert stale_payload["transfer_audit_count"] is None
     dashboard._API_RESPONSE_CACHE.clear()
 
     undeclared_client = _summary_client(
@@ -232,9 +204,7 @@ def test_summary_rejects_stale_or_undeclared_lifecycle_inventory(
     undeclared = undeclared_client.get("/api/summary").get_json()["lifecycle_bundles"]
     assert undeclared["status"] == "UNAVAILABLE_CURRENT_GENERATION"
     assert undeclared["reason"] == "REPORT_NOT_IN_CURRENT_GENERATION"
-    assert undeclared["transfer_ranking_eligible"] is False
-    assert undeclared["transfer_profitability_supported"] is False
-    assert undeclared["transfer_source_cleanup_authorized"] is False
+    assert not any(key.startswith("transfer") for key in undeclared)  # R22
     dashboard._API_RESPONSE_CACHE.clear()
 
 
@@ -242,10 +212,7 @@ def test_lifecycle_bundle_html_uses_non_trading_audit_labels():
     html = dashboard.DASHBOARD_HTML
     assert 'id="lifecycle-bundle-kpis"' in html
     assert "manifest-verified qualification bundles" in html
-    assert "transfer-ready audit copies" in html
-    assert "ranking eligible=false" in html
-    assert "profitability supported=false" in html
-    assert "source cleanup authorized=false" in html
+    assert "transfer-ready audit copies" not in html  # R22: transfer tier retired
     summary_body = html[html.index("async function loadSummary()"):
                         html.index("async function loadDecisionReadiness()")]
     assert "const lifecycleBundles = d.lifecycle_bundles || {};" in summary_body

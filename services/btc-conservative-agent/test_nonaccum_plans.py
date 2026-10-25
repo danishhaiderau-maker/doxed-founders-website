@@ -35,9 +35,7 @@ def _tree(root):
     _w(f"{snap}/{'6'*64}.json", b"x", EPOCH - 50)                   # C2 unreferenced pre-epoch -> planned
     _w(f"{snap}/{'7'*64}.json", b"x", EPOCH - 50)                   # referenced by a current bundle -> kept
     _w(f"{snap}/{'8'*64}.json", b"x", EPOCH + 50)                   # current -> kept
-    _w(f"{v3}/lifecycle_transfer_bundles/aa/transfer-{'9'*64}/b.json", ("ref " + "7" * 64).encode(), EPOCH + 10)
-    _w(f"{v3}/lifecycle_transfer_bundles/bb/transfer-{'b'*64}/b.json", b"old", EPOCH - 10)   # C3a pre-epoch unreferenced
-    _w(f"{v3}/lifecycle_transfer_bundles/cc/transfer-{'c'*64}/b.json", b"old", EPOCH - 10)   # referenced by index -> in flight
+    _w(f"{v3}/lifecycle_bundles/aa/lifecycle-{'9'*64}/b.json", ("ref " + "7" * 64).encode(), EPOCH + 10)
     _w(f"{v3}/lifecycle_bundle_index/lifecycle_index.sqlite3", ("idx " + "c" * 64).encode(), EPOCH - 10)
     now = EPOCH + 30 * 86400
     _w(f"{root}/tape_1s/old.jsonl.gz", b"t", EPOCH - 10 * 86400)    # pre-epoch and > 168h old -> planned
@@ -67,8 +65,7 @@ def test_plans_select_only_pre_epoch_unreferenced_and_never_touch_the_tree(tmp_p
     assert [i for i in p["C1"]["sample"]] == [f"decision/{'1'*64}.json"] and p["C1"]["count"] == 1
     assert p["C1"]["kept_pre_mtime_but_current_epoch_id"] == 1 and p["C1"]["skipped"]["protected_or_non_hex_name"] >= 1
     assert p["C2"]["sample"] == [f"{'6'*64}.json"] and p["C2"]["kept_pre_epoch_but_referenced"] == 1
-    assert p["C3a"]["count"] == 1 and "transfer-" + "b" * 64 in p["C3a"]["sample"][0]
-    assert p["C3a"]["kept_bundles_referenced_in_flight"] == 1 and p["C3a"]["kept_bundles_current_epoch"] == 1
+    assert "C3a" not in p  # R22: transfer-bundle class retired
     assert p["C3b"]["sample"] == ["tape_1s/old.jsonl.gz"]
     assert p["C4"]["count"] == 3 and p["C4"]["lines_kept"] == 1
     assert "relay_switch.json" not in json.dumps(doc)

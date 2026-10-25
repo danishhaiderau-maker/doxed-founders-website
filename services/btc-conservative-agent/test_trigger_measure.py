@@ -220,6 +220,9 @@ def test_trigger_measure_used_only_by_measurement_sites():
 # HM C6: the ONLY top-level names of paper_fill.py the realism-v2 stack may change vs master (explicit allowlist; no
 # keyword guard). Anything else that differs fails - #809's measurement work leaves the pricer untouched.
 PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
+    # RK R0/R4 ruling 25 Oct 13:48 AEDT (#883 item 5): the ONE shared maker fill (queue ahead + trade-through, capped)
+    "MAKER_REST_RULE", "MAKER_REST_SOURCE", "MAKER_REST_LOOKBACK_S", "MAKER_REST_LOCK", "print_key", "maker_rest_fill",
+    "maker_rest_fills",
     # REALISM_V2 SHARED A5 REST FILL (FADE3 PR, RK PASS 25 Oct 06:24 AEDT): new names only; pricers above unchanged
     "REST_TTL_S", "REST_RULE_A5", "NO_FILL_REST_TTL", "REST_SOURCE", "rest_fill", "REST_FILL_SITES",
     "rest_site_violations",

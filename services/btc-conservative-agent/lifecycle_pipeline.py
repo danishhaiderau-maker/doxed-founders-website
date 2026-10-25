@@ -12,7 +12,6 @@ bundle that omits its completion receipt.
 """
 from __future__ import annotations
 
-import hashlib
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,11 +29,9 @@ from lifecycle_bundles import (
     _open_incremental_index,
     _validate_source_identity,
     materialize_bundle,
-    materialize_transfer_bundle,
 )
 from lifecycle_completion_reconciler import (
     evaluate_lifecycle_completion,
-    evaluate_lifecycle_transfer_ready,
 )
 from lifecycle_completion_receipts import build_evidence_collected_receipt
 from qualification_horizon_index import (
@@ -63,7 +60,7 @@ QUALIFICATION_RETRY_SEC = 60.0
 QUALIFICATION_HORIZON_SEC = 7200.0
 QUALIFICATION_RETIRED_R17_STAGE = "QUALIFICATION_HORIZON_RETIRED_R17"
 QUALIFICATION_RETIRED_R17_LABEL = (
-    "R17: POST_EXIT_PATH source retired; lifecycles stop at transfer, no completion/qualification"
+    "R17: POST_EXIT_PATH source retired; lifecycles stop at terminal, no completion/qualification"
 )
 _QUALIFICATION_RETIRED_R17_COUNT = 0
 
@@ -418,18 +415,10 @@ def _process_incremental_lifecycle_pipeline(
                         "completion_appended": False,
                         "completion_duplicate": False,
                         "bundle_written_or_verified": False,
-                        "transfer_ready": False,
-                        "transfer_blockers": ["EMERGENCY_TERMINAL_EVIDENCE_REQUIRED"],
-                        "transfer_bundle_written_or_verified": False,
-                        "transfer_stage": "EMERGENCY_NONTERMINAL_BLOCKED",
                         "stage": "EMERGENCY_NONTERMINAL_BLOCKED",
                         "retry_at": current + EMERGENCY_NONTERMINAL_RETRY_SEC,
                     })
                     continue
-                transfer = evaluate_lifecycle_transfer_ready(
-                    key, rows, now=current,
-                    lifecycle_horizon_sec=QUALIFICATION_HORIZON_SEC,
-                )
                 assessment = evaluate_lifecycle_completion(
                     key, rows, now=current,
                     lifecycle_horizon_sec=QUALIFICATION_HORIZON_SEC,
@@ -443,26 +432,8 @@ def _process_incremental_lifecycle_pipeline(
                     "completion_appended": False,
                     "completion_duplicate": False,
                     "bundle_written_or_verified": False,
-                    "transfer_ready": transfer["ready"],
-                    "transfer_blockers": list(transfer["blockers"]),
-                    "transfer_bundle_written_or_verified": False,
-                    "transfer_stage": "TRANSFER_INCOMPLETE",
                     "stage": "QUALIFICATION_INCOMPLETE",
                 }
-                if transfer["ready"]:
-                    transfer_bundle = materialize_transfer_bundle(
-                        root, key, rows, transfer,
-                    )
-                    item["transfer_bundle_written_or_verified"] = bool(
-                        transfer_bundle.get("written")
-                        or transfer_bundle.get("duplicate")
-                    )
-                    item["transfer_bundle"] = transfer_bundle
-                    item["transfer_stage"] = (
-                        "TRANSFER_BUNDLE_MATERIALIZED_OR_VERIFIED"
-                        if item["transfer_bundle_written_or_verified"]
-                        else "TRANSFER_NOT_MATERIALIZABLE"
-                    )
                 if not assessment["ready"]:
                     if not _post_observation_present(rows):
                         candidate = _terminal_candidate(key, rows)
@@ -605,10 +576,6 @@ def _process_incremental_lifecycle_pipeline(
         "candidate_count": len(results),
         "completion_appended_count": sum(item["completion_appended"] for item in results),
         "bundle_count": sum(item["bundle_written_or_verified"] for item in results),
-        "transfer_ready_count": sum(item["transfer_ready"] for item in results),
-        "transfer_bundle_count": sum(
-            item["transfer_bundle_written_or_verified"] for item in results
-        ),
         "stage_counts": dict(sorted(stage_counts.items())[:32]),
         "blocker_counts": dict(sorted(blocker_counts.items())[:32]),
         "qualification_retired_r17_count": stage_counts.get(QUALIFICATION_RETIRED_R17_STAGE, 0),
@@ -669,8 +636,6 @@ def _recovery_pending_report(
             "candidate_count": 0,
             "completion_appended_count": 0,
             "bundle_count": 0,
-            "transfer_ready_count": 0,
-            "transfer_bundle_count": 0,
             "stage_counts": {"INDEX_RECOVERY_PENDING": 1},
             "blocker_counts": {},
             "results": [],

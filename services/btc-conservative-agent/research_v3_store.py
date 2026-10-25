@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import threading
+from collections import OrderedDict
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
@@ -35,13 +36,22 @@ from transactional_receipt_store import (
 )
 
 _locks_guard = threading.Lock()
-_locks: dict[str, threading.RLock] = {}
+# Audit item 2: per-path locks and segment digests were unbounded (one entry per
+# path ever touched).  Both are now capped.  A lock is only evicted while it is
+# unpinned (no thread holds it, waits on it, or has looked it up and not yet
+# released it), so two threads can never hold different locks for one path.
+# A segment digest is only a cache: a miss re-hashes the bytes under the same
+# stat-signature check, so eviction can change cost but never a digest that the
+# epoch, delay or fill checks read.
+PATH_LOCK_CACHE_MAX = 4096
+SEGMENT_HASH_CACHE_MAX = 4096
+_locks: "OrderedDict[str, _PathLock]" = OrderedDict()
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, set[str]]] = {}
 _tombstone_cache: dict[str, tuple[tuple[Any, Any], Any, str]] = {}
 # HM R2b: rate-limit the fail-closed [ALERT] to once per (stream, reason) per interval per process.
 TOMBSTONE_ALERT_INTERVAL_SEC = 900
 _tombstone_alert_last: dict[tuple[str, str], float] = {}
-_segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
+_segment_hash_cache: "OrderedDict[str, tuple[tuple[int, int, int, int], str]]" = OrderedDict()
 _provenance_cache: dict[str, str] | None = None
 _config_signature_provider = None
 _MAX_MEMBERSHIP_EPISODE_ID_BYTES = 512
@@ -244,10 +254,78 @@ def _collection_provenance() -> dict[str, str]:
     return _collection_provenance()
 
 
-def _path_lock(path: Path) -> threading.RLock:
+class _PathLock:
+    """Re-entrant per-path lock with a pin count that blocks eviction.
+
+    ``_path_lock`` pins the entry under ``_locks_guard``; the pin is dropped by
+    ``release`` (or by a failed non-blocking ``acquire``).  Callers must pair the
+    lookup with exactly one acquire attempt, as both in-repo callers do.
+    """
+
+    __slots__ = ("_rlock", "pins")
+
+    def __init__(self) -> None:
+        self._rlock = threading.RLock()
+        self.pins = 0
+
+    def _unpin(self) -> None:
+        with _locks_guard:
+            self.pins -= 1
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        try:
+            acquired = self._rlock.acquire(blocking, timeout)
+        except BaseException:
+            self._unpin()
+            raise
+        if not acquired:
+            self._unpin()
+        return acquired
+
+    def release(self) -> None:
+        self._rlock.release()
+        self._unpin()
+
+    def __enter__(self) -> "_PathLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.release()
+
+
+def _path_lock(path: Path) -> _PathLock:
     key = str(path.resolve())
     with _locks_guard:
-        return _locks.setdefault(key, threading.RLock())
+        lock = _locks.get(key)
+        if lock is None:
+            lock = _locks[key] = _PathLock()
+        else:
+            _locks.move_to_end(key)
+        lock.pins += 1
+        if len(_locks) > PATH_LOCK_CACHE_MAX:
+            for old_key in [k for k, v in _locks.items() if v.pins == 0][: len(_locks) - PATH_LOCK_CACHE_MAX]:
+                del _locks[old_key]
+        return lock
+
+
+_segment_hash_guard = threading.Lock()
+
+
+def _remember_segment_hash(key: str, signature: tuple[int, int, int, int], digest: str) -> None:
+    with _segment_hash_guard:
+        _segment_hash_cache[key] = (signature, digest)
+        _segment_hash_cache.move_to_end(key)
+        while len(_segment_hash_cache) > SEGMENT_HASH_CACHE_MAX:
+            _segment_hash_cache.popitem(last=False)
+
+
+def _recall_segment_hash(key: str) -> tuple[tuple[int, int, int, int], str] | None:
+    with _segment_hash_guard:
+        cached = _segment_hash_cache.get(key)
+        if cached is not None:
+            _segment_hash_cache.move_to_end(key)
+        return cached
 
 
 def _path_signature(path: Path) -> tuple[int, int, int, int] | None:
@@ -2664,7 +2742,7 @@ class V3EvidenceStore:
                 _fsync_directory(target.parent)
                 signature = _path_signature(target)
                 if signature is not None:
-                    _segment_hash_cache[str(target.resolve())] = (signature, sha)
+                    _remember_segment_hash(str(target.resolve()), signature, sha)
         return {
             "schema": "market_segment_ref_v3",
             "sha256": sha,
@@ -2695,7 +2773,7 @@ class V3EvidenceStore:
         signature = _path_signature(path)
         if signature is None:
             raise FileNotFoundError(path)
-        cached = _segment_hash_cache.get(key)
+        cached = _recall_segment_hash(key)
         if cached is not None and cached[0] == signature:
             return cached[1]
         digest = cls._hash_segment(path)
@@ -2704,7 +2782,7 @@ class V3EvidenceStore:
         final_signature = _path_signature(path)
         if final_signature is None or final_signature != signature:
             raise OSError("MARKET_SEGMENT_CHANGED_DURING_VERIFICATION")
-        _segment_hash_cache[key] = (final_signature, digest)
+        _remember_segment_hash(key, final_signature, digest)
         return digest
 
     def verify(self) -> dict[str, Any]:

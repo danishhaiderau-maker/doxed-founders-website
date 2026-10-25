@@ -6,11 +6,11 @@ import json
 import os
 import time
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from lifecycle_bundles import BUNDLE_SCHEMA, TRANSFER_BUNDLE_SCHEMA, LifecycleKey
+from lifecycle_bundles import BUNDLE_SCHEMA, LifecycleKey
 from research_v3_contract import canonical_json
 
 REPORT_SCHEMA = "lifecycle_bundle_inventory_v1"
@@ -49,8 +49,7 @@ def _manifest_paths(root: Path, *, started: float, runtime: float,
         except FileNotFoundError:
             return
 
-    for name, prefix in (("lifecycle_bundles", "lifecycle-"),
-                         ("lifecycle_transfer_bundles", "transfer-")):
+    for name, prefix in (("lifecycle_bundles", "lifecycle-"),):
         base = root / "v3" / name
         if not base.is_dir():
             continue
@@ -117,10 +116,9 @@ def build_lifecycle_bundle_inventory(
 ) -> dict[str, Any]:
     root, started = Path(data_dir).resolve(), time.monotonic()
     invalid, blockers, scan = Counter(), Counter(), Counter()
-    outcomes = {"qualification": Counter(), "transfer": Counter()}
+    outcomes = {"qualification": Counter()}
     collection = Counter()
-    provenance = {"qualification": defaultdict(set), "transfer": defaultdict(set)}
-    identities = {"qualification": [], "transfer": []}
+    identities = {"qualification": []}
     counts, bytes_read, processed, truncated = Counter(), 0, 0, False
     try:
         paths = _manifest_paths(root, started=started, runtime=max_runtime_sec,
@@ -155,16 +153,6 @@ def build_lifecycle_bundle_inventory(
                     collection["receipt_count"] += 1
                 else:
                     collection["missing_count"] += 1
-            elif schema == TRANSFER_BUNDLE_SCHEMA:
-                tier, evidence = "transfer", manifest.get("transfer_receipt") or {}
-                if not (manifest.get("maturity") == "TRANSFER_READY"
-                        and manifest.get("qualification_ready") is False
-                        and manifest.get("profitability_supported") is False
-                        and manifest.get("ranking_eligible") is False
-                        and manifest.get("source_cleanup_authorized") is False
-                        and "completion" not in manifest):
-                    invalid["TRANSFER_AUDIT_ISOLATION_INVALID"] += 1
-                    continue
             else:
                 invalid["SCHEMA_UNSUPPORTED"] += 1
                 continue
@@ -172,9 +160,6 @@ def build_lifecycle_bundle_inventory(
             counts[tier] += 1
             identities[tier].append(identity)
             outcomes[tier][str(evidence.get("entry_outcome") or "UNKNOWN").upper()] += 1
-            prov = manifest.get("provenance") or {}
-            provenance[tier][identity].add(tuple(str(prov.get(k) or "") for k in
-                ("source_revision", "deployed_revision", "tile_config_signature")))
     except _ScanLimit as exc:
         truncated = True
         blockers[str(exc)] += 1
@@ -182,9 +167,6 @@ def build_lifecycle_bundle_inventory(
     unique = {tier: set(values) for tier, values in identities.items()}
     duplicates = {tier: sum(n - 1 for n in Counter(values).values() if n > 1)
                   for tier, values in identities.items()}
-    intersection = unique["qualification"] & unique["transfer"]
-    mismatches = sum(provenance["qualification"][i] != provenance["transfer"][i]
-                     for i in intersection)
     complete = not truncated
     report = {
         "schema": REPORT_SCHEMA, "inventory_scope": "MANIFEST_ONLY",
@@ -211,18 +193,6 @@ def build_lifecycle_bundle_inventory(
                 complete and collection["receipt_count"] == counts["qualification"]
             ),
         },
-        "transfer": {"label": "transfer-ready audit copies", "audit_only": True,
-            "profitability_supported": False, "ranking_eligible": False,
-            "source_cleanup_authorized": False, "manifest_count": counts["transfer"],
-            "unique_lifecycle_count": len(unique["transfer"]),
-            "duplicate_identity_count": duplicates["transfer"],
-            "entry_outcome_counts": dict(sorted(outcomes["transfer"].items()))},
-        "parity": {"scope": "MANIFEST_INVENTORY",
-            "intersection_count": len(intersection),
-            "qualification_only_count": len(unique["qualification"] - unique["transfer"]),
-            "transfer_only_count": len(unique["transfer"] - unique["qualification"]),
-            "provenance_mismatch_count": mismatches,
-            "complete": complete and not any(duplicates.values()) and not mismatches},
         "invalid_manifest_count": sum(invalid.values()),
         "invalid_reason_counts": dict(sorted(invalid.items())),
         "analysis_provenance": dict(analysis_provenance or {}),

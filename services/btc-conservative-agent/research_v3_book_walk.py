@@ -112,7 +112,7 @@ class BookWalkTape:
         self.receipt = receipt
         self.boot_log = boot_log      # runtime_telemetry boots (C2 BOOT clause); None = unreadable -> flags
         # Bitfinex signed print amount (negative = sell aggressor); NaN = unknown.  The resting entry limit's queue
-        # model (order_model.maker_rest_step, HM #848 C1) needs the aggressor side and size.
+        # model (paper_fill.maker_rest_fills, HM #848 C1) needs the aggressor side and size.
         self.trade_amt = trade_amt if trade_amt is not None else np.full(len(trade_ts), np.nan)
 
     @classmethod
@@ -250,7 +250,7 @@ class BookWalkWindow:
                     "receive_ts_source": _pf.RECEIVE_TS_MEASURED} if self.receive[index, 0] == self.receive[index, 0] else {})}
 
     def trades_between(self, t0: float, t1: float) -> list[dict[str, Any]]:
-        """Prints with ``t0 < ts <= t1`` as ``order_model.maker_rest_step`` / ``quote_trigger.trades_between`` rows
+        """Prints with ``t0 < ts <= t1`` as ``paper_fill.maker_rest_fills`` / ``quote_trigger.trades_between`` rows
         ({"ts", "px", "amt"}; amt None when the collector row had no amount)."""
         lo = int(np.searchsorted(self.trade_ts, t0, side="right"))
         hi = int(np.searchsorted(self.trade_ts, t1, side="right"))

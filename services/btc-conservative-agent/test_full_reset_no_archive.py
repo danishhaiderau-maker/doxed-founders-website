@@ -953,7 +953,8 @@ def test_c4b_bitfinex_named_reports_are_analyzer_derived_with_file_line_evidence
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _BOT_MIRROR_FUNCS = ("_data_sync_runtime_root", "_data_sync_volume_root", "_analyzer_mirror_dir",
                      "_analyzer_generations_dir", "_analyzer_current_pointer_path", "_valid_analyzer_generation",
-                     "_recover_latest_analyzer_generation", "_active_analyzer_mirror_dir")
+                     "_recover_latest_analyzer_generation", "_active_analyzer_mirror_dir",
+                     "_analyzer_bundle_fresh_gate")
 
 
 def _bot_mirror_namespace():
@@ -967,15 +968,20 @@ def _bot_mirror_namespace():
     ns = {"Path": Path, "os": os, "json": json, "re": re, "hashlib": hashlib,
           "_ANALYZER_BUNDLE_MANIFEST": "bundle_manifest.json", "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
           "_ANALYZER_BUNDLE_ALLOWED_SUFFIXES": frozenset((".html", ".txt", ".json", ".log")),
-          "_ANALYZER_BUNDLE_MAX_MEMBER_BYTES": 50 * 1024 * 1024}
+          "_ANALYZER_BUNDLE_MAX_MEMBER_BYTES": 50 * 1024 * 1024, "_ANALYZER_BUNDLE_FRESH_FLOOR_TS": 1792263671,
+          "datetime": __import__("datetime").datetime}
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), ns)
     return ns
 
 
-def _fly_mirror(vol: Path) -> Path:
+_FRESH_REPORT_MANIFEST = b'{"fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"}}'
+
+
+def _fly_mirror(vol: Path, report_manifest: bytes = _FRESH_REPORT_MANIFEST) -> Path:
     files = {"analysis_dashboard.html": b"<html>dash</html>",
              "reports/tile_paired_comparison_report.json": b'{"tile": 6}',
-             "reports/tile_evidence_points_report.json": b'{"tile": 7}'}
+             "reports/tile_evidence_points_report.json": b'{"tile": 7}',
+             "report_manifest.json": report_manifest}
     gen = vol / "analyzer_generations" / "generation-20261024T000000Z-abc"
     for rel, data in files.items():
         (gen / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -1020,7 +1026,7 @@ def test_c3_plan_lists_exactly_the_three_fly_scopes_and_nothing_else_outside_run
     assert "@data/analyzer_mirror/live_flags.json" in rels
     assert "@data/analyzer_generations/generation-20261024T000000Z-abc/reports/tile_paired_comparison_report.json" in rels
     assert "@data/analyzer_generations/.staging-x/partial.json" in rels
-    assert len(rels) == 10  # 5 generation files + 1 staging + 3 legacy mirror + the pointer
+    assert len(rels) == 11  # 6 generation files + 1 staging + 3 legacy mirror + the pointer
     assert {c["reason"] for c in outside} == {"FLY_ANALYZER_MIRROR", "FLY_ANALYZER_GENERATION",
                                               "FLY_ANALYZER_CURRENT_POINTER"}
     assert plan["delete_by_class"]["FLY_ANALYZER_CURRENT_POINTER"]["files"] == 1
@@ -1060,8 +1066,8 @@ def test_c3_readback_failure_records_completed_false(vol, capsys):
     assert "FLY_ANALYZER_READBACK_FAILED" in capsys.readouterr().out
     receipt = json.loads(next((vol / "runtime" / frna.RECEIPTS_DIRNAME).glob("*/receipt-complete.json")).read_text())
     rb = receipt["fly_analyzer_readback"]
-    assert receipt["completed"] is False and rb["leftover_file_count"] == 6
-    assert rb["leftover_count"] == 6 + rb["leftover_kinds"]["dir"] and rb["leftover_kinds"]["dir"] >= 1
+    assert receipt["completed"] is False and rb["leftover_file_count"] == 7
+    assert rb["leftover_count"] == 7 + rb["leftover_kinds"]["dir"] and rb["leftover_kinds"]["dir"] >= 1
     assert frna.completed_receipt(vol / "runtime" / frna.RECEIPTS_DIRNAME, receipt["plan_sha256"]) is None
 
 
@@ -1153,3 +1159,78 @@ def test_c3b_classify_fly_scope_rejects_traversal_and_empty_segments():
         assert frna.classify_candidate(rel)[0] != frna.DELETE, rel
     assert frna.classify_fly_scope("@data/analyzer_mirror/x.json") == (frna.DELETE, "FLY_ANALYZER_MIRROR")
     assert frna.classify_fly_scope("@data/analyzer_current.json") == (frna.DELETE, "FLY_ANALYZER_CURRENT_POINTER")
+
+
+_PRE_CUTOFF = b'{"fresh_epoch": {"cutoff_utc": "2026-10-04T08:13:26+00:00"}}'
+_STRADDLE = (b'{"fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"}, "generation_receipt": '
+             b'{"data_epoch": {"straddle_rows_unguarded": 4, "unstamped_rows_unguarded": 0}}}')
+
+
+def _ungated_mirror_namespace():
+    """Mutation: the same resolver with the serve-time gate call removed from _valid_analyzer_generation."""
+    import ast
+    import os
+    import re
+    tree = ast.parse((Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8"))
+    selected = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in _BOT_MIRROR_FUNCS]
+    valid = next(n for n in selected if n.name == "_valid_analyzer_generation")
+    removed = []
+
+    class _Strip(ast.NodeTransformer):
+        def visit_Expr(self, node):
+            call = node.value
+            if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "_analyzer_bundle_fresh_gate":
+                removed.append(node)
+                return ast.Pass()
+            return node
+    _Strip().visit(valid)
+    ast.fix_missing_locations(valid)
+    assert len(removed) == 1  # exactly the serve-time gate call
+    ns = _bot_mirror_namespace()
+    exec(compile(ast.Module(body=[valid], type_ignores=[]), "bot.py", "exec"), ns)
+    return ns
+
+
+@pytest.mark.parametrize("report_manifest", [_PRE_CUTOFF, _STRADDLE], ids=["pre_cutoff", "straddle"])
+def test_r8_serve_gate_bad_bundle_already_on_disk_is_never_served_and_analysis_is_503(vol, monkeypatch,
+                                                                                       report_manifest):
+    """HM B1: a bundle installed before the gate existed (already on disk, hash-valid) must not be served."""
+    from flask import Flask, jsonify, make_response, send_file
+    import ast
+    gen = _fly_mirror(vol, report_manifest)
+    monkeypatch.setenv("BOT_DATA_DIR", str(vol))
+    bot = _bot_mirror_namespace()
+    assert bot["_valid_analyzer_generation"](gen.resolve()) is False
+    assert bot["_active_analyzer_mirror_dir"]() is None
+    assert bot["_recover_latest_analyzer_generation"]() is None
+    tree = ast.parse((Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8"))
+    routes = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+              and n.name in {"api_analyzer_summary", "analyzer_mirror_dashboard_index"}]
+    app = Flask("r8-serve-gate")
+    rns = {"app": app, "jsonify": jsonify, "make_response": make_response, "send_file": send_file, "os": os,
+           "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle", "_analyzer_view_authed": lambda: True,
+           "_active_analyzer_mirror_dir": bot["_active_analyzer_mirror_dir"],
+           "_external_analyzer_response": lambda e: (_ for _ in ()).throw(AssertionError("must not serve"))}
+    exec(compile(ast.Module(body=routes, type_ignores=[]), "bot.py", "exec"), rns)
+    monkeypatch.setenv("FLY_APP_NAME", "doxed-btc-bot")
+    client = app.test_client()
+    for path in ("/analysis/", "/api/analyzer/summary"):
+        response = client.get(path)
+        assert response.status_code == 503 and response.json["error"] == "no valid bundle", path
+
+
+@pytest.mark.parametrize("report_manifest", [_PRE_CUTOFF, _STRADDLE], ids=["pre_cutoff", "straddle"])
+def test_r8_serve_gate_mutation_proof_without_the_gate_the_bad_bundle_would_be_served(vol, monkeypatch,
+                                                                                      report_manifest):
+    """Mutation proof for the test above: strip the gate call and the same on-disk bundle resolves."""
+    gen = _fly_mirror(vol, report_manifest)
+    monkeypatch.setenv("BOT_DATA_DIR", str(vol))
+    mutant = _ungated_mirror_namespace()
+    assert mutant["_valid_analyzer_generation"](gen.resolve()) is True
+    assert mutant["_active_analyzer_mirror_dir"]() == gen.resolve()
+
+
+def test_r8_serve_gate_fresh_bundle_still_served(vol, monkeypatch):
+    gen = _fly_mirror(vol)
+    monkeypatch.setenv("BOT_DATA_DIR", str(vol))
+    assert _bot_mirror_namespace()["_active_analyzer_mirror_dir"]() == gen.resolve()

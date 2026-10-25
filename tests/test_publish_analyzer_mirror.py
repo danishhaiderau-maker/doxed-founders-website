@@ -25,7 +25,7 @@ GENERATED_AT = "2026-10-03T00:57:40.516531+00:00"
 def _fly_validator():
     """The receiver's own validation functions, extracted from bot.py without importing it."""
     tree = ast.parse((ROOT / "services" / "btc-conservative-agent" / "bot.py").read_text(encoding="utf-8"))
-    wanted = {"_safe_analyzer_bundle_members", "_validated_analyzer_bundle_manifest"}
+    wanted = {"_safe_analyzer_bundle_members", "_validated_analyzer_bundle_manifest", "_analyzer_bundle_fresh_gate"}
     nodes = [
         node for node in tree.body
         if (isinstance(node, ast.FunctionDef) and node.name in wanted)
@@ -55,6 +55,7 @@ def _report_root(tmp_path, *, extra_reports=()):
                                 "generation_revision": "07e607a38c8bb2627d58ed9b9da5fb76f15b13c5"},
         "report_count": len(reports), "reports": reports, "text_artifacts": text,
         "generation_receipt": {"level": "GREEN", "complete": True, "integrity_status": "VALID"},
+        "fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"},
     }
     (root / "report_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return root

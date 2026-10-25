@@ -805,6 +805,37 @@ def totals_view(rows_by_lane: Mapping[str, list], *, include_forced: bool, be_ba
 
 # --------------------------------------------------------------------------- counters
 
+# Per-lane admission refusals since boot (R1 audit item 3). ONE shared helper for every
+# lane: a shared call that a tile does not turn into an order (lane_admission refusal,
+# AI reject, policy/session filter, lane off) is counted here by its exact reason, so a
+# silent lane shows WHY it is silent. Monitor-only: nothing reads it for a decision.
+REFUSAL_REASONS_PER_LANE_MAX = 64
+REFUSAL_OTHER = "OTHER_REASON_OVER_CAP"
+_refusals_lock = threading.Lock()
+_refusals: dict[str, dict[str, int]] = {}
+
+
+def record_lane_refusal(lane: Any, reason: Any) -> None:
+    """Count one refusal for ``lane``; never raises; distinct reasons per lane are capped."""
+    try:
+        lane_key = str(lane or "").upper() or "UNKNOWN_LANE"
+        reason_key = str(reason or "").strip() or "UNSPECIFIED"
+        with _refusals_lock:
+            bucket = _refusals.setdefault(lane_key, {})
+            if reason_key not in bucket and len(bucket) >= REFUSAL_REASONS_PER_LANE_MAX:
+                reason_key = REFUSAL_OTHER
+            bucket[reason_key] = bucket.get(reason_key, 0) + 1
+    except Exception:
+        pass
+
+
+def lane_refusal_counts(lane: Any) -> dict[str, int]:
+    """Since-boot refusal counts for ``lane``, largest first (copy)."""
+    with _refusals_lock:
+        bucket = dict(_refusals.get(str(lane or "").upper()) or {})
+    return dict(sorted(bucket.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def counters_view(lane: str, *, rows: list[dict], route_counts: Mapping[str, Any] | None,
                   xvl_lane: Mapping[str, Any] | None, opportunity: Mapping[str, Any] | None,
                   boot_id: str | None, adaptive_lane: Mapping[str, Any] | None = None) -> dict:
@@ -835,6 +866,7 @@ def counters_view(lane: str, *, rows: list[dict], route_counts: Mapping[str, Any
     orders = (fills + pending_n + expired) if expired is not None else None
     xvl_paper = dict((xvl_lane or {}).get("paper") or {}) if isinstance(xvl_lane, Mapping) else {}
     skips = dict(xvl_paper.get("skips") or {})
+    refusals = lane_refusal_counts(lane)
     epoch = {
         "selected_calls": count("selected_calls"),
         "approved_no_order": count("approved_no_order"),
@@ -864,7 +896,8 @@ def counters_view(lane: str, *, rows: list[dict], route_counts: Mapping[str, Any
             "lane_opportunity_counters": dict(opportunity or {}),
             "xvl_paper": {k: xvl_paper.get(k) for k in ("attempts", "orders_eligible", "submissions_last_hour")
                           if k in xvl_paper},
-            "rejects_and_skips": skips,
+            "rejects_and_skips": {**skips, **{f"ADMISSION:{k}": v for k, v in refusals.items()}},
+            "admission_refusals": refusals,
             "last_attempt_outcome": ((xvl_paper.get("last_attempt") or {}).get("outcome")
                                      if isinstance(xvl_paper.get("last_attempt"), Mapping) else None),
             # GS-05 QUIET stand-aside / GS-06 VIOLENT cell: adaptive_entry_decisions since boot.

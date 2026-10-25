@@ -10,8 +10,8 @@ C1 receipts       v3/receipts/emergency_record_idempotency_v1/<7 ledger dirs>/<6
                   round_robin.json, append_heads/ and every non-<64-hex>.json name are protected by construction.
 C2 signal_snapshots  v3/signal_snapshots_v1/<64-hex>.json, mtime < epoch, hash not referenced by any current-epoch bundle,
                   the bundle index, lifecycle_membership_v1 receipts or the current ledgers.
-C3 bundles/tape   v3/lifecycle_transfer_bundles/transfer-<hash>/ (all files mtime < epoch and hash unreferenced by the index,
-                  membership receipts and worker state = not in flight); tape_1s/*.jsonl.gz mtime < epoch AND older than 168 h.
+C3 tape          tape_1s/*.jsonl.gz mtime < epoch AND older than 168 h (C3b; the transfer-bundle class C3a was retired
+                  with transfer bundles, R22 - r5_retention purges that tree).
 C4 relay outbox   runtime/relay_outbox_{quarantine,retired}.jsonl LINES created before the epoch (28 Sep events); the files
                   themselves, switch and arming files are never in the plan.
 """
@@ -74,7 +74,7 @@ def current_references(v3: str, epoch_ts: float) -> tuple[set, dict]:
     worker state and the current ledgers."""
     refs: set = set()
     n = {"bundle_files_current": 0, "index_files": 0, "membership_files": 0, "ledger_files": 0}
-    b = os.path.join(v3, "lifecycle_transfer_bundles")
+    b = os.path.join(v3, "lifecycle_bundles")
     for d, _s, names in os.walk(b):
         for f in names:
             p = os.path.join(d, f)
@@ -150,32 +150,7 @@ def plan_c2(v3: str, epoch_ts: float, refs: set) -> dict:
                  {"kept_current_epoch_files": kept_new, "kept_pre_epoch_but_referenced": kept_ref, "epoch_ts": epoch_ts})
 
 
-def plan_c3(root: str, v3: str, epoch_ts: float, refs: set, now: float) -> dict:
-    b = os.path.join(v3, "lifecycle_transfer_bundles")
-    bundle_items, in_flight, kept_new = [], 0, 0
-    for shard in sorted(os.listdir(b)):
-        sd = os.path.join(b, shard)
-        if not os.path.isdir(sd):
-            continue
-        for tr in os.listdir(sd):
-            td = os.path.join(sd, tr)
-            files, newest = [], 0.0
-            for d, _s, names in os.walk(td):
-                for f in names:
-                    p = os.path.join(d, f)
-                    try:
-                        st = os.stat(p)
-                    except OSError:
-                        continue
-                    files.append((os.path.relpath(p, b), st.st_size, st.st_mtime_ns))
-                    newest = max(newest, st.st_mtime)
-            h = tr[len("transfer-"):] if tr.startswith("transfer-") else tr
-            if newest >= epoch_ts:
-                kept_new += 1
-            elif h in refs:
-                in_flight += 1
-            else:
-                bundle_items.extend(files)
+def plan_c3(root: str, epoch_ts: float, now: float) -> dict:
     tape_dir = os.path.join(root, "tape_1s")
     tape_items, tape_in_window, tape_mtimes = [], 0, []
     for f in sorted(os.listdir(tape_dir)) if os.path.isdir(tape_dir) else []:
@@ -190,9 +165,6 @@ def plan_c3(root: str, v3: str, epoch_ts: float, refs: set, now: float) -> dict:
         elif st.st_mtime < epoch_ts:
             tape_in_window += 1
     iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
-    bundles = _plan("C3a", "lifecycle_transfer_bundles transfer-<hash>/ with every file mtime<epoch and hash not referenced (not in flight)",
-                    bundle_items, lambda it: "lifecycle_transfer_bundles",
-                    {"kept_bundles_current_epoch": kept_new, "kept_bundles_referenced_in_flight": in_flight})
     tape = _plan("C3b", "tape_1s/*.jsonl.gz mtime<epoch AND older than the 168 h tape-retention window", tape_items,
                  lambda it: "tape_1s",
                  {"pre_epoch_still_inside_168h": tape_in_window, "tape_files_total": len(tape_mtimes),
@@ -200,7 +172,7 @@ def plan_c3(root: str, v3: str, epoch_ts: float, refs: set, now: float) -> dict:
                   "newest_mtime_utc": iso(max(tape_mtimes)) if tape_mtimes else None,
                   "first_eligible_utc": iso(min(tape_mtimes) + TAPE_RETENTION_SEC) if tape_mtimes else None,
                   "needed_by_pre_registered_test": "NOT VERIFIED by this builder (Strategist must confirm before any tape delete)"})
-    return {"C3a": bundles, "C3b": tape}
+    return {"C3b": tape}
 
 
 def plan_c4(root: str, epoch_ts: float) -> dict:
@@ -233,7 +205,7 @@ def build_all(root: str = "/app/data", epoch_ts: float | None = None, now: float
         raise SystemExit("epoch_ts required")
     t0 = time.time()
     refs, refn = current_references(v3, epoch_ts)
-    plans = {"C1": plan_c1(v3, epoch_ts), "C2": plan_c2(v3, epoch_ts, refs), **plan_c3(root, v3, epoch_ts, refs, now),
+    plans = {"C1": plan_c1(v3, epoch_ts), "C2": plan_c2(v3, epoch_ts, refs), **plan_c3(root, epoch_ts, now),
              "C4": plan_c4(root, epoch_ts)}
     doc = {"schema": "nonaccum_plans_v1", "read_only": True, "epoch_ts": epoch_ts, "built_at": now,
            "reference_scan": {"tokens": len(refs), **refn}, "plans": plans, "elapsed_s": round(time.time() - t0, 1)}

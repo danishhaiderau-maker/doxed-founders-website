@@ -7677,12 +7677,13 @@ def _paper_entry_rest_finish(order: dict, direction: str, walk: dict, t0: float,
     remaining = max(0.0, req - float(walk.get("filled_qty") or 0))
     limit = float(walk["cap_px"])
     queue = _om.queue_ahead_at(direction, limit, walk.get("depth_snapshot_fill"))
-    step = _om.maker_rest_step(direction, limit, remaining, queue, _qt.trades_between(t0, t1),
-                               model.get("entry_rest_fill_basis") or _om.REST_FILL_DEFAULT) if t1 > t0 else \
-        {"fills": [], "remaining": remaining, "queue_ahead": queue}
+    import paper_fill as _pf
+    step = _pf.maker_rest_fills(direction, limit, remaining, queue, _qt.trades_between(t0, t1), placement_ts=t0) \
+        if t1 > t0 else {"fills": [], "remaining": remaining, "queue_ahead": queue, "fill_stamps": []}
     out = _om.combine_entry(walk, step["fills"], req, model=model, rest_end_ts=t1, rest_end_reason=why)
     out.update({"entry_rest_limit_px": limit, "entry_rest_queue_ahead_start": queue,
-                "entry_rest_start_ts": t0, **_rest_unsized_stamp(step.get("unsized_prints"))})
+                "entry_rest_start_ts": t0, "entry_rest_fill_rule": _pf.MAKER_REST_RULE,
+                "entry_rest_fill_stamps": step.get("fill_stamps") or [], **_rest_unsized_stamp(step.get("unsized_prints"))})
     return out
 
 
@@ -7690,9 +7691,13 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
                             now: float, *, force: bool = False):
     """REALISM_V2 PR2 MAKER_REST (B1 / B2 regime limits): the limit rests from signal + delay (sent) at
     order["limit_price"], which _process_family_regime_entry reprices at the LIMIT_UPDATED cadence; every reprice
-    resets the queue position (queue ahead = book size at the new price). Fills come only from trade-through or
-    queue-depleting prints at the limit (partials allowed). A TOUCH taker fallback walks the remainder from the book;
-    TTL DROP closes the entry with whatever filled (NO_FILL when nothing). Never priced from the ticker."""
+    resets the queue position (queue ahead = book size at the new price, from the real 10-level book) and the price
+    age. RK R0/R4 (25 Oct): fills come ONLY from paper_fill.maker_rest_fill - per placement, filled = min(remaining,
+    trade-through volume since placement - visible queue ahead at placement); partials stay filled across reprices and
+    the remainder goes to the TOUCH fallback / TTL drop as before. Every fill is stamped (print ts, queue ahead, qty).
+    The advance runs under paper_fill.MAKER_REST_LOCK, counts a print id once and caps at requested - filled (the
+    gb1-d365a7a17cb2 double-evaluation overfill). Never priced from the ticker.
+    """
     import order_model as _om
     import quote_trigger as _qt
     import paper_fill as _pf
@@ -7700,46 +7705,61 @@ def _paper_entry_maker_rest(order: dict, direction: str, signal_ts: float, delay
     rest_t0 = signal_ts + float(delay_s)
     if not force and now < rest_t0:
         return None
-    req = float(order.get("requested_qty") or order.get("qty") or 0)
-    st = order.setdefault("_entry_rest", {"cursor_ts": rest_t0, "limit_px": None, "queue_ahead": 0.0,
-                                          "fills": [], "remaining": req, "reprices": 0})
-    limit = float(order.get("limit_price") or 0)
-    if limit <= 0:
-        return None
-    upto = now if force else now - PAPER_ENTRY_TAPE_LAG_S
-    if st["limit_px"] is None or abs(float(st["limit_px"]) - limit) > 1e-9:
-        if st["limit_px"] is not None:
-            st["reprices"] += 1
-        st["limit_px"] = limit
-        st["queue_ahead"] = _om.queue_ahead_at(direction, limit, _pf.book10l_at(max(float(st["cursor_ts"]), rest_t0)))
-        st["queue_reset_ts"] = float(st["cursor_ts"])
-    if order.get("regime_fallback_done"):
-        # TOUCH fallback: a marketable order for the remainder, walked from the book at send + delay.
-        sent = float(order.get("last_chase_ts") or now)
-        if not force and now < sent + float(delay_s):
+    with _pf.MAKER_REST_LOCK:  # two loops advance pending entries: one writer at a time (gb1-d365a7a17cb2)
+        req = float(order.get("requested_qty") or order.get("qty") or 0)
+        st = order.setdefault("_entry_rest", {"cursor_ts": rest_t0, "limit_px": None, "queue_ahead": 0.0,
+                                              "fills": [], "remaining": req, "reprices": 0, "through_seen": 0.0,
+                                              "fill_stamps": [], "seen_prints": []})
+        limit = float(order.get("limit_price") or 0)
+        if limit <= 0:
             return None
-        walk = _tf.entry_fill(direction, float(st["remaining"]), sent, delay_s, delay_source)
-        if walk.get("status") == "REJECT_NO_BOOK" and not force:
+        upto = now if force else now - PAPER_ENTRY_TAPE_LAG_S
+        if st["limit_px"] is None or abs(float(st["limit_px"]) - limit) > 1e-9:
+            if st["limit_px"] is not None:
+                st["reprices"] += 1
+            st["limit_px"] = limit
+            join_ts = max(float(st["cursor_ts"]), rest_t0)
+            book = _pf.book10l_at(join_ts)
+            st["queue_ahead"] = _om.queue_ahead_at(direction, limit, book)
+            st["queue_reset_ts"] = join_ts  # the replacement's placement: queue and through count restart here
+            st["book_age_s"] = (round(join_ts - (float(book["s"]) + 1.0), 3)
+                                if isinstance(book, dict) and book.get("s") is not None else None)
+            st["through_seen"] = 0.0  # a reprice is a new placement: through volume restarts; filled qty stays filled
+        if order.get("regime_fallback_done"):
+            # TOUCH fallback: a marketable order for the remainder, walked from the book at send + delay.
+            sent = float(order.get("last_chase_ts") or now)
+            if not force and now < sent + float(delay_s):
+                return None
+            walk = _tf.entry_fill(direction, float(st["remaining"]), sent, delay_s, delay_source)
+            if walk.get("status") == "REJECT_NO_BOOK" and not force:
+                return None
+            res = _om.combine_entry(walk, st["fills"], req, model=model, rest_end_ts=sent,
+                                    rest_end_reason="TOUCH_TAKER_FALLBACK")
+            res.update({"entry_rest_reprices": st["reprices"], "signal_ts": signal_ts, "delay_s": delay_s,
+                        "delay_source": delay_source, "side": direction, **_rest_unsized_stamp(st.get("unsized_prints")),
+                        **_rest_queue_stamp(st, None)})
+            order["paper_fill_result"] = res
+            return res
+        filled = sum(float(f[2]) for f in st["fills"])
+        st["remaining"] = round(max(0.0, req - filled), 12)  # derived from the fills: the cap can never be stale
+        if upto > float(st["cursor_ts"]) and st["remaining"] > 1e-12:
+            lo = max(float(st.get("queue_reset_ts") or rest_t0), rest_t0)
+            step = _pf.maker_rest_fill(direction, limit, st["remaining"], st["queue_ahead"],
+                                       st.get("through_seen") or 0.0,
+                                       _qt.trades_between(max(lo, float(st["cursor_ts"]) - _pf.MAKER_REST_LOOKBACK_S), upto),
+                                       placement_ts=lo, seen={tuple(k) for k in st.get("seen_prints") or ()})
+            st["unsized_prints"] = int(st.get("unsized_prints") or 0) + int(step.get("unsized_prints") or 0)
+            st["through_seen"] = step["through_seen"]
+            st["seen_prints"] = [list(k) for k in step["seen"]]
+            st["fills"] = list(st["fills"]) + [[f["print_ts"], f["px"], f["qty"]] for f in step["fills"]]
+            st["fill_stamps"] = list(st.get("fill_stamps") or ()) + [
+                {**f, "placement_ts": lo, "limit_px": limit, "reprice_n": st["reprices"]} for f in step["fills"]]
+            st["remaining"] = step["remaining"]
+            st["cursor_ts"] = upto
+        if st["remaining"] > 1e-12 and not force:
             return None
-        res = _om.combine_entry(walk, st["fills"], req, model=model, rest_end_ts=sent,
-                                rest_end_reason="TOUCH_TAKER_FALLBACK")
-        res.update({"entry_rest_reprices": st["reprices"], "signal_ts": signal_ts, "delay_s": delay_s,
-                    "delay_source": delay_source, "side": direction, **_rest_unsized_stamp(st.get("unsized_prints"))})
-        order["paper_fill_result"] = res
-        return res
-    if upto > float(st["cursor_ts"]):
-        step = _om.maker_rest_step(direction, limit, st["remaining"], st["queue_ahead"],
-                                   _qt.trades_between(float(st["cursor_ts"]), upto),
-                                   model.get("entry_rest_fill_basis") or _om.REST_FILL_DEFAULT)
-        st["fills"] = list(st["fills"]) + [list(f) for f in step["fills"]]
-        st["unsized_prints"] = int(st.get("unsized_prints") or 0) + int(step.get("unsized_prints") or 0)
-        st["remaining"] = step["remaining"]
-        st["queue_ahead"] = step["queue_ahead"]
-        st["cursor_ts"] = upto
-    if st["remaining"] > 1e-12 and not force:
-        return None
-    return _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source, model,
-                                   "REST_FILLED" if st["remaining"] <= 1e-12 else "FORCED_CLOSE")
+        return _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source, model,
+                                       "REST_FILLED" if st["remaining"] <= 1e-12 else "FORCED_CLOSE")
 
 
 def _paper_entry_rest_close(order: dict, direction: str, signal_ts: float, delay_s, delay_source: str, model: dict,
@@ -7755,9 +7775,24 @@ def _paper_entry_rest_close(order: dict, direction: str, signal_ts: float, delay
     res.update({"entry_rest_reprices": st.get("reprices"), "entry_rest_limit_px": st.get("limit_px"),
                 "signal_ts": signal_ts, "delay_s": delay_s, "delay_source": delay_source, "side": direction,
                 "price_source": "MAKER_REST_LIMIT" if res.get("filled_qty") else None,
-                **_rest_unsized_stamp(st.get("unsized_prints"))})
+                **_rest_unsized_stamp(st.get("unsized_prints")),
+                **_rest_queue_stamp(st, res.get("fill_ts") if res.get("filled_qty") else None)})
     order["paper_fill_result"] = res
     return res
+
+
+def _rest_queue_stamp(st: dict, fill_ts) -> dict:
+    """RK R0 / R17: the shared maker rule, queue ahead at the current placement, book age at join, price age
+    (placement -> last fill) and every fill's stamp (print ts, queue ahead, qty filled)."""
+    import paper_fill as _pf
+    reset = st.get("queue_reset_ts")
+    return {"entry_rest_fill_rule": _pf.MAKER_REST_RULE, "entry_rest_fill_source": _pf.MAKER_REST_SOURCE,
+            "entry_rest_queue_ahead": st.get("queue_ahead"),
+            "entry_rest_book_age_s": st.get("book_age_s"),
+            "entry_rest_through_vol": st.get("through_seen"),
+            "entry_rest_fill_stamps": [dict(f) for f in st.get("fill_stamps") or ()],
+            "entry_rest_price_age_s": (round(float(fill_ts) - float(reset), 3)
+                                       if fill_ts is not None and reset is not None else None)}
 
 
 def _rest_unsized_stamp(n) -> dict:
@@ -17093,8 +17128,8 @@ def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
         ("market_segments", lambda: r5_retention.cap_market_segments(
             runtime_root, referenced=keep_info.get("segment_shas") or (), now=now)),
         ("lifecycle_bundles", lambda: r5_retention.cap_lifecycle_bundles(
-            runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks",
-            keep=keep_info.get("bundle_ids") or (), now=now)),
+            runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", now=now)),
+        ("retired_transfer_bundles", lambda: r5_retention.purge_retired_transfer_bundles(runtime_root, now=now)),
     ]
     if v22:
         steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(
@@ -22927,6 +22962,8 @@ def _record_tile_decision_and_dispatch(
     else:
         disposition = "ORDER_ELIGIBLE"
         decision_reason = admission_reason or accept_reason
+    if disposition != "ORDER_ELIGIBLE":
+        monitor_tiles.record_lane_refusal(lane, decision_reason)
     # Keep the operator-facing AI History joined to the same signed
     # per-family decision that is written to the V3 ledger below.  The
     # ledger was complete, but without this stamp genuine family
@@ -34070,9 +34107,11 @@ _xvl_status = {
 }
 _xvl_lane_runtime = {}
 
-# Signal->submit->fill telemetry for IMMEDIATE (taker-at-signal) cross-venue
-# tiles. "signal" is the evaluator's evaluated_ts (the shared_ai_call_ts of the
-# trigger), the clock the tiles' pre-registered median signal->fill gate uses.
+# Signal->submit->fill telemetry for cross-venue tiles. "signal" is the evaluator's
+# evaluated_ts (the shared_ai_call_ts of the trigger). The pre-registered median
+# signal->fill target applies ONLY to taker-at-signal entries; a MAKER_REST entry
+# (B1/B2 regime limits) rests on the book by design, so its signal->fill is published
+# separately as maker_entry_rest with status N/A_MAKER and no target (R1 item 5).
 XVL_LATENCY_SCHEMA = "xvl_signal_latency_v1"
 XVL_LATENCY_WINDOW = 200
 XVL_LATENCY_MIN_FILLS = 10
@@ -34104,7 +34143,8 @@ def _xvl_latency_target_sec(lane: str) -> float:
         return XVL_LATENCY_DEFAULT_TARGET_SEC
 
 
-def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, signal_ts: float = None) -> None:
+def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, signal_ts: float = None,
+                      entry_kind: str = None) -> None:
     """Stamp one stage for one trigger; never raises into the order path."""
     lane = str(lane or "").upper()
     key = str(trigger_id or "")
@@ -34123,6 +34163,8 @@ def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, si
                     open_rows.pop(next(iter(open_rows)))
                 row = open_rows[key] = {"trigger_id": key, "signal_ts": float(signal_ts)}
             row.setdefault(stage, stamp)
+            if entry_kind:
+                row["entry_kind"] = entry_kind
             if stage == "submit_ts" and not row.get("_sampled"):
                 row["_sampled"] = True
                 lane_state["latency_samples"].append(row)
@@ -34132,11 +34174,24 @@ def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, si
         logger.warning(f"[XVL] latency mark failed lane={lane} stage={stage}: {exc} [PIPELINE ENFORCEMENT]")
 
 
+XVL_ENTRY_MAKER = "MAKER_REST"
+XVL_ENTRY_TAKER = "TAKER"
+
+
+def _xvl_entry_kind(record: dict) -> str:
+    """MAKER_REST when the paper entry rested on the book (order_model MAKER_REST), else TAKER."""
+    for src in (record.get("paper_fill_result"), record.get("_entry_order_model")):
+        if isinstance(src, dict) and src.get("entry_order_model") == XVL_ENTRY_MAKER:
+            return XVL_ENTRY_MAKER
+    return XVL_ENTRY_TAKER
+
+
 def _xvl_latency_mark_order(lane, record: dict, stage: str, ts=None) -> None:
     if not isinstance(record, dict):
         return
     _xvl_latency_mark(lane or record.get("research_lane"), record.get("shared_ai_call_id"), stage,
-                      _buf_float(ts, 0.0) or None)
+                      _buf_float(ts, 0.0) or None,
+                      entry_kind=_xvl_entry_kind(record) if stage == "fill_ts" else None)
 
 
 def _xvl_quantile(values: list, q: float):
@@ -34146,7 +34201,7 @@ def _xvl_quantile(values: list, q: float):
     return round(ordered[min(len(ordered) - 1, int(q * len(ordered)))], 3)
 
 
-def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
+def _xvl_stage_stats(samples: list) -> dict:
     stages = {}
     for name, start, end in XVL_LATENCY_STAGES:
         deltas = [
@@ -34158,24 +34213,40 @@ def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
             "p50_s": round(statistics.median(deltas), 3) if deltas else None,
             "p90_s": _xvl_quantile(deltas, 0.9),
         }
+    return stages
+
+
+def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
+    """Taker entries: stages + status against the taker target. Maker-rest entries: their own block, N/A_MAKER."""
+    maker = [r for r in samples if r.get("entry_kind") == XVL_ENTRY_MAKER]
+    taker = [r for r in samples if r.get("entry_kind") != XVL_ENTRY_MAKER]
+    stages = _xvl_stage_stats(taker)
     target = _xvl_latency_target_sec(lane)
     fill = stages["signal_to_fill"]
-    if fill["n"] < XVL_LATENCY_MIN_FILLS:
+    if maker and not taker:
+        status = "N/A_MAKER"
+    elif fill["n"] < XVL_LATENCY_MIN_FILLS:
         status = "INSUFFICIENT_FILLS"
     elif fill["p50_s"] > target:
         status = "SLOW"
     else:
         status = "OK"
+    rest = _xvl_stage_stats(maker)["signal_to_fill"]
     last = samples[-1] if samples else {}
     return {
         "schema": XVL_LATENCY_SCHEMA,
         "status": status,
+        "stage": "taker_entry_signal_to_fill",
         "target_median_signal_to_fill_s": target,
+        "target_applies_to": "TAKER entries only",
         "min_fills": XVL_LATENCY_MIN_FILLS,
         "window": XVL_LATENCY_WINDOW,
         "signal_clock": "TRIGGER_EVALUATED_TS",
         "stages": stages,
-        "last": {k: last.get(k) for k in ("trigger_id", "signal_ts", "attempt_ts", "evidence_ts", "submit_ts", "fill_ts")},
+        "maker_entry_rest": {"status": "N/A_MAKER", "stage": "maker_entry_signal_to_fill_rest",
+                             "target_s": None, **rest},
+        "last": {k: last.get(k) for k in ("trigger_id", "signal_ts", "attempt_ts", "evidence_ts", "submit_ts",
+                                          "fill_ts", "entry_kind")},
     }
 
 
@@ -34933,7 +35004,8 @@ def xvl_evaluator_snapshot() -> dict:
                    "shadow_file": getattr(_XVL_EVALUATORS.get(lane), "SHADOW_FILE", None),
                    "paper": runtime.get(lane, {}),
                    "latency": {**_xvl_latency_snapshot(lane, latency_samples.get(lane, [])),
-                               "signal_to_fill_trades_ms": _signal_to_fill_trades_ms().get(lane)}}
+                               "signal_to_fill_trades_ms": _signal_to_fill_trades_ms().get(lane),
+                               "exit_trigger_to_fill_trades": _exit_trigger_to_fill_trades().get(lane)}}
             for lane in lanes
         },
         **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
@@ -34967,6 +35039,27 @@ def _signal_to_fill_trades_ms(hours: float = 24.0) -> dict:
     except Exception as exc:  # noqa: BLE001 - observation only
         out = {"error": type(exc).__name__}
     _S2F_TRADES_CACHE["v"] = (now, out)
+    return out
+
+
+_E2F_TRADES_CACHE: dict = {}
+
+
+def _exit_trigger_to_fill_trades(hours: float = 24.0) -> dict:
+    """R1 item 5: per lane EXIT leg p50 (timing.exit_trigger_to_fill_sec) from persisted closed rows, cached 30 s."""
+    now = time.time()
+    hit = _E2F_TRADES_CACHE.get("v")
+    if hit and 0.0 <= now - hit[0] < 30.0:
+        return hit[1]
+    out: dict = {}
+    try:
+        import data_gaps as _dg
+        scope = {"lanes": list(ACTIVE_TILE_ORDER), "epoch": _current_epoch_id_for_display(),
+                 "since": now - hours * 3600, "until": None, "be_band_bp": 0.0, "include_forced": True}
+        out = _dg.exit_trigger_to_fill_by_lane(_monitor_tiles_rows(scope, ("closed",)), since=now - hours * 3600)
+    except Exception as exc:  # noqa: BLE001 - observation only
+        out = {"error": type(exc).__name__}
+    _E2F_TRADES_CACHE["v"] = (now, out)
     return out
 
 
@@ -41504,9 +41597,11 @@ DASHBOARD_JS = """(function () {
           const xvlSec = (v) => (v === null || v === undefined) ? '—' : (Number(v).toFixed(2) + ' s');
           const xvlLatColor = xvlLat.status === 'OK' ? '#3fb950' : (xvlLat.status === 'SLOW' ? '#f85149' : '#8b949e');
           const xvlLatency = xvlLane && xvlLat.schema
-            ? ('<div style="margin-top:4px;"><strong style="color:' + xvlLatColor + ';">Signal→fill latency ' + (xvlLat.status || 'UNKNOWN') + ':</strong> '
-              + 'median ' + xvlSec((xvlStages.signal_to_fill || {}).p50_s) + ' (p90 ' + xvlSec((xvlStages.signal_to_fill || {}).p90_s) + ', n=' + Number((xvlStages.signal_to_fill || {}).n || 0) + ')'
-              + ' · target ≤' + xvlSec(xvlLat.target_median_signal_to_fill_s)
+            ? ('<div style="margin-top:4px;"><strong style="color:' + xvlLatColor + ';">Latency ' + (xvlLat.status || 'UNKNOWN') + ':</strong> '
+              + 'taker entry median ' + xvlSec((xvlStages.signal_to_fill || {}).p50_s) + ' (p90 ' + xvlSec((xvlStages.signal_to_fill || {}).p90_s) + ', n=' + Number((xvlStages.signal_to_fill || {}).n || 0) + ')'
+              + ' · taker target ≤' + xvlSec(xvlLat.target_median_signal_to_fill_s)
+              + ' · maker entry rest median ' + xvlSec((xvlLat.maker_entry_rest || {}).p50_s) + ' (n=' + Number((xvlLat.maker_entry_rest || {}).n || 0) + ', no target)'
+              + ' · exit trigger→fill median ' + xvlSec((xvlLat.exit_trigger_to_fill_trades || {}).p50_s)
               + ' · signal→submit ' + xvlSec((xvlStages.signal_to_submit || {}).p50_s)
               + ' · evidence ' + xvlSec((xvlStages.attempt_to_evidence || {}).p50_s)
               + ' · submit→fill ' + xvlSec((xvlStages.submit_to_fill || {}).p50_s) + '</div>')
@@ -46131,6 +46226,10 @@ def _external_analyzer_response(endpoint: str):
 def api_analyzer_summary():
     """Proxy to research dashboard /api/summary — full-session PnL/WR/trade count."""
     if (os.getenv("FLY_APP_NAME") or "").strip():
+        if _active_analyzer_mirror_dir() is None:
+            resp = jsonify({"ok": False, "error": _ANALYZER_BUNDLE_NO_VALID})
+            resp.headers["Cache-Control"] = "no-store"
+            return resp, 503
         return _external_analyzer_response("summary")
     status, body = _analyzer_proxy_fetch("/api/summary")
     if status is None:
@@ -46755,7 +46854,8 @@ def _build_dashboard_truth(snap: dict, now: float | None = None) -> dict:
         "emergency_wal": wal_summary,
         "operating": _dashboard_operating_truth(snap, current, wal_summary),
         "process_boot_time": float(process_boot_time),
-        "session_start_time": float(snap.get("bot_start_time") or 0.0) or None,
+        "session_start_time": float(FRESH_START_TS),
+        "bot_start_time": float(snap.get("bot_start_time") or 0.0) or None,
         "trade_scope": snap.get("trade_scope"),
         "trade_count_session": snap.get("trade_count_session"),
     }
@@ -48964,7 +49064,8 @@ def _monitor_summary_payload(now: float) -> dict:
         "epoch": {
             "data_epoch_id": epoch.get("epoch_id"),
             "data_epoch_declared": epoch.get("declared"),
-            "data_epoch_started_at": epoch.get("started_at_utc"),
+            "data_epoch_started_at": FRESH_START_UTC,
+            "data_epoch_manifest_started_at": epoch.get("started_at_utc"),
             "collection_epoch_id": _monitor_part(_bound_collection_epoch_id),
             "canonical_epoch_id": _monitor_part(_canonical_epoch_public).get("canonical_epoch_id"),
         },
@@ -49029,8 +49130,10 @@ def _monitor_summary_payload(now: float) -> dict:
                 "on": row.get("on"),
                 "closes": row.get("closes"),
                 "net_usd": row.get("net_usd"),
-                "latency_p50_s": (row.get("latency") or {}).get("signal_to_fill_p50_s"),
-                "latency_n": (row.get("latency") or {}).get("n"),
+                "taker_entry_signal_to_fill_p50_s": (row.get("latency") or {}).get("taker_entry_signal_to_fill_p50_s"),
+                "taker_entry_n": (row.get("latency") or {}).get("taker_entry_n"),
+                "maker_entry_rest_p50_s": (row.get("latency") or {}).get("maker_entry_rest_p50_s"),
+                "exit_trigger_to_fill_p50_s": (row.get("latency") or {}).get("exit_trigger_to_fill_p50_s"),
             }
             for row in lanes.get("lanes") or []
         ],
@@ -51793,7 +51896,7 @@ def status():
                 "v22_retired_r17_label": "positive v22 events retired (R17): no stored 1m path, never written",
                 "lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(),
                 "lifecycle_qualification_retired_r17_label": "lifecycles stopped at QUALIFICATION_HORIZON_RETIRED_R17 "
-                                                             "(POST_EXIT_PATH source retired; transfer bundles only)",
+                                                             "(POST_EXIT_PATH source retired; stop at terminal)",
                 "cleanup_enabled": False,
                 "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
                 "family_tiles_arm_discovery_grid": True,
@@ -54807,7 +54910,6 @@ def _lifecycle_artifact_counts(now: float, maximum_entries: int = 4096) -> dict:
     """Count lifecycle artifacts with fixed traversal and no content reads."""
     root = _data_sync_runtime_root() / "v3"
     specifications = {
-        "transfer_bundles": (root / "lifecycle_transfer_bundles", "transfer-", True),
         "completion_bundles": (root / "lifecycle_bundles", "lifecycle-", True),
         "acks": (_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", "lifecycle-", False),
     }
@@ -55111,7 +55213,6 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
             for key in (
                 "rows_scanned", "bytes_indexed", "pending_dirty_lifecycles",
                 "promoted_qualification_retries", "candidate_count",
-                "transfer_ready_count", "transfer_bundle_count",
                 "completion_appended_count", "bundle_count",
             )
         } | {"caught_up": bool(last.get("caught_up"))},
@@ -55920,6 +56021,43 @@ def _analyzer_current_pointer_path() -> Path:
     return _data_sync_volume_root() / "analyzer_current.json"
 
 
+# RK PASS 12:48 (R8): an analyzer bundle is served only if it was cut on the real fresh epoch and the epoch audit
+# placed every row. fresh_epoch.cutoff_utc earlier than the floor (or missing), or any straddle/unstamped row left
+# unguarded in the generation receipt, rejects the bundle at install AND at serve (/analysis, /api/analyzer/summary
+# then answer 503 "no valid bundle"). Fail closed.
+_ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671  # 2026-10-18 06:01:11 AEDT, the real fresh start
+# RK PASS 12:48 (R8 B): the operator-facing "data epoch started" / session start is the real fresh start, not the
+# 4 Oct DATA_EPOCH manifest stamp (DATA_EPOCH_ID itself is unchanged; the manifest stamp stays visible beside it).
+FRESH_START_TS = _ANALYZER_BUNDLE_FRESH_FLOOR_TS
+FRESH_START_UTC = datetime.fromtimestamp(FRESH_START_TS, timezone.utc).isoformat()
+_ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
+
+
+def _analyzer_bundle_fresh_gate(report_manifest) -> None:
+    """Raise ValueError unless the report manifest passes the R8 fresh-epoch install gate."""
+    if not isinstance(report_manifest, dict):
+        raise ValueError("analyzer bundle report manifest missing")
+    raw = (report_manifest.get("fresh_epoch") or {}).get("cutoff_utc")
+    try:
+        cutoff = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if cutoff.tzinfo is None:
+            raise ValueError("naive cutoff_utc")
+        cutoff_ts = cutoff.timestamp()
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"analyzer bundle fresh_epoch.cutoff_utc unusable: {raw!r}") from exc
+    if cutoff_ts < _ANALYZER_BUNDLE_FRESH_FLOOR_TS:
+        raise ValueError(f"analyzer bundle fresh_epoch.cutoff_utc {raw} precedes the fresh floor "
+                         f"{_ANALYZER_BUNDLE_FRESH_FLOOR_TS}")
+    epoch = (report_manifest.get("generation_receipt") or {}).get("data_epoch") or {}
+    for key in ("straddle_rows_unguarded", "unstamped_rows_unguarded"):
+        try:
+            n = int(epoch.get(key) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"analyzer bundle receipt {key} unreadable") from exc
+        if n > 0:
+            raise ValueError(f"analyzer bundle receipt {key}={n} > 0")
+
+
 def _valid_analyzer_generation(candidate: Path) -> bool:
     """Accept only a complete, hash-bound bundle-v2 generation on disk."""
     try:
@@ -55935,6 +56073,8 @@ def _valid_analyzer_generation(candidate: Path) -> bool:
             and isinstance(manifest.get("files"), list)
         ):
             return False
+        _analyzer_bundle_fresh_gate(
+            json.loads((candidate / "report_manifest.json").read_text(encoding="utf-8")))
         declared = {}
         for row in manifest["files"]:
             rel = str((row or {}).get("path") or "").replace("\\", "/")
@@ -56145,6 +56285,7 @@ def _validated_analyzer_bundle_manifest(archive: zipfile.ZipFile, members: list)
         raise ValueError(f"invalid source report manifest: {exc}") from exc
     if hashlib.sha256(report_payload).hexdigest() != str(manifest["source_report_manifest_sha256"]).lower():
         raise ValueError("source report manifest hash does not match bundle provenance")
+    _analyzer_bundle_fresh_gate(report_manifest)
     provenance = report_manifest.get("analysis_provenance") or {}
     comparisons = {
         "analyzer_run_id": report_manifest.get("analyzer_sync_id"),
@@ -56338,7 +56479,8 @@ def analyzer_mirror_dashboard_index():
     active = _active_analyzer_mirror_dir()
     if active is None:
         return jsonify({
-            "error": "no complete validated analyzer bundle is available",
+            "error": _ANALYZER_BUNDLE_NO_VALID,
+            "detail": "no complete validated analyzer bundle is available",
             "next": "run the bundle-v2 local analyzer publisher while the PC is online",
         }), 503
     report = active / "analysis_dashboard.html"
@@ -61172,7 +61314,8 @@ def _research_freeze_public() -> dict:
 def _data_epoch_public() -> dict:
     manifest = _DATA_EPOCH_MANIFEST or {}
     return {"declared": bool(manifest), "configured": DATA_EPOCH_ID, "epoch_id": manifest.get("epoch_id"),
-            "started_at_utc": manifest.get("started_at_utc"), "stamp_field": _data_epoch.STAMP_FIELD,
+            "started_at_utc": FRESH_START_UTC, "manifest_started_at_utc": manifest.get("started_at_utc"),
+            "stamp_field": _data_epoch.STAMP_FIELD,
             "segment_prefix": manifest.get("segment_prefix"), "fingerprint": manifest.get("fingerprint"),
             "boundary": _data_epoch_boundary_status(manifest),
             "fingerprint_changes": len(manifest.get("fingerprint_changes") or [])}

@@ -1204,31 +1204,24 @@ def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, 
     base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "leg": "entry_rest",
             "rest_rule": REST_RULE_A5, "rest_ttl_s": float(ttl_s), "rest_t_start": t0, "rest_t_end": t1,
             "side": str(side).upper(), "qty": q, "limit_px": lim, "price_source": None}
-    beyond = []
-    for p in trades or ():
-        ts, px, amt = _f((p or {}).get("ts")), _f((p or {}).get("px")), _f((p or {}).get("amt"))
-        if ts is None or px is None or amt is None or lim is None:
-            continue
-        if not (t0 < ts <= t1):
-            continue
-        if (px < lim) if buy else (px > lim):
-            beyond.append((ts, abs(amt)))
-    vol = sum(a for _, a in beyond)
-    base.update(trades_n=len(beyond), trade_vol_beyond=round(vol, 8))
-    if q <= 0 or lim is None or vol <= 0:
+    # R4 (RK 25 Oct, #883 item 5): the fill itself comes from THE shared maker fill (maker_rest_fill), the same
+    # queue-ahead / trade-through / partial rule B1 / B2 / WALK_THEN_REST / book_limit_entry / research_v3 use. A5
+    # rests join behind no visible queue (the remainder of a marketable order sits at the touch it just cleared), so
+    # queue_ahead = 0; only prints inside (t_start, t_start + ttl_s] are offered.
+    window = [p for p in trades or () if isinstance(p, Mapping) and _f(p.get("ts")) is not None
+              and t0 < float(_f(p.get("ts"))) <= t1]
+    step = maker_rest_fill(side, lim, q, 0.0, 0.0, window, placement_ts=t0) if lim is not None else None
+    vol = float(step["through_seen"]) if step else 0.0
+    base.update(trades_n=(len(step["seen"]) - int(step["unsized_prints"])) if step else 0,
+                trade_vol_beyond=round(vol, 8))
+    filled = float(step["filled_qty"]) if step else 0.0
+    if q <= 0 or filled <= 1e-12:
         return {**base, "status": NO_FILL_REST_TTL, "price": None, "filled_qty": 0.0, "fill_ts": None,
                 "evidence_status": "NO_FILL"}
-    filled = min(q, vol)
-    # the fill completes at the print that exhausts the remaining qty (or the last beyond print)
-    acc, fill_ts = 0.0, beyond[-1][0]
-    for ts, a in sorted(beyond):
-        acc += a
-        if acc + 1e-12 >= filled:
-            fill_ts = ts
-            break
     full = filled + 1e-12 >= q
     return {**base, "status": "FILLED" if full else "PARTIAL", "price": lim, "filled_qty": round(filled, 8),
-            "fill_ts": fill_ts, "price_source": REST_SOURCE, "evidence_status": "COMPLETE" if full else "INCOMPLETE"}
+            "fill_ts": step["fills"][-1]["print_ts"], "price_source": REST_SOURCE,
+            "evidence_status": "COMPLETE" if full else "INCOMPLETE", "fill_stamps": step["fills"]}
 
 
 # lane -> the registered rest sites (each must be a single `return paper_fill.rest_fill(...)` over trades_between)
@@ -1269,3 +1262,78 @@ def rest_site_violations(source: str, func_name: str) -> list:
                 and getattr(tr.func.value, "id", "") in ("quote_trigger", "_qt")):
             out.append(f"{func_name}: trades must be quote_trigger.trades_between(...)")
     return sorted(set(out))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# RK R0 / R4 (25 Oct): THE shared maker-rest fill for B1 / B2 resting entry limits (bot._paper_entry_maker_rest calls
+# only this). Per placement (each cancel/replace is a new placement):
+#     filled_here = min(remaining size, cumulative trade-through volume since placement - visible queue ahead at placement)
+# Queue ahead comes from the real 10-level order book at placement (order_model.queue_ahead_at); trade-through volume
+# from real Bitfinex trade prints strictly beyond the limit with a printed size. Partials are allowed and stay filled
+# across reprices; the remainder is left to the existing exit / cancel rules. Every fill is stamped (R17) with the
+# print ts, the queue ahead at placement and the qty filled. Fills are capped at the remaining size (gb1-d365a7a17cb2
+# overfill) and a print id is counted at most once per order (the double-evaluation race).
+MAKER_REST_RULE = "R0_QUEUE_AHEAD_TRADE_THROUGH_PARTIAL"
+MAKER_REST_SOURCE = "BFX_BOOK10L_QUEUE_AT_PLACEMENT+BFX_TRADES_THROUGH"
+MAKER_REST_LOOKBACK_S = 2.0  # re-read window: a print can become known up to ~2 s after its ts (TradesTail recv filter)
+MAKER_REST_LOCK = threading.RLock()  # state_monitor_loop and position_manager both advance pending entries
+
+
+def print_key(tr: Mapping[str, Any]):
+    pid = tr.get("id")
+    return ("id", pid) if pid is not None else ("p", _f(tr.get("ts")), _f(tr.get("px")), _f(tr.get("amt")))
+
+
+def maker_rest_fill(direction: str, limit_px: float, qty_remaining: float, queue_ahead: float, through_seen: float,
+                    trades, *, placement_ts: Optional[float] = None, seen=None) -> dict:
+    """Advance ONE placement of a resting maker limit over trade prints (any order; sorted by ts here).
+
+    ``qty_remaining`` = requested - already filled (the cap); ``queue_ahead`` = visible size at the limit on our side of
+    the book at placement (fixed for the placement); ``through_seen`` = trade-through volume already counted for this
+    placement. Prints at/before ``placement_ts`` or whose key is in ``seen`` are ignored; unsized through prints fill
+    nothing and are counted. Returns {"fills": [{"print_ts","px","qty","queue_ahead","through_vol","print_id"}],
+    "filled_qty", "remaining", "through_seen", "unsized_prints", "seen"}."""
+    buy = str(direction).upper() in ("LONG", "BUY")
+    lim = _f(limit_px)
+    rem = max(0.0, _f(qty_remaining) or 0.0)
+    q0 = max(0.0, _f(queue_ahead) or 0.0)
+    seen_vol = max(0.0, _f(through_seen) or 0.0)
+    seen = set(seen or ())
+    fills, unsized = [], 0
+    rows = sorted((t for t in trades or () if isinstance(t, Mapping) and _f(t.get("ts")) is not None),
+                  key=lambda t: float(t["ts"]))
+    for tr in rows:
+        ts, px, amt = _f(tr.get("ts")), _f(tr.get("px")), _f(tr.get("amt"))
+        if lim is None or px is None or (placement_ts is not None and ts <= float(placement_ts)):
+            continue
+        if not ((px < lim - 1e-9) if buy else (px > lim + 1e-9)):
+            continue  # at-limit prints, touches and book crosses never fill
+        key = print_key(tr)
+        if key in seen:
+            continue
+        seen.add(key)
+        size = abs(amt) if amt else 0.0
+        if size <= 0:
+            unsized += 1
+            continue
+        before = max(0.0, seen_vol - q0)
+        seen_vol += size
+        take = min(rem, max(0.0, seen_vol - q0) - before)  # the cap: never more than the remaining size
+        if take > 1e-12:
+            rem -= take
+            fills.append({"print_ts": ts, "px": lim, "qty": round(take, 12), "queue_ahead": q0,
+                          "through_vol": round(seen_vol, 12), "print_id": tr.get("id")})
+    return {"fills": fills, "filled_qty": round(sum(f["qty"] for f in fills), 12), "remaining": round(max(0.0, rem), 12),
+            "through_seen": round(seen_vol, 12), "unsized_prints": unsized, "seen": seen,
+            "rule": MAKER_REST_RULE, "source": MAKER_REST_SOURCE}
+
+
+def maker_rest_fills(direction, limit_px, qty_remaining, queue_ahead, trades, *, placement_ts=None) -> dict:
+    """HM 25 Oct (#883 FAIL): the ONE maker fill entry point for every non-stateful caller (bot WALK_THEN_REST
+    remainder, book_limit_entry, research_v3). Same rule as maker_rest_fill, over a single placement; returns the
+    combine_entry view (fills as (ts, px, qty)) plus the R17 stamps."""
+    r = maker_rest_fill(direction, limit_px, qty_remaining, queue_ahead, 0.0, trades, placement_ts=placement_ts)
+    q0 = max(0.0, float(queue_ahead or 0.0))
+    return {"fills": [(f["print_ts"], f["px"], f["qty"]) for f in r["fills"]], "remaining": r["remaining"],
+            "queue_ahead": max(0.0, q0 - r["through_seen"]), "unsized_prints": r["unsized_prints"],
+            "fill_stamps": r["fills"], "through_vol": r["through_seen"], "rule": r["rule"], "source": r["source"]}

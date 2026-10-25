@@ -369,14 +369,26 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
 
 
 def latency_brief(latency: Mapping[str, Any] | None) -> dict | None:
-    """Signal-to-fill p50/p90/n and status from xvl_signal_latency_v1, if the lane has it."""
+    """Per-stage latency from xvl_signal_latency_v1, each under its own label (R1 item 5).
+
+    taker_entry_*: signal->fill of taker entries, judged against the taker target (status).
+    maker_entry_rest_*: signal->fill of MAKER_REST entries (resting on the book by design): no target, N/A_MAKER.
+    exit_trigger_to_fill_*: the exit leg, from persisted closed rows."""
     if not isinstance(latency, Mapping):
         return None
-    fill = ((latency.get("stages") or {}).get("signal_to_fill") or {})
+    taker = ((latency.get("stages") or {}).get("signal_to_fill") or {})
+    maker = latency.get("maker_entry_rest") or {}
+    exit_leg = latency.get("exit_trigger_to_fill_trades") or {}
     return {
         "status": latency.get("status"),
-        "signal_to_fill_p50_s": fill.get("p50_s"),
-        "signal_to_fill_p90_s": fill.get("p90_s"),
-        "n": fill.get("n"),
-        "target_s": latency.get("target_median_signal_to_fill_s"),
+        "taker_entry_signal_to_fill_p50_s": taker.get("p50_s"),
+        "taker_entry_signal_to_fill_p90_s": taker.get("p90_s"),
+        "taker_entry_n": taker.get("n"),
+        "taker_entry_target_s": latency.get("target_median_signal_to_fill_s"),
+        "maker_entry_rest_p50_s": maker.get("p50_s"),
+        "maker_entry_rest_p90_s": maker.get("p90_s"),
+        "maker_entry_n": maker.get("n"),
+        "maker_entry_status": "N/A_MAKER" if maker.get("n") else None,
+        "exit_trigger_to_fill_p50_s": exit_leg.get("p50_s"),
+        "exit_n": exit_leg.get("n"),
     }

@@ -589,12 +589,15 @@ def _load_analyzer_bundle_validators():
         "_ANALYZER_BUNDLE_MAX_COMPRESSION_RATIO": 1000,
         "_ANALYZER_BUNDLE_MANIFEST": "bundle_manifest.json",
         "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
+        "_ANALYZER_BUNDLE_FRESH_FLOOR_TS": 1792263671,
+        "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
     }
     tree = ast.parse(BOT)
     selected = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef)
-        and node.name in {"_safe_analyzer_bundle_members", "_validated_analyzer_bundle_manifest"}
+        and node.name in {"_safe_analyzer_bundle_members", "_validated_analyzer_bundle_manifest",
+                          "_analyzer_bundle_fresh_gate"}
     ]
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace
@@ -624,6 +627,7 @@ def _ensure_source_report_manifest(files):
                 "cohort_schema": "analysis_cohorts_v1",
                 "generation_revision": "b" * 40,
             },
+            "fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"},
             "report_count": len(reports),
             "reports": reports,
             "text_artifacts": text_artifacts,
@@ -768,6 +772,7 @@ def test_analyzer_bundle_install_is_atomic_and_bad_hash_preserves_current_genera
         "_safe_analyzer_bundle_members",
         "_validated_analyzer_bundle_manifest",
         "_install_analyzer_bundle",
+        "_analyzer_bundle_fresh_gate",
     }
     selected = [
         node for node in tree.body
@@ -791,6 +796,8 @@ def test_analyzer_bundle_install_is_atomic_and_bad_hash_preserves_current_genera
         "_ANALYZER_BUNDLE_MAX_COMPRESSION_RATIO": 1000,
         "_ANALYZER_BUNDLE_MANIFEST": "bundle_manifest.json",
         "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
+        "_ANALYZER_BUNDLE_FRESH_FLOOR_TS": 1792263671,
+        "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
         "_ANALYZER_INSTALL_LOCK": threading.RLock(),
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
@@ -851,6 +858,7 @@ def test_flask_snapshot_routes_require_auth_serve_links_and_reject_traversal():
         "analyzer_mirror_dashboard_index",
         "analyzer_mirror_artifact",
     }
+    _no_valid = {"_ANALYZER_BUNDLE_NO_VALID": "no valid bundle"}
     selected = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -865,7 +873,7 @@ def test_flask_snapshot_routes_require_auth_serve_links_and_reject_traversal():
         outside.write_text("secret", encoding="utf-8")
         app = Flask("analyzer-route-fixture")
         auth = {"allowed": False}
-        namespace = {
+        namespace = {**_no_valid,
             "app": app,
             "request": request,
             "jsonify": jsonify,
@@ -908,7 +916,7 @@ def test_flask_snapshot_routes_fail_closed_without_complete_generation():
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
     app = Flask("analyzer-fail-closed-fixture")
-    namespace = {
+    namespace = {"_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
         "app": app,
         "request": request,
         "jsonify": jsonify,
@@ -952,6 +960,7 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
             "_active_analyzer_mirror_dir": lambda: None,
             "_analyzer_mirror_dir": lambda: legacy,
             "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
+            "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
             "_ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES": 50 * 1024 * 1024,
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
@@ -1027,3 +1036,67 @@ def test_guarded_workflow_has_exact_paper_only_flatten_recovery_mode():
     assert '"/api/orders/cancel"' in block
     assert "paper/live safety flags are not proven" in block
     assert "paper exposure did not flatten" in block
+
+
+# ---------------------------------------------------------------- RK PASS 12:48 (R8): fresh-epoch install gate
+def _gated_bundle(mutate):
+    files = {"analysis_dashboard.html": b"dashboard", "executive_summary.txt": b"summary"}
+    _ensure_source_report_manifest(files)
+    report = json.loads(files["report_manifest.json"])
+    mutate(report)
+    files["report_manifest.json"] = json.dumps(report, sort_keys=True).encode()
+    return _zip_bundle(files)
+
+
+def _gate_verdict(payload):
+    namespace = _load_analyzer_bundle_validators()
+    with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
+        members = namespace["_safe_analyzer_bundle_members"](archive)
+        try:
+            namespace["_validated_analyzer_bundle_manifest"](archive, members)
+        except ValueError as exc:
+            return str(exc)
+    return "OK"
+
+
+def test_r8_gate_rejects_cutoff_before_the_fresh_floor_and_missing_cutoff():
+    one_sec_early = "2026-10-17T19:01:10+00:00"  # 1792263670 < floor 1792263671
+    assert "precedes the fresh floor" in _gate_verdict(
+        _gated_bundle(lambda r: r.update(fresh_epoch={"cutoff_utc": one_sec_early})))
+    assert "precedes the fresh floor" in _gate_verdict(  # the old 4 Oct epoch
+        _gated_bundle(lambda r: r.update(fresh_epoch={"cutoff_utc": "2026-10-04T00:00:00+00:00"})))
+    assert "unusable" in _gate_verdict(_gated_bundle(lambda r: r.pop("fresh_epoch")))
+    assert _gate_verdict(_gated_bundle(lambda r: r.update(fresh_epoch={"cutoff_utc": "2026-10-17T19:01:11Z"}))) == "OK"
+
+
+def test_r8_gate_rejects_straddle_rows_unguarded():
+    msg = _gate_verdict(_gated_bundle(
+        lambda r: r.update(generation_receipt={"data_epoch": {"straddle_rows_unguarded": 1}})))
+    assert "straddle_rows_unguarded=1" in msg
+
+
+def test_r8_gate_rejects_unstamped_rows_unguarded():
+    msg = _gate_verdict(_gated_bundle(
+        lambda r: r.update(generation_receipt={"data_epoch": {"straddle_rows_unguarded": 0,
+                                                              "unstamped_rows_unguarded": 3}})))
+    assert "unstamped_rows_unguarded=3" in msg
+    assert _gate_verdict(_gated_bundle(lambda r: r.update(generation_receipt={"data_epoch": {
+        "straddle_rows_unguarded": 0, "unstamped_rows_unguarded": 0}}))) == "OK"
+
+
+def test_r8_summary_and_analysis_answer_503_no_valid_bundle(monkeypatch):
+    from flask import Flask, jsonify, make_response, send_file
+    tree = ast.parse(BOT)
+    selected = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name in {"api_analyzer_summary", "analyzer_mirror_dashboard_index"}]
+    app = Flask("r8-gate-fixture")
+    namespace = {"app": app, "jsonify": jsonify, "make_response": make_response, "send_file": send_file, "os": os,
+                 "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle", "_active_analyzer_mirror_dir": lambda: None,
+                 "_analyzer_view_authed": lambda: True,
+                 "_external_analyzer_response": lambda e: (_ for _ in ()).throw(AssertionError("must not serve"))}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    monkeypatch.setenv("FLY_APP_NAME", "doxed-btc-bot")
+    client = app.test_client()
+    for path in ("/api/analyzer/summary", "/analysis/"):
+        response = client.get(path)
+        assert response.status_code == 503 and response.json["error"] == "no valid bundle"

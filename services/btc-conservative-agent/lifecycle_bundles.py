@@ -31,8 +31,6 @@ from collector_signal_snapshot import (
 
 
 BUNDLE_SCHEMA = "research_lifecycle_bundle_v1"
-TRANSFER_BUNDLE_SCHEMA = "research_lifecycle_transfer_bundle_v1"
-TRANSFER_POINTER_SCHEMA = "research_lifecycle_transfer_pointer_v1"
 COMPLETION_SCHEMA = "lifecycle_bundle_completion_v1"
 EVIDENCE_COLLECTED_SCHEMA = "lifecycle_evidence_collected_v1"
 ENTRY_OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
@@ -785,7 +783,7 @@ def _read_signal_snapshot(path: Path, ref: dict[str, Any], *, root: Path) -> dic
     return decode_signal_snapshot(raw, identity=ref["identity"])
 
 
-def _copy_signal_snapshots(root: Path, target: Path, refs: list[dict[str, Any]], *, transfer: bool) -> list[dict[str, Any]]:
+def _copy_signal_snapshots(root: Path, target: Path, refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     receipts = []
     for ref in refs:
         source = root / ref["relative_path"]
@@ -803,7 +801,7 @@ def _copy_signal_snapshots(root: Path, target: Path, refs: list[dict[str, Any]],
         payload = _read_signal_snapshot(destination, ref, root=target)
         receipts.append(_file_receipt(
             destination, relative,
-            role="TRANSFER_SIGNAL_SNAPSHOT" if transfer else "SIGNAL_SNAPSHOT", row_count=1,
+            role="SIGNAL_SNAPSHOT", row_count=1,
             first_timestamp=_utc_iso(ref["identity"]["signal_ts"]),
             last_timestamp=_utc_iso(payload["captured_at"]),
         ))
@@ -812,10 +810,10 @@ def _copy_signal_snapshots(root: Path, target: Path, refs: list[dict[str, Any]],
     return receipts
 
 
-def _verify_signal_snapshot_members(bundle: Path, refs: list[dict[str, Any]], files: list[dict[str, Any]], *, transfer: bool) -> None:
+def _verify_signal_snapshot_members(bundle: Path, refs: list[dict[str, Any]], files: list[dict[str, Any]]) -> None:
     expected = {_snapshot_member_path(ref): ref for ref in refs}
     actual = {}
-    roles = {"SIGNAL_SNAPSHOT", "TRANSFER_SIGNAL_SNAPSHOT"}
+    roles = {"SIGNAL_SNAPSHOT"}
     for receipt in files:
         path = str(receipt.get("path") or "")
         if receipt.get("role") in roles or path.startswith("signal_snapshots/"):
@@ -830,7 +828,7 @@ def _verify_signal_snapshot_members(bundle: Path, refs: list[dict[str, Any]], fi
             raise ValueError("SIGNAL_SNAPSHOT_UNLISTED_MEMBER")
     for relative, ref in expected.items():
         receipt = actual[relative]
-        role = "TRANSFER_SIGNAL_SNAPSHOT" if transfer else "SIGNAL_SNAPSHOT"
+        role = "SIGNAL_SNAPSHOT"
         if (receipt.get("role") != role or receipt.get("source_relative_path") != ref["relative_path"]
                 or receipt.get("sha256") != ref["sha256"] or type(receipt.get("size")) is not int
                 or receipt["size"] != ref["bytes"] or type(receipt.get("row_count")) is not int
@@ -1002,7 +1000,7 @@ def materialize_bundle(
                 last_timestamp=end_iso,
             ))
             receipts[-1]["source_relative_path"] = relative
-        receipts.extend(_copy_signal_snapshots(root, temporary, snapshots, transfer=False))
+        receipts.extend(_copy_signal_snapshots(root, temporary, snapshots))
         manifest = {
             "schema": BUNDLE_SCHEMA,
             "bundle_id": bundle_id,
@@ -1032,284 +1030,6 @@ def materialize_bundle(
         return {"written": True, "duplicate": False, "bundle_id": bundle_id, "path": str(target), "manifest": verification["manifest"]}
     finally:
         if temporary.exists():
-            shutil.rmtree(temporary, ignore_errors=True)
-
-
-def _write_transfer_pointer(
-    pointer_path: Path, key: LifecycleKey, bundle_id: str, manifest_sha256: str,
-) -> None:
-    pointer_path.parent.mkdir(parents=True, exist_ok=True)
-    pointer = {
-        "schema": TRANSFER_POINTER_SCHEMA,
-        "lifecycle_identity_id": key.identity_id,
-        "bundle_id": bundle_id,
-        "manifest_sha256": manifest_sha256,
-        "qualification_ready": False,
-        "profitability_supported": False,
-        "ranking_eligible": False,
-        "source_cleanup_authorized": False,
-    }
-    pointer["pointer_sha256"] = hashlib.sha256(
-        canonical_json(pointer).encode("utf-8")
-    ).hexdigest()
-    temporary = pointer_path.parent / f".{key.identity_id}.{uuid.uuid4().hex}.tmp"
-    try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(canonical_json(pointer) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, pointer_path)
-        _fsync_dir(pointer_path.parent)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def _validated_transfer_pointer(pointer_path: Path, key: LifecycleKey) -> dict[str, Any]:
-    """Read only a hash-valid, non-qualifying pointer for this exact identity."""
-    try:
-        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-        supplied_sha = str(pointer.get("pointer_sha256") or "")
-        material = dict(pointer)
-        material.pop("pointer_sha256", None)
-        actual_sha = hashlib.sha256(
-            canonical_json(material).encode("utf-8")
-        ).hexdigest()
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise ValueError("TRANSFER_POINTER_INVALID") from exc
-    bundle_id = str(pointer.get("bundle_id") or "")
-    if not (
-        pointer.get("schema") == TRANSFER_POINTER_SCHEMA
-        and supplied_sha == actual_sha
-        and pointer.get("lifecycle_identity_id") == key.identity_id
-        and bundle_id.startswith("transfer-")
-        and len(bundle_id) == len("transfer-") + 64
-        and all(char in "0123456789abcdef" for char in bundle_id[-64:])
-        and pointer.get("qualification_ready") is False
-        and pointer.get("profitability_supported") is False
-        and pointer.get("ranking_eligible") is False
-        and pointer.get("source_cleanup_authorized") is False
-        and isinstance(pointer.get("manifest_sha256"), str)
-        and len(pointer["manifest_sha256"]) == 64
-    ):
-        raise ValueError("TRANSFER_POINTER_INVALID")
-    return pointer
-
-
-def _verified_transfer_pointer_bundle(
-    candidate: Path, pointer: dict[str, Any], key: LifecycleKey,
-) -> dict[str, Any]:
-    """Verify content before a pointer target is accepted or recovered."""
-    verification = verify_bundle(candidate)
-    manifest = verification.get("manifest") or {}
-    if not (
-        verification.get("passed") is True
-        and manifest.get("schema") == TRANSFER_BUNDLE_SCHEMA
-        and manifest.get("bundle_id") == pointer.get("bundle_id")
-        and manifest.get("lifecycle_identity_id") == key.identity_id
-        and manifest.get("manifest_sha256") == pointer.get("manifest_sha256")
-        and manifest.get("qualification_ready") is False
-        and manifest.get("profitability_supported") is False
-        and manifest.get("ranking_eligible") is False
-        and manifest.get("source_cleanup_authorized") is False
-    ):
-        raise ValueError("TRANSFER_POINTER_INVALID")
-    return verification
-
-
-def materialize_transfer_bundle(
-    root: str | Path, key: LifecycleKey, rows: Iterable[dict[str, Any]],
-    transfer_assessment: dict[str, Any],
-) -> dict[str, Any]:
-    """Publish terminal-flat evidence without qualifying or authorizing cleanup."""
-    root = Path(root).resolve()
-    receipt = transfer_assessment.get("receipt")
-    if transfer_assessment.get("ready") is not True or not isinstance(receipt, dict):
-        return {
-            "written": False,
-            "lifecycle_identity_id": key.identity_id,
-            "transfer": transfer_assessment,
-        }
-    if not (
-        receipt.get("schema") == "lifecycle_bundle_transfer_ready_v1"
-        and receipt.get("transfer_ready") is True
-        and receipt.get("profitability_supported") is False
-        and receipt.get("source_cleanup_authorized") is False
-    ):
-        raise ValueError("TRANSFER_RECEIPT_INVARIANT_FAILED")
-    bundle_root = root / "v3" / "lifecycle_transfer_bundles"
-    pointer_root = bundle_root / "index"
-    pointer_path = pointer_root / f"{key.identity_id}.json"
-    if pointer_path.exists():
-        pointer = _validated_transfer_pointer(pointer_path, key)
-        pointer_bundle_id = str(pointer["bundle_id"])
-        pointer_target = bundle_root / pointer_bundle_id[-64:-62] / pointer_bundle_id
-        recovered = False
-        if not pointer_target.exists():
-            # A hard crash may occur after the pointer fsync but before the
-            # atomic directory publication.  The staging name is the content
-            # ID, so verify the exact reserved bytes before completing the
-            # interrupted rename.  Late ledger rows are deliberately ignored.
-            staged = bundle_root / ".staging" / pointer_bundle_id
-            verification = _verified_transfer_pointer_bundle(staged, pointer, key)
-            pointer_target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staged, pointer_target)
-            _fsync_dir(pointer_target.parent)
-            recovered = True
-        verification = _verified_transfer_pointer_bundle(
-            pointer_target, pointer, key,
-        )
-        return {
-            "written": False, "duplicate": True, "frozen": True,
-            "recovered": recovered,
-            "bundle_id": pointer_bundle_id, "path": str(pointer_target),
-            "pointer_path": str(pointer_path),
-            "manifest": verification["manifest"],
-        }
-    frozen = sorted(
-        (dict(row) for row in rows),
-        key=lambda row: (
-            str(row.get("ledger") or ""),
-            float(row.get("observed_ts") or row.get("ts") or row.get("signal_ts") or 0.0),
-            str(row.get("record_id") or row.get("event_id") or ""),
-        ),
-    )
-    segments = _referenced_market_segments(root, frozen)
-    snapshots = _signal_snapshot_references(frozen, epoch_id=key.collection_epoch_id)
-    for ref in snapshots:
-        _read_signal_snapshot(root / ref["relative_path"], ref, root=root)
-    bundle_id = _bundle_content_id(
-        key, frozen, receipt, segments, prefix="transfer-", snapshots=snapshots,
-    )
-    target = bundle_root / bundle_id[-64:-62] / bundle_id
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        verification = verify_bundle(target)
-        if not verification["passed"]:
-            raise ValueError("EXISTING_TRANSFER_BUNDLE_INVALID")
-        _write_transfer_pointer(
-            pointer_path, key, bundle_id,
-            verification["manifest"]["manifest_sha256"],
-        )
-        return {
-            "written": False, "duplicate": True, "bundle_id": bundle_id,
-            "path": str(target), "pointer_path": str(pointer_path),
-            "manifest": verification["manifest"],
-        }
-    staging_root = bundle_root / ".staging"
-    staging_root.mkdir(parents=True, exist_ok=True)
-    temporary = staging_root / bundle_id
-    pointer_published = False
-    try:
-        if temporary.exists():
-            raise ValueError("EXISTING_TRANSFER_STAGING_INVALID")
-        temporary.mkdir()
-        event_path = temporary / "events.jsonl"
-        with event_path.open("w", encoding="utf-8", newline="\n") as handle:
-            for row in frozen:
-                handle.write(canonical_json(row) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        timestamps = [
-            float(value) for row in frozen
-            for value in (row.get("observed_ts") or row.get("ts") or row.get("signal_ts"),)
-            if _utc_iso(value)
-        ]
-        if not timestamps:
-            raise ValueError("LIFECYCLE_EVENT_TIMESTAMPS_MISSING")
-        files = [_file_receipt(
-            event_path, "events.jsonl", role="TRANSFER_LIFECYCLE_EVENTS",
-            row_count=len(frozen), first_timestamp=_utc_iso(min(timestamps)),
-            last_timestamp=_utc_iso(max(timestamps)),
-        )]
-        segments = segments if _msr3.INPUT_ALLOWED else []  # R3: never copied as evidence
-        for source in segments:
-            relative = source.relative_to(root).as_posix()
-            destination = temporary / "market_segments" / source.stem[:2] / source.name
-            # Transfer staging paths can exceed Win32 MAX_PATH.  Extended-path
-            # I/O also ensures the nested content-addressed parent exists before
-            # copyfile publishes a segment into the verified staging bundle.
-            os.makedirs(_io_path(destination.parent), exist_ok=True)
-            shutil.copyfile(_io_path(source), _io_path(destination))
-            if _sha256_file(destination) != _sha256_file(source):
-                raise ValueError(f"MARKET_SEGMENT_COPY_SHA256_MISMATCH:{source.name}")
-            with open(_io_path(destination), "r", encoding="utf-8") as handle:
-                envelope = json.load(handle)
-            segment_rows = envelope.get("rows") if isinstance(envelope, dict) else None
-            start_iso = _utc_iso(envelope.get("start_ts") if isinstance(envelope, dict) else None)
-            end_iso = _utc_iso(envelope.get("end_ts") if isinstance(envelope, dict) else None)
-            if not isinstance(segment_rows, list) or not start_iso or not end_iso:
-                raise ValueError(f"MARKET_SEGMENT_METADATA_INCOMPLETE:{source.name}")
-            files.append(_file_receipt(
-                destination, f"market_segments/{source.stem[:2]}/{source.name}",
-                role="TRANSFER_MARKET_SEGMENT", row_count=len(segment_rows),
-                first_timestamp=start_iso, last_timestamp=end_iso,
-            ))
-            files[-1]["source_relative_path"] = relative
-        files.extend(_copy_signal_snapshots(root, temporary, snapshots, transfer=True))
-        manifest = {
-            "schema": TRANSFER_BUNDLE_SCHEMA,
-            "bundle_id": bundle_id,
-            "lifecycle_identity_id": key.identity_id,
-            "lifecycle_id": "|".join((key.episode_id, key.policy_signature, key.research_lane)),
-            "identity": key.as_dict(),
-            "provenance": _consistent_provenance(frozen),
-            "maturity": "TRANSFER_READY",
-            "transfer_receipt": receipt,
-            "qualification_ready": False,
-            "qualification_blockers": list(
-                transfer_assessment.get("qualification_blockers") or []
-            ),
-            "profitability_supported": False,
-            "ranking_eligible": False,
-            "files": sorted(files, key=lambda row: row["path"]),
-            "source_cleanup_authorized": False,
-        }
-        manifest["cleanup_manifest_sha256"] = _cleanup_manifest_sha256(manifest["files"])
-        manifest["manifest_sha256"] = hashlib.sha256(
-            canonical_json(manifest).encode("utf-8")
-        ).hexdigest()
-        with (temporary / "manifest.json").open(
-            "w", encoding="utf-8", newline="\n",
-        ) as handle:
-            handle.write(canonical_json(manifest) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        _fsync_dir(temporary)
-        staged_verification = verify_bundle(temporary)
-        if not (
-            staged_verification["passed"]
-            and staged_verification["manifest"].get("bundle_id") == bundle_id
-            and staged_verification["manifest"].get("lifecycle_identity_id")
-            == key.identity_id
-            and staged_verification["manifest"].get("manifest_sha256")
-            == manifest["manifest_sha256"]
-        ):
-            raise ValueError("STAGED_TRANSFER_BUNDLE_INVALID")
-        # Reserve the one immutable transfer snapshot before publishing its
-        # directory.  The pipeline owns an exclusive materialization lock, so
-        # readers cannot observe this short interval.  If the process crashes,
-        # the pointer deliberately fails closed instead of allowing late rows
-        # to create a second snapshot for the same lifecycle identity.
-        _write_transfer_pointer(
-            pointer_path, key, bundle_id, manifest["manifest_sha256"],
-        )
-        pointer_published = True
-        os.replace(temporary, target)
-        _fsync_dir(target.parent)
-        verification = verify_bundle(target)
-        if not verification["passed"]:
-            raise ValueError("PUBLISHED_TRANSFER_BUNDLE_INVALID")
-        return {
-            "written": True, "duplicate": False, "bundle_id": bundle_id,
-            "path": str(target), "pointer_path": str(pointer_path),
-            "manifest": verification["manifest"],
-        }
-    finally:
-        # Once the pointer is durable, this verified staging directory is the
-        # only deterministic crash-recovery source.  Never delete it until the
-        # atomic publication succeeds (at which point it no longer exists).
-        if temporary.exists() and not pointer_published:
             shutil.rmtree(temporary, ignore_errors=True)
 
 
@@ -1350,24 +1070,12 @@ def verify_bundle(bundle_path: str | Path) -> dict[str, Any]:
                 and not collection.get("blockers")
             ):
                 defects.append("QUALIFICATION_BUNDLE_MATURITY_INVALID")
-        elif schema == TRANSFER_BUNDLE_SCHEMA:
-            evidence = manifest.get("transfer_receipt") or {}
-            prefix = "transfer-"
-            if not (
-                manifest.get("maturity") == "TRANSFER_READY"
-                and manifest.get("qualification_ready") is False
-                and manifest.get("profitability_supported") is False
-                and manifest.get("ranking_eligible") is False
-                and manifest.get("source_cleanup_authorized") is False
-                and "completion" not in manifest
-            ):
-                defects.append("TRANSFER_BUNDLE_ISOLATION_INVALID")
         else:
             evidence = {}
             prefix = "invalid-"
             defects.append("BUNDLE_SCHEMA_INVALID")
         snapshots = _signal_snapshot_references(events, epoch_id=key.collection_epoch_id)
-        _verify_signal_snapshot_members(bundle, snapshots, manifest.get("files") or [], transfer=schema == TRANSFER_BUNDLE_SCHEMA)
+        _verify_signal_snapshot_members(bundle, snapshots, manifest.get("files") or [])
         expected_id = _bundle_content_id(
             key, events, evidence, segment_paths, prefix=prefix, snapshots=snapshots,
         )
@@ -1397,14 +1105,14 @@ def verify_bundle(bundle_path: str | Path) -> dict[str, Any]:
         if _sha256_file(candidate) != str(receipt.get("sha256") or ""):
             defects.append(f"FILE_SHA256_MISMATCH:{relative}")
         if receipt.get("row_count") is not None:
-            if receipt.get("role") in ("SIGNAL_SNAPSHOT", "TRANSFER_SIGNAL_SNAPSHOT"):
+            if receipt.get("role") == "SIGNAL_SNAPSHOT":
                 try:
                     with open(io_candidate, "r", encoding="utf-8") as handle:
                         payload = json.load(handle)
                     rows = 1 if isinstance(payload, dict) and payload.get("schema") == SIGNAL_SNAPSHOT_SCHEMA else -1
                 except (OSError, ValueError, TypeError):
                     rows = -1
-            elif receipt.get("role") in ("MARKET_SEGMENT", "TRANSFER_MARKET_SEGMENT"):
+            elif receipt.get("role") == "MARKET_SEGMENT":
                 try:
                     with open(io_candidate, "r", encoding="utf-8") as handle:
                         payload = json.load(handle)

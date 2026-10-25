@@ -85,7 +85,7 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
     }
     payload = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)
     assert payload["source_revision_match"] is True
-    assert payload["progress"]["transfer_bundle_count"] == 1
+    assert "transfer_bundle_count" not in payload["progress"]  # R22: retired key is not surfaced
     assert payload["progress"]["completion_appended_count"] == 1
     assert payload["progress"]["bundle_count"] == 0
     assert len(payload["stage_counts"]) <= 32
@@ -232,7 +232,7 @@ def test_artifact_counts_are_content_free_and_report_age(tmp_path):
         os.utime(path, (900, 900))
     payload = _namespace(tmp_path, {})["_lifecycle_artifact_counts"](1000)
     assert payload["completion_bundles"] == {"count": 1, "newest_age_sec": 100, "scan_truncated": False}
-    assert payload["transfer_bundles"]["count"] == 1
+    assert "transfer_bundles" not in payload  # R22: the retired tree is not counted
     assert payload["acks"]["count"] == 1
     assert "secret" not in repr(payload)
 

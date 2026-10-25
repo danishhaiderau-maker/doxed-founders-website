@@ -18,8 +18,10 @@ def test_snapshot_names_the_growing_container_and_writes_atomically(tmp_path):
         doc = t.run(now=1060.0)
     finally:
         del sys.modules["fake_growth_mod"]
-    top = doc["container_growth"][0]
-    assert top["name"] == "fake_growth_mod.BIG" and top["len_growth"] == 300 and top["len_now"] == 3_000_300
+    top = next(r for r in doc["container_growth"] if r["name"] == "fake_growth_mod.BIG")
+    assert top["len_growth"] == 300 and top["len_now"] == 3_000_300
+    assert doc["latest"]["containers"][0]["name"] == "fake_growth_mod.BIG"  # ranked by bytes
+    assert doc["leak_attribution"]["structure"]  # named or UNATTRIBUTED_ANON_OR_NATIVE, never empty
     assert all(r["name"] != "fake_growth_mod.SMALL" for r in doc["latest"]["containers"])  # < 50 items: not listed
     assert doc["samples"] == 2 and doc["window_sec"] == 60.0
     assert json.loads((tmp_path / "m.json").read_text())["schema"] == "memory_structures_v1"
@@ -322,3 +324,45 @@ def test_mem_tracker_is_a_module_global_so_analytics_loop_can_record_loops():
     assert re.search(r"^_mem_tracker = None", src, re.M)
     body = src[src.index("def runtime_uptime_loop():"):][:400]
     assert "global _mem_tracker" in body
+
+
+def test_attribution_ranks_by_bytes_not_element_count():
+    # many tiny entries vs few huge: by bytes the second wins
+    base = {"m.COUNT": 1000, "m.BYTES": 1000}
+    cont = [{"name": "m.COUNT", "len": 100_000, "shallow_bytes": 1000 + 2 * (1 << 20)},
+            {"name": "m.BYTES", "len": 60, "shallow_bytes": 1000 + 40 * (1 << 20)}]
+    a = ms.attribute_growth(cont, [], base, {}, rss_growth_kb=100 * 1024)
+    assert a["structure"] == "container:m.BYTES" and a["bytes_growth"] == 40 * (1 << 20)
+    assert a["fraction_of_rss_growth"] == 0.4
+
+
+def test_attribution_skips_capped_deque_still_filling():
+    base = {"m.RING": 1000}
+    cont = [{"name": "m.RING", "len": 500, "shallow_bytes": 1000 + 50 * (1 << 20), "maxlen": 1000, "capped_filling": True}]
+    a = ms.attribute_growth(cont, [], base, {}, rss_growth_kb=100 * 1024)
+    assert a["structure"] == ms.UNATTRIBUTED and a["best_candidate"] is None
+
+
+def test_attribution_reports_unattributed_when_nothing_explains_the_rss_growth():
+    base = {"m.D": 1000}
+    cont = [{"name": "m.D", "len": 900, "shallow_bytes": 1000 + (2 << 20)}]  # 2 MiB of a 500 MiB RSS rise
+    a = ms.attribute_growth(cont, [{"type": "dict", "shallow_bytes": 3 << 20}], base, {"dict": 1 << 20},
+                            rss_growth_kb=500 * 1024)
+    assert a["structure"] == "UNATTRIBUTED_ANON_OR_NATIVE" and a["bytes_growth"] is None
+    assert a["best_candidate"] in {"container:m.D", "type:dict"}
+
+
+def test_module_containers_marks_capped_deques_and_ranks_by_bytes():
+    import collections as _c
+    mod = types.ModuleType("fake_deque_mod")
+    mod.RING = _c.deque(range(60), maxlen=100)
+    mod.FULL = _c.deque(range(100), maxlen=100)
+    sys.modules["fake_deque_mod"] = mod
+    try:
+        rows = {r["name"]: r for r in ms.module_containers(modules={"fake_deque_mod": mod})}
+    finally:
+        del sys.modules["fake_deque_mod"]
+    assert rows["fake_deque_mod.RING"]["capped_filling"] is True and rows["fake_deque_mod.RING"]["maxlen"] == 100
+    assert rows["fake_deque_mod.FULL"]["capped_filling"] is False
+    sizes = [r["shallow_bytes"] for r in ms.module_containers(modules={"fake_deque_mod": mod})]
+    assert sizes == sorted(sizes, reverse=True)

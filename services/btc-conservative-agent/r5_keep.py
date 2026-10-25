@@ -5,9 +5,8 @@ shipper's r5_segment_pass:
 
 * ``open_lifecycles(runtime_root)`` - lifecycles still open in the
   lifecycle_pipeline index (``dirty_lifecycle`` = not yet terminal/bundled,
-  ``qualification_retry`` = transfer/qualification pending). Returns their
-  identity ids, the transfer bundle ids their pointers name (the
-  ``cap_lifecycle_bundles`` keep set), the market-segment shas their ledger
+  ``qualification_retry`` = qualification pending). Returns their
+  identity ids, the market-segment shas their ledger
   rows reference (the ``cap_market_segments`` referenced set), and the
   earliest open-lifecycle start.
 * ``prereg_window_start()`` - the FADE3 prereg window start, from
@@ -78,7 +77,7 @@ def open_lifecycles(runtime_root: str | os.PathLike, *, max_keys: int = OPEN_MAX
                     max_rows: int = OPEN_MAX_ROWS) -> dict[str, Any]:
     """Open lifecycles from the pipeline index. Never raises; empty when no index."""
     root = Path(runtime_root)
-    out: dict[str, Any] = {"open_count": 0, "identity_ids": set(), "bundle_ids": set(),
+    out: dict[str, Any] = {"open_count": 0, "identity_ids": set(),
                            "segment_shas": set(), "earliest_start_ts": None, "truncated": False, "error": None}
     database = _index_path(root)
     if not database.is_file():
@@ -106,13 +105,6 @@ def open_lifecycles(runtime_root: str | os.PathLike, *, max_keys: int = OPEN_MAX
                 key = dict(zip(_KEY_FIELDS, (str(v) for v in values)))
                 ident = identity_id(key)
                 out["identity_ids"].add(ident)
-                pointer = root / "v3" / "lifecycle_transfer_bundles" / "index" / f"{ident}.json"
-                try:
-                    bundle_id = str(json.loads(pointer.read_text("utf-8")).get("bundle_id") or "")
-                    if bundle_id.startswith("transfer-"):
-                        out["bundle_ids"].add(bundle_id.removeprefix("transfer-"))
-                except (OSError, ValueError, AttributeError):
-                    pass
                 if "lifecycle_event" not in tables or rows_read >= max_rows:
                     out["truncated"] = out["truncated"] or rows_read >= max_rows
                     continue
@@ -199,8 +191,7 @@ def segment_keep_seqs(store_root: str | os.PathLike, prefix: str, since_ts: floa
 
 
 def summary(open_info: dict[str, Any], since_ts: float | None, keep_seqs: set[int] | None = None) -> dict:
-    return {"open_lifecycles": open_info.get("open_count", 0), "keep_bundles": len(open_info.get("bundle_ids") or ()),
-            "referenced_segments": len(open_info.get("segment_shas") or ()),
+    return {"open_lifecycles": open_info.get("open_count", 0), "referenced_segments": len(open_info.get("segment_shas") or ()),
             "keep_since_ts": since_ts, "keep_seqs": len(keep_seqs or ()),
             "truncated": bool(open_info.get("truncated")), "error": open_info.get("error"),
             "at": round(time.time(), 3)}
