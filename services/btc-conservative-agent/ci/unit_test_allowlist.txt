@@ -671,3 +671,4 @@ test_market_segment_r3_consumers.py
 test_r3_legacy_xfail_scope.py
 test_ledger_scan_incremental_retired.py
 test_restart_initiator.py
+test_tile_fade3_deriv_rotation.py
