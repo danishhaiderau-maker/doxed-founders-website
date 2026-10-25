@@ -67,6 +67,31 @@ def test_guarded_deploy_pause_plus_restart_is_one_amber_interruption(tmp_path):
     assert s["longest_run_7d_sec"] == int(5 * H - 10)
 
 
+def test_deploy_pause_turns_red_after_45_minutes(tmp_path):
+    """HM 25 Oct: fly.paused / PAUSED_DEPLOY must not stay amber forever."""
+    assert ru.fly_paused_monitor_status(
+        paused=True, pause_owner="DEPLOY_MAINTENANCE", paused_for_sec=44 * 60,
+    ) == "AMBER"
+    assert ru.fly_paused_monitor_status(
+        paused=True, pause_owner="DEPLOY_MAINTENANCE", paused_for_sec=45 * 60 + 1,
+    ) == "RED"
+    assert ru.fly_paused_monitor_status(
+        paused=True, pause_owner="OPERATOR", paused_for_sec=1,
+    ) == "RED"
+    assert ru.fly_paused_monitor_status(paused=False, pause_owner=None, paused_for_sec=0) == "GREEN"
+    # Mutation proof: if the age gate is ignored, AMBER would wrongly persist.
+    assert ru.DEPLOY_PAUSE_AMBER_MAX_SEC == 45 * 60
+
+    t = _tracker(tmp_path)
+    t.boot(T0, "rev000000001")
+    t.observe(T0 + 10, _healthy())
+    pause = ru.problem_from(paused=True, pause_owner="DEPLOY_MAINTENANCE", pause_reason="DEPLOY_MAINTENANCE")
+    t.observe(T0 + H, pause)
+    assert t.summary(T0 + H + 10)["colour"] == "amber"
+    stuck = t.summary(T0 + H + ru.DEPLOY_PAUSE_AMBER_MAX_SEC + 30)
+    assert stuck["state"] == "PAUSED_DEPLOY" and stuck["colour"] == "red"
+
+
 def test_operator_pause_paper_off_and_ai_stall_are_red(tmp_path):
     t = _tracker(tmp_path)
     t.boot(T0, "abc1234")

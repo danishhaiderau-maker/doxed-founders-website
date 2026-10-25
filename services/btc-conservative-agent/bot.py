@@ -48522,6 +48522,21 @@ def _restart_initiator_check(now: float) -> dict:
             "threshold": "deploy/first_boot (non-deploy restart AMBER for 6h)"}
 
 
+def _deploy_maintenance_pause_age_sec(now: float) -> float:
+    """Seconds since DEPLOY_MAINTENANCE was requested (shed clock or uptime since)."""
+    requested = float(_DEPLOY_MAINTENANCE_SHED.get("requested_at") or 0.0)
+    if requested > 0:
+        return max(0.0, float(now) - requested)
+    try:
+        summary = _runtime_uptime_summary(now)
+        since = summary.get("since")
+        if isinstance(since, str) and since:
+            return max(0.0, float(now) - datetime.fromisoformat(since.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        pass
+    return 0.0
+
+
 def _system_health_fly_self_checks(now: float | None = None) -> list:
     """Cheap Fly-side facts that stay truthful even when the laptop report is stale."""
     now = float(now or time.time())
@@ -48529,7 +48544,18 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
         ws_ts = float(state.get("ws_last_tick") or 0)
         paused = bool(state.get("execution_paused", False))
         live_armed = bool(state.get("live_armed", False))
+        pause_owner = _pause_owner_locked()
     ws_age = max(0.0, now - ws_ts) if ws_ts else None
+    paused_for = _deploy_maintenance_pause_age_sec(now) if paused else 0.0
+    paused_status = runtime_uptime.fly_paused_monitor_status(
+        paused=paused, pause_owner=pause_owner, paused_for_sec=paused_for,
+    )
+    if not paused:
+        paused_observed = "running"
+    elif pause_owner:
+        paused_observed = f"paused owner={pause_owner} for {int(paused_for // 60)}m"
+    else:
+        paused_observed = "paused"
     checks = [
         {
             "id": "fly.ws_ticks",
@@ -48539,9 +48565,11 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
         },
         {
             "id": "fly.paused",
-            "status": "AMBER" if paused else "GREEN",
-            "observed": "paused" if paused else "running",
-            "threshold": "running",
+            "status": paused_status,
+            "observed": paused_observed,
+            "threshold": (
+                f"unpaused; DEPLOY_MAINTENANCE <= {int(runtime_uptime.DEPLOY_PAUSE_AMBER_MAX_SEC // 60)}m"
+            ),
         },
         {
             "id": "fly.live_armed",

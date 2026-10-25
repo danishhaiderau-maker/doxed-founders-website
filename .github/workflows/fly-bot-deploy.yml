@@ -3468,18 +3468,20 @@ jobs:
           PY
 
       - name: Complete receipt bootstrap inside exact-revision maintenance
-        # A held maintenance deploy (clean-epoch boundary) must reach its
-        # 60-min boundary reset before the long first-boot bootstrap ends; the
-        # later resume (fly_failure_paper_resume.py) still requires bootstrap
-        # COMPLETE before paper can resume, except a terminal ledger stall
-        # (SOURCE_LEDGER_TRUNCATED with zero progress) which fails this step
-        # loudly so the failure-path resume can release DEPLOY_MAINTENANCE.
+        # Hard timeout falls through to Guaranteed paper resume (failure/cancelled).
+        # Terminal ledger stall (SOURCE_LEDGER_TRUNCATED, zero progress) fails
+        # immediately via fly_receipt_bootstrap_gate.py. keep_maintenance_pause
+        # skips this step (clean-epoch hold). Do not raise timeout-minutes without
+        # also raising BOOTSTRAP_TIMEOUT_SEC — Python must raise
+        # RECEIPT_BOOTSTRAP_TIMEOUT before the runner SIGKILLs the step.
+        id: receipt_bootstrap
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
-        timeout-minutes: 95
+        timeout-minutes: 25
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ github.sha }}
+          BOOTSTRAP_TIMEOUT_SEC: "1200"
         run: python scripts/fly_receipt_bootstrap_gate.py
 
       - name: Resume paper execution after exact-revision acceptance
@@ -3693,10 +3695,13 @@ jobs:
       - name: Guaranteed paper resume after failed guarded deploy
         # Paper must never sit idle after a deploy attempt. Runs last on every
         # failure or cancellation exit once a maintenance mutation started.
+        # BOOTSTRAP_GATE_FAILED waives bootstrap-complete when the hard-timeout
+        # bootstrap step failed so resume-paper is never left pending forever.
         if: ${{ (failure() || cancelled()) && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure') }}
         timeout-minutes: 15
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           PRIOR_OPERATOR_STATE: ${{ steps.paper_maintenance.outputs.prior_operator_state }}
+          BOOTSTRAP_GATE_FAILED: ${{ steps.receipt_bootstrap.outcome == 'failure' && '1' || '' }}
         run: python scripts/fly_failure_paper_resume.py

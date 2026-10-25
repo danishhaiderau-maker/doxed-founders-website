@@ -1,4 +1,7 @@
 
+## 25 Oct 2026 ~16:31 AEDT — bootstrap hard-timeout + fly.paused RED (HM / #900)
+- See `docs/TRACKER.md`. Run 40161182874 still hung on receipt bootstrap; agents 403 on cancel / no BOT_ADMIN_TOKEN. Extends #900: Actions bootstrap step 25m hard timeout → failure-path resume with `BOOTSTRAP_GATE_FAILED` waiver; Fly `fly.paused` + uptime `PAUSED_DEPLOY` go RED after 45m (self-check no longer stuck AMBER). Danish cancel+`/api/resume` still required for live clear. GS-01/live disarmed.
+
 ## 25 Oct 2026 ~05:18 UTC — DEPLOY_MAINTENANCE stuck after v729
 - See `docs/TRACKER.md`. Root cause: receipt bootstrap terminal stall (`SOURCE_LEDGER_TRUNCATED`, 0 progress, 30 min backoff) blocked paper resume after healthy v729 deploy run 40161182874. Fix branch `cursor/deploy-maintenance-pause-2a94` (fail-loud stall + release pause on failure/resume-paper). Clear requires Danish cancel+admin `/api/resume` or Actions `resume-paper` (no secrets in cloud agent). Live stayed disarmed.
 

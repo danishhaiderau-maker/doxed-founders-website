@@ -7,9 +7,11 @@ deploy-owned /api/resume path, but only when it is provably paper-only,
 disarmed, and healthy.  Operator and safety pauses are always retained.
 
 When receipt bootstrap is required but terminal-stalled (e.g.
-SOURCE_LEDGER_TRUNCATED with zero progress), bootstrap completeness is
-waived so DEPLOY_MAINTENANCE is still released; the stall is logged with
-``::error::`` so the job fails loudly for repair while paper collects.
+SOURCE_LEDGER_TRUNCATED with zero progress), or when the upstream bootstrap
+gate already failed/timed out (``BOOTSTRAP_GATE_FAILED=1``), bootstrap
+completeness is waived so DEPLOY_MAINTENANCE is still released; the stall or
+timeout is logged with ``::error::`` / ``::warning::`` so the job fails
+loudly for repair while paper collects.
 """
 
 from __future__ import annotations
@@ -25,6 +27,11 @@ from fly_resume_bootstrap import _http_clients, _transient
 RETAINED_OWNERS = frozenset({"OPERATOR", "SAFETY"})
 RESUME_PAYLOAD = {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}
 MAX_RESUME_POSTS = 3
+
+
+def bootstrap_gate_failed() -> bool:
+    """True when the Actions bootstrap step already failed/timed out (fall-through)."""
+    return str(os.environ.get("BOOTSTRAP_GATE_FAILED") or "").strip() in {"1", "true", "TRUE", "yes"}
 
 
 def parse_prior(raw: str) -> dict:
@@ -53,7 +60,11 @@ def readiness_failures(status: dict) -> list[str]:
     )
     # Terminal stall cannot self-heal inside the resume budget; waive the
     # completeness gate so paper is released, and surface the stall loudly.
-    if not bootstrap_done and bootstrap_terminal_stall(status) is not None:
+    # Same waiver when the Actions bootstrap step already failed its hard
+    # timeout — paper must not sit idle behind a hung gate.
+    if not bootstrap_done and (
+        bootstrap_terminal_stall(status) is not None or bootstrap_gate_failed()
+    ):
         bootstrap_done = True
     checks = {
         "revision_reported": bool(re.fullmatch(r"[0-9a-f]{12}|[0-9a-f]{40}", revision)),
@@ -120,6 +131,12 @@ def guaranteed_resume(request_json, prior: dict, *, monotonic=time.monotonic, sl
                 "::warning::receipt bootstrap terminal stall; releasing DEPLOY_MAINTENANCE on "
                 "healthy paper-only revision: "
                 + json.dumps(stall, sort_keys=True, separators=(",", ":")),
+                flush=True,
+            )
+        elif bootstrap_gate_failed():
+            print(
+                "::warning::receipt bootstrap gate failed/timed out; releasing DEPLOY_MAINTENANCE "
+                "on healthy paper-only revision (bootstrap completeness waived)",
                 flush=True,
             )
         if posts >= MAX_RESUME_POSTS:

@@ -3,8 +3,9 @@
 Waits for receipt bootstrap COMPLETE while paper stays in DEPLOY_MAINTENANCE.
 Fails loudly and immediately when the lifecycle worker is terminal-stalled
 (e.g. SOURCE_LEDGER_TRUNCATED with zero progress) so the deploy's failure-path
-resume can release the pause instead of sitting idle for the full 90-minute
-budget.
+resume can release the pause instead of sitting idle for the full hard-timeout
+budget. The Actions step hard-timeout (see fly-bot-deploy.yml) also fails this
+gate so paper resume is never left pending forever.
 """
 
 from __future__ import annotations
@@ -139,13 +140,18 @@ def observe_status(request_json, *, until, monotonic=time.monotonic, sleep=time.
     raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")
 
 
+# Default hard budget for the gate (Actions step timeout is slightly higher so
+# Python can raise RECEIPT_BOOTSTRAP_TIMEOUT cleanly before the runner kills it).
+DEFAULT_BOOTSTRAP_TIMEOUT_SEC = 20 * 60
+
+
 def wait_for_bootstrap(
     request_json,
     expected: str,
     *,
     monotonic=time.monotonic,
     sleep=time.sleep,
-    timeout=90 * 60,
+    timeout=DEFAULT_BOOTSTRAP_TIMEOUT_SEC,
     reassert_pause: bool = True,
 ) -> dict:
     """Block until bootstrap COMPLETE on exact-revision maintenance, or fail loudly."""
@@ -199,7 +205,8 @@ def wait_for_bootstrap(
             return status
         sleep(min(3, max(0.0, deadline - monotonic())))
     raise RuntimeError(
-        "receipt bootstrap did not complete before bounded maintenance timeout: "
+        "RECEIPT_BOOTSTRAP_TIMEOUT: receipt bootstrap did not complete before hard gate timeout "
+        f"({int(timeout)}s); failure-path must release DEPLOY_MAINTENANCE: "
         + json.dumps((last or {}).get("lifecycle_pipeline") or {}, sort_keys=True)
     )
 
@@ -209,7 +216,7 @@ def main() -> int:
     if not token:
         raise RuntimeError("BOT_ADMIN_TOKEN is missing")
     expected = str(os.environ.get("EXPECTED_REVISION") or "").strip().lower()[:12]
-    timeout = int(os.environ.get("BOOTSTRAP_TIMEOUT_SEC") or 90 * 60)
+    timeout = int(os.environ.get("BOOTSTRAP_TIMEOUT_SEC") or DEFAULT_BOOTSTRAP_TIMEOUT_SEC)
     wait_for_bootstrap(_http_clients(token), expected, timeout=timeout)
     return 0
 

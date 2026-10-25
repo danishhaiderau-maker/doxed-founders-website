@@ -35,10 +35,29 @@ AI_STALL_FAILURES = 3
 # interruption that was open when the old process stopped.
 CONTINUE_OPEN_INTERRUPTION_SEC = 2 * 3600
 DEPLOY_PAUSE_OWNER = "DEPLOY_MAINTENANCE"
+# Matches scripts/system_health.py deploy_pause_max_sec: DEPLOY_MAINTENANCE is
+# AMBER only for the first 45 minutes, then RED (stuck boundary).
+DEPLOY_PAUSE_AMBER_MAX_SEC = 45 * 60.0
 PROOF_WINDOW_HOURS = 48.0
 DEFINITION = ("Time since the last interruption: process restart/deploy, execution pause (any owner), "
               "paper off (no registry tile ON), or AI cadence stall (no successful AI response for "
               f"{int(AI_STALL_SEC // 60)} min or {AI_STALL_FAILURES} consecutive failures). A restart resets it.")
+
+
+def fly_paused_monitor_status(*, paused: bool, pause_owner: str | None, paused_for_sec: float) -> str:
+    """Monitor signal ``fly.paused``: GREEN / AMBER / RED.
+
+    ``DEPLOY_MAINTENANCE`` may stay AMBER for up to ``DEPLOY_PAUSE_AMBER_MAX_SEC``;
+    any longer pause, or any other owner, is RED. Used by the Fly self-check
+    (must not stay AMBER forever) and the uptime strip colour.
+    """
+    if not paused:
+        return "GREEN"
+    owner = str(pause_owner or "").strip().upper()
+    age = max(0.0, float(paused_for_sec or 0.0))
+    if owner == DEPLOY_PAUSE_OWNER and age <= DEPLOY_PAUSE_AMBER_MAX_SEC:
+        return "AMBER"
+    return "RED"
 
 
 def _iso(ts: float | None) -> str | None:
@@ -417,13 +436,6 @@ class UptimeTracker:
         current, blocker = st.get("current"), st.get("blocker") or {}
         run_start = st.get("run_started_at")
         running = current is None and run_start is not None
-        if running:
-            state, colour = "RUNNING", "green"
-        elif blocker.get("kind") == "deploy_pause" or (
-                blocker.get("kind") == "booting" and (current or {}).get("kind") == "deploy"):
-            state, colour = "PAUSED_DEPLOY", "amber"
-        else:
-            state, colour = "INTERRUPTED", "red"
         last = st.get("last_interruption") if running else current
         interruptions = st.get("interruptions") or []
         count_24h = sum(1 for i in interruptions if float(i.get("at") or 0) >= now - 86400)
@@ -434,6 +446,17 @@ class UptimeTracker:
         longest = max((b - a for a, b in spans if b > a), default=0.0)
         uninterrupted = (now - float(run_start)) if running else None
         since_ts = float(run_start) if running else float((current or {}).get("at") or now)
+        if running:
+            state, colour = "RUNNING", "green"
+        elif blocker.get("kind") == "deploy_pause" or (
+                blocker.get("kind") == "booting" and (current or {}).get("kind") == "deploy"):
+            state = "PAUSED_DEPLOY"
+            # Stuck DEPLOY_MAINTENANCE must not stay amber forever (HM 25 Oct).
+            colour = ("amber" if fly_paused_monitor_status(
+                paused=True, pause_owner=DEPLOY_PAUSE_OWNER, paused_for_sec=now - since_ts,
+            ) == "AMBER" else "red")
+        else:
+            state, colour = "INTERRUPTED", "red"
         since = clock(since_ts, now)
         cause = (last or {}).get("text")
         if running:

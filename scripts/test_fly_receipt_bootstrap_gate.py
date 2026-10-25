@@ -126,10 +126,26 @@ def test_wait_fails_loud_on_terminal_stall_without_waiting_out_budget():
 
     with pytest.raises(RuntimeError, match="RECEIPT_BOOTSTRAP_TERMINAL_STALL"):
         gate.wait_for_bootstrap(
-            request_json, EXPECTED, monotonic=clock.monotonic, sleep=clock.sleep, timeout=90 * 60,
+            request_json, EXPECTED, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20 * 60,
         )
     assert clock.now < 60
     assert posts[0] == ("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+
+
+def test_wait_hard_timeout_raises_receipt_bootstrap_timeout():
+    clock = Clock()
+    pending = _status()
+
+    def request_json(path, payload=None):
+        return {"status": "paused"} if path == "/api/pause" else pending
+
+    # Must clear the audited scheduling floor (~42s) while still proving the
+    # hard-timeout path (not the 20-minute Actions budget).
+    with pytest.raises(RuntimeError, match="RECEIPT_BOOTSTRAP_TIMEOUT"):
+        gate.wait_for_bootstrap(
+            request_json, EXPECTED, monotonic=clock.monotonic, sleep=clock.sleep, timeout=45,
+        )
+    assert clock.now >= 45
 
 
 def test_wait_returns_when_bootstrap_completes():
@@ -143,7 +159,7 @@ def test_wait_returns_when_bootstrap_completes():
         return responses[path].pop(0)
 
     final = gate.wait_for_bootstrap(
-        request_json, EXPECTED, monotonic=clock.monotonic, sleep=clock.sleep, timeout=90 * 60,
+        request_json, EXPECTED, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20 * 60,
     )
     assert gate.bootstrap_complete(final) is True
 
@@ -178,7 +194,42 @@ def test_failure_resume_releases_deploy_maintenance_on_terminal_stall():
     assert posts == [("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})]
 
 
-def test_blocked_bootstrap_still_refuses_resume():
+def test_failure_resume_waives_bootstrap_when_gate_hard_timeout_flag_set(monkeypatch):
+    """Mutation proof: BOOTSTRAP_GATE_FAILED is what enables fall-through resume."""
+    pending = _status(
+        lifecycle_pipeline={"last_outcome": "SUCCESS", "owner": True, "running": True},
+        receipt_bootstrap={"required": True, "status": "PENDING", "complete": False, "blocked": False},
+    )
+    assert "bootstrap_complete_if_required" in resume.readiness_failures(pending)
+    monkeypatch.setenv("BOOTSTRAP_GATE_FAILED", "1")
+    assert resume.bootstrap_gate_failed() is True
+    assert resume.readiness_failures(pending) == []
+    # Kill the flag → assert reappears (mutation proof the waiver is gated).
+    monkeypatch.delenv("BOOTSTRAP_GATE_FAILED", raising=False)
+    assert "bootstrap_complete_if_required" in resume.readiness_failures(pending)
+
+    monkeypatch.setenv("BOOTSTRAP_GATE_FAILED", "1")
+    active = dict(pending)
+    active.update(execution_paused=False, manual_admin_pause=False, pause_owner=None)
+    posts = []
+    clock = Clock()
+
+    def request_json(path, payload=None):
+        if payload is not None:
+            posts.append((path, payload))
+            return {"status": "resumed", "execution_paused": False}
+        return pending if not posts else active
+
+    result = resume.guaranteed_resume(
+        request_json, {"captured": True, "operator_paused": False},
+        monotonic=clock.monotonic, sleep=clock.sleep, timeout=600,
+    )
+    assert result["status"] == "ACTIVE"
+    assert posts == [("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})]
+
+
+def test_blocked_bootstrap_still_refuses_resume(monkeypatch):
+    monkeypatch.setenv("BOOTSTRAP_GATE_FAILED", "1")
     blocked = _truncated(receipt_bootstrap={"blocked": True, "status": "BLOCKED", "complete": False})
     assert "bootstrap_not_blocked" in resume.readiness_failures(blocked)
 

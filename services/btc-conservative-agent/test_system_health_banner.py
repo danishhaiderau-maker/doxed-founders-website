@@ -113,6 +113,35 @@ def test_fly_self_checks_escalate_even_without_laptop_report(monkeypatch):
     assert {"fly.live_armed", "fly.ws_ticks", "watcher.stale"} <= ids
 
 
+def test_fly_paused_self_check_turns_red_after_45_minutes(monkeypatch):
+    """HM 25 Oct: Fly self-check fly.paused stayed AMBER forever while laptop went RED."""
+    import runtime_uptime as ru
+
+    bot = _bot(monkeypatch)
+    now = time.time()
+    with bot.state_lock:
+        monkeypatch.setitem(bot.state, "execution_paused", True)
+        monkeypatch.setitem(bot.state, "manual_admin_pause", True)
+        monkeypatch.setitem(bot.state, "pause_intent", "DEPLOY_MAINTENANCE")
+        monkeypatch.setitem(bot.state, "ws_last_tick", now)
+    bot._DEPLOY_MAINTENANCE_SHED["requested_at"] = now - 10 * 60
+    amber = {c["id"]: c for c in bot._system_health_fly_self_checks(now)}["fly.paused"]
+    assert amber["status"] == "AMBER"
+    bot._DEPLOY_MAINTENANCE_SHED["requested_at"] = now - (ru.DEPLOY_PAUSE_AMBER_MAX_SEC + 120)
+    red = {c["id"]: c for c in bot._system_health_fly_self_checks(now)}["fly.paused"]
+    assert red["status"] == "RED" and "DEPLOY_MAINTENANCE" in red["observed"]
+    # Mutation proof: clearing the age clock must not leave a stuck deploy AMBER
+    # when we force an old shed timestamp — the age gate is what flips RED.
+    assert ru.fly_paused_monitor_status(
+        paused=True, pause_owner="DEPLOY_MAINTENANCE",
+        paused_for_sec=ru.DEPLOY_PAUSE_AMBER_MAX_SEC + 1,
+    ) == "RED"
+    assert ru.fly_paused_monitor_status(
+        paused=True, pause_owner="DEPLOY_MAINTENANCE",
+        paused_for_sec=ru.DEPLOY_PAUSE_AMBER_MAX_SEC,
+    ) == "AMBER"
+
+
 def test_analyzer_route_reads_laptop_report_and_bypasses_cache(monkeypatch, tmp_path):
     from research import research_dashboard as dashboard
 
