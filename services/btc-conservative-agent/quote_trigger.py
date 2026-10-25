@@ -170,6 +170,10 @@ class TradesTail:
     Tail read only (no archive, no new stored data). ``between(t0, t1)`` returns prints with t0 < ts <= t1 that were
     known by t1 (recv_s + 1 <= t1), oldest first, as dicts {"ts", "px", "amt", "id", "recv_s"} (id = Bitfinex trade id, recv_s = the collector second the
     print was written in, i.e. when this process could first know it). Read-only.
+
+    CPU (R1): ``_refresh`` re-reads only when the file inode or size changes. New bytes are consumed from an in-memory
+    byte offset; a partial trailing line is kept across calls. Shrink or a new inode forces a full reload (offset reset;
+    first open of a large file still starts at the last ``tail_bytes`` like the old 1 MB tail).
     """
 
     def __init__(self, path: str, keep_s: int = 600, tail_bytes: int = 1024 * 1024) -> None:
@@ -177,36 +181,97 @@ class TradesTail:
         self._lock = threading.Lock()
         self._by_s: dict = {}
         self._max_s: Optional[int] = None
+        self._file_id: Optional[tuple] = None  # (st_dev, st_ino); memory only
+        self._file_size: int = -1
+        self._offset: int = 0
+        self._partial: bytes = b""
+
+    def _parse_line(self, line: bytes) -> None:
+        try:
+            r = json.loads(line)
+            sec = int(r["s"])
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return
+        prints = []
+        for tr in r.get("tr") or []:
+            try:
+                ms, amt, px = float(tr[1]), float(tr[2]), float(tr[3])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if px > 0 and math.isfinite(px) and math.isfinite(ms):
+                prints.append({"ts": ms / 1000.0, "px": px, "amt": amt, "id": tr[0], "recv_s": sec})
+        self._by_s[sec] = prints
+
+    def _prune(self) -> None:
+        if not self._by_s:
+            self._max_s = None
+            return
+        hi = max(self._by_s)
+        for sec in [s for s in self._by_s if s < hi - self.keep_s]:
+            del self._by_s[sec]
+        self._max_s = hi
+
+    def _full_reload(self, size: int, file_id: tuple) -> None:
+        """Reload from a fresh open: last ``tail_bytes`` only (same window as the pre-incremental tail)."""
+        self._by_s.clear()
+        self._partial = b""
+        self._file_id = file_id
+        start = max(0, size - self.tail_bytes)
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(start)
+                chunk = fh.read()
+        except OSError:
+            self._file_size = -1
+            self._offset = 0
+            self._max_s = None
+            return
+        # Drop the first line when we mid-seek into the file (may be a partial row), matching the old tail reader.
+        lines = chunk.splitlines()
+        body = lines[1:] if start > 0 else lines
+        if chunk and not chunk.endswith(b"\n"):
+            self._partial = lines[-1] if lines else b""
+            body = body[:-1] if start > 0 else lines[:-1]
+        for line in body:
+            self._parse_line(line)
+        self._offset = size
+        self._file_size = size
+        self._prune()
 
     def _refresh(self) -> None:
         try:
-            size = os.path.getsize(self.path)
+            st = os.stat(self.path)
+            size = int(st.st_size)
+            file_id = (int(getattr(st, "st_dev", 0) or 0), int(getattr(st, "st_ino", 0) or 0))
+        except OSError:
+            return
+        # Unchanged inode+size: no disk read (the ~0.5-core win vs re-parsing 1 MB every call).
+        if self._file_id == file_id and size == self._file_size and self._file_size >= 0:
+            return
+        # Shrink or rotated/new inode: full reload. Also first open (_file_size < 0).
+        if self._file_id != file_id or size < self._file_size or self._file_size < 0:
+            self._full_reload(size, file_id)
+            return
+        # Growth only: read new bytes from the saved offset; keep a partial trailing line in memory.
+        try:
             with open(self.path, "rb") as fh:
-                fh.seek(max(0, size - self.tail_bytes))
+                fh.seek(self._offset)
                 chunk = fh.read()
         except OSError:
             return
-        lines = chunk.splitlines()
-        for line in (lines[1:] if size > self.tail_bytes else lines):
-            try:
-                r = json.loads(line)
-                sec = int(r["s"])
-            except (ValueError, KeyError, TypeError):
-                continue
-            prints = []
-            for tr in r.get("tr") or []:
-                try:
-                    ms, amt, px = float(tr[1]), float(tr[2]), float(tr[3])
-                except (TypeError, ValueError, IndexError):
-                    continue
-                if px > 0 and math.isfinite(px) and math.isfinite(ms):
-                    prints.append({"ts": ms / 1000.0, "px": px, "amt": amt, "id": tr[0], "recv_s": sec})
-            self._by_s[sec] = prints
-        if self._by_s:
-            hi = max(self._by_s)
-            for sec in [s for s in self._by_s if s < hi - self.keep_s]:
-                del self._by_s[sec]
-            self._max_s = hi
+        data = self._partial + chunk
+        self._partial = b""
+        parts = data.split(b"\n")
+        if data.endswith(b"\n"):
+            complete, self._partial = parts[:-1], b""
+        else:
+            complete, self._partial = parts[:-1], parts[-1]
+        for line in complete:
+            if line:
+                self._parse_line(line)
+        self._offset = size
+        self._file_size = size
+        self._prune()
 
     def between(self, t0: float, t1: float) -> list:
         with self._lock:
