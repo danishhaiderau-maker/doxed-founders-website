@@ -10,7 +10,9 @@ import pytest
 
 import quote_trigger as qt
 
-T = 1_790_000_000.0
+# R0: collector seconds and trade ms must be on/after the fresh-epoch replay floor (see test_v3_ledger_write_stamp.FLOOR).
+EPOCH_FLOOR = 1792263671
+T = float(EPOCH_FLOOR + 100)  # 1792263771.0; int(T) + offsets stay >= EPOCH_FLOOR
 
 
 class _FullRebuildTradesTail:
