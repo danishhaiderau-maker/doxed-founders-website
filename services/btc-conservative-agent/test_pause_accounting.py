@@ -122,26 +122,39 @@ def test_bot_wires_pause_accounting_into_status_health_and_config():
         raise AssertionError("_persistent_config_keys missing")
 
 
-def test_api_pause_resume_persists_and_exposes_accounting():
+def test_api_pause_resume_persists_and_exposes_accounting(monkeypatch):
     os.environ.setdefault("FORCE_PAPER_MODE", "1")
     os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
     os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
     import bot
 
+    # monkeypatch only — never assign bot.* lambdas (pollutes later allowlist tests:
+    # test_runtime_revision KeyError ws_transport_ready; test_http_emergency_admission
+    # missing _disarm_live_control.__wrapped__).
     config_dir = tempfile.mkdtemp(prefix="pause-acct-")
-    bot.get_config_file = lambda: os.path.join(config_dir, "config.json")
-    bot._disarm_live_control = lambda reason="TEST": {
-        "cancel": {"failed": [], "cancelled": []}, "exit_only": {},
-    }
-    bot.PAUSE_FINALIZE_WAIT_SEC = 0.2
-    bot._BOT_ADMIN_TOKEN = "test-admin-token-pause-acct"
-    bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
-    bot.pipeline_state_sync = lambda: None
+    monkeypatch.setattr(
+        bot, "get_config_file", lambda: os.path.join(config_dir, "config.json"),
+    )
+    monkeypatch.setattr(
+        bot,
+        "_disarm_live_control",
+        lambda reason="TEST": {"cancel": {"failed": [], "cancelled": []}, "exit_only": {}},
+    )
+    monkeypatch.setattr(bot, "PAUSE_FINALIZE_WAIT_SEC", 0.2)
+    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "test-admin-token-pause-acct")
+    monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    monkeypatch.setattr(bot, "pipeline_state_sync", lambda: None)
     # Resume readiness: pretend system is ready so clear path runs.
-    bot._recompute_system_readiness = lambda now=None: {
-        "system_ready": True, "signal_generation_ready": True, "readiness_reasons": [],
-    }
-    bot._ws_transport_ready = lambda: True
+    monkeypatch.setattr(
+        bot,
+        "_recompute_system_readiness",
+        lambda now=None: {
+            "system_ready": True,
+            "signal_generation_ready": True,
+            "ws_transport_ready": True,
+            "readiness_reasons": [],
+        },
+    )
 
     with bot.state_lock:
         for key in bot._persistent_config_keys() + ["_threshold_locked", "bootstrap_done"]:
