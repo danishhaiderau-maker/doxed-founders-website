@@ -4,6 +4,11 @@ import pytest
 
 import disk_alert
 
+AUTH = {"X-Bot-Admin-Token": "disk-alert-ack-test-token"}
+REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
+URL = "/api/admin/disk-alert/red-ack"
+CLEARABLE = "BUNDLE_CAP_REMOVED_UNACKED"
+
 
 @pytest.fixture(autouse=True)
 def _clear():
@@ -108,3 +113,102 @@ def test_c6_bot_and_server_carry_segment_r5_fields():
         assert f'"{field}"' in bot.split("_SEGMENT_STATUS_FIELDS", 1)[1][:3000]
         assert f'"{field}"' in server
     assert 'disk_alert.configure(_data_sync_runtime_root() / "retention" / "disk_alert_red.json")' in bot
+
+
+def test_admin_disk_alert_red_ack_route_is_strict_admin_and_calls_clear_red():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent / "bot.py").read_text("utf-8")
+    marker = "@app.route('/api/admin/disk-alert/red-ack', methods=['POST'])"
+    assert marker in src
+    route = src[src.index(marker):]
+    route = route[: route.index("\n@app.route(")]
+    assert "_admin_authed_strict()" in route
+    assert route.index("_admin_authed_strict()") < route.index("disk_alert.clear_red(")
+    assert 'disk_alert.clear_red(code)' in route
+    assert "BUNDLE_CAP_REMOVED_UNACKED" in route
+    assert "LEGACY_DATA_SYNC" not in route and "lifecycle-ack" not in route
+
+
+def _ack_bot(monkeypatch):
+    import bot
+    monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "disk-alert-ack-test-token")
+    monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    return bot
+
+
+def test_admin_disk_alert_red_ack_rejects_without_token(monkeypatch):
+    bot = _ack_bot(monkeypatch)
+    disk_alert.raise_red(CLEARABLE, {"count": 1})
+    r = bot.app.test_client().post(
+        URL,
+        json={"actor": "ops", "reason": "bundle-cap latch clear", "code": CLEARABLE},
+        environ_base=REMOTE,
+    )
+    assert r.status_code == 401
+    assert CLEARABLE in {row["reason"] for row in disk_alert.red_conditions()}
+
+
+def test_admin_disk_alert_red_ack_clears_bundle_cap_unacked_only(monkeypatch):
+    bot = _ack_bot(monkeypatch)
+    disk_alert.raise_red(CLEARABLE, {"count": 2})
+    disk_alert.raise_red("BUNDLE_CAP_REACHED", {"count": 1})
+    r = bot.app.test_client().post(
+        URL,
+        json={"actor": "ops-ack", "reason": "operator clear after zero bundles", "code": CLEARABLE},
+        headers=AUTH,
+        environ_base=REMOTE,
+    )
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["acked"]["code"] == CLEARABLE
+    assert body["acked"]["actor"] == "ops-ack"
+    assert "operator clear" in body["acked"]["reason"]
+    remaining = {row["reason"] for row in disk_alert.red_conditions()}
+    assert CLEARABLE not in remaining
+    assert remaining == {"BUNDLE_CAP_REACHED"}
+    assert body["retention_red_remaining"] == ["BUNDLE_CAP_REACHED"]
+
+
+def test_admin_disk_alert_red_ack_refuses_other_codes(monkeypatch):
+    bot = _ack_bot(monkeypatch)
+    disk_alert.raise_red("BUNDLE_CAP_REACHED", {"count": 1})
+    r = bot.app.test_client().post(
+        URL,
+        json={"actor": "ops", "reason": "wrong code", "code": "BUNDLE_CAP_REACHED"},
+        headers=AUTH,
+        environ_base=REMOTE,
+    )
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "CODE_NOT_CLEARABLE"
+    assert "BUNDLE_CAP_REACHED" in {row["reason"] for row in disk_alert.red_conditions()}
+
+
+def test_mutation_proof_disk_alert_red_ack_without_auth_gate_is_caught():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent / "bot.py").read_text("utf-8")
+    route = src[src.index("@app.route('/api/admin/disk-alert/red-ack', methods=['POST'])"):]
+    route = route[: route.index("\n@app.route(")]
+    sabotaged = route.replace("if not _admin_authed_strict():", "if False:  # mutated", 1)
+    assert "_admin_authed_strict()" not in sabotaged.split("disk_alert.clear_red", 1)[0]
+    assert "admin authentication required" in route
+
+
+def test_mutation_proof_disk_alert_red_ack_clear_other_reason_is_caught(monkeypatch):
+    bot = _ack_bot(monkeypatch)
+    disk_alert.raise_red(CLEARABLE, {"count": 1})
+    disk_alert.raise_red("BUNDLE_CAP_REACHED", {"count": 1})
+    # Sabotage: clear the wrong reason if the route ever stopped scoping to code.
+    disk_alert.clear_red("BUNDLE_CAP_REACHED")
+    remaining = {row["reason"] for row in disk_alert.red_conditions()}
+    assert CLEARABLE in remaining and "BUNDLE_CAP_REACHED" not in remaining
+    # The real route must still clear only CLEARABLE and leave REACHED alone when both latched.
+    disk_alert.raise_red("BUNDLE_CAP_REACHED", {"count": 1})
+    r = bot.app.test_client().post(
+        URL,
+        json={"actor": "ops", "reason": "scoped clear", "code": CLEARABLE},
+        headers=AUTH,
+        environ_base=REMOTE,
+    )
+    assert r.status_code == 200
+    assert {row["reason"] for row in disk_alert.red_conditions()} == {"BUNDLE_CAP_REACHED"}

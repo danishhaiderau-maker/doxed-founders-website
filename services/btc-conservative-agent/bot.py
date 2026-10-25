@@ -52597,6 +52597,54 @@ def api_emergency_wal_clear_alarms():
     return jsonify(receipt)
 
 
+# HM C6 operator ack for disk_alert retention RED (guardian red-ack analogue).
+# Only BUNDLE_CAP_REMOVED_UNACKED is clearable here; retention policy / hold /
+# bundle-cap rules are unchanged. Not the retired data-sync lifecycle-ack path.
+_DISK_ALERT_OPERATOR_CLEARABLE = frozenset({"BUNDLE_CAP_REMOVED_UNACKED"})
+
+
+@app.route('/api/admin/disk-alert/red-ack', methods=['POST'])
+def api_admin_disk_alert_red_ack():
+    """Strict-admin ack that clears a latched disk_alert retention RED.
+
+    Body ``{actor, reason, code}``. ``code`` must be ``BUNDLE_CAP_REMOVED_UNACKED``
+    and currently latched; then ``disk_alert.clear_red`` runs with an actor/reason
+    stamp (guardian red-ack analogue). Does not touch retention policy,
+    ``RED_HOLD_SECONDS``, bundle-cap rules, Soft B, Force, wipe, or arm.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin authentication required"}), 401
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    code = str(body.get("code") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"ok": False, "error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"ok": False, "error": "reason is required"}), 400
+    if code not in _DISK_ALERT_OPERATOR_CLEARABLE:
+        return jsonify({"ok": False, "error": "CODE_NOT_CLEARABLE",
+                        "allowed": sorted(_DISK_ALERT_OPERATOR_CLEARABLE)}), 400
+    latched = {str(r.get("reason")) for r in disk_alert.red_conditions()}
+    if code not in latched:
+        return jsonify({"ok": False, "error": "NO_RED", "code": code}), 409
+    disk_alert.clear_red(code)
+    stamp = {
+        "ts": time.time(),
+        "actor": actor,
+        "reason": reason[:240],
+        "auth": str(_admin_auth_method() or "")[:32],
+        "code": code,
+    }
+    logger.warning(
+        "[DISK ALERT] RED %s cleared by operator ack actor=%s auth=%s reason=%r "
+        "[PIPELINE ENFORCEMENT]",
+        code, actor, stamp["auth"], stamp["reason"][:80],
+    )
+    remaining = [r.get("reason") for r in disk_alert.red_conditions()]
+    return jsonify({"ok": True, "acked": stamp, "retention_red_remaining": remaining})
+
+
 # ---------------------------------------------------------------------------
 # Cure 2 — Phantom paper position cancellation (Railway-initiated).
 #

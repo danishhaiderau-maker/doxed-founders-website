@@ -87,6 +87,7 @@
     ["POST", "/api/admin/ledgers/delete-by-sha", "api_admin_ledgers_delete_by_sha"],
     ["POST", "/api/admin/ledgers/delete-rollback-snapshot", "api_admin_ledgers_delete_rollback_snapshot"],
     ["POST", "/api/admin/emergency-wal/clear-alarms", "api_emergency_wal_clear_alarms"],
+    ["POST", "/api/admin/disk-alert/red-ack", "api_admin_disk_alert_red_ack"],
     ["POST", "/api/reset", "api_reset_showcase"],
     ["POST", "/api/toggle_fresh_collection", "toggle_fresh_collection"],
     ["POST", "/api/wipe_fly_only", "wipe_fly_only"],
