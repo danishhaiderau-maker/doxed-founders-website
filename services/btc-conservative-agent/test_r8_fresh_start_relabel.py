@@ -35,6 +35,33 @@ def test_status_data_epoch_started_is_fresh_start_and_epoch_id_unchanged():
     assert out["configured"] == "ce-x" and out["epoch_id"] == "ce-x"
 
 
-def test_monitor_summary_and_state_session_start_use_fresh_start():
+class _Lock:
+    def acquire(self, timeout=None):
+        return False
+
+    def release(self):
+        pass
+
+
+def test_state_session_start_time_is_the_fresh_start_not_the_bot_or_4_oct_start():
+    """Behavioural: /api/state's dashboard truth (owner and public projection) reports 1792263671."""
+    ns = _ns()
+    names = {"_build_dashboard_truth", "_public_dashboard_truth"}
+    for node in TREE.body:
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            exec(compile(ast.Module([node], []), "bot.py", "exec"), ns)
+    ns.update({"time": __import__("time"), "get_effective_ai_cooldown_sec": lambda: 60.0, "trade_lock": _Lock(),
+               "_API_STATE_LOCK_TIMEOUT_SEC": 0.0, "_dashboard_wal_summary_cached": lambda now: {},
+               "_dashboard_truth_fields": lambda snap, now: {}, "_deepseek_dashboard_status": lambda *a: {},
+               "_dashboard_operating_truth": lambda *a: {}, "process_boot_time": 1792400000.0,
+               "_unavailable": lambda r: {"reason": r}, "_PUBLIC_OWNER_ONLY_REASON": "owner only"})
+    four_oct = 1791101606.0  # 2026-10-04T08:13:26Z, the DATA_EPOCH manifest stamp
+    truth = ns["_build_dashboard_truth"]({"bot_start_time": four_oct}, now=1792500000.0)
+    assert truth["session_start_time"] == 1792263671.0
+    assert truth["bot_start_time"] == four_oct  # the raw process/bot start stays visible, under its own name
+    assert ns["_public_dashboard_truth"](truth)["session_start_time"] == 1792263671.0
+
+
+def test_monitor_summary_data_epoch_started_at_uses_fresh_start():
+    # _monitor_summary_payload needs the whole live bot; pin the field binding.
     assert '"data_epoch_started_at": FRESH_START_UTC,' in SRC
-    assert '"session_start_time": float(FRESH_START_TS),' in SRC
