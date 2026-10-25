@@ -1123,10 +1123,12 @@ def _session_start_ts(session: dict):
     if raw is None:
         return None
     try:
-        return pd.Timestamp(float(raw), unit="s", tz="UTC")
+        start = pd.Timestamp(float(raw), unit="s", tz="UTC")
     except Exception:
         iso = session.get("fresh_collection_start_iso") or session.get("bot_start_iso")
-        return pd.to_datetime(iso, utc=True, errors="coerce")
+        start = pd.to_datetime(iso, utc=True, errors="coerce")
+    # RK #882 12:48: the cohort cutoff is never earlier than the analyzer floor (fresh start / epoch start).
+    return _floor_ts(start)
 
 
 def _session_hours(session: dict = None) -> float:
@@ -1430,11 +1432,37 @@ def _mirror_publish_freshness():
         return {"error": f"{type(exc).__name__}: {exc}"[:300], "publish_stale": None}
 
 
-def _v2_data_start_ts():
-    """Clean-epoch start when declared; else v2 segment genesis (Fly shipper baseline, then laptop heartbeat)."""
+def _analyzer_floor_epoch_ts():
+    """RK #882 12:48: analyzer floor = max(epoch manifest started_at_ts, fresh_start_epoch.json epoch_ts).
+
+    None when neither is declared.  DATA_EPOCH_ID is not involved.
+    """
+    from research_segment_epoch import fresh_start_epoch
+
+    candidates = []
     guard = _epoch_guard()
     if guard.declared:
-        return pd.Timestamp(float(guard.manifest["started_at_ts"]), unit="s", tz="UTC")
+        candidates.append(float(guard.manifest["started_at_ts"]))
+    doc = fresh_start_epoch(os.path.dirname(_agent_data_path("fresh_start_epoch.json")))
+    if doc:
+        candidates.append(float(doc["epoch_ts"]))
+    return max(candidates) if candidates else None
+
+
+def _floor_ts(value):
+    """``value`` (a UTC Timestamp or None) raised to the analyzer floor."""
+    floor = _analyzer_floor_epoch_ts()
+    if floor is None:
+        return value
+    floor_ts = pd.Timestamp(floor, unit="s", tz="UTC")
+    return floor_ts if value is None or pd.isna(value) or value < floor_ts else value
+
+
+def _v2_data_start_ts():
+    """Analyzer floor when declared; else v2 segment genesis (Fly shipper baseline, then laptop heartbeat)."""
+    floor = _analyzer_floor_epoch_ts()
+    if floor is not None:
+        return pd.Timestamp(floor, unit="s", tz="UTC")
     sources = (
         (os.path.join("segment-shipper-v2", "state.json"),
          lambda doc: (doc.get("baseline") or {}).get("created_at")),
@@ -12710,6 +12738,23 @@ def _write_aux_report(path, payload, session):
     return payload
 
 
+def _selector_trades(read_csv, trades_file):
+    """trades.csv rows through the epoch guard (admit=_epoch_admit) and the analyzer floor (RK #882 12:48)."""
+    floor = _analyzer_floor_epoch_ts()
+    out = []
+    for row in read_csv(_agent_data_path(trades_file)):
+        if not _epoch_admit(trades_file, row):
+            continue
+        if floor is not None:
+            from research.tile_evidence_points import _epoch_seconds
+
+            ts = _epoch_seconds(row.get("close_ts")) or _epoch_seconds(row.get("ts"))
+            if ts is None or ts < floor:
+                continue
+        out.append(row)
+    return out
+
+
 def fixed_vs_dynamic_selector_report(session=None):
     """Publish best fixed tile vs regime-conditional selector, walk-forward OOS after costs."""
     from research.fixed_vs_dynamic_selector import build_fixed_vs_dynamic_selector
@@ -12721,7 +12766,7 @@ def fixed_vs_dynamic_selector_report(session=None):
         payload = build_fixed_vs_dynamic_selector(
             registry=ACTIVE_TILE_REGISTRY,
             tile_order=CURRENT_RESEARCH_LANES,
-            trades=_read_csv(_agent_data_path(TRADES_FILE)),
+            trades=_selector_trades(_read_csv, TRADES_FILE),
             epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
             v2_start_ts=v2_start.timestamp() if v2_start is not None else None,
             relay_interference_ids=set(relay_interference_trade_ids()),
