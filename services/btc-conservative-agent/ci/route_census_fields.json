@@ -68,11 +68,19 @@
         "total_trades_memory",
         "total_trades_disk",
         "total_trades_source",
-        "total_trades_mismatch"
+        "total_trades_mismatch",
+        "memory_only_ids",
+        "memory_only_count",
+        "disk_only_ids",
+        "disk_only_count",
+        "mismatch_since_ts",
+        "mismatch_age_s",
+        "persistent"
       ],
       "status_values": [
         "GREEN",
-        "AMBER"
+        "AMBER",
+        "RED"
       ]
     },
     "/api/monitor/tiles/gf3": {

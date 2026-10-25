@@ -14412,6 +14412,22 @@ def _reload_trades_after_delete(deleted_ids, list_sha256=None) -> int:
     return dropped
 
 
+def _tombstone_external_delete(deleted_ids, list_sha256=None) -> dict:
+    """RK 25 Oct (a): R21-safe tombstone for trade rows ALREADY removed from CSV_TRADES by a sanctioned out-of-band
+    delete (R21 row-sha tool). Caller holds the trade-file lock. Refuses (ValueError IDS_STILL_ON_DISK) if any id
+    still has a CSV row: this never deletes a row, it only tombstones (persisted first) and drops the ids from memory,
+    then reloads from CSV, so memory == disk without a restart."""
+    ids = sorted({str(i) for i in (deleted_ids or ()) if i})
+    if not ids:
+        raise ValueError("EMPTY_IDS")
+    still = _trade_ids_present(CSV_TRADES, ids)
+    if still:
+        raise ValueError("IDS_STILL_ON_DISK:" + ",".join(sorted(still)))
+    _tombstone_ids_before_delete(ids, list_sha256)
+    dropped = _reload_trades_after_delete(ids, list_sha256)
+    return {"tombstoned": ids, "in_memory_dropped": dropped}
+
+
 def dynamic_csv_writer(filename, row):
     last_err = None
     research_gate = globals().get("_research_write_gate") or threading.RLock()
@@ -48552,6 +48568,22 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
     ]
     checks.append(_restart_initiator_check(now))
     try:
+        import api_state_analytics as _asa
+        with trade_lock:
+            _snap = list(trades)
+        _d = _asa.id_diff(_snap, CSV_TRADES, now)
+        _bad = _d["memory_only_count"] or _d["disk_only_count"]
+        checks.append({
+            "id": "fly.trade_count_parity",
+            "status": "RED" if _d["persistent"] else ("AMBER" if _bad else "GREEN"),
+            "observed": (f"memory_only={_d['memory_only_ids'][:5]} disk_only={_d['disk_only_ids'][:5]} "
+                         f"age={_d['mismatch_age_s']}s") if _bad else "in sync",
+            "threshold": f"memory trade ids == disk CSV ids (RED if mismatch >= {int(_asa.MISMATCH_PERSIST_S)}s)",
+        })
+    except Exception as exc:  # noqa: BLE001
+        checks.append({"id": "fly.trade_count_parity", "status": "AMBER",
+                       "observed": f"check failed: {type(exc).__name__}", "threshold": "readable"})
+    try:
         import exit_latency_slo as _els
         slo = _els.evaluate(list(trades), since=now - 24 * 3600, forced=STATS_EXCLUDED_EXIT_REASONS)
         checks.append({
@@ -51278,8 +51310,14 @@ def monitor_trade_count_route():
             ts = state.get("analytics_ts")
         a, ts = _asa.overlay(live, ts, CSV_TRADES)
         out = {k: a.get(k) for k in _asa.TRADE_COUNT_FIELDS}
+        with trade_lock:
+            snap = list(trades)
+        diff = _asa.id_diff(snap, CSV_TRADES, now)
+        out.update(diff)
         out.update({"check": "trade_count", "analytics_ts": ts,
-                    "status": "AMBER" if out["total_trades_mismatch"] else "GREEN"})
+                    "status": ("RED" if diff["persistent"] else "AMBER")
+                    if (out["total_trades_mismatch"] or diff["memory_only_count"] or diff["disk_only_count"])
+                    else "GREEN"})
         return out
     return _monitor_tiles_guard(build, 8192)
 
@@ -52667,6 +52705,56 @@ def api_admin_trades_delete_by_id():
         f"[TRADE-DELETE-BY-ID] actor={actor} reason={reason[:120]!r} dry_run={out['dry_run']} "
         f"before={out['before_count']} removed={out['removed_count']} after={out['after_count']} "
         f"list_sha={out['list_sha256']} snapshot={out['snapshot_path']} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": True, **out})
+
+
+@app.route('/api/admin/trades/tombstone-external-delete', methods=['POST'])
+def api_admin_trades_tombstone_external_delete():
+    """RK 25 Oct (a): after an R21 out-of-band row delete of CSV_TRADES, tombstone the ids (deleted_trade_ids.json)
+    and drop them from memory without a restart. Trade-file deletes must go through delete-by-id or this route.
+
+    Body: {"ids": [...], "list_sha256": sha256(json.dumps(ids)), "dry_run": true (default), "actor", "reason"}.
+    Refuses if any id still has a CSV row, on sha mismatch, duplicates, or an empty list. Never deletes a row."""
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import api_state_analytics as _asa
+    import trade_delete_by_id as _tdi
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    ids = body.get("ids")
+    if (not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i.strip() for i in ids)
+            or len(set(ids)) != len(ids)):
+        return jsonify({"ok": False, "refused": "BAD_IDS"}), 400
+    if body.get("list_sha256") != _tdi.list_sha256(ids):
+        return jsonify({"ok": False, "refused": "LIST_SHA_MISMATCH"}), 409
+    dry_run = body.get("dry_run", True) is not False
+    if _DELETED_TRADE_TOMBSTONE["status"] == "CORRUPT":
+        return jsonify({"ok": False, "refused": "TOMBSTONE_CORRUPT"}), 409
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+    with research_gate, csv_lock:
+        still = sorted(_trade_ids_present(CSV_TRADES, ids))
+        if still:
+            return jsonify({"ok": False, "refused": "IDS_STILL_ON_DISK", "ids_on_disk": still}), 409
+        with trade_lock:
+            in_mem = sorted({str(t.get("trade_id") or "") for t in trades if isinstance(t, dict)} & set(ids))
+        out = {"dry_run": dry_run, "ids": sorted(ids), "in_memory_matches": in_mem,
+               "list_sha256": body["list_sha256"]}
+        if not dry_run:
+            try:
+                out.update(_tombstone_external_delete(ids, body["list_sha256"]))
+            except TombstoneUnavailable as e:
+                return jsonify({"ok": False, "error": str(e)}), 500
+        with trade_lock:
+            snap = list(trades)
+    out["after"] = {k: v for k, v in _asa.id_diff(snap, CSV_TRADES, time.time()).items()
+                    if k in ("memory_only_ids", "memory_only_count", "disk_only_ids", "disk_only_count")}
+    logger.warning(f"[TRADE-TOMBSTONE-EXTERNAL] actor={actor} reason={reason[:120]!r} dry_run={dry_run} "
+                   f"ids={len(ids)} in_memory={len(in_mem)} list_sha={body['list_sha256']} [PIPELINE ENFORCEMENT]")
     return jsonify({"ok": True, **out})
 
 

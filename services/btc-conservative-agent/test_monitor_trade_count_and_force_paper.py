@@ -18,7 +18,8 @@ def test_trade_count_route_census_auth_and_fields(tmp_path, monkeypatch):
     assert methods and methods <= {"GET", "HEAD", "OPTIONS"}
     assert bot.app.test_client().get(PATH, environ_base={"REMOTE_ADDR": "203.0.113.9"}).status_code == 401
     csv = tmp_path / "t.csv"
-    csv.write_text("id\na\nb\n")
+    csv.write_text("trade_id\na\nb\n")
+    monkeypatch.setattr(bot, "trades", [{"trade_id": "a"}])
     monkeypatch.setattr(bot, "CSV_TRADES", str(csv))
     monkeypatch.setattr(bot, "monitor_integrity_authorized", lambda: True)
     monkeypatch.setitem(bot.state, "analytics", {"total_trades": 1})
@@ -28,7 +29,9 @@ def test_trade_count_route_census_auth_and_fields(tmp_path, monkeypatch):
     assert body["total_trades_disk"] == 2 and body["total_trades_memory"] == 1 and body["total_trades"] == 2
     assert body["total_trades_source"] == "DISK_CSV" and body["total_trades_mismatch"] is True
     assert body["status"] == "AMBER"
+    assert body["disk_only_ids"] == ["b"] and body["memory_only_ids"] == []
     monkeypatch.setitem(bot.state, "analytics", {"total_trades": 2})
+    monkeypatch.setattr(bot, "trades", [{"trade_id": "a"}, {"trade_id": "b"}])
     body = bot.app.test_client().get(PATH).get_json()
     assert body["total_trades_mismatch"] is False and body["status"] == "GREEN"
 
