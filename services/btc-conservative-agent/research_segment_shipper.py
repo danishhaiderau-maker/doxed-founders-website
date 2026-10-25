@@ -157,6 +157,32 @@ def _complete_record_size(path: Path, size: int) -> int:
     return 0
 
 
+def _first_record_end(path: Path, start: int, limit: int) -> int:
+    """End offset of the first complete record at/after ``start``, or 0 if none by ``limit``.
+
+    Used when a single JSONL/CSV/log record is larger than the preferred segment
+    budget: the backward clamp finds only the previous record end (== ``start``),
+    so we scan forward up to ``limit`` (at most the member cap) for the next
+    newline and ship that one record alone.
+    """
+    start = max(0, int(start))
+    limit = max(start, int(limit))
+    if limit <= start or path.suffix.lower() not in RECORD_SUFFIXES:
+        return 0
+    with path.open("rb") as handle:
+        handle.seek(start)
+        cursor = start
+        while cursor < limit:
+            block = handle.read(min(64 * 1024, limit - cursor))
+            if not block:
+                break
+            newline = block.find(b"\n")
+            if newline >= 0:
+                return cursor + newline + 1
+            cursor += len(block)
+    return 0
+
+
 def _anchors(path: Path, offset: int) -> tuple[str, str]:
     head = _sha256_file_range(path, 0, min(ANCHOR_BYTES, offset))
     tail = _sha256_file_range(path, max(0, offset - ANCHOR_BYTES), offset)
@@ -301,6 +327,7 @@ class SegmentShipper:
         self.large_snapshot_interval = max(0.0, float(large_snapshot_interval))
         self.throttled: list[str] = []
         self.derived_unshipped: dict[str, int] = {}
+        self._adopted_append_identity: dict[str, dict] = {}
         self._state_cache: tuple[tuple[int, int, int], dict] | None = None
         self.next_cursor = ""
         # stream -> (consecutive races, retry-not-before); in memory only, so a
@@ -673,10 +700,27 @@ class SegmentShipper:
                 end = _complete_record_size(path, size)
                 if kind == fmt.KIND_REWRITE or end > 0:
                     op = {"kind": kind, "base_offset": 0, "end_offset": end}
-            elif (int(stat.st_dev), int(stat.st_ino)) != (tracked["dev"], tracked["inode"]) \
-                    or size < tracked["offset"]:
+            elif size < tracked["offset"]:
+                # Truncated below the shipped offset: start a new generation.
                 op = {"kind": fmt.KIND_REWRITE, "base_offset": 0,
                       "end_offset": _complete_record_size(path, size)}
+            elif (int(stat.st_dev), int(stat.st_ino)) != (tracked["dev"], tracked["inode"]):
+                # Volume remount / atomic replace often changes st_dev/st_ino while
+                # the already-shipped prefix is byte-identical. A full REWRITE of a
+                # multi-GB ledger then trips the member cap (FLY_OVERSIZED_PATHS) and
+                # permanently blocks analyzer promotion. Adopt the new identity when
+                # anchors still match; only REWRITE when the prefix actually diverged.
+                if _anchors(path, tracked["offset"]) == (tracked["head_sha256"], tracked["tail_sha256"]):
+                    tracked = {**tracked, "dev": int(stat.st_dev), "inode": int(stat.st_ino),
+                               "size": size, "mtime_ns": int(stat.st_mtime_ns)}
+                    self._adopted_append_identity[relpath] = tracked
+                    end = _complete_record_size(path, size)
+                    if end > tracked["offset"]:
+                        op = {"kind": fmt.KIND_APPEND, "base_offset": tracked["offset"],
+                              "end_offset": end}
+                else:
+                    op = {"kind": fmt.KIND_REWRITE, "base_offset": 0,
+                          "end_offset": _complete_record_size(path, size)}
             elif (size, int(stat.st_mtime_ns)) != (tracked["size"], tracked["mtime_ns"]) \
                     or tracked["offset"] < size:
                 if _anchors(path, tracked["offset"]) != (tracked["head_sha256"], tracked["tail_sha256"]):
@@ -710,7 +754,11 @@ class SegmentShipper:
         if op is not None:
             op.update({"stream": relpath, "path": relpath, "abs": path, "stat": stat,
                        "tracked": tracked})
-            if op["kind"] == fmt.KIND_APPEND:
+            # APPEND and append-class REWRITE both carry a byte range; clamp so a
+            # multi-GB ledger rewrite ships as prefix chunks instead of one
+            # never-shippable member (PROMOTION_DENIED:FLY_OVERSIZED_PATHS).
+            if op["kind"] == fmt.KIND_APPEND or (
+                    op["kind"] == fmt.KIND_REWRITE and self._is_append_class(relpath)):
                 self._clamp_append(op)
             # Only a real SQLite file can be backed up online; anything else
             # named *.db keeps the plain stable-copy path.
@@ -730,15 +778,27 @@ class SegmentShipper:
         return op["kind"] in (fmt.KIND_SNAPSHOT, fmt.KIND_REWRITE) and bool(op.get("sqlite"))
 
     def _clamp_append(self, op: dict) -> None:
-        """Split large appends at a record boundary so they fit one segment."""
+        """Split large append/rewrite ranges at a record boundary to fit one segment.
+
+        Prefer the segment budget. When the next record alone exceeds that budget
+        but still fits the member cap, ship that one record. A single record over
+        the member cap stays unclamped so the oversized gate can disclose it.
+        """
         op["pending_bytes"] = op["end_offset"] - op["base_offset"]
         if op["pending_bytes"] <= self.segment_budget:
             return
-        limit = op["base_offset"] + self.segment_budget
+        base = op["base_offset"]
+        limit = min(op["end_offset"], base + self.segment_budget)
         boundary = _complete_record_size(op["abs"], limit)
-        if boundary > op["base_offset"]:
+        if boundary > base:
             op["end_offset"] = boundary
-            op["bytes"] = boundary - op["base_offset"]
+            op["bytes"] = boundary - base
+            return
+        member_limit = min(op["end_offset"], base + self.max_member_bytes)
+        boundary = _first_record_end(op["abs"], base, member_limit)
+        if boundary > base:
+            op["end_offset"] = boundary
+            op["bytes"] = boundary - base
 
     def select(self, ops: list[dict], cursor: str = "") -> tuple[list[dict], int]:
         """Keep a dependency-safe subset of ``ops`` within the byte budget.
@@ -1148,6 +1208,7 @@ class SegmentShipper:
                     "store_cap_reached": True}
         self.throttled = []
         self.derived_unshipped = {}
+        self._adopted_append_identity = {}
         if self.baseline_genesis and int(state["seq"]) == 0 and not state["files"]:
             try:
                 segment_raw, manifest_raw, new_state = self.build_genesis(state, self.scan())
@@ -1173,6 +1234,14 @@ class SegmentShipper:
         for stream in [s for s in self.race_backoff if s not in universe]:
             del self.race_backoff[stream]
         ops = self.plan(state, universe)
+        # Persist inode/dev adoption for append streams whose shipped prefix is
+        # intact after a remount; otherwise the next cycle re-plans a full
+        # REWRITE and FLY_OVERSIZED_PATHS stays latched forever.
+        if self._adopted_append_identity:
+            for relpath, tracked in self._adopted_append_identity.items():
+                state.setdefault("files", {})[relpath] = tracked
+            _atomic_write(self.state_path, json.dumps(state, sort_keys=True).encode())
+            self._state_cache = None
         selected, deferred = self.select(ops, cursor=str(state.get("select_cursor") or ""))
         oversized = sorted(op["path"] for op in ops if op.get("oversized"))
         # Oversized streams can never ship until they shrink, so their bytes are
