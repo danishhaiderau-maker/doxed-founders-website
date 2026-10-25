@@ -10,6 +10,7 @@ research.conservative_shadow_report
 research.cross_world_evidence
 research.data_health_report
 research.discovery_scorecard_publication
+research.entry_baseline_book_replay
 research.entry_baseline_replay
 research.event_study
 research.evidence_coverage_triage
