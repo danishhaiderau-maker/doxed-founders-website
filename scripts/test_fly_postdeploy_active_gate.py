@@ -312,9 +312,18 @@ def test_hold_off_list_comes_from_repository_variable():
 
 def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     lanes, retired = gate.checkout_registry()
-    assert lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
-                     "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
-                     "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
+    registry = gate._registry_module()
+    # RK hotfix (25 Oct): the roster comes from the shared registry, never a hard-coded copy.
+    assert lanes == [str(lane) for lane in registry.ACTIVE_TILE_ORDER] and len(lanes) == len(set(lanes))
+    assert not set(lanes) & retired
+    # The freeze21b core and gf3 (#877, slot 6) are all on it; every lane is held to the same paper-only standard.
+    assert {"FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
+            "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_GS_FADE3_TP30"} <= set(lanes)
+    for lane in lanes:
+        spec = registry.ACTIVE_TILE_REGISTRY[lane]
+        assert spec.get("paper_only") is True and spec.get("execution_scope") == "PAPER_ONLY", lane
+        assert spec.get("platform_relay_eligible") is False and spec.get("live_copy_eligible") is False, lane
+        assert spec.get("lifecycle_state") == "PAPER_ONLY", lane
     # Retired 2026-10-23 (owner): Tiles 6/7 DISLOC and DISLOC-FOI.
     assert {"FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"} <= retired
     # Retired 2026-10-11 (owner): H-C, B3, FADE-POOL, V07.
@@ -386,3 +395,33 @@ def test_transient_ready_503_does_not_fail_the_gate(monkeypatch):
     monkeypatch.setattr(gate, "_request", request)
     assert gate.main([]) == 0
     assert calls["ready"] >= 11
+
+
+def _registry_bot(lanes, relay_eligible):
+    class _RealBot(_Bot):
+        def __call__(self, path, payload=None):
+            if path == "/api/status?fresh=1":
+                return {**_active_status(), "pause_owner": "",
+                        "active_tiles": [{"lane": lane, "relay_eligible": relay_eligible.get(lane, False)}
+                                         for lane in lanes]}
+            return super().__call__(path, payload)
+    return _RealBot
+
+
+def test_checkout_registry_roster_passes_the_gate_and_gf3_is_held_to_the_same_standard(monkeypatch):
+    """RK hotfix: the real roster (incl. gf3) passes restore; gf3 relay-eligible fails exactly like any other tile."""
+    lanes, retired = gate.checkout_registry()
+    defaults = gate.checkout_registry_defaults()
+    assert "FAMILY_GS_FADE3_TP30" in lanes
+    monkeypatch.setattr(gate, "checkout_registry", lambda: (list(lanes), retired))
+    monkeypatch.setattr(gate, "checkout_registry_defaults", lambda: dict(defaults))
+    ok = _registry_bot(lanes, {})({lane: defaults[lane] for lane in lanes})
+    receipt = gate.restore_registry_tiles(ok)
+    assert receipt["tiles_state_ok"] is True and receipt["lanes"] == lanes and ok.toggles == []
+    for lane in ("FAMILY_GS_FADE3_TP30", lanes[0]):
+        bad = _registry_bot(lanes, {lane: True})({x: defaults[x] for x in lanes})
+        with pytest.raises(SystemExit, match="relay-ineligible: " + lane):
+            gate.restore_registry_tiles(bad)
+    missing = _registry_bot([x for x in lanes if x != "FAMILY_GS_FADE3_TP30"], {})({x: defaults[x] for x in lanes})
+    with pytest.raises(SystemExit, match="does not match the checked-out registry"):
+        gate.restore_registry_tiles(missing)
