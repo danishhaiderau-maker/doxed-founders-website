@@ -1,44 +1,115 @@
-# Ops tracker
+# GOAL (persistent — do not remove)
 
-## 25 Oct 2026 ~07:53 UTC — paper clear + 10-min readback PASS
+**Finish the full open list from `docs/CURSOR-STARTER-PROMPT.md` under hard rules R0–R23.**
 
-- **Clear:** Hung run [40169802400](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40169802400) completed **failure**; Guaranteed paper resume logged `ACTIVE` on `4ebcf91d1754` (`resume_posts=0` — already unpaused by observe). Live: `execution_paused=false`, `manual_admin_pause=false`, `live_armed=false`.
-- **10-min proof:** 11/11 samples 07:42:52Z–07:53:02Z all unpaused + disarmed + `force_paper_mode`; open positions advanced 2→5. Artifact: store `artifacts/btc26-10min-readback.json`.
-- **Still open:** [#904](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/904) tip `d99742441` awaiting unit-tests then merge (sticky preserve-skip). #900 deploy [40172488019](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40172488019) in_progress (may briefly re-enter maintenance). HANDOFF: no Danish action.
+Order:
+1. Paper resumed and stable (`execution_paused=false`, advancing AI cadence)
+2. `#885` / `#892` / `#900` merged and deployed (loss caps + deploy-pause always-release)
+3. `#888` (route + apply tombstones → 339/339), `#886`, `#883`, `#884`/`#901`, `#882`, `#879`
+4. Monitor-token admin-only (Railway emergency ops) — done via `#895`
+5. FADE3 BZ rotation `#897`
+6. CPU (`#889` + `#894`) deployed + 30‑min lag / `trade_lock` readback
+7. R22 cleanup + Strategist R19 cycles
+8. Arm gates + RK PASS, then **Danish-only** arm GS-01 live at `$0.25` with `$10/$10` limits
 
-## 25 Oct 2026 ~07:40 UTC — R8 URGENT paper down ~3h8m (Boss HM 18:32)
+Everything else stays paper. FADE3 never live. Fail closed on unread safety data. Never Soft B / Force / blunt bot sync / wipe without R21 / tip without gates.
 
-- **Live:** `4ebcf91d1754` (#889), still `execution_paused=true` / `DEPLOY_MAINTENANCE`; bootstrap PENDING / `SOURCE_LEDGER_TRUNCATED`; live disarmed.
-- **Hung:** [40169802400](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40169802400) on **Complete receipt bootstrap** since ~07:33Z; #900 deploy [40172488019](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40172488019) pending behind it. Retry deploy will not help.
-- **Cancel:** agents get **403** on `gh run cancel` / API. **Danish must Cancel workflow** in Actions UI — see `docs/HANDOFF.md` (store). After cancel: agent `BOOTSTRAP_GATE_FAILED=1` failure-resume; #900 deploy brings 25m timeout live; land [#904](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/904) sticky skip when CI green. No Soft B / Force / wipe / tip / arm.
+Last goal write: 2026-10-25 19:38 AEDT (Boss / Cursor Project — remaster `#902` onto tip after `#904`/`#882`/`#905`).
 
-## 25 Oct 2026 ~07:25 UTC — sticky DEPLOY_MAINTENANCE re-assert after clear resume (fast-follow)
+---
 
-- **Live:** still `execution_paused=true`, `pause_owner=DEPLOY_MAINTENANCE`, `_pause_priority=200` on rev `b57014c0eb28`; bootstrap `PENDING` / `SOURCE_LEDGER_TRUNCATED` / 0 progress; live disarmed.
-- **Root cause:** Run [40166110026](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40166110026) bootstrap gate failed with `receipt bootstrap lost exact-revision flat maintenance` when Danish's deploy-owned `/api/resume` cleared the pause mid-gate (~07:02Z). Failure-path **Best-effort preserve** immediately re-POSTed `/api/pause` (durable `manual_admin_pause`+`pause_intent` lease on the Fly volume). Guaranteed paper resume then waited 12m on `bootstrap_complete_if_required` and died without releasing. Not an in-flight Actions pause loop after 07:14Z — the sticky lease is the persisted config flag plus preserve-after-clear-resume.
-- **#900:** merged `f99681380` (bootstrap hard-timeout + stall/`BOOTSTRAP_GATE_FAILED` waiver + fly.paused RED). Does **not** include preserve skip-if-already-resumed.
-- **Fast-follow:** `cursor/sticky-deploy-maintenance-lease-86dd` — `scripts/fly_preserve_maintenance.py` skips `/api/pause` when paper is already safely resumed; once-clear workflow on `scripts/once/clear-deploy-maintenance.flag` (push path; no `workflow_dispatch` required). Live stays disarmed; no Soft B / Force / wipe / tip / arm.
-- **Release plan:** after deploys [40169802400](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40169802400) (#889) and [40172488019](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40172488019) (#900) settle → merge fast-follow (once-clear + failure-resume) or run `BOOTSTRAP_GATE_FAILED=1 python scripts/fly_failure_paper_resume.py`; prove `execution_paused=false` stable ≥10m.
+# BTC open-items tracker
 
-## 25 Oct 2026 ~16:31 AEDT (HM) — bootstrap hard-timeout + fly.paused RED (#900 follow-up)
+Last status refresh: 2026-10-25 19:38 AEDT. Boss = Cursor Project.
 
-- **Finding:** Run [40161182874](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40161182874) still in_progress ~55–70+ min on **Complete receipt bootstrap inside exact-revision maintenance**; resume-paper steps pending. Fly `39358c1` / v729: `execution_paused=true`, `pause_owner=DEPLOY_MAINTENANCE`, `running=false` / uptime `PAUSED_DEPLOY` amber since ~04:30Z; bootstrap still PENDING / `SOURCE_LEDGER_TRUNCATED` / 0 progress / 1800s backoff. Live flat + disarmed.
-- **Monitor bug:** Laptop `system_health` already had `fly.paused` **RED** after 45m, but Fly self-check `_system_health_fly_self_checks` always reported **AMBER** while paused, and uptime strip stayed amber — so the live monitor signal never aged to RED.
-- **Clear (agents blocked):** `gh run cancel` → **403**; no `BOT_ADMIN_TOKEN` in env. Danish one-shot:
-  1. `gh run cancel 40161182874`
-  2. `curl -sS -X POST 'https://doxed-btc-bot.fly.dev/api/resume' -H "X-Bot-Admin-Token: $BOT_ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"clear_admin_manual_pause":true,"owner":"DEPLOY_MAINTENANCE"}'`
-  3. Read back `/api/status`: `execution_paused=false`, pause cleared, `live_armed=false`.
-- **Code fix (extends #900):** (1) Bootstrap step hard timeout **25 min** / `BOOTSTRAP_TIMEOUT_SEC=1200` raises `RECEIPT_BOOTSTRAP_TIMEOUT`; `BOOTSTRAP_GATE_FAILED=1` on failure-path resume waives bootstrap-complete so paper resume always falls through. (2) `fly.paused` / `PAUSED_DEPLOY` → **RED after 45m** on Fly self-check + uptime colour. Stall fail-loud from prior tip retained. GS-01 / live stay disarmed; no Soft B / Force / wipe / tip / arm.
+## Standing operating rules (from Grok — keep)
 
-## 25 Oct 2026 ~05:18 UTC — DEPLOY_MAINTENANCE stuck after Fly v729 (#885 push)
+1. Danish does not code. Never ask technical questions (R11/R18).
+2. Four roles as separate threads; stricter-safety wins disagreements.
+3. Git: stash/commit; never discard; never force-push.
+4. Escalate to Danish only: arm live, real money, raise limits, delete prod data, credentials, payment.
+5. Report only real results/blockers (2–3 sentences).
+6. Grok unavailable except batched `HANDOFF-QUESTIONS.md`.
+7. **Do not end a run while open items remain and none are blocked.** When a thread finishes, start the next item. Run HM / RK / Strategist cycles regularly.
 
-- **Symptom:** `doxed-btc-bot` paper paused by owner `DEPLOY_MAINTENANCE` after machine `48e1403c492578` came up on release **v729** / rev `39358c1bffbe`. AI cadence stale; laptop `SEGMENT_PULL_STALE`. Live remained disarmed (`live_armed=false`, `bitfinex_live_enabled=false`, GS-01 `relay_eligible=false`).
-- **Root cause:** Guarded deploy run [40161182874](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40161182874) deployed and proved liveness, then stuck in step **Complete receipt bootstrap inside exact-revision maintenance**. Public `/api/status` showed `receipt_bootstrap` required+PENDING with **0** progress while `lifecycle_pipeline.last_outcome=WORKER_FAILED` / `last_error_code=SOURCE_LEDGER_TRUNCATED` and a **1800 s** backoff. Paper resume only runs after bootstrap COMPLETE; `fly_failure_paper_resume` also required COMPLETE, so neither the success path nor the failure-path resume could clear `DEPLOY_MAINTENANCE`. Pending `workflow_dispatch` [40163538971](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40163538971) stayed queued behind concurrency group `fly-btc-production`.
-- **Clear action (this agent):** Could **not** clear — no `BOT_ADMIN_TOKEN` / `FLY_API_TOKEN` / flyctl in the environment; `gh run cancel` on the stuck job returned **403**. Danish (or Actions with secrets) must:
-  1. Cancel stuck run `40161182874` (otherwise a mid-gate re-pause can undo an admin resume).
-  2. Then either admin resume:
-    `POST https://doxed-btc-bot.fly.dev/api/resume` with `X-Bot-Admin-Token` and body `{"clear_admin_manual_pause":true,"owner":"DEPLOY_MAINTENANCE"}`
-     **or** Actions `workflow_dispatch` `mode=resume-paper` with `expected_bootstrap_revision=39358c1bffbe` (after the fix below is on the ref used).
-- **Code fix PR:** deploy-flow always fail-loud on terminal bootstrap stall and release `DEPLOY_MAINTENANCE` on healthy paper-only identity (stall waiver in failure/resume-paper path). See open PR from branch `cursor/deploy-maintenance-pause-2a94`.
-- **Keep disarmed:** No Soft B / Force / blunt sync / wipe / tip / live arming.
+## Definition of done (Danish / Grok 15:43 AEDT — keep)
 
+1. CPU (`#889` + TradesTail `#894`) merged, deployed, lag &lt;1s, 0 trade_lock overruns 30 min.
+2. `#885` caps on Fly $10/$10 + `$9.99`/`$10.00` test `#892`.
+3. `#886`, `#888`, `#883`, `#884`, `#882`, monitor-token admin-only, FADE3 BZ rotation — full loop each.
+4. Trade-count parity 339/339 via tombstone after `#888`.
+5. GS-01 live only after ALL gates + Danish arm OK; else paper; FADE3 paper; fail-closed on unread safety data.
+6. Live vs paper GS-01 ≥10 clean trades; fix R0 gaps.
+7. Ongoing R22 + STRATEGIST R19.
+
+## Live readback (19:38 AEDT / 08:38 UTC)
+
+| Signal | Value |
+|--------|--------|
+| Fly `execution_paused` | **false** |
+| `pause_owner` | none |
+| `manual_admin_pause` | **false** |
+| `live_armed` / `bitfinex_live_enabled` | **false** / **false** |
+| `force_paper_mode` | **true** |
+| Fly paper tip (`git_rev` / `source_git_rev`) | **`f99681380830`** (`#900` merge) |
+| `origin/master` tip | **`f7c0cea6f`** (`#905`; includes `#904` `5c94ca96c` + `#882` `76bd6d2e5`) |
+| Paper tip vs master | Fly still on `#900`; `#904`/`#882`/`#905`/`#883`/`#886`/`#879` on master **not tipped** — no Soft B / Force / wipe / tip / arm |
+| Sticky lease | `#904` **merged** `5c94ca96c` (preserve-skip). Pre-merge post-`#900` 10m continuous **FAIL** (1× `DEPLOY_MAINTENANCE` re-assert @08:14:28Z). Post-`#904` continuous prove: watch / not claimed here |
+| CPU 30‑min lag / `trade_lock` | **PASS** on Fly tip `f99681380830` (scheduler lag max 386 ms; 0 wait/hold over-budget) |
+
+## Open-list status
+
+| Item | Status | Link |
+|------|--------|------|
+| Paper resumed + stable | **IN PROGRESS** unpaused on `#900` tip `f99681380830`; pre-`#904` 10m continuous FAIL (sticky); `#904` now on master — re-prove continuous when tipped | Fly `f99681380830` |
+| `#885` $10/$10 caps | **DONE** | [#885](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/885) |
+| `#892` $9.99/$10.00 test | **DONE** | [#892](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/892) |
+| `#900` bootstrap timeout + RED@45m | **DONE** on Fly tip; Guaranteed resume works | [#900](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/900) |
+| `#904` sticky preserve-skip | **DONE** squash-merged `5c94ca96c` (not on Fly tip yet) | [#904](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/904) |
+| `#894` TradesTail CPU | **DONE** | [#894](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/894) |
+| `#889` FADE3 feed CPU | **DONE** | [#889](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/889) |
+| CPU 30‑min lag / trade_lock readback | **DONE** PASS on Fly `#900` tip | store `internal/btc-lag-trade-lock-readback.md` |
+| `#888` tombstone route | **DONE** | [#888](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/888) |
+| Tombstone apply → 339/339 | **QUEUED** after paper healthy + R21 | — |
+| `#895` Railway admin-only | **DONE** | [#895](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/895) |
+| `#901` / `#884` admin auth CI | **DONE** | [#901](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/901) |
+| `#897` FADE3 BZ rotation | **IN PROGRESS** remastered; CI / merge queue | [#897](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/897) |
+| `#886` relay cutoff + genesis | **DONE** merged `08c3d1b80` | [#886](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/886) |
+| `#883` shared maker fill | **DONE** merged `9354d550b` | [#883](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/883) |
+| `#882` analyzer floor/reconciler | **DONE** squash-merged `76bd6d2e5` | [#882](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/882) |
+| `#879` R22 dead-code PR-A | **DONE** merged `4df62d494` | [#879](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/879) |
+| `#903` exit-truth STOP fill | **IN PROGRESS** RK PASS `7fb43bd7`; merge after green | [#903](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/903) |
+| `#905` analyzer oversized JSONL | **DONE** squash-merged `f7c0cea6f` | [#905](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/905) |
+| `#902` GOAL/TRACKER docs | **IN PROGRESS** remaster onto tip `f7c0cea6f` | [#902](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/902) |
+| `#906` fly.paused RED+AMBER dedupe | **IN PROGRESS** RK PASS; rebase vs `#907` | [#906](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/906) |
+| `#907` pause total-time accounting | **IN PROGRESS** RK PASS; stack after `#906` | [#907](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/907) |
+| Simplified dashboard PR | **BLOCKED** need Boss PR#/branch | HANDOFF |
+| Memory-leak 3h verdict | **QUEUED** clock ~18:53 AEDT | — |
+| GS-01 arm @ $0.25 | **BLOCKED** — all gates + Danish OK | — |
+
+## Priority queue (working order while unblocked)
+
+1. Keep paper unpaused on Fly tip; post-`#904` continuous prove when `#904` is tipped (no Soft B / Force / wipe / tip / arm from docs)
+2. Merge `#903` then `#902` (this PR) as CI green; `#897` when remaster tip green
+3. `#906` → `#907` stack (later; not ahead of open-list merges)
+4. Post-stable: tombstone 339/339, memory-leak 3h
+5. Arm gates last (Danish OK)
+
+## Rules Keeper / Health Monitor (recent)
+
+- `#889` @ `d41b63b`: RK PASS, HM CONDITIONAL → **merged**
+- `#900` @ `28efcf74a`: RK PASS → **merged** `f9968138`
+- `#904` sticky: **merged** `5c94ca96c`
+- `#882` @ remaster tip: RK PASS, HM CONDITIONAL → **merged** `76bd6d2e5`
+- `#905`: **merged** `f7c0cea6f`
+- `#903` @ `7fb43bd7`: RK PASS; CI / merge pending
+- `#897` remaster: RK PASS, HM CONDITIONAL; CI / merge pending
+- `#906` / `#907`: RK PASS; later stack
+- `#901` @ `76d11e34`: RK PASS, HM PASS → **merged**
+- `#888`: RK PASS, HM PASS → **merged**
+
+## Recent ops notes (compressed; open-list above is source of truth)
+
+- **`#900` tip live:** deploy `40172488019` failed loud at receipt bootstrap; Guaranteed resume SUCCESS → paper clear on `f99681380830`.
+- **Sticky race:** post-`#900` 10m continuous FAIL (1× `DEPLOY_MAINTENANCE` re-assert @08:14:28Z). Fix landed as `#904` `5c94ca96c`.
+- **Master tip after merges:** `#904` → `#882` → `#905` (`f7c0cea6f`). Do not tip Fly from this docs PR.

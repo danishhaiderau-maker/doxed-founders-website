@@ -1,0 +1,50 @@
+---
+description: Hard rules R0–R23 for Danish's BTC trading system (Fly, Railway, Neon, Bitfinex)
+alwaysApply: true
+---
+
+# Hard rules — BTC trading system
+
+You work on Danish's BTC trading system: Fly app `doxed-btc-bot` (code in `services/btc-conservative-agent/`), Railway relay (`apps/api`), Neon DB, Bitfinex. Follow every rule. If a plan breaks one, stop and say which.
+
+## Rules
+
+- **PRIME / R0:** Paper must simulate exactly what real Bitfinex would do.
+- **R1:** Find the root cause, with evidence, before fixing.
+- **R2:** Every change gets a review of its exact final commit; any new push voids the earlier pass.
+- **R3:** Prices come only from the order book and real trade prints. Never use ticker, candles, `book_tape_1s`, or `microstructure_1s` for fills.
+- **R4:** One shared helper per job (one fill path, one feed path). No per-tile copies.
+- **R5:** Fresh data epoch only. No archives, quarantines, or growing caches. Ignore data before ts `1792263671` (18 Oct 2026 06:01:11 AEDT).
+- **R6:** `DATA_EPOCH_ID = ce-20261004-v31-freeze21b`.
+- **R7:** No trading fee (account has zero fees). Funding is ignored.
+- **R8:** Urgent fixes deploy at once; the rest is bundled. Trades flattened by a deploy don't count. Don't wait for a flat window to deploy.
+- **R9:** Live trading is GS-01 only, at $0.25 per order. Everything else is paper. FADE3 stays paper.
+- **R10:** Never print secrets (DB URLs, tokens, API keys, Bitfinex keys).
+- **R11 / R18:** Never ask Danish technical questions or re-ask settled things. Plain language only.
+- **R12:** Never delete gs-export temp files in `C:\Users\danis\AppData\Local\Temp`; keep `.puller-backup-*`.
+- **R13:** Never send emails or messages to anyone without Danish pressing send.
+- **R14:** Never claim a strategy has an edge without proof.
+- **R15 / R17:** Every report states its data source and earliest timestamp. Discard data that can't be verified, and everything derived from it.
+- **R16:** Before arming, account for every API route (currently 913) with non-mutating checks.
+- **R19:** Before promoting a strategy, pre-register the minimum countable trades and a confidence bound above zero.
+- **R20:** Live-loss limit is $10 per day and $10 total across all live tiles. Never raise or remove it. Hitting it disarms and goes flat.
+- **R21:** Deletions only from a sha-listed file list, dry run first, then verified read-back, with free-space before and after. Trade-file deletes only via `/api/admin/trades/delete-by-id` or a tested route, never by rewriting the file.
+- **R22:** No dead code. Retired features are deleted entirely (code, config, flags, routes, tests), with grep proof nothing live uses them. Report line counts before and after. `bot.py` (~63,700 lines) and the analyzer (~24,200) must shrink.
+- **R23:** Purely additive test-only changes need only a review plus a mutation proof per new assert and green CI. Deleting, skipping or loosening tests, or touching CI, fixtures or safety gates needs a full rules check.
+
+## Deploy and DB
+
+- Never run `prisma db push --accept-data-loss` against prod. Normal git pushes only (no force).
+- A master push touching `services/btc-conservative-agent/**` (except `test*.py`) auto-deploys Fly. Otherwise deploy with `gh workflow run fly-bot-deploy.yml --ref master -f mode=deploy`.
+
+## Tests
+
+- Run targeted tests only.
+- Every new test is added to `ci/unit_test_allowlist.txt`.
+- Every new assert has a mutation proof (break the code, show the test fails).
+
+## Grok Bot quota
+
+- Answer from the repo, git, and CI first.
+- Batch rare questions in repo-root `HANDOFF-QUESTIONS.md` for Danish to paste to Grok Bot once.
+- Never ask Grok Bot to code, review, or monitor; Cursor does that.
