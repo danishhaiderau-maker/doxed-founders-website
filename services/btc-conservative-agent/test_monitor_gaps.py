@@ -34,6 +34,27 @@ def test_every_main_worker_has_an_expectation():
     assert "xvl_evaluator_thread" in mg.WORKER_EXPECTATIONS
 
 
+def test_r17_future_path_loop_is_not_expected():
+    """R17 retired the worker; expecting it caused false RED (NOT_STARTED)."""
+    name = "all_opportunity_future_path_evidence_loop"
+    assert name not in mg.WORKER_EXPECTATIONS
+    # Function remains for historical/tests; main must not start a Thread on it.
+    tree = ast.parse((ROOT / "bot.py").read_text(encoding="utf-8"))
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    started = set()
+    for node in ast.walk(main):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Thread":
+            target = next((kw.value for kw in node.keywords if kw.arg == "target"), None)
+            if isinstance(target, ast.Call) and getattr(target.func, "id", None) == "safe_thread":
+                target = target.args[0]
+            if isinstance(target, ast.Name):
+                started.add(target.id)
+    assert name not in started
+    assert any(
+        isinstance(n, ast.FunctionDef) and n.name == name for n in tree.body
+    ), "loop function must remain for historical/tests"
+
+
 def test_worker_rows_flag_stale_dead_restart_unmonitored_and_failed_oneshot():
     clock = Clock()
     reg = thread_health.ThreadHealthRegistry(clock=clock)
