@@ -1,5 +1,11 @@
 # Ops tracker
 
+## 25 Oct 2026 ~07:53 UTC — paper clear + 10-min readback PASS
+
+- **Clear:** Hung run [40169802400](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40169802400) completed **failure**; Guaranteed paper resume logged `ACTIVE` on `4ebcf91d1754` (`resume_posts=0` — already unpaused by observe). Live: `execution_paused=false`, `manual_admin_pause=false`, `live_armed=false`.
+- **10-min proof:** 11/11 samples 07:42:52Z–07:53:02Z all unpaused + disarmed + `force_paper_mode`; open positions advanced 2→5. Artifact: store `artifacts/btc26-10min-readback.json`.
+- **Still open:** [#904](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/904) tip `d99742441` awaiting unit-tests then merge (sticky preserve-skip). #900 deploy [40172488019](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40172488019) in_progress (may briefly re-enter maintenance). HANDOFF: no Danish action.
+
 ## 25 Oct 2026 ~07:40 UTC — R8 URGENT paper down ~3h8m (Boss HM 18:32)
 
 - **Live:** `4ebcf91d1754` (#889), still `execution_paused=true` / `DEPLOY_MAINTENANCE`; bootstrap PENDING / `SOURCE_LEDGER_TRUNCATED`; live disarmed.

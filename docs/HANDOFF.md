@@ -1,24 +1,9 @@
-# HANDOFF — Danish action required (paper paused ~3h+)
+# HANDOFF — no Danish action required
 
-**One click only.** Agents cannot cancel this Actions run (GitHub returns 403).
+Paper is running again on `4ebcf91d1754`: `execution_paused=false`, live **DISARMED**.
 
-## Do this now
+- Hung run 40169802400 finished (failure); Guaranteed resume reported ACTIVE.
+- 10-minute stability readback **PASS** (07:42:52Z–07:53:02Z, no pause flip).
+- Agents merging [#904](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/904) when CI is green (sticky preserve-skip). #900 deploy may briefly re-enter maintenance as normal.
 
-1. Open: https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40169802400  
-2. Click **Cancel workflow** (hung on “Complete receipt bootstrap…”).  
-3. Reply here: **cancelled** (or paste the run status).
-
-That is the whole ask. Do **not** call `/api/resume`, Soft B, Force, wipe, tip, or arm live.
-
-## What happens next (agents)
-
-After cancel:
-
-1. Agent runs guaranteed paper resume (bootstrap waived) so paper collects again.  
-2. Queued **#900** deploy starts (25m bootstrap timeout + auto paper resume).  
-3. **#904** sticky-lease fix merges when CI is green.  
-4. Agent proves paper unpaused ≥10 minutes; live stays **DISARMED**.
-
-## Why cancel is required
-
-Run `40169802400` is stuck on receipt bootstrap (`SOURCE_LEDGER_TRUNCATED`). While it runs, any paper resume is re-paused within seconds by the failure-path preserve step. Retrying deploy does not help until this run is cleared from the `fly-btc-production` queue.
+Do **not** Soft B / Force / wipe / tip / arm.
