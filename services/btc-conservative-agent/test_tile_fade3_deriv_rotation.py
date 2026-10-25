@@ -183,4 +183,6 @@ def test_fly_post_cutoff_fixture_bz_unchanged_by_deriv_rotation(tmp_path):
     t_end = max(json.loads(ln)["s"] for ln in lines if ln.strip())
     bz_cont = tf.LiveFeatureFeed(str(cont))(t_end + 1.5)[2].get("BZ")
     bz_rot = tf.LiveFeatureFeed(str(rot))(t_end + 1.5)[2].get("BZ")
-    assert bz_cont is None and bz_rot is None  # <6 h deriv span: both fail closed, never diverge
+    # #889 fixture is >=6 h (finite BZ); shorter tails stay fail-closed NaN. Rotation must never diverge.
+    assert bz_rot == bz_cont
+    assert not (bz_cont is None and bz_rot is not None)

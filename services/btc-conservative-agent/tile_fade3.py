@@ -855,7 +855,8 @@ class LiveFeatureFeed:
             return None, None, {}
         contiguous = idx[-1] - idx[0] + 1 == idx.size
         s_last = int(S_all[idx[-1]])
-        key = (int(S_all[idx[0]]), s_last, int(idx.size), self.book.gen, self.trades.gen, self.deriv.gen)
+        gap_end = getattr(self.deriv, "gap_end", None)
+        key = (int(S_all[idx[0]]), s_last, int(idx.size), self.book.gen, self.trades.gen, self.deriv.gen, gap_end)
         if key == self._cache_key:
             return self._cache_val
         sl = slice(int(idx[0]), int(idx[-1]) + 1) if contiguous else idx
@@ -867,7 +868,6 @@ class LiveFeatureFeed:
         nd = int(np.searchsorted(DK, s_last, "right"))
         D = np.column_stack([DK[:nd].astype(float), self._dbuf.view("D")[:nd]]) if nd else np.empty((0, 3))
         F = compute_features(S, B, A, T, D)
-        gap_end = getattr(self.deriv, "gap_end", None)
         if gap_end is not None and gap_end > s_last + 1 - BZ_WINDOW_S:
             F["BZ"] = np.full(len(F["BZ"]), np.nan)  # rotation-boundary hole inside the z window: no BZ
         L, Sh = entry_signals_e8(F)
