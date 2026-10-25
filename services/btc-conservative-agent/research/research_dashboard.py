@@ -803,7 +803,7 @@ def _pick_best_payload(name: str, default=None):
 
 
 def _read_report(name: str, default=None):
-    """Load JSON from project root, reports/, or all_data fallback when SESSION file is empty."""
+    """Load JSON from project root, reports/."""
     if default is None:
         default = {}
     if _r3_quarantine.quarantined_file(name):
@@ -833,22 +833,11 @@ def _read_report(name: str, default=None):
     fresh = bool(session.get("fresh_collection_mode"))
     primary = None
     primary_key = (-1, -1.0)
-    fallback = None
-    fallback_key = (-1, -1.0)
-    for path, payload, mtime in _iter_data_payloads(name):
+    for _path, payload, mtime in _iter_data_payloads(name):
         key = (_scope_priority(payload, fresh_collection=fresh), mtime)
-        is_all_data = str(path).endswith(os.path.join(ALL_DATA_REPORTS_DIR, name).replace("/", os.sep))
-        if is_all_data:
-            if not _report_is_empty(name, payload) and key > fallback_key:
-                fallback_key = key
-                fallback = payload
-        elif key > primary_key:
+        if key > primary_key:
             primary_key = key
             primary = payload
-    if primary is not None and not _report_is_empty(name, primary):
-        return primary
-    if fallback is not None:
-        return fallback
     if primary is not None:
         return primary
     return default
@@ -928,29 +917,12 @@ def _best_report_path(name: str) -> Path | None:
     session = _load_bot_session() or {}
     fresh = bool(session.get("fresh_collection_mode"))
     primary = None
-    primary_payload = None
     primary_key = (-1, -1.0)
-    fallback = None
-    fallback_payload = None
-    fallback_key = (-1, -1.0)
     for path, payload, mtime in _iter_data_payloads(name):
         key = (_scope_priority(payload, fresh_collection=fresh), mtime)
-        is_all_data = str(path).endswith(
-            os.path.join(ALL_DATA_REPORTS_DIR, name).replace("/", os.sep)
-        )
-        if is_all_data:
-            if not _report_is_empty(name, payload) and key > fallback_key:
-                fallback_key = key
-                fallback = path
-                fallback_payload = payload
-        elif key > primary_key:
+        if key > primary_key:
             primary_key = key
             primary = path
-            primary_payload = payload
-    if primary is not None and not _report_is_empty(name, primary_payload or {}):
-        return primary
-    if fallback is not None and fallback_payload is not None:
-        return fallback
     return primary
 
 
@@ -982,7 +954,7 @@ def _data_file_candidates(name: str) -> list[Path]:
     seen: set[Path] = set()
     out: list[Path] = []
     for base in bases:
-        for candidate in (base / name, base / REPORTS_DIR / name, base / ALL_DATA_REPORTS_DIR / name):
+        for candidate in (base / name, base / REPORTS_DIR / name):
             if candidate not in seen:
                 seen.add(candidate)
                 out.append(candidate)
@@ -4704,11 +4676,6 @@ def api_summary():
     approves = int(re.get("approve_attempts") or 0)
     executed = int(re.get("executed") or p.get("trades") or 0)
     fill_pct = round(100.0 * executed / approves, 1) if approves else None
-    session_empty = not int(p.get("trades") or 0)
-    all_data_active = (
-        session_empty
-        and (ROOT / ALL_DATA_REPORTS_DIR / "top_combinations_report.json").is_file()
-    )
     return jsonify({
         "scope": compact.get("session_scope"),
         # Same bounded latest-attempt reader as /api/status. Do not infer an
@@ -4728,7 +4695,6 @@ def api_summary():
         "coverage_status": (compact.get("coverage") or {}).get("confidence_status"),
         "stale": stale_meta,
         "integrity": _integrity_payload(),
-        "all_data_fallback_active": all_data_active,
         "historical_cohort": historical,
         "retention": retention,
         "lifecycle_bundles": lifecycle_bundle_summary,
@@ -6057,7 +6023,6 @@ def download_everything():
     # reports remain available under an explicitly named directory.
     for arcname, path in _bundle_members():
         candidates.append((path, f"current_reports/{arcname}"))
-    add_tree(ROOT / ALL_DATA_REPORTS_DIR, "all_data_reports")
     add_tree(ROOT / ARCHIVE_DIR, "sessions")
     add_tree(agent_root / "research" / "genome", "genome")
     research_db = agent_root / "research.db"
@@ -7965,22 +7930,13 @@ async function loadSummary() {
         + escapeHtml(analyzerRecoveryGuidance(d))
         + '<details class="receipt-details"><summary>Show exact parity and freshness receipts</summary><pre>'
         + escapeHtml(reasons || 'No machine-readable reason was published.') + '</pre></details>';
-    } else if (d.all_data_fallback_active) {
-      banner.style.display = 'block';
-      banner.style.background = '#1f2d3d';
-      banner.style.borderColor = '#58a6ff';
-      banner.style.color = '#c9d1d9';
-      banner.innerHTML = '<strong>ℹ Using fresh-collection window from reports/all_data/</strong> '
-        + '(full CSV since last Fresh Collection ON). Empty sections may truthfully mean no eligible evidence in the current cohort; check each section\'s evidence status.';
     } else {
       banner.style.display = 'none';
     }
   }
   const scopeLabel = stale.stale
     ? 'STALE SAVED ANALYZER GENERATION · READ-ONLY'
-    : d.all_data_fallback_active
-      ? 'FRESH COLLECTION · reports/all_data fallback'
-      : (d.scope || 'ALL-DATA') + ' · ' + (d.data_scope || '').toUpperCase();
+    : (d.scope || 'SESSION') + ' · ' + (d.data_scope || '').toUpperCase();
   document.getElementById('scope').textContent = scopeLabel;
   const bundleProvenance = document.getElementById('bundle-provenance');
   if (bundleProvenance) {

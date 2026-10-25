@@ -182,8 +182,6 @@ MIN_LANE_APPROVES_FOR_RETIREMENT = 10
 _CONSOLE_STDOUT = sys.stdout
 ANALYZER_CONSOLE_VERBOSE = False
 _ANALYZER_REPORT_SUBDIR = None
-ALL_DATA_REPORTS_SUBDIR = os.path.join(REPORTS_DIR, "all_data")
-ALL_DATA_SESSION_SCOPE = {"data_scope": "all", "fresh_collection_mode": False}
 
 
 def analyzer_report_path(filename: str) -> str:
@@ -242,16 +240,16 @@ class _AnalyzerTee:
 ANALYZER_LOOP_INTERVAL_MINUTES = max(1, int(os.getenv("ANALYZER_INTERVAL_MINUTES", "30")))
 
 
-def resolve_analyzer_session_scope() -> tuple:
+def resolve_analyzer_session_scope() -> str:
     """Always analyze the current session — from last fresh collection wipe onward."""
     session = load_research_session()
     if session.get("fresh_collection_mode") or session.get("fresh_collection_start_time"):
         iso = session.get("fresh_collection_start_iso") or "n/a"
-        return True, f"SESSION (fresh collection from {iso})"
+        return f"SESSION (fresh collection from {iso})"
     if session.get("bot_start_time"):
         iso = session.get("bot_start_iso") or "n/a"
-        return True, f"SESSION (bot session from {iso})"
-    return True, "SESSION (no research_session.json — analyzing all loaded rows)"
+        return f"SESSION (bot session from {iso})"
+    return "SESSION (no research_session.json — analyzing all loaded rows)"
 
 
 def start_research_dashboard_server():
@@ -9302,7 +9300,7 @@ def _assert_local_generation_unfenced(stage):
     assert_local_generation_available(configured, stage=stage)
 
 
-def run(interval_min=30, session_only=True, max_iterations=None):
+def run(interval_min=30, max_iterations=None):
     iteration = 0
     sleep_sec = max(60, int(interval_min) * 60)
     while True:
@@ -9312,7 +9310,7 @@ def run(interval_min=30, session_only=True, max_iterations=None):
         retry_reason = "scheduled interval"
         print(f"\n=== ANALYZER {ANALYZER_VERSION} ITERATION {iteration} START {PIPELINE_ENFORCEMENT_TAG} ===")
         try:
-            _run_analyzer_iteration(iteration, interval_min, session_only)
+            _run_analyzer_iteration(iteration, interval_min)
         except KeyboardInterrupt:
             raise
         except Exception as exc:
@@ -9346,7 +9344,7 @@ def run(interval_min=30, session_only=True, max_iterations=None):
         time.sleep(retry_sec)
 
 
-def _run_analyzer_iteration(iteration, interval_min, session_only):
+def _run_analyzer_iteration(iteration, interval_min):
         global _CURRENT_MIRROR_GENERATION_LEASE
         from research.mirror_generation_lease import MirrorGenerationLease
 
@@ -9360,7 +9358,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             _assert_local_generation_unfenced("analyzer_iteration_under_lease")
             _CURRENT_MIRROR_GENERATION_LEASE = lease
             try:
-                return _run_analyzer_iteration_with_lease(iteration, interval_min, session_only)
+                return _run_analyzer_iteration_with_lease(iteration, interval_min)
             finally:
                 _CURRENT_MIRROR_GENERATION_LEASE = None
 
@@ -9381,7 +9379,7 @@ def _capture_generation_source_heartbeat():
         _CURRENT_GENERATION_SOURCE_HEARTBEAT = None
 
 
-def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
+def _run_analyzer_iteration_with_lease(iteration, interval_min):
         global _CURRENT_ANALYZER_GENERATION_STARTED_AT
         global _CURRENT_MIRROR_COHERENCE_TOKEN
         from research.mirror_coherence import assert_mirror_coherent
@@ -9415,11 +9413,10 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             "csv_setups": len(setups),
         }
         historical_trade_cohort_report()
-        data_scope = "session" if session_only else "all"
-        if session_only:
-            trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(
-                session, trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
-            )
+        # RK B4 #882 (R22): ALL-DATA mode deleted -- the analyzer only reads the current session.
+        trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(
+            session, trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
+        )
         session_trade_ids = (set(trades["trade_id"].astype(str))
                              if trades is not None and "trade_id" in getattr(trades, "columns", []) else None)
         trades, cohort_quarantine = split_current_tile_cohort(
@@ -9517,7 +9514,6 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
                 decisions=decisions,
                 blocked=blocked,
                 dataset_counts=dataset_counts,
-                data_scope=data_scope,
             )
             return
 
@@ -9640,7 +9636,6 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             decisions=decisions,
             blocked=blocked,
             dataset_counts=dataset_counts,
-            data_scope=data_scope,
         )
 
 
@@ -22749,13 +22744,12 @@ def build_executive_summary_payload(
     decisions=None,
     blocked=None,
     dataset_counts=None,
-    data_scope="all",
 ):
     """Aggregate KPIs from analysis_df + JSON reports (written during same run)."""
     session = session or load_research_session()
-    scope = "ALL-DATA" if data_scope == "all" else _shadow_scope_label(session)
-    hours = _session_hours(session) if data_scope == "session" else None
-    data_start = _v2_data_start_ts() if data_scope == "session" else None
+    scope = _shadow_scope_label(session)
+    hours = _session_hours(session)
+    data_start = _v2_data_start_ts()
     data_start_hours = ((pd.Timestamp.now(tz="UTC") - data_start).total_seconds() / 3600.0
                         if data_start is not None else None)
 
@@ -22880,7 +22874,7 @@ def build_executive_summary_payload(
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": ANALYZER_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "data_scope": data_scope,
+        "data_scope": "session",
         "session_scope": scope,
         "session_hours": round(float(hours), 2) if hours is not None else None,
         "data_start_utc": data_start.strftime("%Y-%m-%d %H:%M UTC") if data_start is not None else None,
@@ -23032,7 +23026,7 @@ def format_executive_summary_short(payload):
         "=" * 72,
         f"=== EXECUTIVE SUMMARY — {scope} ({time_label}) | {payload.get('analyzer_sync_id', ANALYZER_SYNC_ID)} ===",
         "=" * 72,
-        f"Data scope: {payload.get('data_scope', 'all').upper()} | CSV trades: {csv_n} | Analyzed fills: {analyzed}",
+        f"Data scope: {payload.get('data_scope', 'UNKNOWN').upper()} | CSV trades: {csv_n} | Analyzed fills: {analyzed}",
         f"Session trades (all lanes, incl. non-tile) {analyzed} | WR {p.get('win_rate_pct', 'n/a')}% | "
         f"PnL {_fmt_usd(p.get('net_pnl_usd'))} | "
         f"EV {p.get('expectancy_usd', 'n/a')}/trade | MFE capture {p.get('mfe_capture_pct', 'n/a')}%",
@@ -23300,7 +23294,7 @@ def format_research_coverage_text(payload):
         "=" * W,
         "=== RESEARCH COVERAGE & STATISTICAL CONFIDENCE ===",
         "=" * W,
-        f"Scope: {payload.get('session_scope', 'ALL-DATA')} ({payload.get('data_scope', 'all').upper()})",
+        f"Scope: {payload.get('session_scope', 'ALL-DATA')} ({payload.get('data_scope', 'UNKNOWN').upper()})",
         f"CSV rows — trades: {ds.get('csv_trades', 'n/a')} | blocked: {ds.get('csv_blocked', 'n/a')} | "
         f"decisions: {ds.get('csv_decisions', 'n/a')}",
         f"Analyzed — trades: {cov.get('trades', 0)} | approves: {cov.get('approves', 0)} | "
@@ -23575,39 +23569,6 @@ def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
         return False
 
 
-def generate_all_data_companion_reports(dataset_counts=None, session_trade_count=0):
-    """Write generic historical reports without promoting archived lanes."""
-    dataset_counts = dataset_counts or {}
-    csv_n = int(dataset_counts.get("csv_trades") or 0)
-    if csv_n <= 0:
-        return
-    sub = ALL_DATA_REPORTS_SUBDIR
-    os.makedirs(sub, exist_ok=True)
-    print(
-        f"\n=== ALL-DATA COMPANION — full CSV ({csv_n} rows; session fills={session_trade_count}) "
-        f"→ {sub}/ {PIPELINE_ENFORCEMENT_TAG} ==="
-    )
-    _set_analyzer_report_subdir(sub)
-    try:
-        trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
-        no_filter_session = {}
-        shadow_report = shadow_fill_outcome_matrix(trades, session=no_filter_session, blocked=blocked)
-        paused_shadow_research_report(session=no_filter_session)
-        benchmark_report = benchmark_vs_lanes_report(
-            trades, session=no_filter_session, blocked=blocked, shadow_report=shadow_report, all_trades=trades,
-        )
-        chase_payload = chase_attribution_report(trades=trades, session=no_filter_session)
-        chase_effectiveness_report(trades=trades, session=no_filter_session, chase_payload=chase_payload)
-        chase_threshold_report(trades=trades, session=no_filter_session)
-        top_combinations_report(trades=trades, session=no_filter_session)
-        exit_combinations_report(trades=trades, session=no_filter_session)
-        print(f"  ✅ ALL-DATA companion reports → {sub}/ {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as exc:
-        print(f"  ⚠️ ALL-DATA companion failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-    finally:
-        _set_analyzer_report_subdir(None)
-
-
 def finalize_analyzer_outputs(
     session=None,
     trades=None,
@@ -23615,7 +23576,6 @@ def finalize_analyzer_outputs(
     decisions=None,
     blocked=None,
     dataset_counts=None,
-    data_scope="all",
 ):
     """Write hierarchical text reports + dashboard; print all layers to console."""
     main_rankings_report(session=session, trades=trades)
@@ -23627,7 +23587,6 @@ def finalize_analyzer_outputs(
         decisions,
         blocked=blocked,
         dataset_counts=dataset_counts,
-        data_scope=data_scope,
     )
     # The Genome pipeline used to be described in the UI but was never invoked
     # by the continuous analyzer. Rebuild it on every cycle so the Genome tab
@@ -23749,14 +23708,6 @@ def finalize_analyzer_outputs(
         )
     except Exception as exc:
         print(f"  ⚠️ Trade accumulator sync failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-    if str(data_scope).lower() == "session":
-        stc = 0
-        if trades is not None and not trades.empty:
-            if "trade_id" in trades.columns:
-                stc = len(trades.drop_duplicates(subset=["trade_id"]))
-            else:
-                stc = len(trades)
-        generate_all_data_companion_reports(dataset_counts, session_trade_count=stc)
     snap = _save_rolling_snapshot()
     if _laptop_artifacts_enabled():
         try:
@@ -23856,7 +23807,7 @@ if __name__ == "__main__":
         os.chdir(_configured_report_root)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
-    session_only, scope_reason = resolve_analyzer_session_scope()
+    scope_reason = resolve_analyzer_session_scope()
     dashboard_url = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/")
 
     _once_mode = len(sys.argv) > 1 and str(sys.argv[1]).startswith("--once")
@@ -23872,7 +23823,7 @@ if __name__ == "__main__":
         )
         print(f"  Data scope: {scope_reason}")
         try:
-            run(interval_min=interval_min, session_only=session_only, max_iterations=1)
+            run(interval_min=interval_min, max_iterations=1)
         finally:
             _close_native_fault_log(_native_fault_handle)
             _restore_analyzer_output(_tee, _log_handle)
@@ -23887,7 +23838,7 @@ if __name__ == "__main__":
     print(f"  Dashboard:  {dashboard_url}")
     dashboard_process = start_research_dashboard_server()
     try:
-        run(interval_min=interval_min, session_only=session_only)
+        run(interval_min=interval_min)
     finally:
         if dashboard_process is not None and dashboard_process.poll() is None:
             dashboard_process.terminate()

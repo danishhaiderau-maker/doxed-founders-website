@@ -15,7 +15,7 @@ def _payload(tmp_path, monkeypatch, files):
     monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     session = {"bot_start_time": time.time() - 213 * 3600}
-    return analyzer.build_executive_summary_payload(session=session, data_scope="session")
+    return analyzer.build_executive_summary_payload(session=session)
 
 
 def test_promoted_heartbeat_genesis_drives_label_without_touching_epoch(tmp_path, monkeypatch):
