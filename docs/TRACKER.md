@@ -1,5 +1,11 @@
 # Ops tracker
 
+## 25 Oct 2026 ~07:40 UTC — R8 URGENT paper down ~3h8m (Boss HM 18:32)
+
+- **Live:** `4ebcf91d1754` (#889), still `execution_paused=true` / `DEPLOY_MAINTENANCE`; bootstrap PENDING / `SOURCE_LEDGER_TRUNCATED`; live disarmed.
+- **Hung:** [40169802400](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40169802400) on **Complete receipt bootstrap** since ~07:33Z; #900 deploy [40172488019](https://github.com/danishhaiderau-maker/doxed-founders-website/actions/runs/40172488019) pending behind it. Retry deploy will not help.
+- **Cancel:** agents get **403** on `gh run cancel` / API. **Danish must Cancel workflow** in Actions UI — see `docs/HANDOFF.md` (store). After cancel: agent `BOOTSTRAP_GATE_FAILED=1` failure-resume; #900 deploy brings 25m timeout live; land [#904](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/904) sticky skip when CI green. No Soft B / Force / wipe / tip / arm.
+
 ## 25 Oct 2026 ~07:25 UTC — sticky DEPLOY_MAINTENANCE re-assert after clear resume (fast-follow)
 
 - **Live:** still `execution_paused=true`, `pause_owner=DEPLOY_MAINTENANCE`, `_pause_priority=200` on rev `b57014c0eb28`; bootstrap `PENDING` / `SOURCE_LEDGER_TRUNCATED` / 0 progress; live disarmed.
