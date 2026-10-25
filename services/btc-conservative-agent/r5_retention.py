@@ -7,8 +7,10 @@ raised and one small receipt line is written; the deletion itself never waits.
 * ``cap_market_segments`` - byte cap on ``v3/market_segments`` (oldest first).
   Segments referenced by an open lifecycle are deleted last, but are still
   bounded by the same cap (no uncapped keep-set).
-* ``cap_lifecycle_bundles`` - byte/age cap on ``v3/lifecycle_transfer_bundles``
-  and ``v3/lifecycle_bundles`` regardless of the laptop cleanup ack.
+* ``cap_lifecycle_bundles`` - byte/age cap on ``v3/lifecycle_bundles``
+  regardless of the laptop cleanup ack.
+* ``purge_retired_transfer_bundles`` - R22: removes the retired
+  ``v3/lifecycle_transfer_bundles`` tree (no producer and no reader remain).
 * ``wipe_stale_locks`` - removes ``v3/.locks/*.lock`` only when older than the
   current process boot AND older than one hour (a held lock is never removed).
 * ``count_market_segments`` - reset post-condition (must be 0 after a reset).
@@ -125,7 +127,7 @@ def _dir_bytes(path: Path) -> int:
 
 def _bundle_dirs(root: Path) -> list[tuple[float, int, Path, str]]:
     out = []
-    for parent_name, prefix in (("lifecycle_transfer_bundles", "transfer-"), ("lifecycle_bundles", "lifecycle-")):
+    for parent_name, prefix in (("lifecycle_bundles", "lifecycle-"),):
         parent = root / "v3" / parent_name
         if not parent.is_dir():
             continue
@@ -148,59 +150,12 @@ BUNDLE_RECEIPT_MAX_IDS = 200
 BUNDLE_FRESH_FLOOR_SEC = 600.0  # HM C7: never cap a bundle younger than 10 min (may be mid-materialisation)
 
 
-def _transfer_pointer_root(root: Path) -> Path:
-    return root / "v3" / "lifecycle_transfer_bundles" / "index"
-
-
-def _drop_transfer_pointers(root: Path, removed_names: set[str]) -> int:
-    """HM C8: remove the transfer pointer(s) of removed transfer bundles.
-
-    lifecycle_bundles fails closed on a pointer whose bundle is gone, so the
-    pointer goes with the bundle. A pointer that already dangles (bundle gone
-    and no ``.staging`` copy to recover from) is swept too; a pointer whose
-    staged bundle still exists is the crash-recovery path and is left alone.
-    """
-    pointer_root = _transfer_pointer_root(root)
-    bundle_root = root / "v3" / "lifecycle_transfer_bundles"
-    if not pointer_root.is_dir():
-        return 0
-    dropped = 0
-    with os.scandir(pointer_root) as entries:
-        for entry in entries:
-            if not (entry.name.endswith(".json") and entry.is_file(follow_symlinks=False)):
-                continue
-            try:
-                bundle_id = str(json.loads(Path(entry.path).read_text("utf-8")).get("bundle_id") or "")
-            except (OSError, ValueError, AttributeError):
-                continue
-            if not bundle_id.startswith("transfer-") or len(bundle_id) != len("transfer-") + 64:
-                continue
-            target = bundle_root / bundle_id[-64:-62] / bundle_id
-            # HM C8 (re-review): staging FIRST, then target. lifecycle_bundles writes the
-            # pointer, then os.replace(staging -> target); checking target first could
-            # see neither if the replace lands between the two checks and drop the
-            # pointer of a just-published bundle.
-            dangling = (bundle_id not in removed_names
-                        and not (bundle_root / ".staging" / bundle_id).exists()
-                        and not target.exists())
-            if bundle_id in removed_names or dangling:
-                try:
-                    os.unlink(entry.path)
-                    dropped += 1
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    continue
-    return dropped
-
-
 def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLike | None = None,
                           max_bytes: int = BUNDLE_CAP_BYTES, max_age_sec: float = BUNDLE_MAX_AGE_SEC,
                           max_removals: int = MAX_BUNDLE_REMOVALS_PER_CALL,
-                          keep: Iterable[str] = (),
                           fresh_floor_sec: float = BUNDLE_FRESH_FLOOR_SEC,
                           now: float | None = None) -> dict[str, Any]:
-    """Cap transfer/completion bundles; never gated on the laptop ack (R5, RK 18:10).
+    """Cap completion bundles; never gated on the laptop ack (R5, RK 18:10).
 
     * Cap pass FIRST (HM C8), with its own ``max_removals`` budget: at the cap,
       oldest first regardless of ship state or ``keep`` until the store is
@@ -208,28 +163,23 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
       never capped (HM C7: they may still be materialising). Every dropped id
       is logged in the capped receipt and RED is raised.
     * Age pass second, with its own budget: below the cap, an aged bundle is
-      removed unless it is still unshipped (no laptop cleanup ack) AND an open
-      lifecycle or a pre-registered test needs it (its id is in ``keep``, see
-      r5_keep.open_lifecycles). Fresh bundles stay.
-    * A removed transfer bundle takes its transfer pointer with it (HM C8).
+      removed. Fresh bundles stay.
+    * The ack key is the bundle's own name: ``lifecycle-<sha>`` bundles are
+      acked by ``lifecycle_cleanup_acks/lifecycle-<sha>.json``, the exact name
+      the ack route accepts. Removing an unacked bundle raises RED (R5).
     """
     root = Path(root)
     now = time.time() if now is None else now
     acks = Path(ack_root) if ack_root is not None else root / "v3" / "lifecycle_cleanup_acks"
-    keep_ids = {str(k).removeprefix("transfer-").removeprefix("lifecycle-") for k in keep}
     rows = sorted(_bundle_dirs(root), key=lambda r: (r[0], str(r[2])))
     total = sum(r[1] for r in rows)
-    freed, unacked, kept = 0, [], 0
+    freed, unacked = 0, []
     cap_dropped: list[str] = []
     age_dropped: list[str] = []
-    removed_transfer: set[str] = set()
 
     def _remove(path: Path) -> bool:
         shutil.rmtree(path, ignore_errors=True)
-        gone = not path.exists()
-        if gone and path.name.startswith("transfer-"):
-            removed_transfer.add(path.name)
-        return gone
+        return not path.exists()
 
     def _acked(suffix: str) -> bool:
         return (acks / f"lifecycle-{suffix}.json").exists()
@@ -246,14 +196,11 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
         cap_dropped.append(path.name)
         if not _acked(suffix):
             unacked.append(path.name)
-    # Pass 2 (age): aged bundles except needed unshipped ones; own budget.
+    # Pass 2 (age): aged bundles; own budget.
     for mtime, size, path, suffix in survivors:
         if now - mtime <= max_age_sec:
             continue
         acked = _acked(suffix)
-        if not acked and suffix in keep_ids:
-            kept += 1
-            continue
         if len(age_dropped) >= max_removals:
             continue
         if not _remove(path):
@@ -264,16 +211,10 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
         if not acked:
             unacked.append(path.name)
     removed = len(cap_dropped) + len(age_dropped)
-    pointers = 0
-    if removed_transfer:
-        try:
-            pointers = _drop_transfer_pointers(root, removed_transfer)
-        except OSError:
-            pointers = 0
     result = {"removed": removed, "freed_bytes": freed, "remaining_bytes": total,
-              "unacked_removed": len(unacked), "kept_needed_unshipped": kept,
+              "unacked_removed": len(unacked),
               "cap_removed": len(cap_dropped), "age_removed": len(age_dropped),
-              "over_cap": total > max_bytes, "transfer_pointers_removed": pointers,
+              "over_cap": total > max_bytes,
               "cap_bytes": int(max_bytes), "max_age_sec": max_age_sec, "fresh_floor_sec": fresh_floor_sec}
     if removed:
         _receipt(root, {"ts": round(now, 3), "kind": "LIFECYCLE_BUNDLE_CAP_R5", **result,
@@ -284,6 +225,33 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
         disk_alert.raise_red("BUNDLE_CAP_REACHED", {"count": len(cap_dropped)}, now=now)
     if unacked:
         disk_alert.raise_red("BUNDLE_CAP_REMOVED_UNACKED", {"count": len(unacked)}, now=now)
+    return result
+
+
+RETIRED_TRANSFER_BUNDLE_DIR = "lifecycle_transfer_bundles"
+
+
+def purge_retired_transfer_bundles(root: str | os.PathLike, *, now: float | None = None) -> dict[str, Any]:
+    """R22: delete the retired ``v3/lifecycle_transfer_bundles`` tree.
+
+    Transfer bundles are no longer produced. Nothing read them: the segment
+    shipper excluded the directory (so the laptop never received one), the
+    laptop cleanup ack route only accepts ``lifecycle-<sha>``, and the only
+    other readers were manifest counters, all removed with the producer. They
+    are retired data, not unacked evidence, so removal writes one receipt and
+    raises no RED; the RED for unacked ``lifecycle-`` bundles is unchanged.
+    """
+    root = Path(root)
+    now = time.time() if now is None else now
+    tree = root / "v3" / RETIRED_TRANSFER_BUNDLE_DIR
+    if not tree.exists() or tree.is_symlink():
+        return {"removed": False, "present": False}
+    entries = sum(1 for bucket in tree.iterdir() if bucket.is_dir() for _ in bucket.iterdir())
+    size = _dir_bytes(tree)
+    shutil.rmtree(tree, ignore_errors=True)
+    gone = not tree.exists()
+    result = {"removed": gone, "present": not gone, "entries": entries, "freed_bytes": size if gone else 0}
+    _receipt(root, {"ts": round(now, 3), "kind": "RETIRED_TRANSFER_BUNDLES_PURGED_R22", **result})
     return result
 
 

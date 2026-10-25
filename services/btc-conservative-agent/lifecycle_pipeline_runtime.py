@@ -8,7 +8,6 @@ as an option and every accepted child result must explicitly deny it.
 from __future__ import annotations
 
 import json
-import hashlib
 import logging
 import os
 import subprocess
@@ -476,8 +475,6 @@ class LifecyclePipelineRuntime:
             "generated_at": receipt.get("generated_at"),
             "candidate_count": pipeline.get("candidate_count"),
             "bundle_count": pipeline.get("bundle_count"),
-            "transfer_ready_count": pipeline.get("transfer_ready_count"),
-            "transfer_bundle_count": pipeline.get("transfer_bundle_count"),
             "completion_appended_count": pipeline.get("completion_appended_count"),
             "pressure_mode": pipeline.get("pressure_mode"),
             "emergency_closure_mode": bool(pipeline.get("emergency_closure_mode")),

@@ -3,7 +3,6 @@ from pathlib import Path
 
 import lifecycle_pipeline
 import research_v3_store
-from lifecycle_bundles import verify_bundle
 from research_v3_bridge import (
     dual_write_lifecycle_qualification_horizon,
     dual_write_paper_close,
@@ -100,10 +99,10 @@ def _patch_provenance(monkeypatch):
     )
 
 
-def test_bridge_lifecycle_materialises_transfer_then_stops_at_retired_r17(tmp_path, monkeypatch):
-    """R17: the transfer bundle is still materialised from the bridge, but the
-    POST_EXIT_PATH qualification source is retired, so no completion row or
-    completion bundle is ever produced and the stage is RETIRED_R17."""
+def test_bridge_lifecycle_stops_at_retired_r17_without_any_bundle(tmp_path, monkeypatch):
+    """R17: the POST_EXIT_PATH qualification source is retired, so no completion
+    row or completion bundle is ever produced and the stage is RETIRED_R17.
+    R22: no transfer bundle is produced either."""
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(lifecycle_pipeline, "QUALIFICATION_HORIZON_SEC", 4.0)
     _write_tape(tmp_path / "market_microstructure_1s.jsonl", 100, 107)
@@ -124,15 +123,8 @@ def test_bridge_lifecycle_materialises_transfer_then_stops_at_retired_r17(tmp_pa
         early = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
             tmp_path, now=104.0
         )
-        if early["transfer_bundle_count"] == 1:
-            break
-    assert early["transfer_bundle_count"] == 1
-    transfer = early["results"][0]["transfer_bundle"]
-    assert transfer["manifest"]["maturity"] == "TRANSFER_READY"
-    assert transfer["manifest"]["qualification_ready"] is False
-    assert transfer["manifest"]["ranking_eligible"] is False
-    assert transfer["manifest"]["source_cleanup_authorized"] is False
-    assert verify_bundle(transfer["path"])["passed"] is True
+        assert early["bundle_count"] == 0
+    assert not (tmp_path / "v3" / "lifecycle_transfer_bundles").exists()
 
     dual_write_lifecycle_qualification_horizon(
         position,
@@ -156,13 +148,8 @@ def test_bridge_lifecycle_materialises_transfer_then_stops_at_retired_r17(tmp_pa
     assert "COMPLETION_PENDING_REINDEX" not in stages
     assert "BUNDLE_MATERIALIZED_OR_VERIFIED" not in stages
 
-    # The early transfer snapshot is immutable and never upgraded into a
-    # qualification, ranking, profitability, or cleanup authority.
     repeated = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
         tmp_path, now=301.0
     )
     assert repeated["candidate_count"] == 0
-    assert verify_bundle(transfer["path"])["passed"] is True
-    assert transfer["manifest"]["qualification_ready"] is False
-    assert transfer["manifest"]["ranking_eligible"] is False
-    assert transfer["manifest"]["source_cleanup_authorized"] is False
+    assert not (tmp_path / "v3" / "lifecycle_transfer_bundles").exists()

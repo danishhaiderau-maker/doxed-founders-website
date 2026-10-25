@@ -17077,8 +17077,8 @@ def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
         ("market_segments", lambda: r5_retention.cap_market_segments(
             runtime_root, referenced=keep_info.get("segment_shas") or (), now=now)),
         ("lifecycle_bundles", lambda: r5_retention.cap_lifecycle_bundles(
-            runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks",
-            keep=keep_info.get("bundle_ids") or (), now=now)),
+            runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", now=now)),
+        ("retired_transfer_bundles", lambda: r5_retention.purge_retired_transfer_bundles(runtime_root, now=now)),
     ]
     if v22:
         steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(
@@ -51722,7 +51722,7 @@ def status():
                 "v22_retired_r17_label": "positive v22 events retired (R17): no stored 1m path, never written",
                 "lifecycle_qualification_retired_r17": _lifecycle_qualification_retired_r17_total(),
                 "lifecycle_qualification_retired_r17_label": "lifecycles stopped at QUALIFICATION_HORIZON_RETIRED_R17 "
-                                                             "(POST_EXIT_PATH source retired; transfer bundles only)",
+                                                             "(POST_EXIT_PATH source retired; stop at terminal)",
                 "cleanup_enabled": False,
                 "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
                 "family_tiles_arm_discovery_grid": True,
@@ -54573,7 +54573,6 @@ def _lifecycle_artifact_counts(now: float, maximum_entries: int = 4096) -> dict:
     """Count lifecycle artifacts with fixed traversal and no content reads."""
     root = _data_sync_runtime_root() / "v3"
     specifications = {
-        "transfer_bundles": (root / "lifecycle_transfer_bundles", "transfer-", True),
         "completion_bundles": (root / "lifecycle_bundles", "lifecycle-", True),
         "acks": (_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", "lifecycle-", False),
     }
@@ -54877,7 +54876,6 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
             for key in (
                 "rows_scanned", "bytes_indexed", "pending_dirty_lifecycles",
                 "promoted_qualification_retries", "candidate_count",
-                "transfer_ready_count", "transfer_bundle_count",
                 "completion_appended_count", "bundle_count",
             )
         } | {"caught_up": bool(last.get("caught_up"))},

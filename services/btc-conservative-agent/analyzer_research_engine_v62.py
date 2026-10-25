@@ -22335,8 +22335,8 @@ def write_report_manifest(
             "file": LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE,
             "category": "Genome & Reports",
             "description": (
-                "Manifest-verified qualification bundles and transfer-ready audit copies; "
-                "payload files are not scanned, and neither count is ranking or profitability evidence"
+                "Manifest-verified qualification bundles; "
+                "payload files are not scanned, and the count is not ranking or profitability evidence"
             ),
             "size_bytes": lifecycle_inventory_mirror.stat().st_size,
             "modified_at": datetime.fromtimestamp(
@@ -22346,9 +22346,6 @@ def write_report_manifest(
             "analysis_provenance": analysis_provenance,
             "qualification_bundle_count": (
                 lifecycle_bundle_inventory.get("qualification") or {}
-            ).get("unique_lifecycle_count"),
-            "transfer_audit_bundle_count": (
-                lifecycle_bundle_inventory.get("transfer") or {}
             ).get("unique_lifecycle_count"),
         })
     except Exception as exc:
@@ -23750,8 +23747,6 @@ def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
     findings = payload.get("key_findings") or []
     findings_html = "".join(f"<li>{esc(f)}</li>" for f in findings[:10])
     lifecycle_qualification = lifecycle_inventory.get("qualification") or {}
-    lifecycle_transfer = lifecycle_inventory.get("transfer") or {}
-    lifecycle_parity = lifecycle_inventory.get("parity") or {}
     lifecycle_current = bool(
         lifecycle_inventory.get("schema") == "lifecycle_bundle_inventory_v1"
         and lifecycle_inventory.get("inventory_scope") == "MANIFEST_ONLY"
@@ -23759,11 +23754,6 @@ def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
         and lifecycle_inventory.get("complete_scope") == "MANIFEST_INVENTORY"
         and lifecycle_inventory.get("payload_verification_status") == "UNKNOWN_NOT_SCANNED"
         and lifecycle_inventory.get("payload_files_read") == 0
-        and lifecycle_parity.get("scope") == "MANIFEST_INVENTORY"
-        and lifecycle_transfer.get("audit_only") is True
-        and lifecycle_transfer.get("profitability_supported") is False
-        and lifecycle_transfer.get("ranking_eligible") is False
-        and lifecycle_transfer.get("source_cleanup_authorized") is False
     )
     provenance = payload.get("analysis_provenance") or {}
     generation_revision = payload.get("generation_revision") or provenance.get("generation_revision") or "UNKNOWN"
@@ -23828,11 +23818,9 @@ def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
 <section><h2>Lifecycle Evidence Bundles</h2>
 <div class="kpis">
   <div class="kpi"><div class="lbl">manifest-verified qualification bundles</div><div class="val">{esc(lifecycle_qualification.get('unique_lifecycle_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
-  <div class="kpi"><div class="lbl">transfer-ready audit copies</div><div class="val">{esc(lifecycle_transfer.get('unique_lifecycle_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
-  <div class="kpi"><div class="lbl">matched lifecycle identities</div><div class="val">{esc(lifecycle_parity.get('intersection_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
   <div class="kpi"><div class="lbl">invalid manifests</div><div class="val">{esc(lifecycle_inventory.get('invalid_manifest_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
 </div>
-<p class="note">Inventory completeness and parity cover manifests only. Payload verification status is UNKNOWN_NOT_SCANNED and payload files read is 0; no payload integrity or ranking qualification is claimed. Transfer-ready audit copies are audit-only=true, ranking eligible=false, profitability supported=false, and source cleanup authorized=false. They are never counted as strategies, fills, trades, or winners.</p></section>
+<p class="note">Inventory completeness covers manifests only. Payload verification status is UNKNOWN_NOT_SCANNED and payload files read is 0; no payload integrity or ranking qualification is claimed.</p></section>
 <section><h2>Lanes</h2><table><tr><th>Lane</th><th>Fills</th><th>Approves</th><th>Real PnL</th><th>EV/Approve</th></tr>{lane_rows}</table></section>
 <section><h2>Research Cohorts</h2><table><tr><th>Cohort</th><th>Included</th><th>Excluded</th><th>Exclusion reasons</th></tr>{cohort_rows or '<tr><td colspan="4">UNKNOWN — cohort evidence missing</td></tr>'}</table></section>
 <section><h2>AI Confidence</h2><table><tr><th>Band</th><th>Trades</th><th>WR</th><th>PnL</th></tr>{cal_rows or '<tr><td colspan="4">No data</td></tr>'}</table></section>

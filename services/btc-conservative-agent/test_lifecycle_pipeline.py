@@ -156,7 +156,7 @@ def test_incomplete_is_retired_r17_and_late_evidence_cannot_resurrect_completion
 
 
 def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path, monkeypatch):
-    """Deferral and promotion of the transfer stage are live; at maturity the
+    """Deferral and promotion are live; at maturity the
     promoted lifecycle stops at the R17 stage instead of queueing retries."""
     _patch_provenance(monkeypatch)
     monkeypatch.setattr(lifecycle_pipeline, "QUALIFICATION_HORIZON_SEC", 100.0)
@@ -166,16 +166,9 @@ def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path
         _append(tmp_path, row)
     first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
     assert first["results"][0]["stage"] == "QUALIFICATION_DEFERRED_UNTIL_MATURITY"
-    assert first["transfer_ready_count"] == 1
-    assert first["transfer_bundle_count"] == 1
-    assert first["results"][0]["transfer_stage"] == (
-        "TRANSFER_BUNDLE_MATERIALIZED_OR_VERIFIED"
-    )
-    transfer_manifest = first["results"][0]["transfer_bundle"]["manifest"]
-    assert transfer_manifest["maturity"] == "TRANSFER_READY"
-    assert transfer_manifest["qualification_ready"] is False
-    assert transfer_manifest["ranking_eligible"] is False
-    assert transfer_manifest["source_cleanup_authorized"] is False
+    assert "transfer_bundle_count" not in first  # R22: transfer bundles retired
+    assert "transfer_stage" not in first["results"][0]
+    assert not (tmp_path / "v3" / "lifecycle_transfer_bundles").exists()
     assert first["results"][0]["retry_at"] == 20_050.0
     assert first["scan"]["pending_dirty_lifecycles"] == 0
 
@@ -187,7 +180,6 @@ def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path
     assert due["candidate_count"] == 1
     assert due["scan"]["promoted_qualification_retries"] == 1
     assert due["results"][0]["stage"] == lifecycle_pipeline.QUALIFICATION_RETIRED_R17_STAGE
-    assert due["results"][0]["transfer_stage"] == "TRANSFER_BUNDLE_MATERIALIZED_OR_VERIFIED"
     assert due["completion_appended_count"] == 0
 
     # The retired stage removes the retry: nothing is promoted again.
@@ -405,7 +397,6 @@ def test_emergency_closure_materializes_only_terminal_lifecycle(tmp_path, monkey
         assert report["source_cleanup_authorized"] is False
         if report["bundle_count"] == 1:
             break
-    assert any(report["transfer_bundle_count"] == 1 for report in reports)
     assert sum(report["completion_appended_count"] for report in reports) == 1
     assert reports[-1]["bundle_count"] == 1
     assert (tmp_path / "v3" / "ledgers" / "lifecycle.jsonl").is_file()
@@ -420,7 +411,6 @@ def test_emergency_closure_defers_nonterminal_without_research_expansion(tmp_pat
     )
     assert report["candidate_count"] == 1
     assert report["results"][0]["stage"] == "EMERGENCY_NONTERMINAL_BLOCKED"
-    assert report["transfer_bundle_count"] == 0
     assert report["completion_appended_count"] == 0
     assert report["bundle_count"] == 0
     assert source.read_bytes() == before
@@ -440,13 +430,8 @@ def test_runtime_provenance_mismatch_remains_dirty_for_later_retry(tmp_path, mon
     )
     first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
     assert first["results"][0]["stage"] == "RUNTIME_PROVENANCE_MISMATCH"
-    # Transfer preserves the internally consistent historical provenance and
-    # never authorizes cleanup; qualification remains fail-closed against the
-    # current runtime revision.
-    assert first["transfer_bundle_count"] == 1
-    assert first["results"][0]["transfer_bundle"]["manifest"][
-        "source_cleanup_authorized"
-    ] is False
+    # Qualification remains fail-closed against the current runtime revision.
+    assert not (tmp_path / "v3" / "lifecycle_transfer_bundles").exists()
     assert first["scan"]["pending_dirty_lifecycles"] == 1
 
     _patch_provenance(monkeypatch)

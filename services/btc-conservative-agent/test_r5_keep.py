@@ -42,15 +42,11 @@ def test_open_lifecycles_reads_pointer_ledger_rows_and_is_readonly(tmp_path):
     retry_key = dict(KEY, episode_id="e2")
     _index(tmp_path, dirty=[KEY], retry=[retry_key, KEY],
            events=[("signals", 0, len(first), KEY), ("signals", len(first) + 1, len(second), KEY)])
-    ident = r5_keep.identity_id(KEY)
-    ptr = tmp_path / "v3" / "lifecycle_transfer_bundles" / "index" / f"{ident}.json"
-    ptr.parent.mkdir(parents=True)
-    ptr.write_text(json.dumps({"bundle_id": "transfer-" + "ee" * 32}))
     db = tmp_path / "v3" / "lifecycle_bundle_index" / "lifecycle_index.sqlite3"
     before = db.read_bytes()
     info = r5_keep.open_lifecycles(tmp_path)
     assert info["open_count"] == 2 and info["error"] is None and info["truncated"] is False
-    assert info["bundle_ids"] == {"ee" * 32}
+    assert "bundle_ids" not in info  # R22: no transfer pointers feed a bundle keep set
     assert info["segment_shas"] == {SHA, "cd" * 32}
     assert info["earliest_start_ts"] == 900.0
     assert db.read_bytes() == before

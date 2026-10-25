@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -53,7 +54,7 @@ def _install_launch(
                 "schema": "lifecycle_pipeline_worker_result_v1", "nonce": nonce,
                 "source_revision": REVISION, "launched_unix": request_payload["launched_unix"],
                 "started_unix": 1, "generated_unix": 2, "generated_at": "x",
-                "request_sha256": runtime_module.hashlib.sha256(request.read_bytes()).hexdigest(),
+                "request_sha256": hashlib.sha256(request.read_bytes()).hexdigest(),
                 "pipeline": pipeline or {
                     "candidate_count": 1, "bundle_count": 1,
                     "pressure_mode": request_payload["pressure_mode"],
@@ -64,7 +65,7 @@ def _install_launch(
                 "emergency_wal": emergency_wal,
                 "emergency_idempotency_bootstrap": emergency_bootstrap,
             }
-            payload["result_sha256"] = runtime_module.hashlib.sha256(
+            payload["result_sha256"] = hashlib.sha256(
                 json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
             ).hexdigest()
             result.write_text(json.dumps(payload), encoding="utf-8")
@@ -368,7 +369,7 @@ def test_worker_failure_receipt_is_retained_as_bounded_status_then_cleaned(tmp_p
             "started_unix": 1,
             "generated_unix": 2,
             "generated_at": "x",
-            "request_sha256": runtime_module.hashlib.sha256(request.read_bytes()).hexdigest(),
+            "request_sha256": hashlib.sha256(request.read_bytes()).hexdigest(),
             "failure": {
                 "error_class": "RuntimeError",
                 "error_code": "WORKER_PIPELINE_FAILED",
@@ -376,7 +377,7 @@ def test_worker_failure_receipt_is_retained_as_bounded_status_then_cleaned(tmp_p
             "source_cleanup_authorized": False,
         }
         unsigned = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-        payload["result_sha256"] = runtime_module.hashlib.sha256(unsigned).hexdigest()
+        payload["result_sha256"] = hashlib.sha256(unsigned).hexdigest()
         result.write_text(json.dumps(payload), encoding="utf-8")
         return process
 
@@ -408,12 +409,12 @@ def test_worker_failure_receipt_survives_later_overlap_skip(tmp_path, monkeypatc
             "nonce": nonce, "source_revision": REVISION,
             "launched_unix": request_payload["launched_unix"],
             "started_unix": 1, "generated_unix": 2, "generated_at": "x",
-            "request_sha256": runtime_module.hashlib.sha256(request.read_bytes()).hexdigest(),
+            "request_sha256": hashlib.sha256(request.read_bytes()).hexdigest(),
             "failure": {"error_class": "RuntimeError", "error_code": "WORKER_PIPELINE_FAILED"},
             "source_cleanup_authorized": False,
         }
         unsigned = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-        payload["result_sha256"] = runtime_module.hashlib.sha256(unsigned).hexdigest()
+        payload["result_sha256"] = hashlib.sha256(unsigned).hexdigest()
         result.write_text(json.dumps(payload), encoding="utf-8")
         return process
 

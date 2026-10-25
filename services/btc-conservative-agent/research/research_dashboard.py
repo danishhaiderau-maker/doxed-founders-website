@@ -4597,10 +4597,6 @@ def api_summary():
         or lifecycle_provenance.get("dataset_epoch")
         or ""
     ).strip()
-    transfer_inventory = (
-        lifecycle_inventory.get("transfer")
-        if isinstance(lifecycle_inventory, dict) else {}
-    ) or {}
     lifecycle_current = bool(
         lifecycle_inventory.get("schema") == "lifecycle_bundle_inventory_v1"
         and lifecycle_inventory.get("inventory_scope") == "MANIFEST_ONLY"
@@ -4611,10 +4607,6 @@ def api_summary():
         and (lifecycle_inventory.get("scan") or {}).get("truncated") is False
         and current_revision and lifecycle_revision == current_revision
         and current_epoch and lifecycle_epoch == current_epoch
-        and transfer_inventory.get("audit_only") is True
-        and transfer_inventory.get("ranking_eligible") is False
-        and transfer_inventory.get("profitability_supported") is False
-        and transfer_inventory.get("source_cleanup_authorized") is False
     )
     def _bundle_count(value):
         try:
@@ -4626,18 +4618,7 @@ def api_summary():
     qualification_count = _bundle_count(
         (lifecycle_inventory.get("qualification") or {}).get("unique_lifecycle_count")
     )
-    transfer_count = _bundle_count(transfer_inventory.get("unique_lifecycle_count"))
     invalid_count = _bundle_count(lifecycle_inventory.get("invalid_manifest_count"))
-    raw_parity = lifecycle_inventory.get("parity") or {}
-    safe_parity = {
-        key: _bundle_count(raw_parity.get(key, 0))
-        for key in (
-            "intersection_count",
-            "qualification_only_count",
-            "transfer_only_count",
-            "provenance_mismatch_count",
-        )
-    }
     payload_verification_status = str(
         lifecycle_inventory.get("payload_verification_status")
         or "UNKNOWN_NOT_SCANNED"
@@ -4645,39 +4626,23 @@ def api_summary():
     lifecycle_current = bool(
         lifecycle_current
         and qualification_count is not None
-        and transfer_count is not None
         and invalid_count is not None
-        and all(value is not None for value in safe_parity.values())
     )
     if lifecycle_current:
         lifecycle_bundle_summary = {
             "status": "AVAILABLE_CURRENT_GENERATION",
             "qualification_count": qualification_count,
-            "transfer_audit_count": transfer_count,
-            "parity": safe_parity,
             "invalid_count": invalid_count,
             "qualification_label": "manifest-verified qualification bundles",
-            "transfer_label": "transfer-ready audit copies",
             "payload_verification_status": payload_verification_status,
-            "transfer_audit_only": True,
-            "transfer_ranking_eligible": False,
-            "transfer_profitability_supported": False,
-            "transfer_source_cleanup_authorized": False,
         }
     else:
         lifecycle_bundle_summary = {
             "status": "UNAVAILABLE_CURRENT_GENERATION",
             "qualification_count": None,
-            "transfer_audit_count": None,
-            "parity": {},
             "invalid_count": None,
             "qualification_label": "manifest-verified qualification bundles",
-            "transfer_label": "transfer-ready audit copies",
             "payload_verification_status": "UNKNOWN_NOT_SCANNED",
-            "transfer_audit_only": True,
-            "transfer_ranking_eligible": False,
-            "transfer_profitability_supported": False,
-            "transfer_source_cleanup_authorized": False,
             "reason": "REPORT_NOT_IN_CURRENT_GENERATION",
         }
 
@@ -8093,15 +8058,8 @@ async function loadSummary() {
   const bundleKpis = document.getElementById('lifecycle-bundle-kpis');
   if (bundleKpis) {
     const unavailable = lifecycleBundles.status !== 'AVAILABLE_CURRENT_GENERATION';
-    const parity = lifecycleBundles.parity || {};
     const rows = [
       ['manifest-verified qualification bundles', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.qualification_count ?? 'NO DATA')],
-      ['transfer-ready audit copies', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.transfer_audit_count ?? 'NO DATA')],
-      ['Bundle parity', unavailable ? 'UNAVAILABLE' : (
-        (parity.intersection_count ?? 'NO DATA') + ' matched · '
-        + (parity.qualification_only_count ?? 'NO DATA') + ' qualification only · '
-        + (parity.transfer_only_count ?? 'NO DATA') + ' transfer only'
-      )],
       ['Invalid bundle manifests', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.invalid_count ?? 'NO DATA')],
     ];
     bundleKpis.innerHTML = rows.map(([label, value]) =>
@@ -8111,8 +8069,8 @@ async function loadSummary() {
   const bundleNote = document.getElementById('lifecycle-bundle-note');
   if (bundleNote) {
     bundleNote.textContent = lifecycleBundles.status === 'AVAILABLE_CURRENT_GENERATION'
-      ? 'Manifest inventory only · payload verification=' + (lifecycleBundles.payload_verification_status || 'UNKNOWN_NOT_SCANNED') + '. Transfer-ready audit copies: audit-only=true · ranking eligible=false · profitability supported=false · source cleanup authorized=false.'
-      : 'Lifecycle bundle inventory is unavailable for this exact analyzer generation. Transfer-ready audit copies remain audit-only and cannot rank, profitability-qualify, or authorize source cleanup.';
+      ? 'Manifest inventory only · payload verification=' + (lifecycleBundles.payload_verification_status || 'UNKNOWN_NOT_SCANNED') + '.'
+      : 'Lifecycle bundle inventory is unavailable for this exact analyzer generation.';
   }
   const cohortNote = document.getElementById('cohort-note');
   if (cohortNote) {

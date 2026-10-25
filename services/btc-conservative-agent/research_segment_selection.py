@@ -74,7 +74,7 @@ EXCLUDED_DIR_NAMES = frozenset({
     # Ops reset trees and rebuildable caches, not live research evidence.
     "research_reset_receipts",
     "signal_snapshots_v1",
-    "lifecycle_transfer_bundles",
+    "lifecycle_transfer_bundles",  # retired (R22); r5_retention purges it, never ship it meanwhile
     "analyzer_generations",
     "epoch_quarantine",
 })
