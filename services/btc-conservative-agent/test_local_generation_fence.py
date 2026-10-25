@@ -1,6 +1,7 @@
 """Malformed tombstones must block consumers, never look like no reset."""
 import base64
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -50,11 +51,31 @@ def test_absent_and_valid_fences_remain_distinct(tmp_path):
         assert_local_generation_available(tmp_path, stage="fixture")
 
 
-@pytest.mark.parametrize("shape", ["absent", "directory", "invalid_json", "missing_tombstone", "valid"])
-def test_powershell_fence_shape_parity(tmp_path, shape):
+# Linux CI pwsh cold-start can exceed 15s; sibling EncodedCommand tests use 30+.
+# [absent] is first in the parametrize list and previously absorbed TimeoutExpired
+# (returncode -9) while later shapes passed — raise budget + warm once per module.
+_PWSH_TIMEOUT_SEC = 60
+_PWSH_ENV = {
+    "POWERSHELL_TELEMETRY_OPTOUT": "1",
+    "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+}
+
+
+@pytest.fixture(scope="module")
+def powershell_shell():
     shell = shutil.which("pwsh") or shutil.which("powershell")
     if not shell:
         pytest.skip("PowerShell is unavailable")
+    env = {**os.environ, **_PWSH_ENV}
+    subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-NoLogo", "-Command", "exit 0"],
+        text=True, capture_output=True, timeout=_PWSH_TIMEOUT_SEC, check=False, env=env,
+    )
+    return shell
+
+
+@pytest.mark.parametrize("shape", ["absent", "directory", "invalid_json", "missing_tombstone", "valid"])
+def test_powershell_fence_shape_parity(tmp_path, shape, powershell_shell):
     path = tmp_path / FENCE_FILE_NAME
     if shape == "directory":
         path.mkdir()
@@ -66,9 +87,12 @@ def test_powershell_fence_shape_parity(tmp_path, shape):
     module = Path(__file__).resolve().parents[2] / "scripts" / "local-generation-fence.ps1"
     quote = lambda value: str(value).replace("'", "''")
     script = f". '{quote(module)}'; try {{ Assert-LocalGenerationUnfenced -DataRoot '{quote(tmp_path)}' -Stage fixture; 'CLEAR' }} catch {{ $_.Exception.Message }}"
-    result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                             base64.b64encode(script.encode("utf-16le")).decode()],
-                            text=True, capture_output=True, timeout=15, check=True)
+    result = subprocess.run(
+        [powershell_shell, "-NoProfile", "-NonInteractive", "-NoLogo", "-EncodedCommand",
+         base64.b64encode(script.encode("utf-16le")).decode()],
+        text=True, capture_output=True, timeout=_PWSH_TIMEOUT_SEC, check=True,
+        env={**os.environ, **_PWSH_ENV},
+    )
     expected = "CLEAR" if shape == "absent" else (
         "LOCAL_GENERATION_FENCED" if shape == "valid" else "LOCAL_GENERATION_FENCE_INVALID")
     assert expected in result.stdout
