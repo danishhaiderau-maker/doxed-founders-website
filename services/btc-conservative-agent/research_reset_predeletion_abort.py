@@ -20,7 +20,7 @@ VENDORED_REVIEWED_DELETERS = {
 
 # sha256 of the deployed research_exact_deletion.py this module accepts (new reviewed blob,
 # #696 caps) or, for incident retirement only, the old reviewed blob. Anything else fails closed.
-CURRENT_REVIEWED_DELETER_SHA256 = 'db4c865bd6745b1b8d957eb09e06d34cc70313dda3706c693a707b3d5134912b'
+CURRENT_REVIEWED_DELETER_SHA256 = 'b0dbcf8f431ae77aae31c5b6a5e65f09faa696ec31d83f4111bdbefff1ce8791'
 OLD_REVIEWED_DELETER_SHA256 = '3a64a7c7f21f238b712df4f4765f1f57d737fb046503635dfa517f48d10538e6'
 
 REVIEWED_FAILED_DELETERS = {
