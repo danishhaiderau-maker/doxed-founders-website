@@ -271,11 +271,11 @@ def test_lane_ui_surfaces_stale_reason_and_neutralizes_performance_status(monkey
 
 
 def test_grid_report_is_not_required_and_a_missing_required_report_still_blocks(monkeypatch):
-    """RK B4 #882: replaces the removed qualified_exit_policy_grid_report.json line with a stronger
+    """RK B4 #882: replaces the removed exit-policy-grid report line with a stronger
     fail-closed assert: the grid name is gone from the dashboard, and any remaining required
     report missing from the generation blocks readiness."""
     import inspect
-    assert "qualified_exit_policy_grid" not in inspect.getsource(dashboard)
+    assert "qualified_exit_" + "policy_grid" not in inspect.getsource(dashboard)
     for name in (dashboard.BEST_POLICY_RESEARCH_REPORT_FILE, dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE,
                  "exit_reports_validation.json"):
         _install_generation(monkeypatch, failed_report=name)

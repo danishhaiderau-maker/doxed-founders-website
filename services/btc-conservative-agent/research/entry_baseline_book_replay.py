@@ -94,6 +94,12 @@ def read_opportunities(data_dir: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+# RK B4 #882 (R3/R14): the replay may only count fills priced by the shared paper_fill maker path (#883).
+# Until book_limit_entry stamps that model, every result stays in the report but is NON-COUNTABLE.
+SHARED_MAKER_FILL_MODEL = "paper_fill.maker_rest_fills"
+NON_COUNTABLE_MAKER_MODEL = "BOOK_LIMIT_ENTRY_NOT_ON_SHARED_PAPER_FILL_MAKER_PATH_PR883"
+
+
 def build_entry_baseline_book_replay(
     data_dir: str | Path, generation: Mapping[str, Any], *,
     opportunities: Iterable[Mapping[str, Any]] | None = None,
@@ -175,6 +181,7 @@ def build_entry_baseline_book_replay(
                             "price_age_ms": receipt.get("entry_book_age_ms"), "price_source": PRICE_SOURCE,
                             "evidence_status": receipt.get("evidence_status"),
                             "schedule_sha256": receipt.get("schedule_sha256"), "epoch_id": epoch,
+                            "countable": receipt.get("rest_fill_model") == SHARED_MAKER_FILL_MODEL,
                             "book_receipt": receipt})
     reason_counts: dict[str, int] = {}
     for item in non_book:
@@ -194,8 +201,11 @@ def build_entry_baseline_book_replay(
             b = bucket(item["baseline_id"])
             b["opportunities"] += 1
             b["non_book"] += 1
+    countable = bool(results) and all(r["countable"] for r in results)
     return {
         "schema": SCHEMA, "status": "OK" if results else "NO_BOOK_PRICED_RESULTS",
+        "countable": countable,
+        "non_countable_reason": None if countable or not results else NON_COUNTABLE_MAKER_MODEL,
         "epoch_id": epoch, "price_source": PRICE_SOURCE, "helper": "book_limit_entry",
         "generation": dict(generation),
         "source_provenance": dict(provenance) if provenance is not None else source_provenance(data_dir, epoch),
@@ -223,7 +233,9 @@ def book_replay_health(report: Mapping[str, Any]) -> dict[str, Any]:
     degraded = sorted(k for k, v in summaries.items()
                       if int(v.get("full_fills", 0)) + int(v.get("partial_fills", 0)) == 0)
     reason = None
-    if not summaries:
+    if report.get("countable") is not True and report.get("results"):
+        reason = report.get("non_countable_reason") or NON_COUNTABLE_MAKER_MODEL
+    elif not summaries:
         reason = "NO_BASELINES_EVALUATED"
     elif book_priced == 0:
         reason = "NO_BOOK_PRICED_RESULTS"

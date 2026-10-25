@@ -149,7 +149,7 @@ def test_evidence_coverage_interim_error_names_retired_source():
 
 def test_book_replay_health_is_native_to_the_new_layout():
     from research.entry_baseline_book_replay import book_replay_health
-    rep = {"schema": "entry_baseline_book_replay_v1", "non_book_reason_counts": {"NO_BOOK": 1}, "summaries": {
+    rep = {"schema": "entry_baseline_book_replay_v1", "countable": True, "non_book_reason_counts": {"NO_BOOK": 1}, "summaries": {
         "A": {"opportunities": 2, "full_fills": 1, "partial_fills": 0, "no_fills": 0, "non_book": 1}}}
     h = book_replay_health(rep)
     assert (h["status"], h["fills"], h["book_priced"], h["non_book"]) == ("OK", 1, 1, 1)
@@ -174,3 +174,31 @@ def test_dashboard_research_design_ships_book_replay_summaries_not_rows(monkeypa
     assert "results" not in replay and "non_book_rows" not in replay and "episode_receipts" not in replay
     assert replay["summaries"]["A"]["non_book"] == 50
     assert replay["rows_url"] == "/api/report/entry_baseline_replay_report.json"
+
+
+# ---- RK B4 #882 ruling 3: no second pricer; non-shared maker model => non-countable -----------------------------
+def _replay_with_model(monkeypatch, model):
+    import book_limit_entry as ble
+
+    def fake(direction, qty, schedule, book_at, **kw):
+        return {"supported": True, "final_classification": "FULL_FILL", "fill_price": 50001.0,
+                "entry_book_age_ms": 250, "delay_s": kw["delay_s"], "filled_qty": qty, "rest_fill_model": model}
+    monkeypatch.setattr(ble, "book_limit_entry", fake)
+    return build_entry_baseline_book_replay("/nonexistent", {"epoch_id": "ep1"}, provenance={"epoch_id": "ep1"},
+                                            opportunities=[_opp()], tape_loader=lambda d, w: _Tape())
+
+
+def test_book_replay_non_countable_until_shared_paper_fill_maker_path(monkeypatch):
+    from research.entry_baseline_book_replay import (NON_COUNTABLE_MAKER_MODEL, SHARED_MAKER_FILL_MODEL,
+                                                     book_replay_health)
+    import book_limit_entry as ble
+    # the current helper still stamps order_model.maker_rest_step (pre-#883): the real stamp is not the shared one
+    assert ble._base("LONG", 0.01)["rest_fill_model"] != SHARED_MAKER_FILL_MODEL
+    rep = _replay_with_model(monkeypatch, "order_model.maker_rest_step")
+    assert rep["countable"] is False and rep["non_countable_reason"] == NON_COUNTABLE_MAKER_MODEL
+    assert rep["results"][0]["countable"] is False
+    health = book_replay_health(rep)
+    assert health["status"] == "DEGRADED" and health["reason_code"] == NON_COUNTABLE_MAKER_MODEL
+    ok = _replay_with_model(monkeypatch, SHARED_MAKER_FILL_MODEL)
+    assert ok["countable"] is True and ok["non_countable_reason"] is None
+    assert book_replay_health(ok)["reason_code"] is None

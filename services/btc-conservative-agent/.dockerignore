@@ -48,6 +48,7 @@ research/*
 !research/shadow_outcome_reconstruction.py
 !research/conservative_fill_cohort.py
 !research/conservative_limit_fill.py
+!research/entry_baseline_book_replay.py
 !research/fill_model.py
 !research/quantity_execution.py
 !research/venue_quantity_constraints.py
