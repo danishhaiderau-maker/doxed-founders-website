@@ -5,6 +5,7 @@ three bridge write sites (paper submit, terminal schedule, v22 mirror) are
 exercised by their real fixtures.
 """
 import math
+import os
 import unittest
 from unittest import mock
 
@@ -34,7 +35,8 @@ def test_every_order_intent_row_from_bridge_suite_is_stamped():
 
     suite = unittest.defaultTestLoader.loadTestsFromModule(test_research_v3_bridge)
     with mock.patch.object(research_v3_store.V3EvidenceStore, "append", spy):
-        unittest.TextTestRunner(verbosity=0, stream=open("/dev/null", "w")).run(suite)
+        with open(os.devnull, "w") as sink:
+            unittest.TextTestRunner(verbosity=0, stream=sink).run(suite)
     assert captured, "bridge suite wrote no order_intent rows"
     kinds = {row.get("intent_kind") for row in captured}
     assert "ACTUAL_PAPER_LIMIT_SUBMIT" in kinds
@@ -60,7 +62,8 @@ def test_paper_submit_site_labels_copied_observed_ts():
 
     suite = unittest.defaultTestLoader.loadTestsFromModule(test_research_v3_bridge)
     with mock.patch.object(research_v3_store.V3EvidenceStore, "append", spy):
-        unittest.TextTestRunner(verbosity=0, stream=open("/dev/null", "w")).run(suite)
+        with open(os.devnull, "w") as sink:
+            unittest.TextTestRunner(verbosity=0, stream=sink).run(suite)
     submits = [r for r in captured if r.get("intent_kind") == "ACTUAL_PAPER_LIMIT_SUBMIT"]
     assert submits
     for row in submits:
