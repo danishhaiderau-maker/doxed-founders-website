@@ -3,7 +3,12 @@
 Shared by research_v3_store.open_read_only and #872. A stream listed here may keep a stale
 identity pointer (it is never republished) WITHOUT failing the read-only store, but only
 while its real ledger file still matches the fingerprint recorded at retirement. Any write
-after retirement, or a file that can't be read, is a conflict (RED).
+after retirement, or a file that can't be read, is a conflict (RED on the retired stream).
+
+Fingerprint mismatch must NOT poison active ledgers (decision/execution/opportunity): the
+pinned fingerprint is Fly-volume-specific, while the laptop analyzer reads a different host
+copy. open_read_only soft-excludes the retired stream on fingerprint-family refusals and
+keeps hard-raising only on identity (epoch/tile/field) mismatches.
 
 Adding or changing an entry here REQUIRES an RK ruling. Do not edit without one.
 """
@@ -21,6 +26,16 @@ RETIRED_STREAM_ALLOWLIST: dict[str, str] = {
 RETIREMENT_FINGERPRINTS: dict[str, dict[str, int]] = {
     "market_segment": {"rows": 18322, "mtime": 1792830018, "size": 37969967},
 }
+
+# open_read_only: exclude the retired stream (serve no rows) instead of raising a store-wide
+# identity conflict. Active authorities stay readable; tipMatch / v3_read_authority must not
+# go INVALID solely because a Fly-pinned fingerprint disagrees with a laptop copy.
+SOFT_RETIRED_EXEMPTION_REFUSALS: frozenset[str] = frozenset({
+    "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT",
+    "RETIRED_STREAM_HAS_ROTATIONS",
+    "RETIRED_STREAM_UNREADABLE",
+    "RETIRED_STREAM_FINGERPRINT_MISSING",
+})
 
 
 def retired_stream_unchanged(ledger_dir: str | Path, stream: str) -> tuple[bool, str]:
