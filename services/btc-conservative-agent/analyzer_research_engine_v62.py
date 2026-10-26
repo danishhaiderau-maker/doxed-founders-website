@@ -21867,7 +21867,7 @@ def _attach_generation_receipt(manifest, *, optional_errors):
     manifest["generation_receipt"] = {
         key: receipt[key] for key in (
             "schema", "level", "complete", "reasons", "failed_required_studies",
-            "failed_optional_studies", "integrity_status", "protection_replay_window",
+            "retired_required_studies", "failed_optional_studies", "integrity_status", "protection_replay_window",
             "source_revision", "expected_epoch_id", "epoch_rejected", "quarantined_inputs", "optional_inputs",
             "protection_replay_excluded_by_reason",
         )

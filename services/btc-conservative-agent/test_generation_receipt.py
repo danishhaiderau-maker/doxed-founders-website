@@ -79,6 +79,55 @@ def test_receipt_is_red_when_a_required_study_errors():
     assert any("UNCHECKED" in reason for reason in receipt["reasons"])
 
 
+
+def test_retired_r17_required_study_is_amber_non_gating_for_complete():
+    """tipMatch blocker: evidence coverage raises CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17 while
+    conservative-results stays LIMIT_FILL_1S-retired.  Declared retirement must not keep
+    complete=false forever after integrity is VALID (#917 cleared v3_read_authority).
+    """
+    receipt = build_generation_receipt(
+        _manifest(**{
+            "evidence_coverage_triage_report.json": {
+                "available_in_generation": False,
+                "generation_error": (
+                    "ValueError: CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17: "
+                    "evidence coverage awaits the book_limit_entry rebuild"
+                ),
+            },
+            "other.json": {"available_in_generation": True, "generation_error": None},
+        }),
+        integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]},
+        **OK,
+    )
+    assert receipt["complete"] is True
+    assert receipt["integrity_status"] == "VALID"
+    assert receipt["failed_required_studies"] == []
+    assert receipt["retired_required_studies"] == ["evidence_coverage_triage_report.json"]
+    assert receipt["level"] == "AMBER"
+    study = next(s for s in receipt["studies"] if s["name"] == "evidence_coverage_triage_report.json")
+    assert study["status"] == "RETIRED" and study["level"] == "AMBER"
+    assert any("retired (R17, non-gating)" in reason for reason in receipt["reasons"])
+
+
+def test_retired_r17_marker_mutation_still_gates_unknown_errors():
+    """Mutation proof: dropping the R17 marker must keep complete=false (real study ERROR)."""
+    receipt = build_generation_receipt(
+        _manifest(**{
+            "evidence_coverage_triage_report.json": {
+                "available_in_generation": False,
+                "generation_error": "ValueError: EVIDENCE_COVERAGE_GENERATION_MISMATCH",
+            },
+        }),
+        integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]},
+        **OK,
+    )
+    assert receipt["complete"] is False
+    assert receipt["failed_required_studies"] == ["evidence_coverage_triage_report.json"]
+    assert receipt["retired_required_studies"] == []
+    study = next(s for s in receipt["studies"] if s["name"] == "evidence_coverage_triage_report.json")
+    assert study["status"] == "ERROR" and study["level"] == "RED"
+
+
 def test_receipt_green_only_when_everything_ran_and_integrity_valid():
     manifest = _manifest(**{"a.json": {"available_in_generation": True}})
     assert build_generation_receipt(manifest, integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]}, **OK)["level"] == "GREEN"
