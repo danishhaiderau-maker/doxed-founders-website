@@ -443,6 +443,58 @@ def guarded_open(path: str | os.PathLike, *args: Any, relpath: str | None = None
         return open(path, *args, **kwargs)
 
 
+V3_LEDGER_DIRS = ("ledgers", "recovery_ledgers")
+
+
+def v3_ledger_relpath(path: str | os.PathLike) -> str | None:
+    """``v3/ledgers/<name>.jsonl`` (or ``v3/recovery_ledgers/...``) for a V3 ledger file, rotation suffix dropped;
+    None for any other file (non-ledger readers keep their own guard)."""
+    parts = Path(path).parts
+    if len(parts) >= 3 and parts[-3] == "v3" and parts[-2] in V3_LEDGER_DIRS:
+        name = re.sub(r"\.\d+$", "", parts[-1])
+        if name.endswith(".jsonl"):
+            return f"v3/{parts[-2]}/{name}"
+    return None
+
+
+def open_v3_ledger(path: str | os.PathLike, *args: Any, inventory: bool = False, **kwargs: Any):
+    """``open`` for one V3 ledger file, recorded by the read monitor as guarded.
+
+    Default (``inventory=False``): the caller MUST pass every parsed row through :func:`admit_v3_row` (hard
+    rejection of PRE_EPOCH / STRADDLE / UNSTAMPED rows) before it reaches any result. ``inventory=True`` is only for
+    byte-level work whose output is never a cohort row (whole-file digests, store dedup/truncation checks).
+    Only the ``open`` itself runs inside the guarded block, so a suspended generator never marks the caller's
+    other opens as guarded."""
+    rel = v3_ledger_relpath(path) or stream_name(path)
+    with guarded_read(rel, "inventory" if inventory else "epoch_filtered"):
+        return Path(path).open(*args, **kwargs)
+
+
+def admit_v3_row(path_or_rel: str | os.PathLike, row: Any) -> bool:
+    """Hard fresh-epoch gate for one parsed V3 ledger row (EpochGuard.admit_v3_ledger_row under the analyzer's
+    process guard). Non-dict rows are rejected. Outside an analyzer run (no declared epoch) everything is admitted."""
+    if not isinstance(row, dict):
+        return False
+    text = os.fspath(path_or_rel)
+    rel = text if text.startswith("v3/") else v3_ledger_relpath(text)
+    if rel is None:
+        return True
+    return process_guard().admit_v3_ledger_row(rel, row)
+
+
+def admit_v3_line(path_or_rel: str | os.PathLike, raw: str | bytes) -> bool:
+    """:func:`admit_v3_row` for one raw JSONL line (parsed here; unparseable lines are rejected)."""
+    guard = process_guard()
+    if not guard.manifest:
+        return True
+    import json
+    try:
+        row = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return admit_v3_row(path_or_rel, row)
+
+
 _PROCESS_GUARD: "EpochGuard | None" = None
 
 

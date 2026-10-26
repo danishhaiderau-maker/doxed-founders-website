@@ -297,8 +297,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _count_jsonl_records(path: Path) -> int:
     """Validate and count a ledger without retaining its rows in memory."""
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
     count = 0
-    with path.open("rt", encoding="utf-8-sig") as handle:
+    with open_v3_ledger(path, "rt", encoding="utf-8-sig") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
@@ -312,6 +314,8 @@ def _count_jsonl_records(path: Path) -> int:
                 raise ValueError(
                     f"AUTHORITATIVE_LEDGER_ROW_NOT_OBJECT:{path.name}:{line_number}"
                 )
+            if not admit_v3_row(path, dict(row)):  # fresh-epoch count, same gate as the binding index
+                continue
             count += 1
     return count
 

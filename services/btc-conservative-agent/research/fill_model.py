@@ -117,19 +117,25 @@ def measure_decision_latency(ledger_dir: Path | str, *, exclude_lanes: Iterable[
     excluded = set(exclude_lanes)
     signal: dict[str, float] = {}
     samples: list[float] = []
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
     try:
-        with open(led / "opportunity.jsonl", encoding="utf-8", errors="replace") as fh:
+        with open_v3_ledger(led / "opportunity.jsonl", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 try:
                     row = json.loads(line)
+                    if not admit_v3_row(led / "opportunity.jsonl", row):  # hard fresh-epoch gate
+                        continue
                     signal[str(row["episode_id"])] = float(row["signal_ts"])
                 except (ValueError, KeyError, TypeError):
                     continue
-        with open(led / "order_intent.jsonl", encoding="utf-8", errors="replace") as fh:
+        with open_v3_ledger(led / "order_intent.jsonl", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 try:
                     row = json.loads(line)
                 except ValueError:
+                    continue
+                if not admit_v3_row(led / "order_intent.jsonl", row):
                     continue
                 if row.get("research_lane") in excluded or str(row.get("episode_id")) not in signal:
                     continue
