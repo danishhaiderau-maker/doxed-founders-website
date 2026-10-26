@@ -32,27 +32,46 @@ def _worst(*levels: str) -> str:
     return max((lvl for lvl in levels if lvl in _RANK), key=_RANK.get, default=GREEN)
 
 
+# Declared R17 retirements that still appear in required_report_status must not
+# permanently gate tipMatch complete=true.  They stay visible as AMBER RETIRED debt
+# until the producer is rebuilt (e.g. evidence coverage awaits book_limit_entry).
+RETIRED_REQUIRED_STUDY_MARKERS = (
+    "CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17",
+)
+
+
+def _is_retired_required_study_error(error_text: str) -> bool:
+    return any(marker in error_text for marker in RETIRED_REQUIRED_STUDY_MARKERS)
+
+
 def _study_from_required(name: str, status: Any) -> dict[str, Any]:
     status = status if isinstance(status, Mapping) else {}
     error = status.get("generation_error")
     available = status.get("available_in_generation") is True
     invalid = status.get("current_generation_valid") is False
-    if error:
+    error_text = str(error or "")
+    if error and _is_retired_required_study_error(error_text):
+        state = "RETIRED"
+        level = AMBER
+    elif error:
         state = "ERROR"
+        level = RED
     elif not available:
         state = "MISSING"
+        level = RED
     elif invalid:
         state = "INVALID"
+        level = RED
     else:
         state = "OK"
-    error_text = str(error or "")
+        level = GREEN
     return {
         "name": name,
         "required": True,
         "status": state,
         "error_class": error_text.split(":", 1)[0] if error_text else None,
         "error_head": error_text[:300] or None,
-        "level": GREEN if state == "OK" else RED,
+        "level": level,
     }
 
 
@@ -170,7 +189,12 @@ def build_generation_receipt(
     window = dict(protection_replay_window or {})
     window_level = _window_level(window) if window else GREEN
 
-    failed_required = [s["name"] for s in studies if s["required"] and s["status"] != "OK"]
+    retired_required = [s["name"] for s in studies if s["required"] and s["status"] == "RETIRED"]
+    # RETIRED required studies are declared R17 debt: visible, AMBER, non-gating for complete.
+    failed_required = [
+        s["name"] for s in studies
+        if s["required"] and s["status"] not in ("OK", "RETIRED")
+    ]
     failed_optional = [s["name"] for s in studies if not s["required"] and s["status"] != "OK"]
     # Known input limitations stay RED in analyzer_input_blockers.json but only degrade
     # the generation; RED here means a failed required study or non-VALID integrity.
@@ -179,6 +203,10 @@ def build_generation_receipt(
     reasons = []
     if failed_required:
         reasons.append("required studies failed: " + ", ".join(failed_required))
+    if retired_required:
+        reasons.append(
+            "required studies retired (R17, non-gating): " + ", ".join(retired_required)
+        )
     if integrity_status != "VALID":
         failed_checks = integrity_failed_names
         reasons.append(f"integrity {integrity_status}"
@@ -246,6 +274,7 @@ def build_generation_receipt(
         or (window.get("mark_source") or {}).get("excluded_events_by_reason"),
         "reasons": reasons,
         "failed_required_studies": failed_required,
+        "retired_required_studies": retired_required,
         "failed_optional_studies": failed_optional,
         "integrity_status": integrity_status,
         "integrity_failed_checks": integrity_failed_names,
