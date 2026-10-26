@@ -1,9 +1,15 @@
 import json
 import os
+import sys
 
 import pytest
 
 import research_v3_bridge as bridge
+
+# bridge.json is the stdlib json module: patching .loads is process-global. Count only
+# frames from the overdue index / overdue_decisions path so full-suite noise cannot
+# inflate the second-pass assert (CI saw 4 or 7 instead of 2).
+_OVERDUE_LOAD_FRAMES = frozenset({"_overdue_reconcile_index", "overdue_decisions"})
 
 
 def _store(tmp_path, appended):
@@ -29,6 +35,7 @@ def _write(path, rows, mode="a"):
 
 
 def test_second_pass_decodes_only_appended_rows(tmp_path, monkeypatch):
+    bridge._OVERDUE_INDEX_CACHE.clear()
     appended = []
     monkeypatch.setattr(bridge, "V3EvidenceStore", _store(tmp_path, appended))
     big = {"epoch_id": "e", "episode_id": "x", "policy_signature": "p",
@@ -38,7 +45,8 @@ def test_second_pass_decodes_only_appended_rows(tmp_path, monkeypatch):
     calls = {"n": 0}
     real = json.loads
     def counting(s, *a, **k):
-        calls["n"] += 1
+        if sys._getframe(1).f_code.co_name in _OVERDUE_LOAD_FRAMES:
+            calls["n"] += 1
         return real(s, *a, **k)
     monkeypatch.setattr(bridge.json, "loads", counting)
     first = bridge.reconcile_overdue_expected_order_decisions(epoch_id="e", data_dir=str(tmp_path), observed_ts=5)
@@ -57,6 +65,7 @@ def test_second_pass_decodes_only_appended_rows(tmp_path, monkeypatch):
 
 
 def test_replaced_ledger_is_rescanned(tmp_path, monkeypatch):
+    bridge._OVERDUE_INDEX_CACHE.clear()
     monkeypatch.setattr(bridge, "V3EvidenceStore", _store(tmp_path, []))
     _write(tmp_path / "decision.jsonl", [_decision("a")])
     _write(tmp_path / "lifecycle.jsonl", [{"epoch_id": "e", "episode_id": "a", "policy_signature": "p",
@@ -72,6 +81,7 @@ def test_replaced_ledger_is_rescanned(tmp_path, monkeypatch):
 
 
 def test_truncated_tail_fails_closed_without_advancing(tmp_path, monkeypatch):
+    bridge._OVERDUE_INDEX_CACHE.clear()
     monkeypatch.setattr(bridge, "V3EvidenceStore", _store(tmp_path, []))
     _write(tmp_path / "decision.jsonl", [_decision("a")])
     with open(tmp_path / "decision.jsonl", "a") as fh:

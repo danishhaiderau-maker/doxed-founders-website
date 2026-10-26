@@ -315,6 +315,8 @@ def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     registry = gate._registry_module()
     # RK hotfix (25 Oct): the roster comes from the shared registry, never a hard-coded copy.
     assert lanes == [str(lane) for lane in registry.ACTIVE_TILE_ORDER] and len(lanes) == len(set(lanes))
+    # HM nit: pin the roster size; a 7th tile must update this pin deliberately (and pass the standard below).
+    assert len(lanes) == 6 and lanes[5] == "FAMILY_GS_FADE3_TP30", lanes
     assert not set(lanes) & retired
     # The freeze21b core and gf3 (#877, slot 6) are all on it; every lane is held to the same paper-only standard.
     assert {"FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
@@ -425,3 +427,17 @@ def test_checkout_registry_roster_passes_the_gate_and_gf3_is_held_to_the_same_st
     missing = _registry_bot([x for x in lanes if x != "FAMILY_GS_FADE3_TP30"], {})({x: defaults[x] for x in lanes})
     with pytest.raises(SystemExit, match="does not match the checked-out registry"):
         gate.restore_registry_tiles(missing)
+
+
+def test_checkout_registry_live_copy_check_flags_every_non_false_relay_flag_on_the_real_roster():
+    """HM nit: exercise the gate's live-copy check (relay_eligible_tiles) directly on the real roster, gf3 included."""
+    lanes, _ = gate.checkout_registry()
+    assert gate.relay_eligible_tiles([{"lane": lane, "relay_eligible": False} for lane in lanes]) == []
+    for bad in (True, None, "false", 0):
+        tiles = [{"lane": lane, "relay_eligible": False} for lane in lanes]
+        tiles[5]["relay_eligible"] = bad
+        assert gate.relay_eligible_tiles(tiles) == ["FAMILY_GS_FADE3_TP30"], bad
+    missing = [{"lane": lane, "relay_eligible": False} for lane in lanes]
+    del missing[5]["relay_eligible"]
+    assert gate.relay_eligible_tiles(missing) == ["FAMILY_GS_FADE3_TP30"]
+    assert gate.relay_eligible_tiles([{"lane": lane, "relay_eligible": True} for lane in lanes]) == lanes
