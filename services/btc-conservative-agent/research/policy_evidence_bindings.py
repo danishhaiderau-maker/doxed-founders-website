@@ -53,16 +53,20 @@ def complete_conservative_future_path(row: Mapping[str, Any]) -> bool:
 
 
 def _read_jsonl(path: Path, *, drop_keys: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
     rows: list[dict[str, Any]] = []
     if not path.is_file():
         return rows
-    with path.open("r", encoding="utf-8-sig") as handle:
+    with open_v3_ledger(path, "r", encoding="utf-8-sig") as handle:
         for number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError(f"V3_LEDGER_ROW_NOT_OBJECT:{path.name}:{number}")
+            if not admit_v3_row(path, value):  # hard fresh-epoch gate
+                continue
             for key in drop_keys:
                 value.pop(key, None)
             rows.append(value)
@@ -84,10 +88,9 @@ def _binding_inputs_digest(root: Path) -> str:
         if not path.is_file():
             digest.update(b"\0MISSING\n")
             continue
-        from analyzer_epoch_guard import guarded_read
-        with guarded_read(f"v3/ledgers/{path.name}", "inventory"):  # byte digest (cache key), never a result
-            handle = path.open("rb")
-        with handle:
+        from analyzer_epoch_guard import open_v3_ledger
+
+        with open_v3_ledger(path, "rb", inventory=True) as handle:  # cache-key digest of raw bytes only
             for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
                 digest.update(block)
         digest.update(b"\n")

@@ -79,17 +79,21 @@ def source_provenance(data_dir: str | Path, epoch_id: str) -> dict[str, Any]:
 
 
 def read_opportunities(data_dir: str | Path) -> list[dict[str, Any]]:
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
     path = Path(data_dir) / "v3" / "ledgers" / "opportunity.jsonl"
     if not path.is_file():
         raise FileNotFoundError("V3_OPPORTUNITY_LEDGER_MISSING")
     rows = []
-    with path.open("r", encoding="utf-8-sig") as handle:
+    with open_v3_ledger(path, "r", encoding="utf-8-sig") as handle:
         for number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
             row = json.loads(line)  # a corrupt line fails the whole report closed
             if not isinstance(row, dict):
                 raise ValueError(f"V3_OPPORTUNITY_ROW_INVALID:{number}")
+            if not admit_v3_row(path, row):  # hard fresh-epoch gate
+                continue
             rows.append(row)
     return rows
 

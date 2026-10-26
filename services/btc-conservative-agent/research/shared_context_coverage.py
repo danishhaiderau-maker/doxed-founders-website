@@ -156,13 +156,17 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
             processed_keys.append(key)
             for ref in indexed:
                 path = Path(root)/'v3'/'ledgers'/(ref['ledger']+'.jsonl')
-                with path.open('rb') as stream:
+                from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+                with open_v3_ledger(path, 'rb') as stream:
                     stream.seek(ref['offset'])
                     raw = stream.read(ref['length'])
                 if len(raw) != ref['length'] or hashlib.sha256(raw).hexdigest() != ref['sha']:
                     raise ValueError('SHARED_CONTEXT_SOURCE_CHANGED')
+                source_row = json.loads(raw)
+                if not admit_v3_row(path, source_row):
+                    continue  # a ref cached before the gate existed is re-checked, never trusted
                 references[episode].append({'ledger':ref['ledger'], 'byte_offset':ref['offset'],
-                    'row_length':ref['length'], 'row_sha256':ref['sha'], 'source_row':json.loads(raw)})
+                    'row_length':ref['length'], 'row_sha256':ref['sha'], 'source_row':source_row})
         page_keys = processed_keys
     except (ValueError, OSError, sqlite3.Error) as exc:
         defects.append('SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT' if str(exc) == 'SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT'
