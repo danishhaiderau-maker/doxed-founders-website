@@ -14,13 +14,13 @@ Order:
 
 Everything else stays paper. FADE3 never live. Fail closed on unread safety data. Never Soft B / Force / blunt bot sync / wipe without R21 / tip without gates.
 
-Last goal write: 2026-10-25 17:05 UTC (Boss / Cursor Project — remaster `#893` RK archive onto tip `0ce26fbd4` after `#896`/`#914`/`#912`).
+Last goal write: 2026-10-26 05:02 AEDT (Boss / Cursor Project — remaster `#908` onto tip `c7b3d1690` after `#893`; HOLD after `#884`).
 
 ---
 
 # BTC open-items tracker
 
-Last status refresh: 2026-10-25 17:05 UTC. Boss = Cursor Project.
+Last status refresh: 2026-10-26 05:02 AEDT. Boss = Cursor Project.
 
 ## Standing operating rules (from Grok — keep)
 
@@ -42,23 +42,25 @@ Last status refresh: 2026-10-25 17:05 UTC. Boss = Cursor Project.
 6. Live vs paper GS-01 ≥10 clean trades; fix R0 gaps.
 7. Ongoing R22 + STRATEGIST R19.
 
-## Live readback (16:10 UTC / remaster tip)
+## Live readback (05:02 AEDT / 18:02 UTC)
 
 | Signal | Value |
 |--------|--------|
-| Fly `execution_paused` | **false** (post-`#915` tip) |
+| Fly `execution_paused` | **false** |
+| `pause_owner` | none |
+| `manual_admin_pause` | **false** |
 | `live_armed` / `bitfinex_live_enabled` | **false** / **false** |
 | `force_paper_mode` | **true** |
-| Fly paper tip (`git_rev` / `source_git_rev`) | **`9c12c3bb9a3a`** (`#915` tip with `#910`+`#913`) |
-| `origin/master` tip | **`0ce26fbd4`** (`#896` hard-rules on `#914`/`#912`) |
-| Soft B / Force / wipe / tip / arm from docs PRs | **NO** — docs remasters only |
-| Quiet stack | Do **not** touch `#911` / `#884` / `#908` / `#914` |
+| Fly paper tip (`source_git_rev`) | **`c5a0d6dba6a9`** (`#914`) |
+| `origin/master` tip | **`c7b3d1690`** (`#893`; includes `#896` `0ce26fbd4` + `#914` `c5a0d6dba`) |
+| Paper tip vs master | Fly on `#914`; `#896`/`#893` docs-only on master **not tipped** — no Soft B / Force / wipe / tip / arm from docs |
+| Quiet bundle | **HOLD** merge of `#908` until `#911` → `#884` land; order `#910`→`#911`→`#884`→`#908` |
 
 ## Open-list status
 
 | Item | Status | Link |
 |------|--------|------|
-| Paper resumed + stable | **IN PROGRESS** unpaused on tip `9c12c3bb9a3a`; memory-leak 3h clock running | Fly `9c12c3bb9a3a` |
+| Paper resumed + stable | **DONE** clear + DISARMED on Fly `#914` tip | Fly `c5a0d6dba6a9` |
 | `#885` $10/$10 caps | **DONE** | [#885](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/885) |
 | `#892` $9.99/$10.00 test | **DONE** | [#892](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/892) |
 | `#900` bootstrap timeout + RED@45m | **DONE** | [#900](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/900) |
@@ -86,20 +88,21 @@ Last status refresh: 2026-10-25 17:05 UTC. Boss = Cursor Project.
 | `#915` tip deploy trigger | **DONE** merged `9c12c3bb9` | [#915](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/915) |
 | `#912` handoff dashboard ask | **DONE** merged `09bd71e7e` | [#912](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/912) |
 | `#914` disk_alert red-ack | **DONE** merged `c5a0d6dba` (quiet stack landed) | [#914](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/914) |
-| `#893` RK verdicts tracker | **IN PROGRESS** remaster onto tip `0ce26fbd4` → squash when UT green | [#893](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/893) |
+| `#893` RK verdicts tracker | **DONE** squash-merged `c7b3d1690` (= master tip; RK archive below) | [#893](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/893) |
 | `#896` hard-rules handoff | **DONE** squash-merged `0ce26fbd4` | [#896](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/896) |
-| Quiet stack `#911`/`#884`/`#908`/`#914` | **HOLD** — do not touch | — |
+| `#911` fly.revision serving-deploy fields | **OPEN** — quiet-bundle next | [#911](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/911) |
+| `#884` Fly deploy step allowlist | **OPEN** head `ebb63738` — quiet-bundle after `#911` | [#884](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/884) |
+| `#908` tracker remaster | **OPEN** this PR — remastered onto `c7b3d1690`; **HOLD** squash until after `#884` | [#908](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/908) |
 | Simplified dashboard PR | **BLOCKED** need Boss PR#/branch | HANDOFF |
-| Memory-leak 3h verdict | **QUEUED** clock on tip `9c12c3bb` | store `internal/btc-memory-leak-9c12c3bb.md` |
+| Memory-leak 3h verdict | **QUEUED** | store `internal/btc-memory-leak-9c12c3bb.md` |
 | GS-01 arm @ $0.25 | **BLOCKED** — all gates + Danish OK | — |
 
 ## Priority queue (working order while unblocked)
 
-1. Keep paper unpaused on Fly tip `9c12c3bb9a3a`; finish memory-leak 3h (no Soft B / Force / wipe / tip / arm from docs)
-2. Remaster docs `#893` / `#896` for Danish review — **do not merge** from this remaster
-3. Hold quiet stack `#911`/`#884`/`#908`/`#914`
-4. Post-stable: tombstone 339/339
-5. Arm gates last (Danish OK)
+1. Keep paper unpaused on Fly `#914` tip; no Soft B / Force / wipe / tip / arm from docs
+2. Quiet bundle when green: `#911` → `#884` → `#908` (this PR last; remaster onto post-`#884` tip before squash)
+3. Post-stable: tombstone 339/339 (R21), memory-leak 3h
+4. Arm gates last (Danish OK)
 
 ## Rules Keeper / Health Monitor (recent)
 
@@ -107,14 +110,15 @@ Last status refresh: 2026-10-25 17:05 UTC. Boss = Cursor Project.
 - `#894` @ `2bcf8723`: RK PASS (see archive) → **merged**
 - `#892` / `#895`: RK PASS (see archive) → **merged**
 - `#900` / `#904` / `#882` / `#905` / `#901` / `#888`: **merged**
-- `#903` / `#897` / `#906` / `#907` / `#909` / `#910` / `#913` / `#915` / `#912`: **merged**; master tip `09bd71e7e`
-- Detailed early RK tables for `#889`/`#894`/`#891`/`#892`/`#895` preserved below (remaster `#893`)
+- `#903` / `#897` / `#906` / `#907` / `#909` / `#910` / `#913` / `#915` / `#912` / `#914` / `#896`: **merged**
+- `#893` → **merged** `c7b3d1690` (= master tip); RK archive preserved below
+- `#911` / `#884` / `#908`: open; `#908` HOLD after `#884`
 
 ## Recent ops notes (compressed; open-list above is source of truth)
 
-- **Master tip:** `0ce26fbd4` (`#896` after `#914`/`#912`). Fly paper still `9c12c3bb9a3a` (`#915`) unless `#914` deploy completes tip separately. `#896` docs-only — no new Fly deploy from that merge.
-- **Docs remaster:** `#893` keeps GOAL/open-list from `#902` and archives RK verdict tables. `#896` remaster keeps `#902` R0–R23 taxonomy (does not restore alternate numbering).
-- **Do not tip / Soft B / Force / wipe / arm** from docs PRs. Quiet stack untouched.
+- **Master tip:** `c7b3d1690` (`#893` after `#896`/`#914`). Fly paper `c5a0d6dba6a9` (`#914`). Docs remasters — no Soft B / Force / wipe / tip / arm.
+- **Quiet bundle:** `#910` **DONE** → `#911` → `#884` → `#908` (HOLD merge of this PR until `#884` lands).
+- **Still NO-GO:** tombstone apply until R21; dashboard blocked (Boss PR#); GS-01 arm last after Danish OK.
 
 ---
 
