@@ -248,6 +248,60 @@ if ($offline) {
       # ConvertTo-Json writes a flat list instead of a {"value": [...], "Count": n} wrapper.
       $deploys.runs = [object[]]@($raw | ConvertFrom-Json | ForEach-Object { $_ })
       $deploys.ok = $true
+      # Serving tip's deploy run + job steps for system-health fly.revision
+      # (deploy_run_id / conclusion / failed_steps / paper_resumed_by). One read-only
+      # gh api call; never workflow run / rerun / cancel / merge.
+      $servingRev = [string]$runtime.git_rev
+      if ([string]::IsNullOrWhiteSpace($servingRev) -and $runtime.last_good) {
+        $servingRev = [string]$runtime.last_good.git_rev
+      }
+      if (-not [string]::IsNullOrWhiteSpace($servingRev)) {
+        $servingRev = $servingRev.Trim().ToLowerInvariant()
+        $match = $null
+        foreach ($run in $deploys.runs) {
+          if ($null -eq $run) { continue }
+          if ([string]$run.status -ne 'completed') { continue }
+          $sha = ([string]$run.headSha).Trim().ToLowerInvariant()
+          if ([string]::IsNullOrWhiteSpace($sha)) { continue }
+          if ($sha.StartsWith($servingRev) -or $servingRev.StartsWith($sha.Substring(0, [Math]::Min(12, $sha.Length)))) {
+            $match = $run
+            break
+          }
+        }
+        if ($null -ne $match -and $null -ne $match.databaseId) {
+          try {
+            $jobsRaw = & gh api "repos/$deployRepo/actions/runs/$($match.databaseId)/jobs?per_page=100" 2>$null | Out-String
+            if ($LASTEXITCODE -eq 0 -and $jobsRaw.Trim()) {
+              $jobsDoc = $jobsRaw | ConvertFrom-Json
+              $compact = @()
+              foreach ($job in @($jobsDoc.jobs)) {
+                $jName = [string]$job.name
+                if ($jName -ne 'test-and-deploy' -and $jName -ne 'resume-paper') { continue }
+                $steps = @()
+                foreach ($step in @($job.steps)) {
+                  $steps += [ordered]@{ name = [string]$step.name; conclusion = [string]$step.conclusion }
+                }
+                $compact += [ordered]@{
+                  name = $jName
+                  conclusion = [string]$job.conclusion
+                  steps = $steps
+                }
+              }
+              $deploys.serving_deploy = [ordered]@{
+                databaseId = $match.databaseId
+                status = [string]$match.status
+                conclusion = [string]$match.conclusion
+                createdAt = [string]$match.createdAt
+                event = [string]$match.event
+                headSha = [string]$match.headSha
+                jobs = $compact
+              }
+            }
+          } catch {
+            # Keep runs list; fly.revision falls back to run match without steps.
+          }
+        }
+      }
     } else {
       $deploys.error = 'GH_RUN_LIST_FAILED'
     }
@@ -258,5 +312,5 @@ if ($offline) {
     if ($null -ne $previousEncoding) { try { [Console]::OutputEncoding = $previousEncoding } catch { } }
   }
 }
-Write-JsonAtomic -Path (Join-Path $cfg.StateDir 'fly_deploy_runs_snapshot_v1.json') -Value $deploys -Depth 5
+Write-JsonAtomic -Path (Join-Path $cfg.StateDir 'fly_deploy_runs_snapshot_v1.json') -Value $deploys -Depth 8
 Write-Output ("SNAPSHOTS fly_head_ok={0} relay_ok={1} runtime_ok={2} deploy_runs_ok={3}" -f $head.ok, $relay.ok, $runtime.ok, $deploys.ok)

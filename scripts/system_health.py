@@ -44,6 +44,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fly_platform_status as fly_platform_mod  # noqa: E402
+import fly_revision_health as fly_revision_health  # noqa: E402
 import system_health_meta as meta_mod  # noqa: E402
 
 SCHEMA = "system_health_v1"
@@ -1131,20 +1132,39 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
 
     fly_rev = str(dig(status, "git_rev") or dig(health, "git_rev") or "")
     master = str(inputs.get("master_sha") or "")
-    runs = dig(inputs.get("deploy_runs"), "runs", default=[]) or []
-    runs = sorted([r for r in runs if isinstance(r, Mapping)], key=lambda r: str(r.get("createdAt")), reverse=True)
-    last_run = runs[0] if runs else {}
-    failed = last_run.get("status") == "completed" and last_run.get("conclusion") not in (None, "success")
+    # Serving tip's guarded deploy (not merely the chronologically last run):
+    # deploy_run_id / conclusion / failed_steps / paper_resumed_by. AMBER when
+    # that deploy did not conclude success (Guaranteed resume still leaves tip live).
+    rev_fields = fly_revision_health.serving_revision_fields(fly_rev, inputs.get("deploy_runs"))
+    failed = bool(
+        rev_fields.get("matched")
+        and fly_revision_health.deploy_did_not_succeed(
+            rev_fields.get("conclusion"), status=rev_fields.get("status")
+        )
+    )
     if not fly_rev:
-        add(check("fly.revision", "fly", SKIP if not reachable else AMBER, "unknown", "Fly git_rev reported"))
+        add(check("fly.revision", "fly", SKIP if not reachable else AMBER, "unknown", "Fly git_rev reported",
+                  fields={"deploy_run_id": None, "conclusion": None, "failed_steps": [],
+                          "paper_resumed_by": None}))
     else:
-        same = bool(master) and master.startswith(fly_rev)
-        obs = f"fly={fly_rev[:12]} master={master[:12] or '?'}{' (current)' if same else ' (master ahead; deploy queued)'}"
+        obs = fly_revision_health.format_revision_observed(
+            fly_rev=fly_rev, master_sha=master, fields=rev_fields
+        )
+        hint = ""
         if failed:
-            obs += f"; last guarded deploy {last_run.get('databaseId')} concluded {last_run.get('conclusion')}"
+            steps = ", ".join(rev_fields.get("failed_steps") or []) or "see Actions run"
+            resumed = rev_fields.get("paper_resumed_by") or "unknown"
+            hint = (f"serving deploy {rev_fields.get('deploy_run_id')} concluded "
+                    f"{rev_fields.get('conclusion')}; failed_steps={steps}; paper_resumed_by={resumed}")
         add(check("fly.revision", "fly", AMBER if failed else GREEN, obs,
-                  "Fly runs a successfully deployed master revision",
-                  "last guarded deploy failed; Fly still on the previous revision" if failed else ""))
+                  "Fly tip's guarded deploy concluded success",
+                  hint,
+                  fields={
+                      "deploy_run_id": rev_fields.get("deploy_run_id"),
+                      "conclusion": rev_fields.get("conclusion"),
+                      "failed_steps": list(rev_fields.get("failed_steps") or []),
+                      "paper_resumed_by": rev_fields.get("paper_resumed_by"),
+                  }))
 
     # ---------------- AI
     prov = _ai_provider_health(status, fstate)
@@ -2437,6 +2457,24 @@ def fly_platform_check(snapshot: Any, checks: list[dict[str, Any]], now: float) 
                  fields={**fly_platform_mod.compact(res), "classification": res["classification"]})
 
 
+def _failing_public(check_row: Mapping[str, Any]) -> dict[str, Any]:
+    """Banner/API failing row; keeps bounded observed_fields (e.g. fly.revision deploy facts)."""
+    out = {k: check_row.get(k) for k in ("id", "status", "observed", "threshold", "hint", "runbook", "last_good_at")}
+    fields = check_row.get("observed_fields")
+    if isinstance(fields, Mapping) and fields:
+        # Bound size: only scalar/list values, short keys.
+        kept: dict[str, Any] = {}
+        for key, value in list(fields.items())[:12]:
+            name = str(key)[:64]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                kept[name] = value if not isinstance(value, str) else value[:240]
+            elif isinstance(value, list):
+                kept[name] = [str(v)[:160] for v in value[:12]]
+        if kept:
+            out["observed_fields"] = kept
+    return out
+
+
 def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float,
               acks: Any = None) -> dict[str, Any]:
     checks = meta_mod.dedupe(checks)
@@ -2464,8 +2502,7 @@ def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float,
         "verdict": verdict,
         "counts": {s: sum(1 for c in checks if c["status"] == s) for s in (RED, AMBER, GREEN, SKIP)},
         "subsystems": subsystems,
-        "failing": [{k: c[k] for k in ("id", "status", "observed", "threshold", "hint", "runbook", "last_good_at")}
-                    for c in failing],
+        "failing": [_failing_public(c) for c in failing],
         "acked": acked,
         "checks": checks,
         "runbook": RUNBOOK,
@@ -2575,8 +2612,7 @@ def banner_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "verdict": report["verdict"],
         "generated_at": report["generated_at"],
         "open_alarms": report.get("open_alarms", []),
-        "failing": [{k: f.get(k) for k in ("id", "status", "observed", "threshold", "hint", "runbook", "last_good_at")}
-                    for f in report["failing"][:12]],
+        "failing": [_failing_public(f) for f in report["failing"][:12]],
         "counts": report["counts"],
         "check_status": {c["id"]: c["status"] for c in report.get("checks") or []},
         "source": f"laptop {report.get('host')}",

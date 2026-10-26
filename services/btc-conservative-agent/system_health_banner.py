@@ -55,7 +55,7 @@ def sanitize_report(report) -> dict | None:
         if not isinstance(item, dict):
             continue
         status = item.get("status")
-        failing.append({
+        row = {
             "id": _text(item.get("id"), 64),
             "status": status if status in _STATUSES else "AMBER",
             "observed": _text(item.get("observed")),
@@ -63,7 +63,27 @@ def sanitize_report(report) -> dict | None:
             "hint": _text(item.get("hint"), 400),
             "runbook": _text(item.get("runbook"), 160),
             "last_good_at": _text(item.get("last_good_at"), 40),
-        })
+        }
+        # Keep bounded observed_fields so fly.revision can publish deploy_run_id /
+        # conclusion / failed_steps / paper_resumed_by on Fly /api/system-health.
+        raw_fields = item.get("observed_fields")
+        if isinstance(raw_fields, dict) and raw_fields:
+            kept = {}
+            for key, value in list(raw_fields.items())[:12]:
+                name = _text(key, 64)
+                if not name:
+                    continue
+                if isinstance(value, bool) or value is None:
+                    kept[name] = value
+                elif isinstance(value, (int, float)):
+                    kept[name] = value
+                elif isinstance(value, str):
+                    kept[name] = _text(value, 240)
+                elif isinstance(value, list):
+                    kept[name] = [_text(v, 160) for v in value[:12] if _text(v, 160)]
+            if kept:
+                row["observed_fields"] = kept
+        failing.append(row)
     alarms = []
     for item in (report.get("open_alarms") or [])[:MAX_FAILING]:
         if isinstance(item, dict):
