@@ -1,7 +1,7 @@
 """PHASE02: the committed-fade tiles' AI model is version-pinned.
 
 The shared ``trading_direction`` call that drives the committed-fade tiles
-(H-A, GS-06) must stay reproducible across provider model renames. DeepSeek
+(B2 TREND cell) must stay reproducible across provider model renames. DeepSeek
 retired ``deepseek-v4-flash`` (2026-10-01) and answers those requests as
 ``deepseek-flash`` (DeepSeek-V4.1-Flash); that served id is the explicit pin.
 """
@@ -17,8 +17,8 @@ import bot
 from combo_pathway_config import ACTIVE_TILE_REGISTRY, COMBO_LANE_SPECS
 
 COMMITTED_FADE_LANES = (
-    # H-A (FAMILY_COMMITTED_FADE_TAKER_90) retired 12 Oct 10:57.
-    "FAMILY_GS06_COMMITTED_FADE_ATR_TP",  # GS-06
+    # H-A retired 12 Oct; GS-06 retired 28 Oct R22. B2 still fades via INVERTED_SCORE_LED_SIDE in TREND.
+    "FAMILY_GSB2_REGIME_SWITCHER",
 )
 
 
@@ -47,7 +47,7 @@ def test_model_resolution_returns_the_pinned_id_and_fails_closed():
 
 
 def test_committed_fade_tiles_consume_the_shared_ai_call():
-    # Both committed-fade tiles fade the shared AI's committed call; their
+    # Active committed-fade-direction tiles fade the shared AI's committed call; their
     # directional behaviour is exactly what the pinned model produces.
     for lane in COMMITTED_FADE_LANES:
         assert lane in ACTIVE_TILE_REGISTRY, lane

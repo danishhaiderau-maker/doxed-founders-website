@@ -1,6 +1,6 @@
-"""GS-FADE3-TP30 PAPER tile (key gf3, cid code 8, display slot 6). RK PASS 25 Oct 06:24 AEDT.
+"""GS-FADE3-TP30 PAPER tile (key gf3, cid code 8, display slot 5). RK PASS 25 Oct 06:24 AEDT.
 
-PAPER ONLY. Self-simulated engine (like the retired DISLOC engine): registry slot 6 in COMBO_EXECUTION_LANES with
+PAPER ONLY. Self-simulated engine (like the retired DISLOC engine): registry slot 5 in COMBO_EXECUTION_LANES with
 signal_clock SELF_SIMULATED_SIGNAL_CLOCK and self_simulated_paper, so the shared AI call and the XVL evaluator loop both
 skip it; bot._gf3_thread steps Fade3PaperEngine once a second over LiveFeatureFeed. live_tile_gate.PAPER_ONLY_TILE_KEYS
 refuses every arm path; LIVE_HM_GATE_FADE3 stays unset in this PR.
@@ -28,6 +28,7 @@ import json
 import os
 import re
 import threading
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 import numpy as np
@@ -38,7 +39,7 @@ import tile_fill
 
 TILE_KEY = "gf3"
 TILE_KEY_CODE = 8
-DISPLAY_SLOT = 6
+DISPLAY_SLOT = 5
 LANE = "FAMILY_GS_FADE3_TP30"
 # Registry identity (combo_pathway_config spec raw_policy_id; bot._load_tile_policy_modules checks it at boot).
 POLICY_ID = "GS_FADE3_E8_FADE_ALL_W3_Z2P5_MOM2ATR_IMB0P2_BZ2|TP30_HARD25_XSTOP35_TIME1200_CAP1"
@@ -65,10 +66,46 @@ FUNDING_MODEL = "IGNORED"
 MARGIN_BP_NOTE = "18 bp margin unchanged; E10 is a process rule, no code path here alters it (T23)"
 PRICE_SOURCES = ("bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "bfx_deriv_status_1s.jsonl")
 HISTORY_S = 6 * 3600 + 15 * 60  # 6 h minute-z window + 31 completed minutes of ATR, with margin
+A5_VERIFIED_ENV = "GF3_A5_VERIFIED"  # operator marker (A5 deployed + verified); unset in this PR
+
+
+@dataclass(frozen=True)
+class Fade3Variant:
+    """Identity + gate/exit thresholds for one FADE3-family paper tile (E8 or LOOSE)."""
+    tile_key: str
+    tile_key_code: int
+    display_slot: int
+    lane: str
+    policy_id: str
+    ledger_file: str
+    tile_name: str
+    signal_id: str
+    z_entry: float
+    mom_atr_mult: float
+    imb_min: float
+    bz_limit: float
+    spread_max_bp: float
+    flow_w_min: int
+    tp_bp: float
+    hard_stop_bp: float
+    exchange_stop_bp: float
+    time_exit_s: float
+    cooldown_s: float
+    notional_usd: float
+    a5_verified_env: str
+
+
+E8_VARIANT = Fade3Variant(
+    tile_key=TILE_KEY, tile_key_code=TILE_KEY_CODE, display_slot=DISPLAY_SLOT, lane=LANE,
+    policy_id=POLICY_ID, ledger_file=LEDGER_FILE, tile_name=TILE_NAME, signal_id=SIGNAL_ID,
+    z_entry=Z_ENTRY, mom_atr_mult=MOM_ATR_MULT, imb_min=IMB_MIN, bz_limit=BZ_LIMIT,
+    spread_max_bp=SPREAD_MAX_BP, flow_w_min=FLOW_W_MIN, tp_bp=TP_BP, hard_stop_bp=HARD_STOP_BP,
+    exchange_stop_bp=EXCHANGE_STOP_BP, time_exit_s=TIME_EXIT_S, cooldown_s=COOLDOWN_S,
+    notional_usd=NOTIONAL_USD, a5_verified_env=A5_VERIFIED_ENV,
+)
 
 MIN_POOL_N = paper_fill.MIN_POOL_N if hasattr(paper_fill, "MIN_POOL_N") else 10
 A5_VERIFIED_MIN_TRADES = 5
-A5_VERIFIED_ENV = "GF3_A5_VERIFIED"  # operator marker (A5 deployed + verified); unset in this PR
 LABEL_WARMUP = "PAPER, NON-COUNTABLE (warm-up)"
 LABEL_PAPER = "PAPER"
 G4_A_MIN_BP = 28.0
@@ -169,14 +206,21 @@ def compute_features(S, B, A, T, D) -> dict:
             "mom5": mom5, "ATR30": ATR30, "BZ": BZ}
 
 
+def entry_signals(F: Mapping[str, np.ndarray], *, z_entry: float, mom_atr_mult: float, imb_min: float,
+                  bz_limit: float = BZ_LIMIT, spread_max_bp: float = SPREAD_MAX_BP):
+    """Shared FADE ALL W=3 gate family (E8 and LOOSE differ only by thresholds)."""
+    z, BZ, mom5, ATR30, imb5 = F["z3"], F["BZ"], F["mom5"], F["ATR30"], F["imb5"]
+    gate = F["spread"] <= spread_max_bp
+    base = gate & np.isfinite(z) & np.isfinite(BZ) & np.isfinite(mom5) & np.isfinite(ATR30)
+    Sh = base & (z >= z_entry) & (mom5 >= mom_atr_mult * ATR30) & (imb5 <= -imb_min) & (BZ > -bz_limit)
+    L = base & (z <= -z_entry) & (mom5 <= -mom_atr_mult * ATR30) & (imb5 >= imb_min) & (BZ < bz_limit)
+    return L, Sh
+
+
 def entry_signals_e8(F: Mapping[str, np.ndarray]):
     """family.entry_signals("FADE", "ALL", 3): returns (LONG mask, SHORT mask)."""
-    z, BZ, mom5, ATR30, imb5 = F["z3"], F["BZ"], F["mom5"], F["ATR30"], F["imb5"]
-    gate = F["spread"] <= SPREAD_MAX_BP
-    base = gate & np.isfinite(z) & np.isfinite(BZ) & np.isfinite(mom5) & np.isfinite(ATR30)
-    Sh = base & (z >= Z_ENTRY) & (mom5 >= MOM_ATR_MULT * ATR30) & (imb5 <= -IMB_MIN) & (BZ > -BZ_LIMIT)
-    L = base & (z <= -Z_ENTRY) & (mom5 <= -MOM_ATR_MULT * ATR30) & (imb5 >= IMB_MIN) & (BZ < BZ_LIMIT)
-    return L, Sh
+    return entry_signals(F, z_entry=Z_ENTRY, mom_atr_mult=MOM_ATR_MULT, imb_min=IMB_MIN,
+                         bz_limit=BZ_LIMIT, spread_max_bp=SPREAD_MAX_BP)
 
 
 # ------------------------------------------------------------------ countability (no back-stamp)
@@ -218,9 +262,10 @@ def rest_fill_count(rows: Iterable[Mapping[str, Any]]) -> int:
     return len(seen)
 
 
-def a5_verified(n_rest_trades: int, env: Optional[Mapping[str, str]] = None) -> bool:
+def a5_verified(n_rest_trades: int, env: Optional[Mapping[str, str]] = None, *,
+                env_key: str = A5_VERIFIED_ENV) -> bool:
     e = os.environ if env is None else env
-    return bool(str(e.get(A5_VERIFIED_ENV, "")).strip()) and int(n_rest_trades or 0) >= A5_VERIFIED_MIN_TRADES
+    return bool(str(e.get(env_key, "")).strip()) and int(n_rest_trades or 0) >= A5_VERIFIED_MIN_TRADES
 
 
 def g4_band(latest_real_l_bp: Optional[float]) -> Optional[str]:
@@ -290,7 +335,8 @@ class Fade3PaperEngine:
                  entry_fill_fn: Callable = tile_fill.entry_fill, rest_fill_fn: Callable = tile_fill.price_entry_rest,
                  exit_fill_fn: Callable = tile_fill.exit_fill, resident_fill_fn: Callable = tile_fill.exit_resident_fill,
                  forced_fill_fn: Callable = tile_fill.exit_forced_fill, stamp_fn: Callable = paper_fill.delay_stamp,
-                 ledger_rows: Iterable[Mapping[str, Any]] = ()):
+                 ledger_rows: Iterable[Mapping[str, Any]] = (), variant: Fade3Variant = E8_VARIANT):
+        self.v = variant
         self.features_fn, self.delay_fn, self.write_fn = features_fn, delay_fn, write_fn
         self.book_rows_fn = book_rows_fn or (lambda t0, t1: quote_trigger.book_rows_between(t0, t1, paper_fill.book10l_at))
         self.trades_fn = trades_fn or quote_trigger.trades_between
@@ -343,10 +389,10 @@ class Fade3PaperEngine:
         mid = (snap or {}).get("mid")
         if not mid:
             return []
-        qty = NOTIONAL_USD / float(mid)
+        qty = self.v.notional_usd / float(mid)
         res = self.entry_fill_fn(side, qty, ts, d, src)
         if res.get("status") == "REJECT_NO_BOOK" or res.get("cap_px") is None:
-            self.cooldown_until = ts + COOLDOWN_S
+            self.cooldown_until = ts + self.v.cooldown_s
             return [self._row("ENTRY_REJECTED", side=side, signal_ts=ts, entry_fill=res, features=snap)]
         filled = float(res.get("filled_qty") or 0) if res.get("price") is not None else 0.0
         self.pending = {"side": side, "signal_ts": ts, "qty": qty, "ioc": res, "ioc_filled": filled,
@@ -371,14 +417,14 @@ class Fade3PaperEngine:
             legs.append((float(rest["filled_qty"]), float(rest["price"]), rest.get("fill_ts")))
         q = sum(x[0] for x in legs if x[1] is not None)
         if q <= 0:
-            self.cooldown_until = p["signal_ts"] + COOLDOWN_S
+            self.cooldown_until = p["signal_ts"] + self.v.cooldown_s
             return [self._row("ENTRY_NO_FILL", side=p["side"], signal_ts=p["signal_ts"], entry_fill=p["ioc"],
                               rest_fill=rest, features=p["features"])]
         px = sum(x[0] * x[1] for x in legs if x[1] is not None) / q
         fill_ts = max(float(x[2]) for x in legs if x[1] is not None and x[2] is not None)
         self.pos = {"side": p["side"], "qty": q, "entry_px": px, "entry_fill_ts": fill_ts,
-                    "signal_ts": p["signal_ts"], "tp_px": _level(px, p["side"], TP_BP, True),
-                    "hard_px": _level(px, p["side"], HARD_STOP_BP, False), "exch_px": _exch_stop_px(px, p["side"]),
+                    "signal_ts": p["signal_ts"], "tp_px": _level(px, p["side"], self.v.tp_bp, True),
+                    "hard_px": _level(px, p["side"], self.v.hard_stop_bp, False), "exch_px": float(f"{_level(px, p['side'], self.v.exchange_stop_bp, False):.5g}"),
                     "scan_ts": fill_ts, "entry_fill": p["ioc"], "rest_fill": rest, "entry_delay": p["entry_delay"],
                     "features": p["features"]}
         return [self._row("OPEN", **{k: v for k, v in self.pos.items() if k not in ("features",)},
@@ -406,7 +452,7 @@ class Fade3PaperEngine:
                                                book_rows=rows)
         if tp:
             cands.append((float(tp["trigger_ts"]), 2, "TP", tp))
-        te = p["entry_fill_ts"] + TIME_EXIT_S
+        te = p["entry_fill_ts"] + self.v.time_exit_s
         if t0 < te <= t1:
             cands.append((te, 3, "TIME_EXIT", {"trigger_ts": te, "trigger_basis": "CLOCK"}))
         p["scan_ts"] = t1
@@ -443,28 +489,30 @@ class Fade3PaperEngine:
         exit_px = float(res["price"])
         pnl_bp = _dir_sign(p["side"]) * (exit_px / p["entry_px"] - 1) * 1e4
         self.pos, self.pending_exit = None, None
-        self.cooldown_until = float(res.get("fill_ts") or x["trigger_ts"]) + COOLDOWN_S
+        self.cooldown_until = float(res.get("fill_ts") or x["trigger_ts"]) + self.v.cooldown_s
         ready = pool_ready(p["entry_delay"], x["delay"])
         evidence = "COMPLETE" if res.get("status") == "FILLED" and p["entry_fill"].get("status") in ("FILLED", "PARTIAL") \
             and not res.get("unverified") else "UNVERIFIED"
         return [self._row("CLOSE", side=p["side"], qty=p["qty"], entry_px=p["entry_px"],
                           entry_fill_ts=p["entry_fill_ts"], signal_ts=p["signal_ts"], exit_reason=x["reason"],
                           exit_trigger=x["event"], exit_fill=res, exit_px=exit_px, pnl_bp=pnl_bp,
-                          pnl_usd=pnl_bp / 1e4 * NOTIONAL_USD, entry_delay=p["entry_delay"], exit_delay=x["delay"],
+                          pnl_usd=pnl_bp / 1e4 * self.v.notional_usd, entry_delay=p["entry_delay"], exit_delay=x["delay"],
                           rest_fill=p["rest_fill"], pool_ready_at_write=ready, evidence_status=evidence,
                           countable_at_write=False)]
 
     def _row(self, event: str, **kw) -> dict:
-        row = {"event": event, "lane": LANE, "tile_key": TILE_KEY, "tile_key_code": TILE_KEY_CODE,
-               "display_slot": DISPLAY_SLOT, "tile": TILE_NAME, "signal_id": SIGNAL_ID, "paper_only": True,
+        v = self.v
+        row = {"event": event, "lane": v.lane, "tile_key": v.tile_key, "tile_key_code": v.tile_key_code,
+               "display_slot": v.display_slot, "tile": v.tile_name, "signal_id": v.signal_id, "paper_only": True,
                "liq_model": LIQ_MODEL, "fee_model": FEE_MODEL, "funding_model": FUNDING_MODEL, "fee_usd": 0.0,
                "rest_rule": paper_fill.REST_RULE_A5, "rest_ttl_s": paper_fill.REST_TTL_S, **kw}
         self.write_fn(row)
         return row
 
     def status(self, *, latest_real_l_bp: Optional[float] = None, env: Optional[Mapping[str, str]] = None) -> dict:
-        a5 = a5_verified(self.rest_trades_n, env)
-        return {"tile": TILE_NAME, "tile_key": TILE_KEY, "display_slot": DISPLAY_SLOT, "lane": LANE,
+        v = self.v
+        a5 = a5_verified(self.rest_trades_n, env, env_key=v.a5_verified_env)
+        return {"tile": v.tile_name, "tile_key": v.tile_key, "display_slot": v.display_slot, "lane": v.lane,
                 "label": dashboard_label(self.min_pool_n, a5), "paper_only": True, "min_pool_n": self.min_pool_n,
                 "a5_rest_trades_n": self.rest_trades_n, "a5_verified": a5, "g4_band": g4_band(latest_real_l_bp),
                 "open_position": bool(self.pos), "liq_model": LIQ_MODEL, "margin_note": MARGIN_BP_NOTE}
@@ -750,7 +798,8 @@ class LiveFeatureFeed:
     compute_features are identical, element for element, to the former full rebuild (``full_rebuild_inputs``), so
     the features are bit-identical (test_tile_fade3_incremental_feed pins this on a recorded post-cutoff window)."""
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, *, signals_fn: Optional[Callable] = None) -> None:
+        self.signals_fn = signals_fn or entry_signals_e8
         self.book = _JsonlHistory(os.path.join(root, PRICE_SOURCES[0]), _parse_book, 48 << 20)
         self.trades = _JsonlHistory(os.path.join(root, PRICE_SOURCES[1]), _parse_trades, 32 << 20)
         self.deriv = _RotatingDerivHistory(os.path.join(root, PRICE_SOURCES[2]), _parse_deriv, 16 << 20)
@@ -870,7 +919,7 @@ class LiveFeatureFeed:
         F = compute_features(S, B, A, T, D)
         if gap_end is not None and gap_end > s_last + 1 - BZ_WINDOW_S:
             F["BZ"] = np.full(len(F["BZ"]), np.nan)  # rotation-boundary hole inside the z window: no BZ
-        L, Sh = entry_signals_e8(F)
+        L, Sh = self.signals_fn(F)
         side = "LONG" if L[-1] else "SHORT" if Sh[-1] else None
         snap = {k: (float(F[k][-1]) if np.isfinite(F[k][-1]) else None)
                 for k in ("mid", "spread", "imb5", "z3", "mom5", "ATR30", "BZ")}

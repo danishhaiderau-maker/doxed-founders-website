@@ -316,11 +316,14 @@ def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     # RK hotfix (25 Oct): the roster comes from the shared registry, never a hard-coded copy.
     assert lanes == [str(lane) for lane in registry.ACTIVE_TILE_ORDER] and len(lanes) == len(set(lanes))
     # HM nit: pin the roster size; a 7th tile must update this pin deliberately (and pass the standard below).
-    assert len(lanes) == 6 and lanes[5] == "FAMILY_GS_FADE3_TP30", lanes
+    # 2026-10-28 (R22 + LOOSE): still 6 tiles — GS-06 out, FADE3-LOOSE in. Index 4 = FADE3 (tile 5),
+    # index 5 = LOOSE (tile 6). Updating this pin is deliberate.
+    assert len(lanes) == 6 and lanes[4] == "FAMILY_GS_FADE3_TP30" and lanes[5] == "FAMILY_GS_FADE3_LOOSE_TP25", lanes
     assert not set(lanes) & retired
-    # The freeze21b core and gf3 (#877, slot 6) are all on it; every lane is held to the same paper-only standard.
+    # Freeze21b survivors + gf3 (#877) + gf3l (#924); every lane is held to the same paper-only standard.
     assert {"FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
-            "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_GS_FADE3_TP30"} <= set(lanes)
+            "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25"} <= set(lanes)
+    assert "FAMILY_GS06_COMMITTED_FADE_ATR_TP" in retired
     for lane in lanes:
         spec = registry.ACTIVE_TILE_REGISTRY[lane]
         assert spec.get("paper_only") is True and spec.get("execution_scope") == "PAPER_ONLY", lane
@@ -430,14 +433,15 @@ def test_checkout_registry_roster_passes_the_gate_and_gf3_is_held_to_the_same_st
 
 
 def test_checkout_registry_live_copy_check_flags_every_non_false_relay_flag_on_the_real_roster():
-    """HM nit: exercise the gate's live-copy check (relay_eligible_tiles) directly on the real roster, gf3 included."""
+    """HM nit: live-copy check on the real roster; tiles[5] is FADE3-LOOSE (tile 6 / index 5) after #924."""
     lanes, _ = gate.checkout_registry()
+    assert lanes[5] == "FAMILY_GS_FADE3_LOOSE_TP25"
     assert gate.relay_eligible_tiles([{"lane": lane, "relay_eligible": False} for lane in lanes]) == []
     for bad in (True, None, "false", 0):
         tiles = [{"lane": lane, "relay_eligible": False} for lane in lanes]
         tiles[5]["relay_eligible"] = bad
-        assert gate.relay_eligible_tiles(tiles) == ["FAMILY_GS_FADE3_TP30"], bad
+        assert gate.relay_eligible_tiles(tiles) == ["FAMILY_GS_FADE3_LOOSE_TP25"], bad
     missing = [{"lane": lane, "relay_eligible": False} for lane in lanes]
     del missing[5]["relay_eligible"]
-    assert gate.relay_eligible_tiles(missing) == ["FAMILY_GS_FADE3_TP30"]
+    assert gate.relay_eligible_tiles(missing) == ["FAMILY_GS_FADE3_LOOSE_TP25"]
     assert gate.relay_eligible_tiles([{"lane": lane, "relay_eligible": True} for lane in lanes]) == lanes

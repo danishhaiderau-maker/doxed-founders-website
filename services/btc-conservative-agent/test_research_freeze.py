@@ -85,16 +85,16 @@ def test_every_frozen_tile_is_pre_registered_with_target_kill_and_day21():
 
 def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_ones():
     assert rf.MID_EPOCH_ADDITION_ROSTER == (
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
         "FAMILY_GS07_FAST_PREMIUM_FADE",
         "FAMILY_DANISH_REGIME_ROUTER",
         "FAMILY_FADE_POOL",
         "FAMILY_GS07_V07_PREMIUM_FADE_60M",
         "FAMILY_GS_FADE3_TP30",
+        "FAMILY_GS_FADE3_LOOSE_TP25",
     )
     assert not set(rf.MID_EPOCH_ADDITION_ROSTER).intersection(rf.FREEZE_ROSTER)
-    # PHASE03 additions ship default OFF; the earlier GS-06 mid-epoch addition defaults ON.
-    # FADE3 (gf3) defaults ON. DISLOC historical mid-epoch rows removed in R22 PR-A.
+    # PHASE03 additions ship default OFF; FADE3 + FADE3-LOOSE default ON.
+    # GS-06 removed from mid-epoch roster on 2026-10-28 R22 retire.
     default_off = {"FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL",
                    "FAMILY_GS07_V07_PREMIUM_FADE_60M"}
     for item in rf.MID_EPOCH_ADDITIONS:

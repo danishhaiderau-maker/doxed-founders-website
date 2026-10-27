@@ -93,7 +93,7 @@ def test_ffill_matches_pandas_semantics():
 
 # ------------------------------------------------------------------ identity / T13 / costs / T23
 def test_identity_and_spec_constants():
-    assert (tf.TILE_KEY, tf.TILE_KEY_CODE, tf.DISPLAY_SLOT) == ("gf3", 8, 6)
+    assert (tf.TILE_KEY, tf.TILE_KEY_CODE, tf.DISPLAY_SLOT) == ("gf3", 8, 5)
     assert ltg.TILE_KEY_CODES["gf3"] == 8 and 8 not in ltg.RESERVED_TILE_KEY_CODES.values()
     assert ltg.decode_cid(ltg.encode_cid("gf3", 12345)) == "gf3"
     assert (tf.TP_BP, tf.HARD_STOP_BP, tf.EXCHANGE_STOP_BP, tf.TIME_EXIT_S, tf.COOLDOWN_S, tf.NOTIONAL_USD) == \
@@ -294,7 +294,7 @@ class Harness:
 def test_engine_tp_exit_on_book_side_and_cooldown():
     h = Harness(exit_px=65196.0)
     out = h.eng.step(1000.0)
-    assert out[0]["event"] == "OPEN" and out[0]["tile_key"] == "gf3" and out[0]["display_slot"] == 6
+    assert out[0]["event"] == "OPEN" and out[0]["tile_key"] == "gf3" and out[0]["display_slot"] == 5
     tp = out[0]["tp_px"]
     h.bookrow(1003, tp - 1, tp + 1)        # bid below TP: no trigger
     assert h.eng.step(1004.5) == []
@@ -367,7 +367,7 @@ def test_engine_one_position():
 
 
 # ------------------------------------------------------------------ slot-6 registry activation + live feed + route
-def test_gf3_is_registry_slot_6_paper_only_and_skipped_by_ai_and_evaluator():
+def test_gf3_is_registry_slot_5_paper_only_and_skipped_by_ai_and_evaluator():
     import combo_pathway_config as c
     spec = c.ACTIVE_TILE_REGISTRY[tf.LANE]
     assert c.ACTIVE_TILE_ORDER.index(tf.LANE) + 1 == tf.DISPLAY_SLOT and spec["id_prefix"] == tf.TILE_KEY

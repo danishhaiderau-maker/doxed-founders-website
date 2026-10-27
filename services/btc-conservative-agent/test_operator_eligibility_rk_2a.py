@@ -38,11 +38,11 @@ def test_persisted_eligibility_for_other_tile_is_ignored(tmp_path):
 
 
 def test_gf3_needs_its_own_hm_gate():
-    reg = {"FADE3": {"id_prefix": "gf3"}, "GS01": {"id_prefix": "gs1"}, "GS06": {"id_prefix": "gs6"}}
+    reg = {"FADE3": {"id_prefix": "gf3"}, "GS01": {"id_prefix": "gs1"}, "FADE3L": {"id_prefix": "gf3l"}}
     assert ltg.operator_eligibility_refusal("FADE3", reg, env={}) == "FADE3_HM_GATE_NOT_PASSED"
     assert ltg.operator_eligibility_refusal("FADE3", reg, env={"LIVE_HM_GATE_FADE3": "PASS:hm-ref"}) is None
     assert ltg.operator_eligibility_refusal("GS01", reg, env={}) is None
-    assert ltg.operator_eligibility_refusal("GS06", reg, env={"LIVE_HM_GATE_FADE3": "PASS:x"}) == "TILE_NEVER_OPERATOR_ELIGIBLE"
+    assert ltg.operator_eligibility_refusal("FADE3L", reg, env={"LIVE_HM_GATE_FADE3": "PASS:x"}) == "TILE_NEVER_OPERATOR_ELIGIBLE"
     assert ltg.operator_eligibility_refusal("NOPE", reg) == "TILE_NEVER_OPERATOR_ELIGIBLE"
 
 

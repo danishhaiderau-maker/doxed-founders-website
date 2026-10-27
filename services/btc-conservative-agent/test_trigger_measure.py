@@ -305,7 +305,7 @@ def test_paper_fill_output_byte_identical_with_measurement_stamped():
 
 
 def test_policy_outputs_identical_with_measurement_stamped():
-    import paper_policy_family_gs06_committed_fade_atr_tp as policy
+    import paper_policy_family_gsb2_regime_switcher as policy
     from gs_tile_contract_support import asia_ts, bar, decide
     d = decide(policy, direction="LONG", engine_bar=bar(atr_pct=50.0, adx=30.0, atr_bp=4.0), ts=asia_ts())
     stamped = copy.deepcopy(d)
@@ -330,7 +330,7 @@ def test_policy_outputs_identical_with_measurement_stamped():
 
 def test_tile_row_fill_price_limit_and_pnl_byte_identical():
     import monitor_tiles as mt
-    base = {"trade_id": "gs6-iso", "research_lane": "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "ts": T0 + 600,
+    base = {"trade_id": "gb2-iso", "research_lane": "FAMILY_GSB2_REGIME_SWITCHER", "ts": T0 + 600,
             "dir": "LONG", "entry": 83150.0, "exit": 83170.0, "net_pnl_usd": 0.01, "net_pnl_usd_raw": 0.0103,
             "net_pnl_bp": 2.4, "exit_reason": "GS_ATR_TAKE_PROFIT", "leverage": 100, "margin_usdt": 0.25,
             "duration_min": 10.0, "shared_ai_call_ts": T0, "limit_price": 83178.3,
@@ -359,7 +359,7 @@ def test_pair_row_fill_and_pnl_identical_with_measurement():
     twin = {"side": "LONG", "entry_price": 83150.0, "exit_price": 83170.0, "exit_ts": T0 + 600, "net_pnl_usd": 0.01}
     stamped = {**twin, **{f"paper_{k}": 1.0 for k in tm.ENTRY_QUOTE_KEYS + tm.ENTRY_BOOK_KEYS},
                **{k: 1.0 for k in tm.EXIT_KEYS}}
-    a, b = lvp.pair_row("gs6-iso", chain, twin), lvp.pair_row("gs6-iso", chain, stamped)
+    a, b = lvp.pair_row("gb2-iso", chain, twin), lvp.pair_row("gb2-iso", chain, stamped)
     measured = {f"paper_{k}" for k in tm.ENTRY_QUOTE_KEYS + tm.ENTRY_BOOK_KEYS} | {
         "paper_trigger_vs_book_bp", "paper_trigger_tape_age_s", "paper_trigger_book_age_s",
         "paper_trigger_vs_book_reason", "paper_trigger_tape_age_flag"}

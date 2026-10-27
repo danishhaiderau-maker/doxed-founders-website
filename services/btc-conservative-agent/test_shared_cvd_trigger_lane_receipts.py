@@ -23,8 +23,7 @@ B1 = "FAMILY_GSB1_CVD_DIV_REGIME"
 B2 = "FAMILY_GSB2_REGIME_SWITCHER"
 # Tiles triggered only by the shared AI call (no evaluator, no own clock).
 SHARED_AI_ONLY = {
-    "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_RANDOM_CONTROL_TAKER_90",
-    "FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
+    "FAMILY_RANDOM_CONTROL_TAKER_90",  # only active shared-AI-only tile after GS-06 R22 retire
 }
 EVALUATOR_SOURCES = {"CVD_DIVERGENCE_3M", "CROSS_VENUE_PREMIUM", "CROSS_VENUE_LEAD"}
 
@@ -41,7 +40,9 @@ def test_cvd_lanes_stamp_one_bar_close_clock():
 
 def test_no_evaluator_driven_tile_lacks_a_signal_clock():
     loop = set(evaluator_loop_lanes())
-    assert loop | SHARED_AI_ONLY == set(ACTIVE_TILE_ORDER) and not (loop & SHARED_AI_ONLY)
+    self_sim = {lane for lane in ACTIVE_TILE_ORDER if ACTIVE_TILE_REGISTRY[lane].get("self_simulated_paper")}
+    assert loop | SHARED_AI_ONLY | self_sim == set(ACTIVE_TILE_ORDER)
+    assert not (loop & SHARED_AI_ONLY) and not (loop & self_sim)
     for lane in loop:
         spec = ACTIVE_TILE_REGISTRY[lane]
         clock = _clock(lane)

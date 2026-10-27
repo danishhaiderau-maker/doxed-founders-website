@@ -11,10 +11,10 @@ from __future__ import annotations
 import paper_fill
 import quote_trigger  # A5 rest site: the receive-stamped trades feed (trades_between); never the ticker
 
-# The five paper lanes migrated off the legacy touch model (Tiles 6/7 DISLOC / DISLOC-FOI removed 23 Oct 2026, R9).
+# Paper lanes migrated off the legacy touch model (GS-06 retired 28 Oct 2026; FADE3/LOOSE use these sites too).
 MIGRATED_LANES = frozenset({
     "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
-    "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP"})
+    "FAMILY_GSB2_REGIME_SWITCHER"})
 IOC_CAP_BP = 5.0          # signal ask +5 bp (long) / signal bid -5 bp (short), same cap as paper_fill step B
 EXIT_FORCE_AFTER_S = 10.0  # unpriced exit is force-closed (FORCED_NO_BOOK) after this
 EXIT_FORCE_CAP_S = 30.0

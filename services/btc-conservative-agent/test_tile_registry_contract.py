@@ -98,14 +98,14 @@ GS_B_ORDER = (
     "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
 )
 # FREEZE21B mid-epoch addition (owner 2026-10-05): GS-06 appended; GS-05 retired PHASE02.
-GS_MID_EPOCH_ORDER = ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
+GS_MID_EPOCH_ORDER = ()  # GS-06 retired 2026-10-28 under R22
 # PHASE03 mid-epoch additions (owner 2026-10-07): three research tiles, all default OFF.
 PHASE03_ORDER = ("FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL")
 # FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
 TILE14_ORDER = ("FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
                 "FAMILY_DISLOC_FOI_LONG_1M")
 # Tile 6 · GS-FADE3-TP30 (gf3) added 25 Oct 2026: self-simulated PAPER tile (tile_fade3), live refused.
-GF3_ORDER = ("FAMILY_GS_FADE3_TP30",)
+GF3_ORDER = ("FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25")
 EXPECTED_ORDER_ALL = (FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER + TILE14_ORDER
                       + GF3_ORDER)
 # 2026-10-11 retirement (owner): H-C, B3, FADE-POOL and V07 leave the roster.
@@ -116,8 +116,10 @@ RETIRED_20261011_LANES = ("FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED
                           "FAMILY_GS07_FAST_PREMIUM_FADE")  # + 12 Oct 10:57 H-A, GS-07
 # Tiles 6/7 (DISLOC, DISLOC-FOI) retired 23 Oct 2026; renumbering is display-only.
 RETIRED_TILE67_LANES = ("FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M")
+RETIRED_GS06_LANES = ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
 EXPECTED_ORDER = tuple(lane for lane in EXPECTED_ORDER_ALL
-                       if lane not in RETIRED_20261011_LANES and lane not in RETIRED_TILE67_LANES)
+                       if lane not in RETIRED_20261011_LANES and lane not in RETIRED_TILE67_LANES
+                       and lane not in RETIRED_GS06_LANES)
 ACTIVE_GS_B_ORDER = tuple(lane for lane in GS_B_ORDER if lane not in RETIRED_20261011_LANES)
 # PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
 RETIRED_PHASE02_LANES = (
@@ -142,12 +144,7 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gb1", "gb2"]
     assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == len(ACTIVE_TILE_REGISTRY)
     mid = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_MID_EPOCH_ORDER]
-    assert [t["id_prefix"] for t in mid] == ["gs6"] and [t["max_active_signals"] for t in mid] == [2]
-    for tile in mid:
-        assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
-        assert tile["default_enabled"] is True and tile["paper_only"] is True
-        assert tile["platform_relay_eligible"] is False and tile["live_copy_eligible"] is False
-        assert tile["entry_policy"]["mode"] == "REGIME_ADAPTIVE" and tile["pre_registration"]["mid_epoch_addition"]
+    assert mid == []  # GS-06 retired
     phase03 = [ACTIVE_TILE_REGISTRY[lane] for lane in PHASE03_ORDER if lane not in RETIRED_20261011_LANES]
     assert [t["id_prefix"] for t in phase03] == []  # GS-07 retired 12 Oct 10:57
     for tile in phase03:
@@ -331,8 +328,7 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     # active tile (H-A, the committed fade) is registered on them.
     inverted_users = [lane for lane in ACTIVE_TILE_ORDER
                       if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
-    assert inverted_users == ["FAMILY_GSB2_REGIME_SWITCHER",
-                              "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
+    assert inverted_users == ["FAMILY_GSB2_REGIME_SWITCHER"]
     assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
     assert callable(taker_time_exit_binding.committed_call_refusal)
     for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):
@@ -459,9 +455,9 @@ def test_every_policy_module_is_owned_by_one_active_tile():
     from combo_pathway_config import RETIRED_KEPT_POLICY_MODULES
     assert not (RETIRED_KEPT_POLICY_MODULES & set(declared)), "retired module still owned by an active tile"
     discovered -= RETIRED_KEPT_POLICY_MODULES
-    # Self-simulated tiles (gf3) own a tile_*.py engine module, not a paper_policy_*.py.
+    # Self-simulated tiles (gf3 / gf3l) own a tile_*.py engine module, not a paper_policy_*.py.
     self_sim = {m for m in declared if not m.startswith("paper_policy_")}
-    assert self_sim == {"tile_fade3.py"} and all((service_dir / m).is_file() for m in self_sim)
+    assert self_sim == {"tile_fade3.py", "tile_fade3_loose.py"} and all((service_dir / m).is_file() for m in self_sim)
     declared = [m for m in declared if m not in self_sim]
     assert discovered == set(declared), (
         "orphan or unregistered policy module; register it or physically delete it: "
@@ -534,8 +530,14 @@ def test_ha_gs07_and_tiles67_retired_and_roster_renumbered_1_to_5():
     for lane in RETIRED_TILE67_LANES:
         assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_REGISTRY
         assert lane not in registry.COMBO_LANE_SPECS  # code spec deleted with disloc_engine; ledgers stay on disk (R5)
+    for lane in RETIRED_GS06_LANES:
+        assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_REGISTRY
+        assert lane not in registry.COMBO_LANE_SPECS  # R22 delete
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    assert not (service_dir / "paper_policy_family_gs06_committed_fade_atr_tp.py").exists()
+    assert not (service_dir / "test_paper_policy_family_gs06_committed_fade_atr_tp.py").exists()
     assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 7))
     assert ACTIVE_TILE_ORDER == (
         "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
         "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_GS_FADE3_TP30")
+        "FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25")

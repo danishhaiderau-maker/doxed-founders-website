@@ -793,8 +793,6 @@ TILE_FILL_SITES = {
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
-    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
 }
 # R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
 # (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five
@@ -811,6 +809,8 @@ PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never ad
 # shared A5 helper via REST_FILL_SITES (tile_fill.price_entry_rest).
 TILE_FILL_SITES["FAMILY_GS_FADE3_TP30"] = (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
                                            ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced"))
+# GS-FADE3-LOOSE (gf3l, paper only; Danish yes 2026-10-27): same four shared sites as gf3 (R4).
+TILE_FILL_SITES["FAMILY_GS_FADE3_LOOSE_TP25"] = TILE_FILL_SITES["FAMILY_GS_FADE3_TP30"]
 ALLOWED_FILL_MODELS = frozenset({FILL_MODEL})
 LEGACY_TAG = "LEGACY_PRICING_INVALID"
 FORBIDDEN_NAMES = ("book_tape_1s", "market_microstructure_1s", "ticker")
@@ -1227,6 +1227,7 @@ def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, 
 # lane -> the registered rest sites (each must be a single `return paper_fill.rest_fill(...)` over trades_between)
 REST_FILL_SITES = {
     "FAMILY_GS_FADE3_TP30": (("tile_fill.py", "price_entry_rest"),),
+    "FAMILY_GS_FADE3_LOOSE_TP25": (("tile_fill.py", "price_entry_rest"),),
 }
 
 

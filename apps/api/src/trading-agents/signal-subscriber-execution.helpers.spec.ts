@@ -126,7 +126,7 @@ import {
 /** Two-tile gate: Fly signs the trade's tile key (mandatory for live entries). */
 function testTileKey(tradeId: string) {
   const head = String(tradeId).split('-')[0].toLowerCase();
-  const code = ({ rnd: 1, gs1: 2, gb1: 3, gb2: 4, gs6: 5, dsl: 6, dsf: 7 } as Record<string, number>)[head];
+  const code = ({ rnd: 1, gs1: 2, gb1: 3, gb2: 4, gf3: 8, gf3l: 9, gs6: 5, dsl: 6, dsf: 7 } as Record<string, number>)[head];
   return code == null ? {} : { tile_key: head, tile_key_code: code };
 }
 

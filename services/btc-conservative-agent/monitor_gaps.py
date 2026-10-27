@@ -45,6 +45,7 @@ WORKER_EXPECTATIONS: dict[str, tuple] = {
     "microstructure_capture_loop": (1.0, 60.0),
     "xvl_evaluator_thread": (1.0, 60.0),
     "gf3_paper_thread": (1.0, 60.0),
+    "gf3l_paper_thread": (1.0, 60.0),
     "_platform_health_loop": (180.0, 600.0),
     "ai_shadow_maturation_loop": (5.0, 120.0),
     "engine_loop": (1.0, 120.0),

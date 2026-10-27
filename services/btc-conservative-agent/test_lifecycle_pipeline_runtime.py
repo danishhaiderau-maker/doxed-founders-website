@@ -522,8 +522,9 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert score_child.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        # 25 Oct 2026: pin moved deliberately because gf3 (GS-FADE3-TP30, PAPER ONLY, slot 6) joined the score-led registry (#877).
-        "b7da543be509a0b4b51ee5481ab06023c2cf560b23ee3ccc30242fe858d13cc3",
+        # 2026-10-28 (#924): pin moved deliberately — GS-06 R22 retire + FADE3-LOOSE mid-epoch add
+        # (score_led = research_freeze.MID_EPOCH_REGISTRY_SIGNATURES["score_led"]).
+        "f241b3d0f7eb3cb4d1364c4f22cf3de804aaa2dabaadb4b3f3f23146e236c01c",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -538,8 +539,9 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert hypothesis_child.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        # 25 Oct 2026: hypothesis-mode pin moved deliberately too: gf3 joined the registry (#877).
-        "563c0a6f3567a446d734f6f633ccc40c0fcc61a082e9f0c8f2553ebf95a4dc69",
+        # 2026-10-28 (#924): hypothesis-mode pin moved for the same roster change
+        # (hypothesis = research_freeze.MID_EPOCH_REGISTRY_SIGNATURES["hypothesis"]).
+        "45535a186adf7185e9e215fde1154a7248e86016c435585b3d6a0ec008cbe748",
     ]
 
 
