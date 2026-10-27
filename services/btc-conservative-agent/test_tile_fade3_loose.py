@@ -69,6 +69,10 @@ def test_loose_registry_slot_6_paper_only_shared_fills():
     assert "1.75" in entry_blob and "1.25" in entry_blob
     assert "max loss" not in risk_blob.lower()
     assert "$0.25 margin" in risk_blob
+    # Mutation proof: dashboard_policy must expose entry (build_static_pathway_lane_specs KeyError).
+    dash = loose.dashboard_policy()
+    assert "entry" in dash and dash["entry"]["entry_path"] == "TILE_FADE3_LOOSE_SELF_SIMULATED"
+    assert dash["exit"]["profile"] == "GS_FADE3_LOOSE_FIRST_TRIGGER_WINS"
 
 
 def test_loose_refused_on_every_arm_path(monkeypatch):
