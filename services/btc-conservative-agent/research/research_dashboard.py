@@ -40,6 +40,7 @@ from research import archive_history_view as _archive_history_view
 from research import dashboard_sections as _dashboard_sections
 from research import research_api_cache as _research_cache
 from research import r3_quarantine as _r3_quarantine
+from research.generation_receipt import _is_retired_required_study_error
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -3486,13 +3487,26 @@ def api_status():
     freshness = _generation_freshness_meta(manifest)
     source_revision_parity = freshness["revision_parity"]
     required_report_status = manifest.get("required_report_status") or {}
+    # Parity with generation_receipt (#918): declared R17 retirements stay visible as
+    # retired/AMBER debt and must not hard-fail :9001 required_reports_ok / analyzer.reports.
+    required_report_retired = sorted(
+        str(name)
+        for name, status in required_report_status.items()
+        if isinstance(status, dict)
+        and status.get("generation_error")
+        and _is_retired_required_study_error(str(status.get("generation_error") or ""))
+    )
+    retired_required_set = set(required_report_retired)
     required_report_failures = sorted(
         str(name)
         for name, status in required_report_status.items()
-        if not isinstance(status, dict)
-        or status.get("available_in_generation") is not True
-        or bool(status.get("generation_error"))
-        or status.get("current_generation_valid") is False
+        if name not in retired_required_set
+        and (
+            not isinstance(status, dict)
+            or status.get("available_in_generation") is not True
+            or bool(status.get("generation_error"))
+            or status.get("current_generation_valid") is False
+        )
     )
     required_reports_ok = bool(required_report_status) and not required_report_failures
     dashboard_started_dt = _parse_utc_dt(_DASHBOARD_STARTED_AT.isoformat())
@@ -3543,6 +3557,7 @@ def api_status():
         "required_reports_ok": required_reports_ok,
         "required_report_status": required_report_status,
         "required_report_failures": required_report_failures,
+        "required_report_retired": required_report_retired,
         "generation_receipt": manifest.get("generation_receipt"),
         "analysis_in_progress": run_state.get("in_progress"),
         "analysis_run": run_state,
