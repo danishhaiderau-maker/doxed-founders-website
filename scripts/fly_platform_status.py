@@ -49,8 +49,11 @@ INFO = "INFO"
 
 # Our own runtime checks a platform incident can explain. fly.revision is a
 # deploy-queue fact, not runtime health, so it never escalates.
+# fly.gap.* are our trading/feed gap monitors (regime/warmup/exit_queues): they
+# flap for app reasons and must not escalate a status-page notice to RED.
 APP_CHECK_PREFIXES = ("fly.", "ws.", "shipper.", "deploy.")
 APP_CHECK_EXCLUDE = frozenset({"fly.platform_status", "fly.revision"})
+APP_CHECK_EXCLUDE_PREFIXES = ("fly.gap.",)
 
 # Components (status page names, lower case substrings) our app depends on.
 RELEVANT_COMPONENTS = ("customer applications", "machines", "volumes", "persistent storage", "deployments",
@@ -296,9 +299,16 @@ def classify_event(event: Mapping[str, Any], region: str, now: float) -> dict[st
 
 def app_failures(checks: Iterable[Mapping[str, Any]], extra_ids: Iterable[str] = ()) -> list[dict[str, Any]]:
     extra = frozenset(extra_ids)
-    return [{"id": c.get("id"), "status": c.get("status")} for c in checks
-            if (str(c.get("id") or "").startswith(APP_CHECK_PREFIXES) or c.get("id") in extra)
-            and c.get("id") not in APP_CHECK_EXCLUDE and c.get("status") in (AMBER, RED)]
+    out = []
+    for c in checks:
+        cid = str(c.get("id") or "")
+        if c.get("status") not in (AMBER, RED):
+            continue
+        if cid in APP_CHECK_EXCLUDE or any(cid.startswith(p) for p in APP_CHECK_EXCLUDE_PREFIXES):
+            continue
+        if cid.startswith(APP_CHECK_PREFIXES) or cid in extra:
+            out.append({"id": c.get("id"), "status": c.get("status")})
+    return out
 
 
 def assess(snapshot: Mapping[str, Any] | None, app_checks: Iterable[Mapping[str, Any]], now: float,

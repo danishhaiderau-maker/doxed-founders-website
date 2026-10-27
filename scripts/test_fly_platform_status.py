@@ -171,6 +171,30 @@ def test_red_only_when_our_fly_checks_also_fail_and_annotated():
     assert "platform_correlation" not in checks[2] and "platform_correlation" not in checks[3]
 
 
+def test_fly_gap_amber_alone_does_not_escalate_platform_to_red():
+    """False-red fix: fly.gap.* (exit_queues/regime/warmup) are app monitors, not Fly platform health."""
+    checks = [
+        {"id": "fly.gap.exit_queues", "status": "AMBER", "hint": "EXIT_TICK_DROPS_WHILE_OPEN"},
+        {"id": "fly.gap.regime", "status": "AMBER", "hint": "REGIME_SOURCES_DISAGREE_GT_10M"},
+        {"id": "fly.gap.warmup", "status": "AMBER", "hint": "GS01 BLIND_GT_60M_24H"},
+    ]
+    r = fps.assess(_snap(_incident(title="Degraded networking to AWS IPs", comps=())), checks, NOW, "sin")
+    assert r["status"] == sh.AMBER, r["summary"]
+    assert r["app_failing_checks"] == []
+    assert "app unaffected" in r["summary"]
+
+
+def test_fly_gap_exclude_mutation_still_escalates_real_fly_process_red():
+    """Mutation proof: excluding gaps must not hide a real fly.process RED under an incident."""
+    checks = [
+        {"id": "fly.gap.exit_queues", "status": "AMBER"},
+        {"id": "fly.process", "status": "RED", "hint": "not alive"},
+    ]
+    r = fps.assess(_snap(_incident()), checks, NOW, "sin")
+    assert r["status"] == sh.RED
+    assert {f["id"] for f in r["app_failing_checks"]} == {"fly.process"}
+
+
 def test_failing_app_with_no_platform_incident_is_ours():
     checks = [{"id": "shipper.progress", "status": "RED", "hint": "stalled"}]
     r = fps.assess(_snap(V1), checks, NOW, "sin")
