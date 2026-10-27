@@ -413,9 +413,15 @@ def preentry_level(health: str, degraded_for_s, oldest_pending_age_s, triggers_r
 # A3 tick drops while open
 # ----------------------------------------------------------------------------
 class DropRate:
-    def __init__(self, clock=time.time, window_s: float = 60.0):
+    # A single dropped exit tick while a paper position is open is common WS jitter and was
+    # flapping fly.gap.exit_queues AMBER (watcher.flapping). Require a short burst before alerting.
+    ALERT_MIN_DROPS_WHILE_OPEN = 3
+
+    def __init__(self, clock=time.time, window_s: float = 60.0,
+                 alert_min_drops: int = ALERT_MIN_DROPS_WHILE_OPEN):
         self._clock = clock
         self._window = window_s
+        self._alert_min = max(1, int(alert_min_drops))
         self._lock = threading.Lock()
         self._events: deque = deque(maxlen=10000)
         self.total = 0
@@ -434,9 +440,10 @@ class DropRate:
         with self._lock:
             recent = [e for e in self._events if now - e[0] <= self._window]
         per_min_open = sum(1 for _, o in recent if o)
-        alerts = ["EXIT_TICK_DROPS_WHILE_OPEN"] if per_min_open else []
+        alerts = ["EXIT_TICK_DROPS_WHILE_OPEN"] if per_min_open >= self._alert_min else []
         return {"dropped_total": self.total, "dropped_while_open": self.while_open,
                 "drops_last_min": len(recent), "drops_last_min_while_open": per_min_open,
+                "alert_min_drops_while_open": self._alert_min,
                 "alerts": alerts, "level": AMBER if alerts else GREEN}
 
 

@@ -164,11 +164,28 @@ def test_drop_rate_while_open():
     d = mg.DropRate(clock=clock)
     d.drop(False)
     assert d.snapshot()["level"] == "GREEN"
+    # One drop while open is WS jitter — stay GREEN (false-amber flap fix).
     d.drop(True)
     snap = d.snapshot()
-    assert snap["dropped_while_open"] == 1 and snap["level"] == "AMBER"
+    assert snap["dropped_while_open"] == 1 and snap["level"] == "GREEN"
+    assert snap["drops_last_min_while_open"] == 1
+    assert snap["alert_min_drops_while_open"] == mg.DropRate.ALERT_MIN_DROPS_WHILE_OPEN
+    d.drop(True)
+    assert d.snapshot()["level"] == "GREEN"
+    d.drop(True)
+    snap = d.snapshot()
+    assert snap["drops_last_min_while_open"] == 3 and snap["level"] == "AMBER"
+    assert snap["alerts"] == ["EXIT_TICK_DROPS_WHILE_OPEN"]
     clock.t += 120
-    assert d.snapshot()["drops_last_min_while_open"] == 0
+    assert d.snapshot()["drops_last_min_while_open"] == 0 and d.snapshot()["level"] == "GREEN"
+
+
+def test_drop_rate_alert_min_mutation_still_gates_burst():
+    """Mutation proof: alert_min=1 must AMBER on the first while-open drop."""
+    clock = Clock()
+    d = mg.DropRate(clock=clock, alert_min_drops=1)
+    d.drop(True)
+    assert d.snapshot()["level"] == "AMBER"
 
 
 def test_persisted_windows_survive_restart(tmp_path):
