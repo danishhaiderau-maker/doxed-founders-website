@@ -141,3 +141,103 @@ def test_entry_baseline_book_replay_opportunity_reader_is_guarded(tmp_path):
     assert [r["record_id"] for r in rows] == ["ok"]
     assert rep["straddle_rows_unguarded"] == 0 and rep["unstamped_rows_unguarded"] == 0
     assert rep["unguarded_stream_reads"] == {}
+
+
+def _write_book_trades(tmp_path, *, book_rows, trade_rows):
+    """Tape rows stamp time on ``s`` only (not default TS_KEYS) — raw opens count them as unstamped."""
+    book = tmp_path / "bfx_book_10l_1s.jsonl"
+    trades = tmp_path / "bfx_trades.jsonl"
+    book.write_text("".join(json.dumps(r) + "\n" for r in book_rows), encoding="utf-8")
+    trades.write_text("".join(json.dumps(r) + "\n" for r in trade_rows), encoding="utf-8")
+    return book, trades
+
+
+def test_raw_book_trades_open_still_counts_unstamped(tmp_path):
+    """Control: one raw open of book/trades with ``s``-only rows still RED for Item 5."""
+    s_ok = int(FLOOR) + 100
+    book, trades = _write_book_trades(
+        tmp_path,
+        book_rows=[{"s": s_ok, "b": [[1.0, 1]], "a": [[2.0, 1]]}],
+        trade_rows=[{"s": s_ok, "tr": [[s_ok, s_ok * 1000, 0.01, 1.5]]}],
+    )
+    mon = eg.StreamReadMonitor([str(tmp_path)]).install()
+    try:
+        with open(book, "rb") as handle:
+            handle.read()
+        with open(trades, "rb") as handle:
+            handle.read()
+        rep = mon.report(MANIFEST, FLOOR)
+    finally:
+        eg._ACTIVE_MONITOR = None
+    assert rep["unstamped_rows_unguarded"] >= 2
+    assert "bfx_book_10l_1s.jsonl" in rep["unstamped_rows_unguarded_by_stream"]
+    assert "bfx_trades.jsonl" in rep["unstamped_rows_unguarded_by_stream"]
+
+
+def test_research_v3_book_walk_rows_are_guarded(tmp_path):
+    """load_book_walk opens book/trades via guarded_open + admit(s/receive_ts); monitor stays clean."""
+    from research_v3_book_walk import load_book_walk
+
+    s_ok = int(FLOOR) + 100
+    s_pre = int(FLOOR) - 50
+    _write_book_trades(
+        tmp_path,
+        book_rows=[
+            {"s": s_pre, "b": [[1.0, 1]], "a": [[2.0, 1]]},
+            {"s": s_ok, "b": [[1.0, 1]], "a": [[2.0, 1]]},
+        ],
+        trade_rows=[
+            {"s": s_pre, "tr": [[s_pre, s_pre * 1000, 0.01, 1.5]]},
+            {"s": s_ok, "tr": [[s_ok, s_ok * 1000, 0.01, 1.5]]},
+        ],
+    )
+    mon = eg.StreamReadMonitor([str(tmp_path)]).install()
+    eg.set_process_guard(eg.EpochGuard(MANIFEST, floor_ts=FLOOR))
+    try:
+        tape = load_book_walk(tmp_path, [(s_ok - 10, s_ok + 10)])
+        rep = mon.report(MANIFEST, FLOOR)
+    finally:
+        eg.set_process_guard(None)
+        eg._ACTIVE_MONITOR = None
+    assert list(tape.book_s) == [s_ok]
+    assert len(tape.trade_ts) == 1
+    assert rep["straddle_rows_unguarded"] == 0 and rep["unstamped_rows_unguarded"] == 0
+    assert rep["unguarded_stream_reads"] == {}
+    assert "bfx_book_10l_1s.jsonl" in rep["epoch_filtered_stream_opens"]
+    assert "bfx_trades.jsonl" in rep["epoch_filtered_stream_opens"]
+
+
+def test_entry_baseline_book_replay_sha256_is_inventory_guarded(tmp_path):
+    """source_provenance digests book/trades under inventory (byte digest, never a cohort row)."""
+    from research.entry_baseline_book_replay import source_provenance
+
+    s_ok = int(FLOOR) + 100
+    _write_book_trades(
+        tmp_path,
+        book_rows=[{"s": s_ok, "b": [[1.0, 1]], "a": [[2.0, 1]]}],
+        trade_rows=[{"s": s_ok, "tr": [[s_ok, s_ok * 1000, 0.01, 1.5]]}],
+    )
+    mon = eg.StreamReadMonitor([str(tmp_path)]).install()
+    eg.set_process_guard(eg.EpochGuard(MANIFEST, floor_ts=FLOOR))
+    try:
+        prov = source_provenance(tmp_path, EPOCH_ID)
+        rep = mon.report(MANIFEST, FLOOR)
+    finally:
+        eg.set_process_guard(None)
+        eg._ACTIVE_MONITOR = None
+    assert len(prov["files"]) == 2
+    assert all(len(f["sha256"]) == 64 for f in prov["files"])
+    assert rep["straddle_rows_unguarded"] == 0 and rep["unstamped_rows_unguarded"] == 0
+    assert rep["unguarded_stream_reads"] == {}
+    assert "bfx_book_10l_1s.jsonl" in rep["inventory_stream_opens"]
+    assert "bfx_trades.jsonl" in rep["inventory_stream_opens"]
+
+
+def test_generation_receipt_item5_still_hard_fails_on_unplaced():
+    """Item 5 must stay hard in generation_receipt (no soft-gate of unstamped/straddle)."""
+    from pathlib import Path
+
+    text = Path(__file__).resolve().parent.joinpath("research", "generation_receipt.py").read_text(encoding="utf-8")
+    assert "straddle_rows_unguarded" in text and "unstamped_rows_unguarded" in text
+    assert "straddle/unstamped rows read unguarded" in text
+    assert "not unplaced" in text

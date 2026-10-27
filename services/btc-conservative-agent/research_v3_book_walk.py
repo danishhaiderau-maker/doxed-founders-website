@@ -328,8 +328,15 @@ def load_book_walk(data_dir: str | Path, intervals: Iterable[tuple[float, float]
     stats = {"book_lines_read": 0, "trade_lines_read": 0, "decode_errors": 0}
 
     def rows(name: str, counter: str):
+        # Same Item-5 pattern as open_v3_ledger + admit_v3_row: declare the open epoch_filtered and hard-reject
+        # PRE_EPOCH / UNDATED rows. Book/trades stamp time on ``s`` (book may also carry receive_ts); those keys
+        # are not in the default TS_KEYS set, so admit must name them or every tape row looks unstamped.
+        from analyzer_epoch_guard import guarded_open, process_guard, stream_name
+
+        guard = process_guard()
         for path in rotation_paths(data_dir, name):
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
+            rel = stream_name(path)
+            with guarded_open(path, "r", encoding="utf-8", errors="replace", relpath=rel) as handle:
                 for line in handle:
                     stats[counter] += 1
                     match = _S_RE.search(line)
@@ -340,7 +347,7 @@ def load_book_walk(data_dir: str | Path, intervals: Iterable[tuple[float, float]
                     except ValueError:
                         stats["decode_errors"] += 1
                         continue
-                    if isinstance(row, dict):
+                    if isinstance(row, dict) and guard.admit(rel, row, ("s", "receive_ts")):
                         yield row
 
     boot_paths = rotation_paths(data_dir, _gd.BOOT_LOG_FILE)

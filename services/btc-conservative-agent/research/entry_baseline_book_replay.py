@@ -23,8 +23,13 @@ OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL"})
 
 
 def _sha256(path: Path) -> str:
+    """Whole-file digest for provenance only (never a cohort row) — inventory-guarded like open_v3_ledger(..., inventory=True)."""
+    from analyzer_epoch_guard import guarded_read, stream_name
+
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with guarded_read(stream_name(path), "inventory"):
+        handle = path.open("rb")
+    with handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
