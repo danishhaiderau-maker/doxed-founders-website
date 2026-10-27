@@ -9,6 +9,9 @@ def test_navigation_preserves_all_sections_and_remaps_saved_sections():
     expected = set('summary findings regime lanes ai chase chase-policy-lab chase-threshold chase-delay combos indicator-edge spread-perf exit-combos exit-reason-leak shadow-exits ladder-sim exits genome research-design evidence-coverage edge explorer archives download runtime-incidents pathway-audit horizon'.split())
     groups=dashboard.REPORT_NAV_GROUPS
     ids=[item[0] for _,_,items in groups for item in items]
+    assert len(groups)==4  # Overview, Strategy Research, Execution, Diagnostics & Historical
+    assert [gid for gid,_,_ in groups]==['overview','lanes-group','trading-group','deep-group']
+    assert groups[-1][1]=='Diagnostics & Historical'
     assert len(ids)==27 and set(ids)==expected
     for sid in ids:
         assert f'id="sec-{sid}"' in dashboard.DASHBOARD_HTML
@@ -22,6 +25,15 @@ def test_navigation_preserves_all_sections_and_remaps_saved_sections():
     assert json.loads(result.stdout)==[gid for gid,_,items in groups for _ in items]
     assert dict((sid,label) for _,_,items in groups for sid,label,_ in items)['ai']=='AI comparison & calibration'
     assert '<h2>AI comparison &amp; calibration</h2>' in page
+    assert sectionGroup_ids_for_historical_nested_under_diagnostics(groups)
+
+
+def sectionGroup_ids_for_historical_nested_under_diagnostics(groups):
+    deep=dict((gid, items) for gid,_,items in groups)['deep-group']
+    deep_ids={sid for sid,_,_ in deep}
+    for sid in ('findings','regime','ai','archives','horizon'):
+        assert sid in deep_ids
+    return True
 
 
 def test_registry_count_does_not_claim_collection():

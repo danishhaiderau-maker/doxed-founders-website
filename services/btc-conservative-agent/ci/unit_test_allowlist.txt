@@ -127,6 +127,7 @@ test_dashboard_report_publication.py
 test_dashboard_runtime_identity.py
 test_dashboard_self_aware_link.py
 test_dashboard_signed_epoch_tile_scope.py
+test_dashboard_simplified_disclosure.py
 test_dashboard_snapshot_failure.py
 test_dashboard_state_projection_runtime.py
 test_dashboard_storage_receipt.py

@@ -39952,7 +39952,7 @@ __ADMIN_ACCESS_CONTROLS__
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
 </div>
 
-<details id="tradingParamsPanel" open style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+<details id="tradingParamsPanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
@@ -39994,7 +39994,9 @@ __ADMIN_ACCESS_CONTROLS__
 <p><strong>Equity:</strong> <span id="equity">-</span></p>
 <p><strong>Regime:</strong> <span id="regime">-</span></p>
 
-<h3>Support / Resistance (24h Structural)</h3>
+<details id="supportResistancePanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary style="cursor:pointer;padding:12px 14px;font-weight:700;">Support / Resistance (24h Structural) — advanced</summary>
+  <div class="advanced-content">
 <p><strong>Swing High:</strong> <span id="swingHigh">-</span></p>
 <p><strong>Swing Low:</strong> <span id="swingLow">-</span></p>
 <p><strong>Dist to Resistance:</strong> <span id="distRes">-</span>%</p>
@@ -40002,6 +40004,8 @@ __ADMIN_ACCESS_CONTROLS__
 <p><strong>SR Zone:</strong> <span id="srZone">-</span>%</p>
 <p><strong>SR State:</strong> <span id="srState">-</span></p>
 <p><strong>SR Bias:</strong> <span id="srBias">-</span></p>
+  </div>
+</details>
 
 <h3>AI Decision (current cycle)</h3>
 <p><strong>AI Status:</strong> <span id="aiDecision">-</span> <span id="aiStatusNote" style="color:#8b949e;font-size:0.9em;"></span></p>
@@ -40014,25 +40018,34 @@ __ADMIN_ACCESS_CONTROLS__
 <p><strong>Last APPROVE Outcome:</strong> <span id="approveOutcome">-</span></p>
 <p><strong>AI Reason:</strong> <span id="aiReason">-</span></p>
 
-<h3>Exchange &amp; Cost Model (Research Sim)</h3>
+<details id="exchangeCostPanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary style="cursor:pointer;padding:12px 14px;font-weight:700;">Exchange &amp; Cost Model (Research Sim) — advanced</summary>
+  <div class="advanced-content">
 <p><strong>Exchange:</strong> <span id="exchangeLabel">Bitfinex</span> · <strong>Fee profile:</strong> <span id="feeProfile">-</span> · <strong>Trading fees:</strong> <span id="tradingFeeRates">-</span></p>
 <p><strong>Funding (live):</strong> <span id="fundingRateLive">-</span> · <strong>Source:</strong> <span id="fundingSource">-</span> · <strong>Next settlement (Melbourne):</strong> <span id="fundingNextSettle">-</span></p>
 <p><strong>Funding meaning:</strong> <span id="fundingMeaning">-</span> · <strong>Open-interest:</strong> <span id="fundingOpenInterest">-</span></p>
+  </div>
+</details>
 
 <h3>System Status</h3>
 <p id="why"></p>
 <p><strong>Bot sync:</strong> <span id="botInstance">-</span></p>
 <p>Last Fetch: <span id="lastFetch"></span></p>
 <p>WS Age: <span id="ws_age">-</span> <span id="wsStaleBadge" style="font-size:0.85em;"></span></p>
-<h3>Runtime incident &amp; restart history</h3>
+<details id="runtimeIncidentPanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary style="cursor:pointer;padding:12px 14px;font-weight:700;">Runtime incident &amp; restart history — forensic</summary>
+  <div class="advanced-content">
 <p id="runtimeIncidentScope" style="color:#8b949e;font-size:0.85em;">Loading retained application receipts…</p>
 <div class="activity-table-scroll" role="region" aria-label="Runtime incident history table" tabindex="0"><table>
   <thead><tr><th>Time (UTC)</th><th>Classification</th><th>Reason</th><th>Restart requested</th><th>Exit code</th><th>Evidence</th></tr></thead>
   <tbody id="runtimeIncidentTable"></tbody>
 </table></div>
+  </div>
+</details>
 
-<div class="debug-panel">
-    <h3>🔍 DEBUG STATE</h3>
+<details id="debugStatePanel" class="debug-panel" style="margin:15px 0;">
+    <summary style="cursor:pointer;font-weight:700;">DEBUG STATE — machine / forensic detail</summary>
+    <div class="advanced-content">
     <p><strong>Last Check:</strong> <span id="lastCheckTime">-</span></p>
     <p><strong>Last Event:</strong> <span id="lastEventTime">-</span></p>
     <p><strong>Edge Score:</strong> <span id="edgeScore">-</span></p>
@@ -40060,13 +40073,19 @@ __ADMIN_ACCESS_CONTROLS__
     <p id="aiShadowNote" style="color:#6e7681;font-size:0.74em;margin:4px 0 0 0;">-</p>
     <p><strong>Features:</strong> <span id="features">-</span></p>
     <p><strong>Data Quality:</strong> <span id="dataQuality">-</span></p>
-</div>
+    </div>
+</details>
 
+<details id="destructiveOpsHintPanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary style="cursor:pointer;padding:12px 14px;font-weight:700;color:#f0b429;">Destructive / reset operation notes — read before wipe</summary>
+  <div class="advanced-content">
 <p id="freshCollectionHint" style="color:#8b949e;font-size:0.85em;margin-top:8px;">
   <strong>Fresh Collection — Laptop Only:</strong> deletes the configured laptop research mirror, derived analysis and eligible research archives. Fly data and its collection epoch stay unchanged. Protected credentials, configuration, accounting, recovery state and operation receipts are retained. Open this page on the laptop with its authenticated local controller available; a phone cannot reach the laptop through localhost. After deletion, local sync remains blocked until a verified import is explicitly approved, so old downloads cannot silently restore deleted data. This is a one-shot operation, not an ON/OFF mode.
   <br><br>
   <strong>Wipe Fly Data Only:</strong> deletes scoped Fly research files + resets Fly in-memory research state while retaining protected credentials, accounting, and recovery state. It does not signal a fresh desktop epoch: the existing local sync mirror is left untouched.
 </p>
+  </div>
+</details>
 <p id="freshCollectionStatus" role="status" aria-live="polite" style="color:#58a6ff;font-size:0.85em;margin-top:4px;overflow-wrap:anywhere;">Laptop reset unavailable — local controller readiness required. No reset requested; Fly is unchanged.</p>
 <dialog id="localResetDialog" style="max-width:540px;width:calc(100% - 48px);box-sizing:border-box;background:#161b22;color:#c9d1d9;border:1px solid #8b949e;border-radius:10px;">
   <form method="dialog">
@@ -40081,8 +40100,9 @@ __ADMIN_ACCESS_CONTROLS__
 </dialog>
 <p id="wipeFlyOnlyStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
-<div id="dataStoragePanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + retention status</strong>
+<details id="dataStoragePanel" style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary style="cursor:pointer;padding:12px 14px;font-weight:700;color:#58a6ff;">Data Storage · Fly volume + retention — advanced</summary>
+  <div class="advanced-content">
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
     Fly volume size and largest files. Research data leaves Fly only as numbered segments: the laptop pulls them about every 2 min, ACKs each applied sequence, and the analyzer runs on a store promoted from those segments. Segment progress is in the operating strip above.
     Safe source pruning is disabled until lifecycle-complete, immutable local acknowledgement and active-reader gates are proven. Moving evidence to quarantine on the same volume reclaims zero bytes.
@@ -40119,7 +40139,8 @@ __ADMIN_ACCESS_CONTROLS__
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
     Laptop segment pull about every 2&nbsp;min; analyzer runs on the promoted segment store &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
-</div>
+  </div>
+</details>
 
 <h2 id="activityTables">Virtual Chase Candidates</h2>
 <p id="virtualChaseApplicability" style="display:none;color:#f59e0b;font-size:0.85em;margin:4px 0 8px;"></p>
@@ -41032,7 +41053,9 @@ DASHBOARD_JS = """(function () {
             + '<div style="font-weight:700;letter-spacing:0.04em;color:' + color + ';font-size:0.92em;">' + title + '</div>' + inner + '</div>';
           const cs = spec.card_sections || null;
           const cardSections = cs
-            ? ('<div class="tile-card-sections" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px;font-size:0.76em;line-height:1.42;color:#c9d1d9;">'
+            ? ('<details class="tile-card-policy-details" style="margin-top:10px;border:1px solid #30363d;border-radius:8px;background:#0d1117;">'
+              + '<summary style="cursor:pointer;padding:8px 10px;font-weight:700;color:#8b949e;font-size:0.78em;">ENTRY / EXIT / RISK — policy detail</summary>'
+              + '<div class="tile-card-sections" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;padding:0 10px 10px;font-size:0.76em;line-height:1.42;color:#c9d1d9;">'
               + cardBox('ENTRY', '#58a6ff', cardList(cs.entry))
               + cardBox('EXIT', '#3fb950', '<div style="color:#8b949e;margin-top:2px;">Live, ' + cardEsc((cs.exit || {}).order || 'first trigger wins') + ':</div>'
                 + cardList((cs.exit || {}).live)
@@ -41041,7 +41064,7 @@ DASHBOARD_JS = """(function () {
                   ? '<div style="color:#8b949e;font-size:0.95em;margin-top:2px;">' + cardEsc(((cs.exit || {}).shadow || []).join(' · ')) + '</div>'
                   : '<div style="color:#8b949e;font-size:0.95em;margin-top:2px;">none</div>'))
               + cardBox('RISK MANAGEMENT', '#f0883e', cardList(cs.risk))
-              + '</div>')
+              + '</div></details>')
             : '';
           let orderBanner = '';
           // Pt 5 (toggle contract): prefer the dynamic exec_banner driven by
