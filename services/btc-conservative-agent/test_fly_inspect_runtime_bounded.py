@@ -96,8 +96,9 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
     )
     assert result.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        # 25 Oct 2026: pin moved deliberately because gf3 (GS-FADE3-TP30, PAPER ONLY, slot 6) joined the score-led registry (#877).
-        "b7da543be509a0b4b51ee5481ab06023c2cf560b23ee3ccc30242fe858d13cc3",
+        # 2026-10-28 (#924): pin moved deliberately — GS-06 R22 retire + FADE3-LOOSE mid-epoch add
+        # (score_led = research_freeze.MID_EPOCH_REGISTRY_SIGNATURES["score_led"]).
+        "f241b3d0f7eb3cb4d1364c4f22cf3de804aaa2dabaadb4b3f3f23146e236c01c",
     ]
 
 

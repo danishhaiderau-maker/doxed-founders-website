@@ -101,10 +101,15 @@ def exit_config(analyzer_sync_id: str) -> dict:
 
 
 def dashboard_policy() -> dict:
+    """Static pathway card view (bot.build_static_pathway_lane_specs). Must include entry."""
     return {
         "filter_chips": ["PAPER ONLY", "LIVE REFUSED", f"Cap touch +-{ENTRY_CAP_BP:g} bp", f"TP {TP_BP:g} bp",
                          f"Hard {HARD_STOP_BP:g} bp", f"Exch stop {EXCHANGE_STOP_BP:g} bp",
                          f"{TIME_EXIT_S // 60}m time", f"{COOLDOWN_S:g}s cool", "1 open"],
+        "entry": {"trigger": f"{SIGNAL_ID}: looser 3-min flow z-score fade (self-simulated 1 s engine)",
+                  "entry_path": "TILE_FADE3_LOOSE_SELF_SIMULATED", "fill_path": "TILE_FILL_IOC_CAP_THEN_A5_REST",
+                  "execution": "Own paper ledger; every live arm path refused",
+                  "chase_detail": f"No chase; remainder rests at the cap for {paper_fill.REST_TTL_S:g} s (A5)"},
         "strategy_detail": [
             f"E8L FADE ALL W={FLOW_W_MIN}: z3 >= {Z_ENTRY:g}, mom5 >= {MOM_ATR_MULT:g} ATR30, "
             f"imb5 against >= {IMB_MIN:g}, |BZ| guard {BZ_LIMIT:g}, spread <= {SPREAD_MAX_BP:g} bp",
@@ -114,5 +119,5 @@ def dashboard_policy() -> dict:
         ],
         "exit": {"profile": "GS_FADE3_LOOSE_FIRST_TRIGGER_WINS", "take_profit_bp": TP_BP,
                  "hard_stop_bp": HARD_STOP_BP, "exchange_stop_bp": EXCHANGE_STOP_BP,
-                 "time_exit_sec": TIME_EXIT_S},
+                 "time_exit_sec": TIME_EXIT_S, "fixed_time_exit": f"{TIME_EXIT_S // 60}m"},
     }
