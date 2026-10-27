@@ -34,15 +34,15 @@ export const LIVE_COPY_TILE_PREFIXES: Readonly<Record<string, string>> = Object.
   FAMILY_GS01_XV_PREMIUM_ATR_TP: 'gs1',
   FAMILY_GSB1_CVD_DIV_REGIME: 'gb1',
   FAMILY_GSB2_REGIME_SWITCHER: 'gb2',
-  FAMILY_GS06_COMMITTED_FADE_ATR_TP: 'gs6',
+  // gf3 / gf3l are PAPER ONLY (not listed): live copy refused via paper-only gate on Fly.
 });
 
 /**
- * Retired tile trade-id prefixes (Tiles 6/7 DISLOC / DISLOC-FOI removed 23 Oct 2026).
+ * Retired tile trade-id prefixes (DISLOC dsl/dsf 23 Oct 2026; GS-06 gs6 28 Oct 2026).
  * Not in LIVE_COPY_TILE_PREFIXES, so routing already fails closed; the explicit
  * check makes the rejection independent of the map (ingest AND placement).
  */
-export const RETIRED_LIVE_COPY_TILE_PREFIXES: ReadonlySet<string> = new Set(['dsl', 'dsf']);
+export const RETIRED_LIVE_COPY_TILE_PREFIXES: ReadonlySet<string> = new Set(['dsl', 'dsf', 'gs6']);
 
 /** True when the trade id (adopt:/relink: wrappers ignored) carries a retired tile prefix. */
 export function isRetiredLiveCopyTileTradeId(tradeId: string | null | undefined): boolean {

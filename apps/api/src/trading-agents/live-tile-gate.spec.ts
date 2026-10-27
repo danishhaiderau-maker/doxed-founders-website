@@ -26,7 +26,8 @@ test('every live-copy tile prefix has a stable tile code; codes are unique and n
   assert.equal(new Set(codes).size, codes.length);
   for (const c of codes) assert.ok(c >= 1 && c <= 127);
   assert.equal(LIVE_TILE_KEY_CODES.gs1, 2);
-  assert.equal(LIVE_TILE_KEY_CODES.gs6, 5);
+  assert.equal(RESERVED_LIVE_TILE_KEY_CODES.gs6, 5);
+  assert.equal(LIVE_TILE_KEY_CODES.gf3l, 9);
 });
 
 test('tile key from trade id ignores adopt/relink wrappers and unknown prefixes', () => {
@@ -48,7 +49,8 @@ test('cid round-trips the tile, stays a positive int32, and keeps hashes distinc
     }
   }
   assert.notEqual(encodeTileClientOrderId('gs1', 1), encodeTileClientOrderId('gs1', 2));
-  assert.notEqual(encodeTileClientOrderId('gs1', 7), encodeTileClientOrderId('gs6', 7));
+  assert.notEqual(encodeTileClientOrderId('gs1', 7), encodeTileClientOrderId('gf3l', 7));
+  assert.throws(() => encodeTileClientOrderId('gs6', 7));
   assert.throws(() => encodeTileClientOrderId('dsl', 1));
 });
 
@@ -76,9 +78,9 @@ test('approval tile key is MANDATORY for a live entry (RK) and must match the tr
   assert.equal(approvalTileMatchesTrade(base as never, 'gs1-x1'), false);   // untagged entry refused (default)
   assert.equal(approvalTileMatchesTrade(base as never, 'gs1-x1', { requireTileKey: true }), false);
   assert.equal(approvalTileMatchesTrade(base as never, 'gs1-x1', { requireTileKey: false }), true);   // exit continuation
-  assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs6', tile_key_code: 5 } as never, 'gs1-x1', { requireTileKey: false }), false);
+  assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gb2', tile_key_code: 4 } as never, 'gs1-x1', { requireTileKey: false }), false);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs1', tile_key_code: 2 } as never, 'gs1-x1'), true);
-  assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs6', tile_key_code: 5 } as never, 'gs1-x1'), false);
+  assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gb2', tile_key_code: 4 } as never, 'gs1-x1'), false);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key: 'gs1', tile_key_code: 5 } as never, 'gs1-x1'), false);
   assert.equal(approvalTileMatchesTrade({ ...base, tile_key_code: 2 } as never, 'gs1-x1'), false);
 });

@@ -444,7 +444,7 @@ def test_live_guardian_route_returns_a_response():
 # ------------------------------------------------- two-tile live gate: every live tile, tile attribution (24 Oct)
 import live_tile_gate as _ltg
 
-GS6_LANE = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
+GB2_LANE = "FAMILY_GSB2_REGIME_SWITCHER"
 
 
 def _tiles(v, code):
@@ -453,24 +453,24 @@ def _tiles(v, code):
 
 def test_guardian_covers_every_live_tile_not_only_gs01():
     assert g.LANE_NEEDLE == ""
-    c = {"correlation_id": "gs6-1", "lane": GS6_LANE, "fill_at_ts": NOW - 6}
+    c = {"correlation_id": "gb2-1", "lane": GB2_LANE, "fill_at_ts": NOW - 6}
     v = g.evaluate([c], dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle="")
-    assert "STOP_MISSING_GT_5S" in codes(v) and _tiles(v, "STOP_MISSING_GT_5S") == {"gs6"}
+    assert "STOP_MISSING_GT_5S" in codes(v) and _tiles(v, "STOP_MISSING_GT_5S") == {"gb2"}
 
 
 def test_mutex_breach_two_open_live_positions():
     cs = [{"correlation_id": "gs1-1", "lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "fill_at_ts": NOW - 60, "stop_confirmed": True},
-          {"correlation_id": "gs6-1", "lane": GS6_LANE, "fill_at_ts": NOW - 60, "stop_confirmed": True}]
+          {"correlation_id": "gb2-1", "lane": GB2_LANE, "fill_at_ts": NOW - 60, "stop_confirmed": True}]
     v = g.evaluate(cs, dict(MIR, positions=[{"id": 1}, {"id": 2}]), {}, NOW, lane_needle="")
     assert "MUTEX_BREACH" in codes(v)
     assert "MUTEX_BREACH" not in codes(g.evaluate(cs[:1], dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle=""))
 
 
 def test_stop_placement_failed_and_slow_stop_disarm_with_tile():
-    c = {"correlation_id": "gs6-1", "lane": GS6_LANE, "fill_at_ts": NOW - 60, "stop_confirmed": True,
+    c = {"correlation_id": "gb2-1", "lane": GB2_LANE, "fill_at_ts": NOW - 60, "stop_confirmed": True,
          "errors": [{"type": "STOP_FAILED"}]}
     v = g.evaluate([c], dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle="")
-    assert _tiles(v, "STOP_PLACEMENT_FAILED") == {"gs6"}
+    assert _tiles(v, "STOP_PLACEMENT_FAILED") == {"gb2"}
     slow = {"correlation_id": "gs1-1", "lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "fill_at_ts": NOW - 60,
             "stop_confirmed": True, "stop_confirmed_at_ts": NOW - 54}
     v = g.evaluate([slow], dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle="")
@@ -480,14 +480,14 @@ def test_stop_placement_failed_and_slow_stop_disarm_with_tile():
 
 
 def test_tile_key_mismatch_entry_order_without_its_tile_chain_after_grace():
-    order = {"id": 7, "type": "LIMIT", "reduce_only": False, "cid": _ltg.encode_cid("gs6", 12345)}
+    order = {"id": 7, "type": "LIMIT", "reduce_only": False, "cid": _ltg.encode_cid("gb2", 12345)}
     m = dict(MIR, open_orders=[order])
     st = {}
     assert "TILE_KEY_MISMATCH" not in codes(g.evaluate([], m, st, NOW, lane_needle=""))     # inside grace
     v = g.evaluate([], m, st, NOW + g.LEDGER_GRACE_SEC, lane_needle="")
-    assert _tiles(v, "TILE_KEY_MISMATCH") == {"gs6"}
+    assert _tiles(v, "TILE_KEY_MISMATCH") == {"gb2"}
     # matching non-closed chain of that tile (however old its order): no mismatch, state cleared
-    pend = {"correlation_id": "gs6-1", "lane": GS6_LANE, "order_sent_at_ts": NOW - 900}
+    pend = {"correlation_id": "gb2-1", "lane": GB2_LANE, "order_sent_at_ts": NOW - 900}
     st2 = {}
     for t in (NOW, NOW + 30):
         assert "TILE_KEY_MISMATCH" not in codes(g.evaluate([pend], m, st2, t, lane_needle=""))
@@ -517,7 +517,7 @@ def test_g6_per_tile_cap_trips_at_five_cents_and_names_the_tile():
 
 
 def test_g6_total_cap_trips_across_tiles_when_no_single_tile_does():
-    rows = [lc("gs1-a", -0.04, NOW - 10), lc("gs6-a", -0.04, NOW - 9), lc("gb1-a", -0.02, NOW - 8)]
+    rows = [lc("gs1-a", -0.04, NOW - 10), lc("gb2-a", -0.04, NOW - 9), lc("gb1-a", -0.02, NOW - 8)]
     v = ltg.daily_loss_violations(rows, NOW)
     assert codes(v) == {ltg.VIOL_TOTAL_LOSS_CAP}
 

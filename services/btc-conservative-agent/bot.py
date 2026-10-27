@@ -34119,6 +34119,7 @@ def _paper_delay_pool_reset() -> None:
 
 import live_ack_pool as _live_ack_pool
 import tile_fade3 as _tile_fade3
+import tile_fade3_loose as _tile_fade3_loose
 
 _CROSS_LANE_POOL = None
 
@@ -34192,6 +34193,47 @@ def gf3_paper_thread():
         except Exception as exc:  # noqa: BLE001 - one bad second never kills the tile
             logger.warning(f"[GF3 PAPER] step failed: {type(exc).__name__}: {exc}")
         _worker_beat("gf3_paper_thread")
+        time.sleep(1.0)
+
+
+# Tile 6 · GS-FADE3-LOOSE (gf3l): same self-sim 1 s PAPER engine family as gf3 with looser gates.
+_GF3L_POOL_KEYS = {"entry": _live_ack_pool.KEY_ENTRY_MKT, "exit": _live_ack_pool.KEY_EXIT_RO_MKT}
+_gf3l_engine = None
+_gf3l_engine_lock = threading.Lock()
+
+
+def _gf3l_ledger_path() -> str:
+    return os.path.join(str(_data_sync_runtime_root()), _tile_fade3_loose.LEDGER_FILE)
+
+
+def _gf3l_get_engine():
+    global _gf3l_engine
+    with _gf3l_engine_lock:
+        if _gf3l_engine is None:
+            lane = _tile_fade3_loose.LANE
+            _gf3l_engine = _tile_fade3_loose.Fade3PaperEngine(
+                features_fn=_tile_fade3_loose.LiveFeatureFeed(str(_data_sync_runtime_root())),
+                delay_fn=lambda leg: _paper_delay(lane, leg, pool_key=_GF3L_POOL_KEYS.get(leg)),
+                write_fn=_tile_fade3_loose.append_jsonl(_gf3l_ledger_path()),
+                ledger_rows=_tile_fade3_loose.read_ledger(_gf3l_ledger_path()),
+            )
+        return _gf3l_engine
+
+
+def gf3l_paper_thread():
+    """Steps the gf3l (FADE3-LOOSE) paper engine once a second while its research toggle is on."""
+    while True:
+        try:
+            engine = _gf3l_get_engine()
+            if is_research_lane_enabled(_tile_fade3_loose.LANE) or engine.pos is not None or engine.pending is not None:
+                t_cpu = time.thread_time()
+                engine.step(time.time())
+                cpu = time.thread_time() - t_cpu
+                if cpu > _tile_fade3_loose.STEP_CPU_BUDGET_S:
+                    logger.warning(f"[GF3L PAPER] step CPU {cpu:.3f}s > budget {_tile_fade3_loose.STEP_CPU_BUDGET_S}s")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[GF3L PAPER] step failed: {type(exc).__name__}: {exc}")
+        _worker_beat("gf3l_paper_thread")
         time.sleep(1.0)
 
 
@@ -35171,7 +35213,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
     "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency", "/api/monitor/exit-lag",
-    "/api/monitor/tiles/field-completeness", "/api/monitor/tiles/gf3",
+    "/api/monitor/tiles/field-completeness", "/api/monitor/tiles/gf3", "/api/monitor/tiles/gf3l",
     # API-GAP-SWEEP-20261012
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
@@ -48815,7 +48857,7 @@ def monitor_tiles_specs():
 
 @app.route('/api/monitor/tiles/gf3', methods=["GET"])
 def monitor_tiles_gf3():
-    """Tile 6 · GS-FADE3-TP30 paper engine status + its closed ledger rows re-evaluated for countability
+    """Tile 5 · GS-FADE3-TP30 paper engine status + its closed ledger rows re-evaluated for countability
     (?limit=50, max 200). Read-only; PAPER ONLY."""
     def build(now):
         try:
@@ -48828,6 +48870,25 @@ def monitor_tiles_gf3():
         closed = _tile_fade3.recount(rows, a5_verified_now=a5_now, latest_real_l_bp=None, clamp_hit=False)
         return {"schema": "monitor_tile_gf3_v1", **_monitor_tiles_common(now),
                 "toggle_on": bool(is_research_lane_enabled(_tile_fade3.LANE)),
+                "status": engine.status(), "closed_n": len(closed), "closed": closed[-limit:]}
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_SPECS_BYTES)
+
+
+@app.route('/api/monitor/tiles/gf3l', methods=["GET"])
+def monitor_tiles_gf3l():
+    """Tile 6 · GS-FADE3-LOOSE paper engine status + closed ledger (?limit=50, max 200). PAPER ONLY."""
+    def build(now):
+        try:
+            limit = max(1, min(200, int(request.args.get("limit") or 50)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("limit must be an integer")
+        engine = _gf3l_get_engine()
+        rows = _tile_fade3_loose.read_ledger(_gf3l_ledger_path())
+        a5_now = _tile_fade3_loose.a5_verified(_tile_fade3_loose.rest_fill_count(rows))
+        closed = _tile_fade3_loose.recount(rows, a5_verified_now=a5_now, latest_real_l_bp=None, clamp_hit=False)
+        return {"schema": "monitor_tile_gf3l_v1", **_monitor_tiles_common(now),
+                "toggle_on": bool(is_research_lane_enabled(_tile_fade3_loose.LANE)),
                 "status": engine.status(), "closed_n": len(closed), "closed": closed[-limit:]}
 
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_SPECS_BYTES)
@@ -61912,6 +61973,7 @@ def main():
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
     threading.Thread(target=xvl_evaluator_thread, name="xvl-evaluator", daemon=True).start()
     threading.Thread(target=gf3_paper_thread, name="gf3-paper", daemon=True).start()
+    threading.Thread(target=gf3l_paper_thread, name="gf3l-paper", daemon=True).start()
     _start_collector_worker("collector-maturation")
     _start_collector_worker("collector-v3-reconcile")
     threading.Thread(target=safe_thread(ai_shadow_maturation_loop), daemon=True).start()

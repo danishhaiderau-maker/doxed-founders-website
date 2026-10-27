@@ -81,7 +81,7 @@ def test_e1_open_mark_to_book_counts_against_the_cap_and_unreadable_blocks(small
 
 def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
     c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60, "pnl_usd": None}
-    blocks, _ = ltg.daily_cap_entry_block([c], mirror(), book(), NOW, "gs6")
+    blocks, _ = ltg.daily_cap_entry_block([c], mirror(), book(), NOW, "gb2")
     assert ltg.VIOL_PNL_UNREADABLE in {b["code"] for b in blocks}
     v = g.evaluate([c], mirror(), {}, NOW, lane_needle="", book=book())
     red, amber = g.split_violations(v)
@@ -312,7 +312,7 @@ def _rec_ns(prot, state=None):
 def test_e8_g4_first_l_recorded_once_from_gs01_bitfinex_l_only():
     row = {"side": "LONG", "entry": 100500.0, "stop_level": 100000.0, "liq_price": 99900.0, "liq_read_at": NOW - 1,
            "stop_liq_distance_bp": 10.0, "liq_source": ltg.LIQ_SOURCE}
-    ns, st = _rec_ns({"tile": "gs6", "positions": [row]})
+    ns, st = _rec_ns({"tile": "gb2", "positions": [row]})
     ns["_live_guardian_record_protection"](NOW, [])
     assert not st.get("g4_first_l")                                         # only GS-01's first position decides G4
     ns, st = _rec_ns({"tile": "gs1", "trade_id": "t1", "positions": [dict(row, liq_source=None)]})
@@ -838,7 +838,7 @@ def _pass(sha=_SHA1, ts=NOW, actor="danish"):
 def test_rk_l27_arm_gate_refuses_until_a_new_amendment_passes(monkeypatch):
     monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
     rec = {"ts": NOW - 100, "stop_liq_distance_bp": 12.0, "amendment_at_record": ""}
-    for tile in ("gs1", "gs6", "gb1"):                                      # every tile, account-wide
+    for tile in ("gs1", "gb2", "gb1"):                                      # every tile, account-wide
         assert ltg.arm_gate_block(tile, {"outcome": ltg.G4_A}, "PASS:hm", rec) == ltg.DENY_L27_LATEST_L
     assert ltg.arm_gate_block("gb1", None, None, rec, "FAIL") == ltg.DENY_L27_LATEST_L
     assert ltg.arm_gate_block("gb1", None, None, rec, "PASS:" + _SHA1) == ltg.DENY_L27_LATEST_L   # env alone: no pass record

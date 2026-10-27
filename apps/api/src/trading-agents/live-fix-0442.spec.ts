@@ -152,7 +152,7 @@ test('LIVE-FIX-1460: one-statement lock+claim; duplicate claim -> P2002 (no seco
 test('1480: direct close/open wakes for active dashboard tiles are accepted', async () => {
   const { parseExecutorWakeRequest, relayWakeTradeIdRoutable } = await import('../relay-executor-wake-http');
   const now = Date.now();
-  for (const tid of ['gs1-446291153ae7', 'gs6-0123456789ab', 'rnd-0123456789ab', 'gb1-0123456789ab', 'gb2-0123456789ab']) {
+  for (const tid of ['gs1-446291153ae7', 'rnd-0123456789ab', 'gb1-0123456789ab', 'gb2-0123456789ab']) {
     assert.equal(relayWakeTradeIdRoutable(tid), true, tid);
     const close = parseExecutorWakeRequest({
       trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: tid,
@@ -173,7 +173,7 @@ test('1480: direct close/open wakes for active dashboard tiles are accepted', as
 
 test('1480: retired, continuous, unknown and bare ids stay unroutable', async () => {
   const { relayWakeTradeIdRoutable, parseExecutorWakeRequest } = await import('../relay-executor-wake-http');
-  for (const tid of ['cont-c105efa5', 'o29atr-deadbeef1234', 'gs7-deadbeef1234', 'dsl-1791785201-4', 'dsf-1791785201-2', 'unknown-1', 'deadbeef1234', 'dsl-', 'dsl', '']) {
+  for (const tid of ['gs6-0123456789ab', 'cont-c105efa5', 'o29atr-deadbeef1234', 'gs7-deadbeef1234', 'dsl-1791785201-4', 'dsf-1791785201-2', 'unknown-1', 'deadbeef1234', 'dsl-', 'dsl', '']) {
     assert.equal(relayWakeTradeIdRoutable(tid), false, tid);
   }
   const now = Date.now();

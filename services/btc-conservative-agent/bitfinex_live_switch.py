@@ -92,7 +92,7 @@ DENY_SWITCH_NOT_REQUESTED = "SWITCH_NOT_REQUESTED"
 DENY_LANE_NOT_ARM_ALLOWLISTED = "LANE_NOT_ARM_ALLOWLISTED"
 DENY_TILE_PRE_ARMING = "TILE_LIVE_SWITCH_PRE_ARMING"
 DENY_PAPER_ONLY_TILE = "LIVE_TILE_PAPER_ONLY"  # = live_tile_gate.DENY_PAPER_ONLY_TILE (gf3 GS-FADE3-TP30)
-PAPER_ONLY_LANES = frozenset({"FAMILY_GS_FADE3_TP30"})  # = live_tile_gate.PAPER_ONLY_LANES (test pins equality)
+PAPER_ONLY_LANES = frozenset({"FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25"})  # = live_tile_gate.PAPER_ONLY_LANES
 # Terminal state meaning the lane is genuinely allowed and armed.
 ALLOW_ARMED = "ARMED"
 # Registry capability blocks the operator's live-eligibility switch may waive.

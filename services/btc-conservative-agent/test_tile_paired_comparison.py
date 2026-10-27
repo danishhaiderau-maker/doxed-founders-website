@@ -86,14 +86,12 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     report = _report(rows)
     assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
     assert report["tile_order"][:3] == [RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME"]
-    # Shared-call tiles pair (H-A, control, B2, B3, GS-06, Danish, Fade Pool);
-    # evaluator-clock tiles (H-C, GS-01, B1, GS-07) never do.
-    # H-A retired 2026-10-12 10:57 (spec kept); the control now leads the shared-call pairs.
+    # Shared-call tiles pair (control + B2); evaluator-clock / self-sim tiles never do.
+    # H-A / B3 / GS-06 retired; GS-01 / B1 / FADE3 / FADE3-LOOSE are clock or self-sim.
     assert report["all_tiles_paired"]["paired_tiles"] == [
-        RND, "FAMILY_GSB2_REGIME_SWITCHER",
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
+        RND, "FAMILY_GSB2_REGIME_SWITCHER"]
     assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
-        (RND, "FAMILY_GSB2_REGIME_SWITCHER"), (RND, "FAMILY_GS06_COMMITTED_FADE_ATR_TP")}
+        (RND, "FAMILY_GSB2_REGIME_SWITCHER")}
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])
     assert set(report["pre_registered"]) == set(ACTIVE_TILE_ORDER)
     json.dumps(report, allow_nan=False)
@@ -142,7 +140,7 @@ def test_random_control_is_a_yardstick_not_a_trial_and_pairs_with_h_a():
         rows += [_fill(RND, f"b{i}", -1.0, ts), _fill(CFT, f"b{i}", 3.0, ts)]
     report = _report(rows, extra=(CFT,))  # H-A retired 12 Oct; frozen spec is the fixture
     assert report["baseline_lane"] is None
-    # Ten hypotheses (H-A, H-C, GS-01, B1..B3, GS-06, GS-07, Danish, Fade Pool, GS-07 V07); the control is not a trial.
+    # Active hypotheses + the H-A fixture (extra); the control is not a trial.
     assert report["deflated_sharpe_trials"] == len(ACTIVE_TILE_ORDER)
     verdict = report["pre_registered"][CFT]["verdict"]
     assert report["pre_registered"][CFT]["control_lane"] == RND

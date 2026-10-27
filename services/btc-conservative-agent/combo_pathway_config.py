@@ -122,11 +122,9 @@ GS_PREMIUM_FOLLOW_ADMISSION_POLICY_ID = "GS01_CROSS_VENUE_PREMIUM_FOLLOW_NO_AI_V
 GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID = "GS_CVD_DIVERGENCE_3M_EVENT_NO_AI_V1"
 GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID = "GSB2_CVD_DIVERGENCE_OR_COMMITTED_FADE_BY_REGIME_V1"
 GSB3_COMMITTED_FADE_ADMISSION_POLICY_ID = "GSB3_INVERTED_COMMITTED_SCORE_LED_SIDE_REGIME_V1"
-# FREEZE21B mid-epoch additions (owner, 2026-10-05 ~20:15 AEDT; Health Monitor +
-# Grok Strategist spec GS05-GS06-TILE-SPECS-20261005): appended as tiles 12/13
-# after the eleven frozen tiles, which stay byte-identical (research_freeze.
-# MID_EPOCH_ADDITIONS; frozen_roster_registry_signature proves it in CI).
-RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
+# FREEZE21B mid-epoch GS-06 (owner 2026-10-05) was retired 2026-10-28 under Rule 22
+# (Danish yes; CODE_OVERRIDE in research_freeze). Lane token kept only in
+# RETIRED_TILE_LANES; policy module deleted.
 # PHASE03 mid-epoch additions (owner, 2026-10-07): three research tiles, all
 # default OFF, paper-only, relay-ineligible (research_freeze.MID_EPOCH_ADDITIONS).
 # GS-07 = fast cross-venue premium fade (15-60s mean); the Danish regime router
@@ -150,6 +148,8 @@ BAR_CLOSE_SIGNAL_CLOCK = "BAR_CLOSE_3M_CVD_EVALUATOR"
 # it is never routed through the shared AI call nor the XVL evaluator loop.
 RESEARCH_LANE_FAMILY_GS_FADE3_TP30 = "FAMILY_GS_FADE3_TP30"
 GF3_ADMISSION_POLICY_ID = "GS_FADE3_E8_FADE_ALL_W3_NO_AI_V1"
+RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25 = "FAMILY_GS_FADE3_LOOSE_TP25"
+GF3L_ADMISSION_POLICY_ID = "GS_FADE3_E8L_FADE_ALL_W3_LOOSE_NO_AI_V1"
 SELF_SIMULATED_SIGNAL_CLOCK = "GF3_SELF_SIMULATED_1S_ENGINE"
 EVALUATOR_SIGNAL_CLOCKS = frozenset({CROSS_VENUE_SIGNAL_CLOCK, BAR_CLOSE_SIGNAL_CLOCK, SELF_SIMULATED_SIGNAL_CLOCK})
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
@@ -179,17 +179,15 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
 # Display order; every user-facing "Tile N" number is derived from it
 # (tile_number), never hard-coded.
-# PHASE02 roster (owner, 2026-10-07): five losing tiles retired in one atomic
-# registry transaction. The eight survivors keep their original relative order:
-# H-A, H-C, the control, GS-01, B1, B2, B3, GS-06, GS-07, the Danish regime
-# router, and the fade pool.
+# Active roster after GS-06 R22 retire + FADE3-LOOSE mid-epoch add (2026-10-28):
+# CTRL, GS-01, B1, B2, FADE3, FADE3-LOOSE.
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
     RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
     RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
-    RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
     RESEARCH_LANE_FAMILY_GS_FADE3_TP30,
+    RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1206,108 +1204,10 @@ COMBO_LANE_SPECS.update({
 })
 
 # ---------------------------------------------------------------------------
-# FREEZE21B mid-epoch addition GS-06 (owner ask 2026-10-05 ~20:15 AEDT;
-# spec diagnostics/GS05-GS06-TILE-SPECS-20261005.md, Health Monitor + Grok
-# Strategist). Paper only, relay ineligible, same freeze21b data epoch; the
-# window starts at the deploy of the registering revision (research_freeze.
-# MID_EPOCH_ADDITIONS). GS-05 was retired in the PHASE02 transaction
-# (2026-10-07). GS-06 reuses the H-A building blocks above without touching
-# any frozen tile's entry or exit dict.
+# GS-06 (FAMILY_GS06_COMMITTED_FADE_ATR_TP / gs6) retired 2026-10-28 (Danish
+# APPROVED Rule 22 delete). Spec + policy module + dedicated tests deleted;
+# evidence ledgers stay on disk (R5). Generic regime/fill primitives remain.
 # ---------------------------------------------------------------------------
-GS0506_SPEC_PATH = "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md"
-GS0506_REGISTERED_UTC = "2026-10-05T09:15:00Z"
-GS0506_DECISION_ANCHOR = ("MID_EPOCH_ADDITION_START (first boot of the registering revision); judged with the "
-                          "freeze21b epoch end, fewer than 21 days of data by construction")
-
-
-# CORRECTED 2026-10-05 20:37 AEDT (Danish-approved, Grok Strategist
-# GS05-GS06-TILE-SPECS-CORRECTED-20261005 after STRATEGY-CROSSCHECK-20261005).
-# GS-05 was retired in the PHASE02 atomic transaction (2026-10-07); GS-06
-# remains: HM F1 "patient fade". The first-draft quick-TP / ladder exits were
-# never shipped.
-_GS06_ENTRY = _gs_entry(
-    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
-    regime=GSB_REGIME, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"},
-    **_COMMITTED_FADE_KEYS,
-)
-_GS06_ENTRY.update({
-    "allowed_sessions": FREEZE21_SESSIONS_ASIA_EU, "max_spread_bps": 3.0, "max_bbo_age_sec": 5.0,
-    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE", "SCORE_DIRECTION_MISMATCH",
-                  "BBO_STALE", "SPREAD_ABOVE_MAX", "SESSION_GATED"),
-    "regime_audit": True,
-    # VIOLENT is traded as its own pre-registered cell; every VIOLENT decision
-    # also carries the old meta-rule's stand-aside as a shadow tag.
-    "regime_cells": {"QUIET": "QUIET_TREND", "TREND": "QUIET_TREND", "VIOLENT": "VIOLENT"},
-    "shadow_stand_aside_regimes": ("VIOLENT",),
-})
-# HM F1 "patient fade": -12 bp / 5 min cut, 40 bp stop, break-even armed at
-# +25 bp locking +8 bp, ATR trail (2.5 ATR distance) armed at max(+25 bp,
-# 3 ATR) i.e. after break-even, 120-minute backstop; no TP, no ladder.
-_GS06_PATIENT_PROFILE = {
-    "stack": "PATIENT_FADE_HM_F1", "hard_bp": 40.0, "cut_bp": 12.0, "cut_win_sec": 300, "cut_close_sec": 1,
-    "time_sec": 7200, "be_atr": 0.0, "be_floor": 25.0, "lock_bp": 8.0,
-    "trail_atr": 2.5, "trail_arm_atr": 3.0, "trail_floor": 0.0, "trail_arm_floor": 25.0,
-    "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
-    "order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL"),
-}
-_GS06_EXIT = {
-    "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 7200,
-    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
-    "profiles": {"ALL": dict(_GS06_PATIENT_PROFILE)},
-    "regime_profiles": {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"},
-    "take_profit_fill": "NONE - no take-profit (patient fade)",
-    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
-    "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
-    "max_open_positions": 2,
-    "exit_order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL", "TIME_BACKSTOP"),
-}
-
-
-def _gs0506_pre(rule_id: str, *, benchmark_lane: str, extra_kills: dict, decisions: tuple) -> dict:
-    pre = _gs_pre_registration(
-        rule_id, prereg_path=GS0506_SPEC_PATH, registered_utc=GS0506_REGISTERED_UTC, bonferroni_k=2,
-        honest_label=("MID-EPOCH PAPER TILE BY OWNER ORDER - built from live freeze21b profit patterns "
-                      "(in-sample), no out-of-sample evidence yet"),
-        giveback_arm_bp=8.0,
-        extra_kills={"benchmark_lane": benchmark_lane, "benchmark_min_edge_bp": 1.0, "latency_p50_above_sec": 5.0,
-                     **extra_kills},
-        decisions=("mid-epoch addition: window starts at the deploy of the registering revision",) + tuple(decisions),
-    )
-    pre["mid_epoch_addition"] = True
-    pre["decision"]["anchor"] = GS0506_DECISION_ANCHOR
-    pre["kill_summary"] += f"; must beat {benchmark_lane} on the same triggers by >= 1 bp mean"
-    return pre
-
-
-COMBO_LANE_SPECS.update({
-    RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP: _gs_tile(
-        lane=RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
-        label=("GS-06 Committed fade, patient exit · H-A invert entry, Asia+EU, taker (VIOLENT its own cell), "
-               "BE +25 -> +8, 2.5 ATR trail, 120-min"),
-        raw_policy_id=("GS06_INVERT_COMMITTED_SCORE_LED_SIDE_ASIA_EU_SPREADLE3BP_TAKER_ALL_REGIMES_VIOLENT_CELL|"
-                       "PATIENT_CUT12BP5M_HARD40BP_BE25_LOCK8_TRAIL2.5ATR_ARM3ATR_AFTER_BE_T120M_CAP2"),
-        id_prefix="gs6", module="paper_policy_family_gs06_committed_fade_atr_tp.py",
-        entry=_GS06_ENTRY, exit_policy=_GS06_EXIT, admission=COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID,
-        max_active_signals=2,
-        hypothesis={"status": "GS20261005_MID_EPOCH_IN_SAMPLE_PATTERN", "hypothesis_id": "GS-20261005-06",
-                    "in_sample": "freeze21b live profit pattern (PROFIT-PATTERN-FREEZE21B-20261005); not OOS"},
-        pre=_gs0506_pre(
-            "GS-20261005-06", benchmark_lane=RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
-            extra_kills={"control_lane_live": RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
-                         "control_live_min_edge_bp": 2.0, "two_sided_min_fills_before_pass": 10,
-                         "report_cells": ("QUIET_TREND", "VIOLENT"),
-                         "violent_cell_harm_after_fills": 30, "violent_cell_harm_mean_bp_at_or_below": -2.0},
-            decisions=("committed fade follows H-A and the frozen scorer (explicit side == score-led side)",
-                       "VIOLENT is traded as its own pre-registered cell (same exits); every VIOLENT decision also "
-                       "carries the old meta-rule stand-aside as a shadow tag; QUIET/TREND and VIOLENT are reported "
-                       "separately and the VIOLENT cell can be gated only by an explicit owner decision",
-                       "patient-fade exits (HM F1) per GS05-GS06-TILE-SPECS-CORRECTED-20261005",
-                       "GS-01-style research-candidate rules (Bonferroni over the two mid-epoch tiles)")),
-        subtitle="GS-06 — committed-AI fade, patient exit — PAPER ONLY — RELAY INELIGIBLE",
-        signal_summary=("fade the shared AI's committed LONG/SHORT call (H-A definition, Asia+EU, spread <= 3 bp) "
-                        "as a taker in every regime (VIOLENT reported as its own cell); patient break-even/trail exits"),
-    ),
-})
 
 # ---------------------------------------------------------------------------
 # PHASE03 mid-epoch additions (owner, 2026-10-07): three research tiles, all
@@ -1622,6 +1522,55 @@ COMBO_LANE_SPECS.update({
 })
 COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_GS_FADE3_TP30]["self_simulated_paper"] = True
 
+# Tile 6 · GS-FADE3-LOOSE (key gf3l, cid 9; Danish yes 2026-10-27). Same FADE3 family / shared fill path
+# as gf3 with looser entry gates (z 1.75, mom 1.25 ATR, imb 0.10, spread 3 bp), TP 25 bp, 30 s cooldown.
+# Sample-density experiment only (R14: not an edge claim). PAPER ONLY / live refused.
+_GF3L_ENTRY = {
+    "mode": "MARKETABLE_LIMIT_CAP_5BP_THEN_A5_REST_SELF_SIMULATED", "offset_pct": 0.0, "chase_windows": (),
+    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "direction_source": "E8L_FADE_Z3_MOMENTUM_IMBALANCE",
+    "max_spread_bps": 3.0, "entry_cap_bps": 5.0, "cooldown_sec": 30, "notional_usd": 25.0,
+    "e8l": {"z_entry": 1.75, "mom_atr_mult": 1.25, "imb_min": 0.10, "bz_limit": 2.0, "flow_window_min": 3},
+    "ai_decision_role": "NONE",
+    "fill_model": "TILE_FILL_IOC_CAP_THEN_A5_REST",
+}
+_GF3L_EXIT = _composite_exit(max_duration_sec=1200, max_open_positions=1,
+                             volatility_scaling="NONE - fixed bp TP / stops and a 20 min time exit")
+_GF3L_EXIT.update({"hard_stop_bps": 25.0, "hard_stop_margin_pct": 25.0, "take_profit_bps": 25.0,
+                   "exchange_stop_bps": 35.0})
+_GF3L_EXIT["exit_order"] = registry_live_exit_order(_GF3L_EXIT)
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25: _tile(
+        lane=RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25,
+        label=("GS-FADE3-LOOSE · looser 3-min z-fade, cap 5 bp then A5 rest, TP 25 bp, stop 25 bp, 20 min exit"),
+        raw_policy_id=("GS_FADE3_E8L_FADE_ALL_W3_Z1P75_MOM1P25ATR_IMB0P1_BZ2|"
+                       "TP25_HARD25_XSTOP35_TIME1200_CAP1"),
+        id_prefix="gf3l",
+        module="tile_fade3_loose.py",
+        test_module="test_tile_fade3_loose.py",
+        entry=_GF3L_ENTRY, exit_policy=_GF3L_EXIT,
+        hypothesis_result={"status": "MID_EPOCH_SAMPLE_DENSITY_20261027", "hypothesis_id": "GS-20261027-FADE3-LOOSE"},
+        pre_registration=_phase3_pre(
+            "GS-20261027-FADE3-LOOSE",
+            spec_source=("docs/tile-retire-and-fade3-variant.md §3 + Danish yes 2026-10-27 "
+                         "(sample density of FADE3 family; not an edge claim)"),
+            decisions=("E8L FADE ALL W=3; z>=1.75, mom>=1.25 ATR, imb>=0.10, spread<=3 bp; "
+                       "cap touch +-5 bp then A5 rest; TP 25 / hard 25 / exchange 35 bp; "
+                       "20 min time exit; 30 s cooldown; one open; $25 notional; paper only",),
+        ),
+        admission_treatment=GF3L_ADMISSION_POLICY_ID,
+        max_active_signals=1, entry_ttl_sec=1, default_enabled=True,
+        signal_clock=SELF_SIMULATED_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="GS-FADE3-LOOSE — looser 3-min spike fade — PAPER ONLY — LIVE REFUSED",
+        signal_summary=("price moves ~1.75 sd on the 3-minute z-score with momentum >= 1.25 ATR and a mild book "
+                        "lean against the spike; fade with a capped marketable limit (touch ±5 bp, A5 rest)"),
+        live_exit_order=registry_live_exit_order(_GF3L_EXIT),
+        shadow_exits=(),
+        early_cut_shadow_reason="GS-FADE3-LOOSE spec: TP, stops and time exit only",
+    ),
+})
+COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25]["self_simulated_paper"] = True
+
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
 ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
@@ -1650,6 +1599,7 @@ TILE_SHORT_CODES = {
     "FAMILY_FADE_POOL": "FADE-POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M": "V07",
     "FAMILY_DISLOC_BFX_DISLOCATION_1M": "DISLOC", "FAMILY_DISLOC_FOI_LONG_1M": "DISLOC-FOI",
     "FAMILY_GS_FADE3_TP30": "GS-FADE3",
+    "FAMILY_GS_FADE3_LOOSE_TP25": "GS-FADE3-LOOSE",
 }
 
 
@@ -1731,6 +1681,10 @@ RETIRED_TILE_LANES = frozenset({
     # already OFF and all evidence files stay on disk (R5 custody, no backfill).
     # Active tiles stay 1..5: CTRL, GS-01, B1, B2, GS-06 (display-only renumber).
     "FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M",
+    # Retired 2026-10-28 (owner Danish APPROVED Rule 22; RK A=PASS): GS-06 committed
+    # fade patient-exit mid-epoch tile. Policy module + dedicated tests DELETED;
+    # evidence stays on disk (R5). Active tiles renumber 1..5: CTRL, GS-01, B1, B2, FADE3.
+    "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
 })
 # Retired 2026-10-11 tiles whose policy modules stay in-tree (not spawned,
 # not numbered): H-C's evaluator is still the fixture for generic cross-venue

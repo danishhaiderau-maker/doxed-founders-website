@@ -344,7 +344,6 @@ test_paper_policy_family_committed_fade_taker_90.py
 test_paper_policy_family_danish_regime_router.py
 test_paper_policy_family_fade_pool.py
 test_paper_policy_family_gs01_xv_premium_atr_tp.py
-test_paper_policy_family_gs06_committed_fade_atr_tp.py
 test_paper_policy_family_gs07_fast_premium_fade.py
 test_paper_policy_family_gs07_v07_premium_fade_60m.py
 test_paper_policy_family_gsb1_cvd_div_regime.py
@@ -701,3 +700,4 @@ test_tile_fade3_deriv_rotation.py
 ../../scripts/test_fly_resume_bootstrap.py
 ../../scripts/test_fly_resume_predeploy_abort.py
 ../../scripts/test_live_flat_verify.py
+test_tile_fade3_loose.py

@@ -107,6 +107,30 @@
         "liq_model",
         "margin_note"
       ]
+    },
+    "/api/monitor/tiles/gf3l": {
+      "top": [
+        "schema",
+        "toggle_on",
+        "status",
+        "closed_n",
+        "closed"
+      ],
+      "status": [
+        "tile",
+        "tile_key",
+        "display_slot",
+        "lane",
+        "label",
+        "paper_only",
+        "min_pool_n",
+        "a5_rest_trades_n",
+        "a5_verified",
+        "g4_band",
+        "open_position",
+        "liq_model",
+        "margin_note"
+      ]
     }
   }
 }

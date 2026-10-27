@@ -36,7 +36,7 @@ def test_registry_ttl_helper_never_raises():
 
 
 def test_every_registry_lane_has_one_signature_whatever_ttl_a_source_carries():
-    """Covers CTRL/GS-01/GS-06/B1/B2/DISLOC/FOI: decision and order sources may carry different TTLs; identity cannot fork."""
+    """Covers CTRL/GS-01/B1/B2/FADE3: decision and order sources may carry different TTLs; identity cannot fork."""
     from combo_pathway_config import ACTIVE_TILE_REGISTRY
     for lane, spec in ACTIVE_TILE_REGISTRY.items():
         registry_ttl = float(spec["entry_ttl_sec"])
@@ -47,7 +47,7 @@ def test_every_registry_lane_has_one_signature_whatever_ttl_a_source_carries():
 
 def test_research_resolution_deadline_follows_the_canonical_ttl_for_gs01_gs06_and_regime_lanes():
     """resolution_deadline_ts = signal_ts + declared_entry_ttl_sec + allowance, so it now reads the registry TTL."""
-    expected = {"FAMILY_GS01_XV_PREMIUM_ATR_TP": 3.0, "FAMILY_GS06_COMMITTED_FADE_ATR_TP": 3.0,
+    expected = {"FAMILY_GS01_XV_PREMIUM_ATR_TP": 3.0, "FAMILY_GS_FADE3_TP30": 1.0,
                 "FAMILY_GSB1_CVD_DIV_REGIME": 1200.0, "FAMILY_GSB2_REGIME_SWITCHER": 1200.0}
     for lane, ttl in expected.items():
         spec = _sig(lane, 1800.0)["paper_policy_spec"]

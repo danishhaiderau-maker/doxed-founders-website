@@ -111,6 +111,6 @@ def test_runtime_tile_view_refuses_uncommitted_and_inverts_committed():
         shared = dict(copy.deepcopy(raw), direction="LONG", decision="APPROVE")
         snapshot = copy.deepcopy(shared)
         ai, direction, spread, _ = bot._tile_view_of_shared_call(
-            "FAMILY_GS06_COMMITTED_FADE_ATR_TP", raw, shared, _admission(raw), "LONG", 4,  # H-A retired; GS-06 shares the rule
+            "FAMILY_GSB2_REGIME_SWITCHER", raw, shared, _admission(raw), "LONG", 4,  # H-A/GS-06 retired; B2 TREND shares invert rule
         )
         assert direction == expected and shared == snapshot

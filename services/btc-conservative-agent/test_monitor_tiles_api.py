@@ -29,7 +29,7 @@ GS1 = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
 HA = "FAMILY_RANDOM_CONTROL_TAKER_90"
 B2 = "FAMILY_GSB2_REGIME_SWITCHER"
 GS5 = "FAMILY_GS05_PREMIUM_REGIME_MANAGED"
-GS6 = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
+GS6 = "FAMILY_GSB2_REGIME_SWITCHER"  # was GS-06; retired — B2 still regime-stamped
 EPOCH = "ce-20261004-v31-freeze21b"
 CUTOFF = 1_791_100_000.0
 
@@ -47,7 +47,7 @@ def _closed(tid, lane, *, close_ts, bp=None, net=0.0, reason="GS_ATR_TAKE_PROFIT
 
 
 def _rows(raws, status="closed", fills=None, be=0.0):
-    short = {GS1: "GS-01", HA: "CTRL", B2: "B2", GS5: "GS-05", GS6: "GS-06"}
+    short = {GS1: "GS-01", HA: "CTRL", B2: "B2", GS5: "GS-05", GS6: "B2"}
     return [mt.tile_trade_row(r, status=status, short_names=short, epoch_id=EPOCH,
                               forced_reasons={"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT"},
                               fill_evidence=(fills or {}).get(r["trade_id"]), be_band_bp=be) for r in raws]
@@ -853,13 +853,13 @@ def test_lane_admission_refusals_go_through_one_shared_helper_and_reach_counters
     for _ in range(3):
         mt.record_lane_refusal("ctrl", "NO_COMMITTED_CALL")
     mt.record_lane_refusal("CTRL", "FADE_SESSION_GATED")
-    mt.record_lane_refusal("GS-06", "RAW_AI_COMMITTED")
+    mt.record_lane_refusal("B2", "RAW_AI_COMMITTED")
     out = mt.counters_view("CTRL", rows=[], route_counts={}, xvl_lane={"paper": {"skips": {"STALE": 2}}},
                            opportunity={}, boot_id="b")
     sb = out["since_boot"]
     assert sb["admission_refusals"] == {"NO_COMMITTED_CALL": 3, "FADE_SESSION_GATED": 1}
     assert sb["rejects_and_skips"] == {"STALE": 2, "ADMISSION:NO_COMMITTED_CALL": 3, "ADMISSION:FADE_SESSION_GATED": 1}
-    assert mt.lane_refusal_counts("GS-06") == {"RAW_AI_COMMITTED": 1}
+    assert mt.lane_refusal_counts("B2") == {"RAW_AI_COMMITTED": 1}
 
 
 def test_refusal_reasons_per_lane_are_capped(monkeypatch):

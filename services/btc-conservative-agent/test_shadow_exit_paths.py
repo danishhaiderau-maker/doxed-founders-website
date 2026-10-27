@@ -64,8 +64,8 @@ def test_all_tiles_score_the_full_registry_catalog_under_their_own_guards():
         assert "hard_stop_bp" not in by_id["hold_to_horizon"]
         assert by_id["LATE_BE_20_5"]["hard_stop_bp"] == guard["hard_stop_bp"]
         assert "shadow_exit" not in json.dumps(tile["exit_policy"])
-    fade = registry._shadow_exit_guard("FAMILY_GS06_COMMITTED_FADE_ATR_TP")
-    assert fade == {"hard_stop_bp": 40.0, "backstop_sec": 7200}
+    ctrl = registry._shadow_exit_guard("FAMILY_RANDOM_CONTROL_TAKER_90")
+    assert ctrl == {"hard_stop_bp": 40.0, "backstop_sec": 5400}
     assert registry._shadow_exit_guard(LANE) == {"hard_stop_bp": 35.0, "backstop_sec": 3600}
     assert registry._shadow_exit_guard("NOT_A_TILE") == {
         "hard_stop_bp": registry.SHADOW_EXIT_DEFAULT_HARD_STOP_BP,
