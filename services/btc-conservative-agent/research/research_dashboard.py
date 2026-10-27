@@ -320,6 +320,8 @@ HISTORY_ROOT = (
     or (ROOT if (ROOT / ARCHIVE_DIR).is_dir() else (_parent if (_parent / ARCHIVE_DIR).is_dir() else ROOT))
 )
 
+# Four primary groups (Visual QA / simplification acceptance). Historical and
+# forensic report sections stay reachable under Diagnostics — never deleted.
 REPORT_NAV_GROUPS = (
     ("overview", "Overview", (
         ("summary", "Overview", None),
@@ -340,13 +342,11 @@ REPORT_NAV_GROUPS = (
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
         ("shadow-exits", "Shadow Exits", "shadow_exit_report.json"),
     )),
-    ("deep-group", "Diagnostics & Exports", (
+    ("deep-group", "Diagnostics & Historical", (
         ("explorer", "Report Explorer", None),
         ("download", "Downloads", None),
         ("runtime-incidents", "Runtime Incidents", None),
         ("pathway-audit", "Pathway Audit", "tile_independence_report.json"),
-    )),
-    ("historical-group", "Historical Research", (
         ("findings", "Historical Findings", None),
         ("regime", "Historical Regime & ADX", "regime_leaderboard.json"),
         ("ai", "AI comparison & calibration", "ai_calibration_report.json"),
@@ -7148,7 +7148,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="table-scroll" tabindex="0"><table><thead><tr><th>Gate</th><th>Status</th><th>Evidence / receipt</th><th>Precise blocker</th></tr></thead><tbody id="qualification-gate-body"><tr><td colspan="4">Loading qualification gates…</td></tr></tbody></table></div>
     <p class="note" id="decision-readiness-provenance"></p>
     </details>
+    <details id="overview-machine-json-details">
+    <summary>Inspect machine JSON executive text</summary>
+    <p class="note">Raw analyzer executive payload for forensics. Actionable results stay above; this disclosure does not invent values.</p>
     <pre id="exec-text"></pre>
+    </details>
     <p class="note">Active tab refreshes every 3 minutes. Canonical workspace: <code>C:\DoxxedCrypto\btc-v31-current</code>. Use the existing single-owner analyzer workflow; do not launch a duplicate analyzer or use retired laptop folders. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
   </section>
   <section id="sec-findings">
@@ -7169,8 +7173,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="regime-note">Recommend-only — best lane per weekend/weekday × ADX × spread bucket.</p>
     <div class="kpis" id="regime-kpis"></div>
     <table><thead><tr><th>Regime</th><th>Trades</th><th>Best lane</th><th>Best EV</th><th>2nd lane</th><th>OK?</th></tr></thead><tbody id="regime-body"></tbody></table>
-    <h3>Roster policy (recommend only)</h3>
+    <details id="regime-roster-policy-details">
+    <summary>Inspect roster policy machine JSON</summary>
     <pre id="roster-policy-json">Loading…</pre>
+    </details>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
@@ -7315,7 +7321,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Shadow triggers are logged every qualifying second whether or not the tile toggle is ON. Markout: Bitfinex taker at anchor+1 to anchor+1+hold, after spread, no fee. Capacity-one mirrors the single paper slot; replay re-runs the registered rule on the cross-venue and Bitfinex tapes. HINT - 12h evidence, not validated across days.</p>
     <table><thead><tr><th>Tile</th><th>Triggers logged</th><th>Gates</th><th>Stale-feed share</th><th>Shadow cap-1 trades / Win % / mean bp [1 h CI]</th><th>Every qualifying second</th><th>Tape replay</th><th>Parity (match / side / gap bp)</th></tr></thead><tbody id="xvl-shadow-body"></tbody></table>
     <p class="note" id="xvl-shadow-note"></p>
-    <details id="exit-combos-detail-inventory" open>
+    <details id="exit-combos-detail-inventory">
     <summary>Detailed exit-analysis tables and evidence labels</summary>
     <h3>Executed-paper exit-family scorecard</h3>
     <p class="note">Low-dimensional family comparison. EV is divided by independent shared opportunities, not correlated family children. Missing values remain missing.</p>
@@ -7470,10 +7476,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Shared market-context evidence coverage</h3>
     <p class="note" id="genome-shared-context"></p>
     <p class="note" id="genome-taxonomy-note"></p>
-    <h2>Current market cluster</h2>
-    <pre id="genome-cluster"></pre>
     <h2>Discoveries</h2>
     <div id="genome-discoveries"></div>
+    <details id="genome-forensic-json-details">
+    <summary>Inspect genome cluster / DNA / hypotheses machine JSON</summary>
+    <h2>Current market cluster</h2>
+    <pre id="genome-cluster"></pre>
     <h2>Decision DNA</h2>
     <pre id="genome-decision"></pre>
     <h2>Lifecycle DNA</h2>
@@ -7482,6 +7490,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <pre id="genome-hypotheses"></pre>
     <h2>Replay capabilities</h2>
     <pre id="genome-replay"></pre>
+    </details>
     </div>
   </section>
   <section id="sec-research-design">
@@ -7509,7 +7518,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Reason</th><th>Episodes / rows</th></tr></thead><tbody id="evidence-coverage-reasons"></tbody></table>
     <h2>Archive recovery and quarantined orphan</h2>
     <div class="kpis" id="evidence-coverage-archive-kpis"></div>
+    <details id="evidence-coverage-orphan-details">
+    <summary>Inspect orphan / archive recovery machine JSON</summary>
     <pre id="evidence-coverage-orphan">Loading…</pre>
+    </details>
     <p><a class="btn secondary" id="evidence-coverage-full" href="#">Inspect full declared report</a></p>
   </section>
   <section id="sec-edge">
@@ -7546,7 +7558,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="stale-banner" id="bundle-provenance" style="display:block">Loading export provenance…</div>
     <a class="btn" href="/download/everything" id="dl-everything" style="background:#7b4cc9">⬇ Download Forensic Research Evidence Bundle</a>
     <p class="note">Older specialized download routes remain available for compatibility, but are intentionally hidden here so there is one authoritative export.</p>
+    <details id="download-bundle-list-details">
+    <summary>Inspect forensic bundle file list</summary>
     <pre id="bundle-list"></pre>
+    </details>
   </section>
   <section id="sec-shadow-exits">
     <h2>Shadow exits &mdash; every exit idea on the same recorded paths</h2>

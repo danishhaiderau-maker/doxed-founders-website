@@ -31,8 +31,14 @@ def test_overview_keeps_strategy_tiers_visible_and_receipts_accessible():
     assert parser.owners['decision-readiness'] == ('overview-candidate-details',)
     for receipt in ('qualification-gate-body', 'decision-readiness-provenance'):
         assert parser.owners[receipt] == ('overview-qualification-details',)
-    for visible in ('collection-status', 'strategy-leader-tiers', 'exec-text'):
+    assert parser.owners['exec-text'] == ('overview-machine-json-details',)
+    for visible in ('collection-status', 'strategy-leader-tiers'):
         assert parser.owners[visible] == ()
-    for name in ('overview-evidence-details', 'overview-candidate-details', 'overview-qualification-details'):
+    for name in (
+        'overview-evidence-details',
+        'overview-candidate-details',
+        'overview-qualification-details',
+        'overview-machine-json-details',
+    ):
         assert 'open' not in parser.disclosures[name]
     assert not parser.details
