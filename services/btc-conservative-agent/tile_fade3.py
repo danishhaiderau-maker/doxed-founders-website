@@ -29,6 +29,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 import numpy as np
@@ -521,6 +522,78 @@ class Fade3PaperEngine:
 def recount(rows: Iterable[Mapping[str, Any]], **kw) -> list:
     """Re-evaluate closed rows for display. pool_ready_at_write is read, never rewritten (no back-stamp)."""
     return [{**r, **countability(r, **kw)} for r in rows if r.get("event") == "CLOSE"]
+
+
+def close_row_as_shared_trade(
+    row: Mapping[str, Any],
+    *,
+    margin_usdt: float = 0.25,
+    leverage: float = 100.0,
+) -> Optional[dict]:
+    """Project a private CLOSE ledger row into the shared trade-book shape.
+
+    Self-sim FADE3 tiles write only to ``gf3*_paper_ledger.jsonl``; they never
+    append to the shared ``trades`` list. Monitor lanes / pathway session_stats
+    must project these closes so cards do not stay at closes=0 forever.
+    Returns None unless ``event == CLOSE``.
+    """
+    if not isinstance(row, Mapping) or row.get("event") != "CLOSE":
+        return None
+    lane = str(row.get("lane") or "").strip()
+    if not lane:
+        return None
+    exit_fill = row.get("exit_fill") if isinstance(row.get("exit_fill"), Mapping) else {}
+    try:
+        fill_ts = float(exit_fill.get("fill_ts") or row.get("exit_fill_ts") or 0.0)
+    except (TypeError, ValueError):
+        fill_ts = 0.0
+    if fill_ts <= 0:
+        try:
+            fill_ts = float(row.get("entry_fill_ts") or row.get("signal_ts") or 0.0)
+        except (TypeError, ValueError):
+            fill_ts = 0.0
+    try:
+        pnl_usd = float(row.get("pnl_usd"))
+    except (TypeError, ValueError):
+        try:
+            pnl_bp = float(row.get("pnl_bp") or 0.0)
+            notional = float(row.get("notional_usd") or (margin_usdt * leverage))
+            pnl_usd = pnl_bp / 1e4 * notional
+        except (TypeError, ValueError):
+            pnl_usd = 0.0
+    try:
+        pnl_bp = float(row.get("pnl_bp"))
+    except (TypeError, ValueError):
+        pnl_bp = None
+    side = str(row.get("side") or "").upper()
+    ts_iso = None
+    if fill_ts > 0:
+        ts_iso = datetime.fromtimestamp(fill_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    notional = float(margin_usdt) * float(leverage)
+    return {
+        "research_lane": lane,
+        "ts": ts_iso,
+        "entry_ts": float(row.get("entry_fill_ts") or fill_ts or 0.0) or None,
+        "dir": side,
+        "final_direction": side,
+        "entry": row.get("entry_px"),
+        "exit": row.get("exit_px") or exit_fill.get("price"),
+        "net_pnl_usd": pnl_usd,
+        "net_pnl_usd_raw": pnl_usd,
+        "net_pnl_bp": pnl_bp,
+        "margin_usdt": float(margin_usdt),
+        "leverage": float(leverage),
+        "notional_usd": notional,
+        "exit_reason": row.get("exit_reason"),
+        "paper_only": True,
+        "self_simulated_paper": True,
+        "fill_model_version": None,
+        "book_slippage_usd_total": None,
+        "exit_legs": None,
+        # Margin-% display for lane_stats (pnl / margin * 100); $0.25 margin @100x.
+        "pnl": round(pnl_usd / float(margin_usdt) * 100.0, 4) if margin_usdt else None,
+        "source_ledger": "self_sim_paper",
+    }
 
 
 def read_ledger(path: str) -> list:

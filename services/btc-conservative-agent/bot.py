@@ -34206,6 +34206,55 @@ def _gf3l_ledger_path() -> str:
     return os.path.join(str(_data_sync_runtime_root()), _tile_fade3_loose.LEDGER_FILE)
 
 
+def _self_sim_paper_trade_rows(session_start: float = 0.0) -> list:
+    """CLOSED rows from self-sim private ledgers (gf3 / gf3l), session-scoped.
+
+    These tiles never write to the shared ``trades`` book. Monitor lanes and
+    pathway session_stats must project them or cards stay at closes=0.
+    Read-only; does not take ``trade_lock`` (private files are independent).
+    Soft B / Force / wipe / arm / entry gates are untouched.
+    """
+    out = []
+    sources = (
+        (_gf3_ledger_path, _tile_fade3.close_row_as_shared_trade),
+        (_gf3l_ledger_path, _tile_fade3_loose.close_row_as_shared_trade),
+    )
+    for path_fn, as_trade in sources:
+        try:
+            rows = _tile_fade3.read_ledger(path_fn())
+        except Exception:  # noqa: BLE001 - missing/corrupt ledger = zero closes, never crash monitor
+            continue
+        for row in rows:
+            trade = as_trade(row)
+            if not trade:
+                continue
+            if session_start and not _trade_row_in_session(trade, session_start):
+                continue
+            out.append(trade)
+    return out
+
+
+def _overlay_self_sim_paper_closes(
+    session_start: float,
+    count: int,
+    realized: float,
+    ledger: dict,
+) -> tuple[int, float, dict]:
+    """Merge self-sim private closes into a session lane ledger (authoritative for those lanes)."""
+    extra = _self_sim_paper_trade_rows(session_start)
+    if not extra:
+        return count, realized, ledger
+    derived = _derive_lane_pnl_ledger_from_trades(extra)
+    merged = dict(ledger or {})
+    added_pnl = 0.0
+    for lane, bucket in derived.items():
+        # Self-sim tiles never appear in the shared trades book, so replace.
+        prev = merged.get(lane) or {}
+        added_pnl += float(bucket.get("net_pnl_usd") or 0.0) - float(prev.get("net_pnl_usd") or 0.0)
+        merged[lane] = bucket
+    return int(count) + len(extra), round(float(realized) + added_pnl, 2), merged
+
+
 def _gf3l_get_engine():
     global _gf3l_engine
     with _gf3l_engine_lock:
@@ -45811,6 +45860,9 @@ def _session_trade_accounting_locked(session_start: float, trades_src=None) -> t
     The headline equals the lane-ledger sum plus lane-less rows, so the
     dashboard tiles and the session total cannot disagree.  Caller owns
     ``trade_lock``; rows are referenced, never copied.
+
+    Self-sim FADE3 private ledgers (gf3/gf3l) are overlaid after the shared
+    book so pathway cards and tile_route_counts.closed match real paper closes.
     """
     rows = [
         row for row in (trades if trades_src is None else trades_src)
@@ -45830,7 +45882,7 @@ def _session_trade_accounting_locked(session_start: float, trades_src=None) -> t
             continue
         if not _normalize_lane_key(row.get("research_lane") or ""):
             realized += _trade_row_net_pnl_usd(row)
-    return len(rows), round(realized, 2), ledger
+    return _overlay_self_sim_paper_closes(session_start, len(rows), round(realized, 2), ledger)
 
 
 def _session_forced_close_pnl_usd_locked(session_start: float, trades_src=None) -> float:
@@ -48362,8 +48414,20 @@ def _monitor_part(build):
         return {"error": type(exc).__name__}
 
 
+def _monitor_lane_append_trade(bucket: list, row: dict) -> None:
+    """Append one closed trade into the raw monitor-lane tuple list."""
+    bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
+                   row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
+                   row.get("pnl"), monitor_api.trade_net_bp(row), row.get("fill_model_version"),
+                   row.get("exit_legs")))
+
+
 def _monitor_lane_rows(lanes) -> tuple[dict, float]:
-    """Booked closes of the active lanes in the dashboard's trade session (same rows as lane_pnl_ledger)."""
+    """Booked closes of the active lanes in the dashboard's trade session (same rows as lane_pnl_ledger).
+
+    Includes self-sim FADE3 private-ledger closes (gf3/gf3l) so public lanes/summary
+    cards match dedicated ``/api/monitor/tiles/gf3*`` closed_n.
+    """
     session_start = _showcase_trade_session_start()
     rows = {lane: [] for lane in lanes}
     forced = {lane: 0 for lane in lanes}
@@ -48395,12 +48459,16 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                 except Exception:  # noqa: BLE001 - tagging only
                     pass
                 continue
-            bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
-                           row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
-                           row.get("pnl"), monitor_api.trade_net_bp(row), row.get("fill_model_version"),
-                           row.get("exit_legs")))
+            _monitor_lane_append_trade(bucket, row)
     finally:
         trade_lock.release()
+    # Private self-sim ledgers are outside trade_lock / shared trades.
+    for row in _self_sim_paper_trade_rows(session_start):
+        lane_key = _normalize_lane_key(row.get("research_lane") or "")
+        bucket = rows.get(lane_key)
+        if bucket is None:
+            continue
+        _monitor_lane_append_trade(bucket, row)
     shaped = {}
     for lane, raw in rows.items():
         shaped[lane] = []
@@ -48450,7 +48518,9 @@ def _monitor_lanes_payload(now: float) -> dict:
             "session_start_at": monitor_api.utc_iso(session_start) if session_start else None,
             **_epoch_trade_scope_fields(),
             "include_forced": False,
-            "closes": "current-epoch strategy closes; forced closes excluded (same as tile_route_counts.closed)",
+            "closes": ("current-epoch strategy closes; forced closes excluded (same as tile_route_counts.closed); "
+                       "self-sim FADE3 (gf3/gf3l) private paper ledgers included"),
+            "self_sim_paper_ledgers": ["gf3_paper_ledger.jsonl", "gf3l_paper_ledger.jsonl"],
             "wl": "W/L by price-based net bp (wl_basis PRICE_BP_NET_OF_FEES)",
             "pnl": "booked net_pnl_usd under the bot's conservative fill model; never recomputed",
             "drawdown": "peak-to-trough of cumulative booked net from 0, in close order",

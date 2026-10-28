@@ -316,6 +316,7 @@ test_monitor_gaps.py
 test_monitor_integrity.py
 test_monitor_ladder_legs_and_route_floor.py
 test_monitor_lanes_funnel_epoch_scope.py
+test_monitor_lanes_self_sim_closes.py
 test_monitor_streams.py
 test_monitor_tiles_api.py
 test_multiverse_maturation_starvation.py
