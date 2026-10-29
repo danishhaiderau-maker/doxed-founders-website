@@ -86,6 +86,11 @@ def _load(trades=None, session_filter=None):
         "_safe_append_jsonl": append_jsonl,
         "_normalize_lane_key": lambda lane: str(lane or "").strip().upper(),
         "_trade_row_in_session": session_filter or (lambda row, start: True),
+        # Real bot overlays gf3/gf3l private closes; this harness has no self-sim
+        # ledgers — pass-through so shared-book integrity asserts stay exact.
+        "_overlay_self_sim_paper_closes": (
+            lambda _session_start, count, realized, ledger: (count, realized, ledger)
+        ),
         "trades": trades if trades is not None else [],
         "ACTIVE_TILE_REGISTRY": ACTIVE_TILE_REGISTRY,
         "STATS_EXCLUDED_EXIT_REASONS": FORCED_EXIT_REASONS,

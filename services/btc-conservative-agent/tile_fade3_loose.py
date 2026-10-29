@@ -50,6 +50,7 @@ compute_features = base.compute_features
 read_ledger = base.read_ledger
 append_jsonl = base.append_jsonl
 recount = base.recount
+close_row_as_shared_trade = base.close_row_as_shared_trade
 pool_ready = base.pool_ready
 countability = base.countability
 STEP_CPU_BUDGET_S = base.STEP_CPU_BUDGET_S
