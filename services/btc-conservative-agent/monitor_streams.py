@@ -349,8 +349,133 @@ def _file_mtimes(data_dir, now: float) -> dict:
     return out
 
 
-def health(data_dir, now: float, sample_rows: int = 200) -> dict:
-    """Per stream: first/last ts across parts, age, approx rows, key-field null rate, archive."""
+# ---- #808 tape_freeze: how often the 1 s tape repeats a stale ticker quote while trades print outside it ------------
+# Monitoring only: never gates, never writes, nothing kept after the call. Detects the #807 gap (triggers and the
+# limit-touch test still read ticker bid/ask), it does not fix it.
+TAPE_FREEZE_STREAM = "book_tape_1s"            # market_microstructure_1s.jsonl (+ rotated parts)
+TAPE_FREEZE_WINDOW_S = 3600
+TAPE_FREEZE_MAX_BYTES = 4 * 1024 * 1024        # hard read cap per call; `truncated` reports when it stopped the read
+TAPE_FREEZE_PAGE_BYTES = 512 * 1024            # one page in memory at a time
+TAPE_FREEZE_OUTSIDE_BP = 2.5                   # a print > 2.5 bp beyond the quoted bid/ask (~$20 at 80k) is "outside"
+TAPE_FREEZE_MAX_GAP_S = 2.0                    # consecutive rows further apart than this are not compared
+TAPE_FREEZE_CACHE_S = 300.0                    # bot.py caches tape_freeze separately from the 15 s health cache
+
+
+def _fnum(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+
+def _tape_freeze_null(reason: str, base: dict) -> dict:
+    return {**base, "reason": reason, "unchanged_bbo_pct": None, "source_ts_unchanged_pct": None,
+            "frozen_s": None, "frozen_s_per_h": None, "longest_frozen_run_s": None,
+            "longest_unchanged_run_s": None, "outside_print_count": None}
+
+
+def tape_freeze(data_dir, now: float, window_s: float = TAPE_FREEZE_WINDOW_S,
+                max_bytes: int = TAPE_FREEZE_MAX_BYTES, page_bytes: int = TAPE_FREEZE_PAGE_BYTES) -> dict:
+    """Stream the last ``window_s`` of the 1 s tape (across rotated parts) with O(1) state.
+
+    Only rows with valid_bbo True count. A row is compared with the previous valid row when they are at most
+    TAPE_FREEZE_MAX_GAP_S apart:
+      unchanged    bid and ask identical to the previous valid row
+      source_same  source_ts (ticker timestamp) identical: no new ticker message, vs. a message repeating the quote
+      outside      trade_high > ask*(1+bp) or trade_low < bid*(1-bp), bp = TAPE_FREEZE_OUTSIDE_BP (any valid row)
+      frozen       unchanged AND outside: the quote did not move although the market traded through it
+    Never raises; missing/empty tape -> null values with a reason (never 0 %)."""
+    import json
+    since = float(now) - float(window_s)
+    base = {"schema": "tape_freeze_v1", "stream": TAPE_FREEZE_STREAM, "file": STREAMS[TAPE_FREEZE_STREAM],
+            "window_s": float(window_s), "since": since, "until": float(now), "outside_bp": TAPE_FREEZE_OUTSIDE_BP,
+            "max_gap_s": TAPE_FREEZE_MAX_GAP_S, "max_bytes": int(max_bytes), "computed_at": float(now),
+            "rows_seen": 0, "valid_rows": 0, "compared_pairs": 0, "coverage": None, "bytes_read": 0,
+            "truncated": False, "monitoring_only": True}
+    try:
+        if not parts(data_dir, TAPE_FREEZE_STREAM):
+            return _tape_freeze_null("TAPE_MISSING", base)
+        rows_seen = valid_rows = pairs = unchanged = source_same = outside = frozen = 0
+        run_frozen = run_unchanged = best_frozen = best_unchanged = 0
+        prev = None                      # (bucket_ts, bid, ask, source_ts) of the previous valid row
+        bytes_read, part, cursor, truncated = 0, None, None, False
+        while True:
+            remaining = int(max_bytes) - bytes_read
+            if remaining <= 0:
+                truncated = True
+                break
+            try:
+                header, body = read_range(data_dir, TAPE_FREEZE_STREAM, since=since, until=now, part=part,
+                                          cursor=cursor, limit_bytes=min(int(page_bytes), remaining))
+            except BadRequest:
+                if remaining < int(page_bytes):      # a row did not fit in what is left of the cap
+                    truncated = True
+                    break
+                raise
+            bytes_read += header.get("bytes") or 0
+            for line in body.splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                ts = _fnum(row.get("bucket_ts")) if isinstance(row, dict) else None
+                if ts is None or ts < since or ts > now:
+                    continue
+                rows_seen += 1
+                bid, ask = _fnum(row.get("bid")), _fnum(row.get("ask"))
+                if row.get("valid_bbo") is not True or bid is None or ask is None or bid <= 0 or ask < bid:
+                    prev, run_frozen, run_unchanged = None, 0, 0
+                    continue
+                valid_rows += 1
+                src = _fnum(row.get("source_ts"))
+                hi, lo = _fnum(row.get("trade_high")), _fnum(row.get("trade_low"))
+                k = TAPE_FREEZE_OUTSIDE_BP / 1e4
+                is_out = (hi is not None and hi > ask * (1 + k)) or (lo is not None and lo < bid * (1 - k))
+                outside += int(bool(is_out))
+                if prev is not None and 0 < ts - prev[0] <= TAPE_FREEZE_MAX_GAP_S:
+                    pairs += 1
+                    same = bid == prev[1] and ask == prev[2]
+                    unchanged += int(same)
+                    source_same += int(src is not None and src == prev[3])
+                    run_unchanged = run_unchanged + 1 if same else 0
+                    is_frozen = same and is_out
+                    frozen += int(is_frozen)
+                    run_frozen = run_frozen + 1 if is_frozen else 0
+                else:
+                    run_frozen = run_unchanged = 0
+                best_frozen, best_unchanged = max(best_frozen, run_frozen), max(best_unchanged, run_unchanged)
+                prev = (ts, bid, ask, src)
+            body = None
+            if header.get("done"):
+                break
+            part, cursor = header.get("next_part"), header.get("next_cursor")
+        base.update(rows_seen=rows_seen, valid_rows=valid_rows, compared_pairs=pairs, bytes_read=bytes_read,
+                    truncated=truncated, coverage=round(rows_seen / float(window_s), 4) if window_s else None)
+        if rows_seen == 0:
+            return _tape_freeze_null("TAPE_EMPTY_IN_WINDOW", base)
+        if valid_rows == 0:
+            return _tape_freeze_null("NO_VALID_BBO_ROWS", base)
+        out = {**base, "reason": None if pairs else "NO_COMPARABLE_PAIRS",
+               "unchanged_bbo_pct": round(100.0 * unchanged / pairs, 3) if pairs else None,
+               "source_ts_unchanged_pct": round(100.0 * source_same / pairs, 3) if pairs else None,
+               "frozen_s": frozen if pairs else None,
+               "frozen_s_per_h": round(frozen * 3600.0 / pairs, 2) if pairs else None,
+               "frozen_s_per_h_basis": "frozen seconds per hour of compared valid seconds",
+               "longest_frozen_run_s": best_frozen if pairs else None,
+               "longest_unchanged_run_s": best_unchanged if pairs else None,
+               "outside_print_count": outside}
+        return out
+    except Exception as exc:  # noqa: BLE001 - observability must not take /streams/health down
+        return _tape_freeze_null(f"ERROR:{type(exc).__name__}", base)
+
+
+_COMPUTE = object()
+
+
+def health(data_dir, now: float, sample_rows: int = 200, tape_freeze_result=_COMPUTE) -> dict:
+    """Per stream: first/last ts across parts, age, approx rows, key-field null rate, archive.
+
+    ``tape_freeze_result``: bot.py passes its separately cached (300 s) tape_freeze dict; computed when omitted."""
     import json
     out = {}
     for name, rel in STREAMS.items():
@@ -397,5 +522,7 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
                         **({"tape_7d": ARCHIVE_NOTE["tape_7d"]} if name == "book_tape_1s" else {}),
                         "segment_store": ARCHIVE_NOTE["segment_store"]},
         }
+    if tape_freeze_result is _COMPUTE:
+        tape_freeze_result = tape_freeze(data_dir, now)
     return {"schema": "monitor_stream_health_v1", "streams": out, "archive_locations": ARCHIVE_NOTE,
-            "log_files": file_mtimes(data_dir, now), "server_ts": now}
+            "log_files": file_mtimes(data_dir, now), "tape_freeze": tape_freeze_result, "server_ts": now}

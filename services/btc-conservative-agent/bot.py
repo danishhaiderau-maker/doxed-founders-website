@@ -49919,12 +49919,24 @@ def monitor_streams_health():
     hit = _STREAM_HEALTH_CACHE.get("v")
     now = time.time()
     if not hit or now - hit[0] > 15.0:
-        hit = (now, monitor_streams.health(os.getcwd(), now))
+        hit = (now, monitor_streams.health(os.getcwd(), now, tape_freeze_result=_tape_freeze_cached(now)))
         _STREAM_HEALTH_CACHE["v"] = hit
     return jsonify({**hit[1], "cached_at": hit[0], "server_ts": now})
 
 
 _STREAM_HEALTH_CACHE: dict = {}
+_TAPE_FREEZE_CACHE: dict = {}
+
+
+def _tape_freeze_cached(now: float) -> dict:
+    """#808: tape_freeze has its own 300 s cache (an hour of 1 s tape is ~1.8 MB to stream); the 15 s streams/health
+    cache above is unchanged. Monitoring only."""
+    import monitor_streams
+    hit = _TAPE_FREEZE_CACHE.get("v")
+    if not hit or now - hit[0] > monitor_streams.TAPE_FREEZE_CACHE_S:
+        hit = (now, monitor_streams.tape_freeze(os.getcwd(), now))
+        _TAPE_FREEZE_CACHE["v"] = hit
+    return {**hit[1], "cached_at": hit[0]}
 
 
 @app.route('/api/monitor/streams/<name>/parts', methods=["GET"])
