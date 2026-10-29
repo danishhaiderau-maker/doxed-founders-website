@@ -1,6 +1,21 @@
 import deploy_gate_open_trades as gate
 
 GOOD_STATUS = {"live_armed": False, "force_paper_mode": True, "git_rev": "abc"}
+# #806: all-safe live surfaces (live copy off, no tile live orders, nothing armed, one flat fresh account)
+SAFE_LIVE_COPY = {"live_copy_output": {"enabled": False}, "live_copy_source_enabled": False,
+                  "tiles": [{"lane": "L", "bitfinex_live_orders": False}],
+                  "website": {"reachable": True, "armed_accounts": []}}
+SAFE_EXCHANGE = {"account": "acct-1", "mirror_ok": True, "read_age_s": 3.0, "fresh": True, "positions": [],
+                 "orphans": [], "open_orders": 0, "verdict": "FLAT_NO_STOPS", "accounts_seen": ["acct-1"]}
+
+
+def live_surface(path):
+    """Safe answers for the #806 routes, else None."""
+    if path == "/api/live-copy/status":
+        return SAFE_LIVE_COPY
+    if path.startswith("/api/monitor/live/exchange-stops"):
+        return SAFE_EXCHANGE
+    return None
 
 
 def _feed(rows, page_size):
@@ -22,6 +37,8 @@ def _fetcher(all_rows, page_size=3, state=None, status=GOOD_STATUS, fail_page=No
     calls = {"n": 0}
 
     def fetch(path):
+        if live_surface(path) is not None:
+            return live_surface(path)
         if path == "/api/status":
             return status
         if path == "/api/state":
@@ -77,6 +94,8 @@ def test_missing_monitor_count_or_live_armed_or_paging_loop_fail_closed():
     assert "FORCE_PAPER_NOT_TRUE" in gate.evaluate(_fetcher(_rows(2, 0), status={**GOOD_STATUS, "force_paper_mode": False}))["reasons"]
 
     def looping(path):
+        if live_surface(path) is not None:
+            return live_surface(path)
         if path == "/api/status":
             return GOOD_STATUS
         if path == "/api/state":
@@ -110,6 +129,8 @@ _REAL = {r["trade_id"]: r for r in json.loads(
 
 def _gate_fetch(all_rows, monitor_open):
     def fetch(path):
+        if live_surface(path) is not None:
+            return live_surface(path)
         if path == "/api/status":
             return GOOD_STATUS
         if path == "/api/state":
