@@ -52392,6 +52392,52 @@ def api_admin_ledgers_delete_by_sha():
     return jsonify({"ok": True, **out})
 
 
+@app.route('/api/admin/corrupt-evidence-r21', methods=['POST'])
+def api_admin_corrupt_evidence_r21():
+    """R21 expiry for corrupt_evidence_quarantine/ — admin-only, dry_run default True.
+
+    Body: {"dry_run": true (default), "plan_sha256": "<required when dry_run=false>",
+    "max_age_sec": <optional>, "actor", "reason"}. Never auto-deletes; confirm_delete only
+    when dry_run is explicitly false and plan_sha256 matches. Never echoes a token.
+    """
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import corrupt_evidence_r21 as _ce
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    dry_run = body.get("dry_run", True) is not False
+    try:
+        max_age = float(body["max_age_sec"]) if body.get("max_age_sec") is not None else _ce.DEFAULT_MAX_AGE_SEC
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_age_sec must be a number"}), 400
+    data_dir = _data_sync_runtime_root()
+    if dry_run:
+        out = _ce.plan_expired(data_dir, max_age_sec=max_age)
+        logger.warning(
+            f"[CORRUPT-EVIDENCE-R21] actor={actor} reason={reason[:120]!r} dry_run=True "
+            f"count={out.get('count')} plan_sha={out.get('plan_sha256')} [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": True, **out})
+    plan_sha = str(body.get("plan_sha256") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", plan_sha):
+        return jsonify({"error": "plan_sha256 required (64 hex) when dry_run=false"}), 400
+    out = _ce.confirm_delete(data_dir, plan_sha256=plan_sha, max_age_sec=max_age)
+    if not out.get("ok"):
+        logger.warning(
+            f"[CORRUPT-EVIDENCE-R21] actor={actor} refused={out.get('error')} "
+            f"deleted={out.get('deleted')} [PIPELINE ENFORCEMENT]")
+        return jsonify(out), 409
+    logger.warning(
+        f"[CORRUPT-EVIDENCE-R21] actor={actor} reason={reason[:120]!r} dry_run=False "
+        f"before={out.get('before_count')} after={out.get('after_count')} "
+        f"deleted={out.get('deleted')} plan_sha={plan_sha} [PIPELINE ENFORCEMENT]")
+    return jsonify(out)
+
+
 @app.route('/api/admin/ledgers/delete-rollback-snapshot', methods=['POST'])
 def api_admin_ledgers_delete_rollback_snapshot():
     """Delete the temporary rollback snapshot from ledgers/delete-by-sha and read back that it is gone."""

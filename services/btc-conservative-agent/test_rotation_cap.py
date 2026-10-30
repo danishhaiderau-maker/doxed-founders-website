@@ -65,6 +65,59 @@ def test_protected_exempt_and_unclassified_untouched(tmp_path):
     assert rotation_cap.classify("relay_outbox_quarantine.jsonl")[0] == "EXEMPT"
 
 
+def test_no_raw_generation_cleanup_symbols():
+    """B2: owner/module/class importables must be gone; lease gate helpers may remain."""
+    import ast
+
+    banned_names = {
+        "raw_generation_cleanup_owner",
+        "RawGenerationCleanup",
+        "raw_generation_cleanup_transactions",
+        "raw_generation_cleanup_quarantine",
+        "raw_generation_cleanup",
+    }
+    for path in (HERE / "bot.py", HERE / "research_reset_auxiliary_audit.py",
+                 HERE / "local_fresh_collection_owner_audit.py"):
+        if not path.exists():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                mods = []
+                if isinstance(node, ast.Import):
+                    mods = [a.name for a in node.names]
+                else:
+                    mods = [node.module or ""] + [a.name for a in node.names]
+                for mod in mods:
+                    for banned in banned_names:
+                        assert banned not in (mod or "").split("."), f"{path.name} imports {mod}"
+            if isinstance(node, ast.Name) and node.id in banned_names:
+                # Allow comments-only mentions via Name would not fire; Name means live symbol use.
+                assert False, f"{path.name} still references symbol {node.id}"
+            if isinstance(node, ast.Attribute) and node.attr in banned_names:
+                assert False, f"{path.name} still references attribute {node.attr}"
+    assert not (HERE / "raw_generation_cleanup.py").exists()
+    assert not (HERE / "raw_generation_cleanup_owner.py").exists()
+    # Gate helpers intentionally kept for fresh-reset lease.
+    src = (HERE / "bot.py").read_text(encoding="utf-8")
+    assert "def _raw_generation_cleanup_gate_acquire" in src
+    assert "def _raw_generation_cleanup_gate_release" in src
+
+
+def test_rotation_cap_protects_only_named_quarantines():
+    """B1/B2: only named live quarantines are EXEMPT; tombstone + corrupt_evidence never scanned."""
+    assert "quarantine" not in rotation_cap._PROTECTED_SUBSTRINGS
+    assert rotation_cap.NAMED_LIVE_QUARANTINE_BASES == frozenset({"relay_outbox_quarantine.jsonl"})
+    for base in rotation_cap.NAMED_LIVE_QUARANTINE_BASES:
+        assert rotation_cap.classify(base)[0] == "EXEMPT"
+        assert base in rotation_cap.CAP_EXEMPT
+    # Tombstone + corrupt_evidence_quarantine/ are documented never-scanned (not rotation bases).
+    assert "deleted_trade_ids.json.corrupt.*" in rotation_cap.CAP_NEVER_SCANNED_QUARANTINES
+    assert "corrupt_evidence_quarantine/" in rotation_cap.CAP_NEVER_SCANNED_QUARANTINES
+    assert rotation_cap.classify("deleted_trade_ids.json.corrupt.20261030T120000.1")[0] == "UNCLASSIFIED"
+    assert rotation_cap.classify("some_other_quarantine.jsonl")[0] == "UNCLASSIFIED"
+
+
 def test_cap_receipts_self_capped_and_failure_never_blocks(tmp_path):
     big = {"pad": "z" * 4000}
     for _ in range(1300):  # ~5 MB of receipts

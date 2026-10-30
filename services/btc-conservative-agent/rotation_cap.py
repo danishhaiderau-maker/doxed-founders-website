@@ -128,7 +128,7 @@ CAP_EXEMPT: dict[str, str] = {
     "retired_tile_boundary_receipts.jsonl": "receipt (protected)",
     "disloc_trades.jsonl": "DISLOC tile trade ledger",
     "disloc_foi_trades.jsonl": "DISLOC-FOI tile trade ledger",
-    # Live safety quarantines (HM audit 30 Oct) — named only, not substring "quarantine".
+    # Live safety quarantines (HM audit 30 Oct / #948) — named only, not substring "quarantine".
     "relay_outbox_quarantine.jsonl": "relay outbox safety quarantine",
 }
 # Suffix-classified exempt families (dynamic paths).
@@ -136,8 +136,24 @@ CAP_EXEMPT_SUFFIXES: dict[str, str] = {
     ".malformed_rows.jsonl": "CSV malformed-row quarantine sidecar",
 }
 
+# Quarantines the rotation cap never scans (not CAP_ALLOW bases / not JSONL rotations).
+# Named here so HM/RK audits can see them without a blanket "*quarantine*" substring.
+CAP_NEVER_SCANNED_QUARANTINES: dict[str, str] = {
+    "deleted_trade_ids.json.corrupt.*": (
+        "trade-id tombstone quarantine (_quarantine_tombstone); rename sidecars, not rotations"
+    ),
+    "corrupt_evidence_quarantine/": (
+        "corrupt evidence dir tree; R21 expiry via corrupt_evidence_r21 (not a rotation family)"
+    ),
+}
+
+# Named live safety quarantine bases the cap must leave alone (EXEMPT).
+NAMED_LIVE_QUARANTINE_BASES: frozenset[str] = frozenset({
+    "relay_outbox_quarantine.jsonl",
+})
+
 # R22 BOT-36: do not blanket-protect every "*quarantine*" name (retention hole).
-# Named live safety quarantines are CAP_EXEMPT below; substring covers ledger/receipt only.
+# Named live safety quarantines are CAP_EXEMPT / CAP_NEVER_SCANNED; substring covers ledger/receipt only.
 _PROTECTED_SUBSTRINGS = ("ledger", "receipt")
 
 
