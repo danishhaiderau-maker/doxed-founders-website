@@ -4,19 +4,20 @@ R5: caps and discards are never custody- or ack-gated. When a cap removes
 something that was not yet acknowledged / reconciled, a RED disk alert is
 raised and one small receipt line is written; the deletion itself never waits.
 
-* ``cap_market_segments`` - byte cap on ``v3/market_segments`` (oldest first).
-  Segments referenced by an open lifecycle are deleted last, but are still
-  bounded by the same cap (no uncapped keep-set).
+* ``cap_market_segments`` - PR2 never-delete: at/over the 5 GiB byte cap,
+  stop local writes + 70/85 alarms; never unlink (R25/R34). Real deletes are
+  R21-only. PR4 must not reintroduce deletes here.
 * ``cap_lifecycle_bundles`` - byte/age cap on ``v3/lifecycle_bundles``
-  regardless of the laptop cleanup ack.
+  regardless of the laptop cleanup ack. (PR4 scope for never-delete.)
 * ``purge_retired_transfer_bundles`` - R22: removes the retired
   ``v3/lifecycle_transfer_bundles`` tree (no producer and no reader remain).
+  (PR4 scope.)
 * ``wipe_stale_locks`` - removes ``v3/.locks/*.lock`` only when older than the
   current process boot AND older than one hour (a held lock is never removed).
 * ``count_market_segments`` - reset post-condition (must be 0 after a reset).
 * ``seal_drain_discard_v22`` - seal the active research_events_v22 generation,
   let the Fly-local v3 reconcile drain for a bounded time, then delete the
-  sealed generation unconditionally; ``index.sqlite3`` is kept.
+  sealed generation unconditionally; ``index.sqlite3`` is kept. (PR4 scope.)
 
 PRIME RULE: neutral. None of these files feed paper_fill, exits or tile
 decisions (fills read bfx_book_10l_1s.jsonl only, which is never touched here).
@@ -33,13 +34,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 import disk_alert
+import retention_stop_write
 import rotation_cap
 
 SEGMENT_CAP_BYTES = 5 * 1024 ** 3
 BUNDLE_CAP_BYTES = 256 * 1024 ** 2
 BUNDLE_MAX_AGE_SEC = 7 * 86400
 LOCK_MIN_AGE_SEC = 3600.0
-MAX_SEGMENT_UNLINKS_PER_CALL = 500
 MAX_BUNDLE_REMOVALS_PER_CALL = 50
 MAX_LOCK_UNLINKS_PER_CALL = 5000
 V22_DRAIN_MAX_SEC = 30 * 60
@@ -47,6 +48,7 @@ V22_SEAL_MIN_BYTES = 512 * 1024 ** 2
 V22_RECEIPT_MAX_BYTES = 64 * 1024
 V22_RECEIPT_FILE = "v22_discard_receipts.jsonl"
 _SEGMENT_RE = re.compile(r"^[0-9a-f]{64}\.json$")
+MARKET_SEGMENTS_FAMILY = "market_segments"
 
 
 def _receipt(root: Path, row: Mapping[str, Any]) -> bool:
@@ -77,41 +79,68 @@ def count_market_segments(root: str | os.PathLike) -> int:
 
 
 def cap_market_segments(root: str | os.PathLike, *, max_bytes: int = SEGMENT_CAP_BYTES,
-                        referenced: Iterable[str] = (), max_unlinks: int = MAX_SEGMENT_UNLINKS_PER_CALL,
                         now: float | None = None) -> dict[str, Any]:
-    """Delete the oldest segments until the store is under ``max_bytes``.
+    """Never-delete market-segment byte-cap check (PR2).
 
-    ``referenced`` (sha names) are ordered last but are still deleted when the
-    cap requires it; that raises RED and writes a receipt (R5)."""
+    At/over ``max_bytes`` (default 5 GiB) or free-disk RED: latch stop-write +
+    70/85 alarms. Never unlinks any segment (R22: no max_unlinks / referenced
+    delete-compat params).
+    """
     root = Path(root)
     now = time.time() if now is None else now
-    refs = {str(r).removesuffix(".json") for r in referenced}
     rows = list(_iter_segments(root))
     total = sum(size for _, size, _ in rows)
-    rows.sort(key=lambda r: (r[2].stem in refs, r[0], r[2].name))
-    deleted, freed, referenced_deleted = 0, 0, 0
+    rows.sort(key=lambda r: (r[0], r[2].name))  # oldest first (telemetry only)
+    would_drop: list[str] = []
+    probe_total = total
     for _, size, path in rows:
-        if total <= max_bytes or deleted >= max_unlinks:
+        if probe_total <= max_bytes:
             break
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            continue
-        deleted += 1
-        freed += size
-        total -= size
-        if path.stem in refs:
-            referenced_deleted += 1
-    result = {"deleted": deleted, "freed_bytes": freed, "remaining_bytes": total,
-              "over_cap": total > max_bytes, "referenced_deleted": referenced_deleted,
-              "cap_bytes": int(max_bytes)}
-    if deleted:
-        _receipt(root, {"ts": round(now, 3), "kind": "MARKET_SEGMENT_CAP_R5", **result})
-    if referenced_deleted:
-        disk_alert.raise_red("SEGMENT_CAP_DELETED_REFERENCED", {"count": referenced_deleted}, now=now)
+        would_drop.append(path.name)
+        probe_total -= size
+    over_cap = total > max_bytes
+    decision = retention_stop_write.evaluate_and_latch(
+        MARKET_SEGMENTS_FAMILY,
+        used=total,
+        cap=int(max_bytes),
+        reason="MARKET_SEGMENT_CAP_STOP_WRITE" if over_cap else "MARKET_SEGMENT_CAP_PRESSURE",
+        receipt_dir=root,
+        detail={
+            "would_have_dropped": would_drop[:200],
+            "rule": "R25_NEVER_DELETE",
+            "kind": "MARKET_SEGMENT_CAP_R5",
+        },
+        now=now,
+    )
+    if over_cap:
+        decision["stop_write"] = True
+        if decision.get("alarm_level") != "RED":
+            decision["alarm_level"] = "RED"
+            retention_stop_write.latch(
+                MARKET_SEGMENTS_FAMILY, reason="MARKET_SEGMENT_CAP_STOP_WRITE",
+                used=total, cap=int(max_bytes), now=now,
+                detail={"would_have_dropped": would_drop[:200]},
+            )
+    result = {
+        "deleted": 0, "freed_bytes": 0, "remaining_bytes": total,
+        "over_cap": over_cap,
+        "cap_bytes": int(max_bytes),
+        "would_have_dropped": would_drop,
+        "stop_write": bool(decision.get("stop_write")),
+        "alarm_level": decision.get("alarm_level") or "GREEN",
+        "used_ratio": decision.get("used_ratio"),
+        "amber_at": retention_stop_write.AMBER_RATIO,
+        "red_at": retention_stop_write.RED_RATIO,
+    }
+    if result["stop_write"] or result["alarm_level"] != "GREEN":
+        _receipt(root, {"ts": round(now, 3), "kind": "MARKET_SEGMENT_CAP_R5",
+                        "rule": "R25_NEVER_DELETE", **result})
     return result
+
+
+def market_segments_stop_write_latched() -> bool:
+    """True when local v3/market_segments writes must stop (PR2)."""
+    return retention_stop_write.is_stopped(MARKET_SEGMENTS_FAMILY)
 
 
 def _dir_bytes(path: Path) -> int:

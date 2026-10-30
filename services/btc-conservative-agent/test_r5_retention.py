@@ -34,26 +34,32 @@ def _seg(root, i, size, mtime):
 
 
 def test_segment_cap_oldest_first_and_count(tmp_path):
+    """PR2: never-delete. Over cap → stop-write + would_have_dropped; files stay."""
     shas = [_seg(tmp_path, i, 100, 1000 + i) for i in range(10)]
     (tmp_path / "v3" / "market_segments" / "zz").mkdir()
     (tmp_path / "v3" / "market_segments" / "zz" / "notasegment.json").write_text("x")
     assert r5.count_market_segments(tmp_path) == 10
     res = r5.cap_market_segments(tmp_path, max_bytes=500, now=5.0)
-    assert res["deleted"] == 5 and res["referenced_deleted"] == 0
+    assert res["deleted"] == 0 and res["stop_write"] is True
+    assert "referenced_deleted" not in res
+    assert res["would_have_dropped"]  # old policy would have dropped oldest first
     left = sorted(p.stem for p in (tmp_path / "v3" / "market_segments").rglob("*.json") if len(p.stem) == 64)
-    assert left == sorted(shas[5:])
-    assert disk_alert.red_conditions() == []
+    assert left == sorted(shas)
     assert (tmp_path / rotation_cap.CAP_RECEIPTS_FILE).exists()
+    assert r5.market_segments_stop_write_latched() is True
 
 
-def test_referenced_segments_go_last_but_still_capped_with_red(tmp_path):
+def test_market_segments_over_cap_stop_write_never_deletes(tmp_path):
+    """PR2: over cap → stop-write + RED; no unlinks (referenced/max_unlinks params removed)."""
     shas = [_seg(tmp_path, i, 100, 1000 + i) for i in range(4)]
-    res = r5.cap_market_segments(tmp_path, max_bytes=100, referenced=[shas[0]], now=time.time())
-    assert res["deleted"] == 3 and res["referenced_deleted"] == 0
-    res = r5.cap_market_segments(tmp_path, max_bytes=0, referenced=[shas[0]], now=time.time())
-    assert res["referenced_deleted"] == 1
-    assert r5.count_market_segments(tmp_path) == 0
-    assert "SEGMENT_CAP_DELETED_REFERENCED" in {r["reason"] for r in disk_alert.red_conditions()}
+    res = r5.cap_market_segments(tmp_path, max_bytes=100, now=time.time())
+    assert res["deleted"] == 0 and res["stop_write"] is True
+    assert "referenced_deleted" not in res
+    assert r5.count_market_segments(tmp_path) == 4
+    assert set(shas) == {
+        p.stem for p in (tmp_path / "v3" / "market_segments").rglob("*.json") if len(p.stem) == 64
+    }
+    assert any(r["reason"].startswith("STOP_WRITE") for r in disk_alert.red_conditions())
     assert disk_alert.compute_disk_alert({"total_bytes": 100, "used_bytes": 1})["level"] == "RED"
 
 
