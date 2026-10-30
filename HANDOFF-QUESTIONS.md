@@ -20,3 +20,7 @@ Keep GS-01 **disarmed** until Boss/gates say otherwise. Do not paste tokens into
 <!-- Cursor: append Grok-only numbered questions below. Delete answered blocks after paste-back. -->
 
 _No open Grok-only questions._
+
+## Closed (do not re-ask)
+
+- **Countability / measured delay** (Danish 30 Oct 21:46): stays **live-ack-only**. No paper-measured delay. Rows count only after **10 real Bitfinex acks** from the GS-01 `$0.25` live test. Arming GS-01 needs every gate passing, `#929`/`#930` revert deployed, R16 + R9 checks, and Grok HM + RK both PASS the arm — and even then only when Boss relays that both passed.
