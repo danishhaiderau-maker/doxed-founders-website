@@ -1,3 +1,6 @@
+## URGENT PR3 r5_segment_pass never-delete (HM-mapped)
+- Remove auto-unlink (`shipper` r5_segment_pass / `execute_r5_segment_prune` R22-deleted) + hard-coded prune arm; fail-closed on missing status; R5a eligibility via `validate_custody`+`analyzer_consumed_seq`+parity GREEN+2 ACK cycles+min(custody,ack,analyzer); tripwires (−500 seq / 2 h ACK); stop-write RED; PR4 for lifecycle/v22 deleters; R44+R31 before `RESEARCH_SEGMENTS_ENABLED=1`. **Success:** zero auto-unlinks; greps clean; two-cycle R31 read-back; live OFF. Plan `90f0a5491850`; rules `10f0b8daa510`; restacked by merge onto #951 tip `6360e9e228f8` (prior PASS @37b3c0cd80da voided).
+
 ## 31 Oct 2026 AEDT — URGENT partial 1 of 5 — book10 Sink never-unlink (R0–R45 `10f0b8daa510`)
 - Root: `Sink._rotate` keep-N `os.remove` since #584. #949 Sink-only: no unlink; running byte total (R43); AMBER@70% / RED `STREAM_SIZE_CAP`@85% (monitor/status); hard stop @100%; card **8 GiB × 5 streams = 40 GiB**. Keep Fly secret `STRATEGIST_STREAM_KEEP_ROTATIONS=0` (Boss). Remaining deleters = sibling PRs. Merge only after green CI + HM exact-head + RK PASS + Boss announce (0b). Live OFF.
 

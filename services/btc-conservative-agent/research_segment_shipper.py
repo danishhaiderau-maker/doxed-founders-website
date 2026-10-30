@@ -3,7 +3,7 @@
 Runs as its own process (started by fly-entrypoint.sh only when
 ``RESEARCH_SEGMENTS_ENABLED=1``). It never imports bot.py or Flask, never
 takes the trade lock, never serves HTTP and never deletes or rewrites source
-data: pruning is not implemented in this phase.
+data: PR3 never-delete (R5a eligibility + stop-write only; R21 for deletes).
 
 Each cycle:
 1. Stat the file universe selected by ``research_segment_selection``.
@@ -48,7 +48,7 @@ from research_segment_store import ObjectStore, PreconditionFailed, StoreError, 
 STATE_SCHEMA = "research_segment_shipper_state_v1"
 STATUS_SCHEMA = "research_segment_shipper_status_v1"
 INTENT_SCHEMA = "research_segment_shipper_intent_v1"
-PRUNING_ENABLED = True
+# PR3: hard-coded prune arm R22-deleted — never-delete; no env arms unlink.
 # R5 segment-store RED (cap drop / pre-ACK drop) stays on the status this long after the last drop.
 R5_RED_HOLD_SECONDS = 24 * 3600.0
 
@@ -426,18 +426,17 @@ class SegmentShipper:
                 previous = {}
         previous.update(fields)
         previous.update({"schema": STATUS_SCHEMA, "prune_mode": "off",
-                         "pruning_enabled": bool(PRUNING_ENABLED and self.sink == "volume"),
-                         "retention": "R5_AGE_CAP_NO_CUSTODY_GATE",
+                         "pruning_enabled": False,
+                         "retention": "R5A_ELIGIBILITY_NEVER_DELETE",
                          "updated_at": self.clock(), "prefix": self.prefix, "sink": self.sink,
                          "max_store_bytes": self.max_store_bytes})
         _atomic_write(self.status_path, json.dumps(previous, sort_keys=True, indent=2).encode())
 
     # ---------------------------------------------------------------- pruning
     def prune_mode(self) -> str:
-        """HM C4 (23 Oct): the custody-gated prune (``prune_pass``) is retired under R5.
+        """HM C4 + PR3: custody prune retired; r5_segment_pass is never-delete.
 
-        Retention is R5 only: ``r5_segment_pass`` (age/cap, no custody gate)
-        plus rotation_cap. Always "off"; kept for status/back-compat readers.
+        Always "off"; kept for status/back-compat readers. Real deletes only via R21.
         """
         return "off"
 
@@ -492,48 +491,112 @@ class SegmentShipper:
         return {"state": "PENDING", "seq": seq, "committed": committed, "exclude_seqs": [seq]}
 
     def r5_segment_pass(self, keep_seqs=()) -> dict:
-        """R5 segment-store retention (RK 2026-10-23): live, no custody/ACK gate.
+        """PR3 never-delete: R5a eligibility + tripwires + stop-write; zero unlinks.
 
-        Between cycles only. Below the cap, segments past the age limit go
-        (unless un-ACKed and in ``keep_seqs``); at the cap, oldest first
-        regardless, dropped seqs in the capped receipt and a RED reason in
-        the status. A custody stall only alerts (monitor_gaps.custody_stall).
+        Replaces the former live age/cap auto-unlink path (R22-deleted).
+        Missing/corrupt status fails closed (no empty-status fall-through).
+        Cap pressure latches stop-write RED via ``retention_stop_write``; shipping
+        of new segments still fails closed at ``STORE_CAP_REACHED`` in ``cycle``.
+        No env value (including ``1``) can arm a delete from this method.
         """
-        if not PRUNING_ENABLED or self.sink != "volume":
-            return {"skipped": "NOT_VOLUME"}
-        # HM C3-R: a pending/stale/corrupt ship intent never makes R5 wait (a
-        # crash mid-ship + LOW_DISK skips the cycle that would complete it, and
-        # complete_intent raises on a stale/corrupt spool). Only the intent's
-        # own seq is excluded from deletion; the spool is left untouched.
+        import retention_stop_write as stop_write
+        if self.sink != "volume":
+            return {"skipped": "NOT_VOLUME", "result": {"deleted": 0, "deleted_bytes": 0, "red": []}}
         intent_info = self.inspect_intent()
         store_root = getattr(self.store, "root", None)
         if store_root is None:
-            return {"skipped": "NO_VOLUME_STORE_ROOT"}
+            return {"skipped": "NO_VOLUME_STORE_ROOT", "result": {"deleted": 0, "deleted_bytes": 0, "red": []}}
+        status_readable = True
+        status: dict = {}
         try:
-            status = json.loads(self.status_path.read_text(encoding="utf-8"))
+            loaded = json.loads(self.status_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                status_readable = False
+                status = {}
+            else:
+                status = loaded
         except (OSError, ValueError):
+            status_readable = False
             status = {}
         state = self.load_state()
         now = self.clock()
-        plan = prune.plan_r5_segment_prune(Path(store_root), self.prefix, shipped_seq=int(state["seq"]),
-                                           acked_seq=status.get("laptop_acked_seq"),
-                                           max_store_bytes=self.max_store_bytes, now=now, keep_seqs=keep_seqs,
-                                           accounted_bytes=int(state.get("store_bytes") or 0),
-                                           exclude_seqs=intent_info.get("exclude_seqs") or ())
-        result = prune.execute_r5_segment_prune(plan, receipt_dir=self.runtime_root, clock=self.clock)
-        fields: dict = {"r5_segment_last_at": now, "r5_segment_store_bytes": plan["store_bytes"],
-                        "r5_segment_over_cap": plan["over_cap"],
-                        "r5_segment_last_deleted": result["deleted"],
-                        "r5_segment_kept_needed_unacked": plan["kept_needed_unacked"][:20],
-                        "r5_segment_intent": {k: v for k, v in intent_info.items() if k != "exclude_seqs"}}
-        if result["deleted"]:
-            state = self.load_state()
-            state["store_bytes"] = max(0, plan["store_bytes"] - result["deleted_bytes"])
-            _atomic_write(self.state_path, json.dumps(state, sort_keys=True).encode())
-            fields["store_bytes"] = state["store_bytes"]
-            fields["r5_segment_deleted_bytes_total"] = (int(status.get("r5_segment_deleted_bytes_total") or 0)
-                                                        + result["deleted_bytes"])
-        # RED stays visible R5_RED_HOLD_SECONDS after the last drop (since = first drop of the episode)
+        plan = prune.plan_r5_segment_prune(
+            Path(store_root), self.prefix, shipped_seq=int(state["seq"]),
+            acked_seq=status.get("laptop_acked_seq") if status_readable else None,
+            max_store_bytes=self.max_store_bytes, now=now, keep_seqs=keep_seqs,
+            accounted_bytes=int(state.get("store_bytes") or 0),
+            exclude_seqs=intent_info.get("exclude_seqs") or (),
+        )
+        eligibility = prune.evaluate_r5a_segment_eligibility(
+            store_root=Path(store_root), prefix=self.prefix,
+            shipped_seq=int(state["seq"]), status=status, status_readable=status_readable,
+            now=now, fly_oldest_seq=plan.get("fly_oldest_seq"),
+        )
+        result = {
+            "deleted": 0,
+            "deleted_bytes": 0,
+            "age_dropped_seqs": [],
+            "cap_dropped_seqs": [],
+            "unacked_dropped_seqs": [],
+            "red": list(eligibility.get("red") or []),
+            "amber": list(eligibility.get("amber") or []),
+            "shadow_would_have_age": [int(i["seq"]) for i in (plan.get("age_drop") or [])][:prune.R5_RECEIPT_MAX_IDS],
+            "shadow_would_have_cap": [int(i["seq"]) for i in (plan.get("cap_drop") or [])][:prune.R5_RECEIPT_MAX_IDS],
+            "eligible": bool(eligibility.get("eligible")),
+            "bound_seq": int(eligibility.get("bound_seq") or 0),
+            "deny_reasons": list(eligibility.get("deny_reasons") or []),
+        }
+        stop_row = None
+        if plan.get("over_cap") and self.max_store_bytes:
+            stop_row = stop_write.evaluate_and_latch(
+                "r5_segment_store",
+                used=int(plan.get("store_bytes") or 0),
+                cap=int(self.max_store_bytes),
+                reason=prune.R5_RED_CAP,
+                receipt_dir=self.runtime_root,
+                detail={"shipped_seq": int(state["seq"]),
+                        "shadow_would_have_cap": result["shadow_would_have_cap"][:20]},
+                now=now,
+            )
+            if prune.R5_RED_CAP not in result["red"]:
+                result["red"].append(prune.R5_RED_CAP)
+        fields: dict = {
+            "r5_segment_last_at": now,
+            "r5_segment_store_bytes": plan["store_bytes"],
+            "r5_segment_over_cap": plan["over_cap"],
+            "r5_segment_last_deleted": 0,
+            "r5_segment_kept_needed_unacked": plan["kept_needed_unacked"][:20],
+            "r5_segment_intent": {k: v for k, v in intent_info.items() if k != "exclude_seqs"},
+            "r5a_eligibility": {
+                "eligible": result["eligible"],
+                "bound_seq": result["bound_seq"],
+                "deny_reasons": result["deny_reasons"],
+                "acked_seq": eligibility.get("acked_seq"),
+                "custody_through_seq": eligibility.get("custody_through_seq"),
+                "analyzer_consumed_seq": eligibility.get("analyzer_consumed_seq"),
+                "proven_ack_cycles": eligibility.get("proven_ack_cycles"),
+                "fly_oldest_seq": eligibility.get("fly_oldest_seq"),
+                "ack_age_s": eligibility.get("ack_age_s"),
+            },
+            "r5_segment_shadow_would_have": {
+                "age": result["shadow_would_have_age"][:20],
+                "cap": result["shadow_would_have_cap"][:20],
+            },
+            "r5_segment_tripwire": {
+                "red": result["red"],
+                "amber": result["amber"],
+                "status_readable": status_readable,
+            },
+        }
+        if stop_row is not None:
+            fields["r5_segment_stop_write"] = {
+                "stop_write": bool(stop_row.get("stop_write")),
+                "alarm_level": stop_row.get("alarm_level"),
+                "used_ratio": stop_row.get("used_ratio"),
+                "amber_at": stop_row.get("amber_at"),
+                "red_at": stop_row.get("red_at"),
+            }
+        # Hold prior RED keys that are still within the hold window; merge new ones.
         red = status.get("r5_segment_red") if isinstance(status.get("r5_segment_red"), dict) else {}
         red = {k: v for k, v in red.items()
                if isinstance(v, dict) and now - float(v.get("last") or 0) < R5_RED_HOLD_SECONDS}
@@ -541,13 +604,14 @@ class SegmentShipper:
             entry = red.get(reason) or {"since": now}
             red[reason] = {**entry, "last": now}
         fields["r5_segment_red"] = red
-        if result["cap_dropped_seqs"]:
-            fields["r5_segment_last_cap_dropped_seqs"] = result["cap_dropped_seqs"][:prune.R5_RECEIPT_MAX_IDS]
-        if status.get("last_error") == "STORE_CAP_REACHED" and (not plan["over_cap"] or result["cap_dropped_seqs"]):
+        # Never clear STORE_CAP_REACHED by deleting; only clear when under cap.
+        if status.get("last_error") == "STORE_CAP_REACHED" and not plan["over_cap"]:
             fields["last_error"] = None
         self.write_status(**fields)
         return {"plan": {k: v for k, v in plan.items() if k not in ("age_drop", "cap_drop")},
+                "eligibility": eligibility,
                 "result": result}
+
 
     # --------------------------------------------------------------- universe
     def _roots(self) -> list[tuple[Path, str]]:
@@ -1199,8 +1263,8 @@ class SegmentShipper:
         store_bytes = int(state.get("store_bytes") or 0)
         if self.max_store_bytes and store_bytes >= self.max_store_bytes:
             # Fail closed for this cycle: the store must never grow into the
-            # trading volume's headroom. R5: the between-cycles
-            # r5_segment_pass drops the oldest segments, so this clears.
+            # trading volume's headroom. PR3: r5_segment_pass never deletes;
+            # stop-write + RED until R21 / under-cap.
             self.write_status(shipped_seq=state["seq"], store_bytes=store_bytes,
                               last_error="STORE_CAP_REACHED",
                               last_segment_at=state.get("last_segment_at"))
@@ -1544,17 +1608,18 @@ def main() -> int:
             _log(f"ack poll error: {type(exc).__name__}: {exc}")
 
     def r5_pass() -> None:
-        # HM C3: R5 segment-store retention runs FIRST every loop, in its own try,
-        # so LOW_DISK or a failing cycle never skips it (that is when it is needed).
-        # Age/cap, no custody gate; STORE_CAP_REACHED clears on the next cycle.
+        # HM C3 + PR3: R5a eligibility / tripwire / stop-write runs FIRST every loop.
+        # Never deletes; STORE_CAP_REACHED clears only when under cap.
         try:
             r5 = shipper.r5_segment_pass(keep_seqs=shipper.r5_keep_seqs())
         except Exception as exc:  # noqa: BLE001 - retention never stops the loop
-            _log(f"r5 segment prune error: {type(exc).__name__}: {exc}")
+            _log(f"r5 segment pass error: {type(exc).__name__}: {exc}")
             return
-        if r5.get("result", {}).get("deleted"):
-            _log(f"r5 segment prune deleted={r5['result']['deleted']} bytes={r5['result']['deleted_bytes']} "
-                 f"cap_dropped={r5['result']['cap_dropped_seqs'][:20]} red={r5['result']['red']}")
+        result = r5.get("result") or {}
+        if result.get("red") or result.get("deny_reasons") or result.get("eligible") is False:
+            _log(f"r5 segment pass deleted=0 eligible={result.get('eligible')} "
+                 f"deny={result.get('deny_reasons')} red={result.get('red')} "
+                 f"shadow_cap={result.get('shadow_would_have_cap', [])[:20]}")
 
     while True:
         pause = interval

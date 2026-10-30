@@ -16,9 +16,9 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   # Sealed research segments, shadow mode: write-once store on this volume
   # (/app/data/segment-store), served read-only at /api/research-segments/*.
   # Hard-capped (10 GiB store, 4 GiB free floor).
-  # R5: cap/age, no custody gate (r5_segment_pass + rotation_cap). The old
-  # custody prune (ACK-gated) is retired (HM C4): mode is always off and the
-  # prune-mode route answers 409 CUSTODY_PRUNE_RETIRED_R5.
+  # PR3: r5_segment_pass never-delete (R5a eligibility + stop-write); rotation_cap
+  # never-delete (PR2). Custody prune retired (HM C4): mode always off; prune-mode
+  # route answers 409 CUSTODY_PRUNE_RETIRED_R5.
   RESEARCH_SEGMENTS_PRUNE_ENABLED = "1"
   RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "off"
   RESEARCH_SEGMENTS_ENABLED = "1"
