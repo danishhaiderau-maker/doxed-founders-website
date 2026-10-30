@@ -33,7 +33,6 @@ MB = 1024 * 1024
 DEFAULT_MAX_ROTATIONS = 10
 DEFAULT_MAX_BYTES = 500 * MB
 DEFAULT_CAP = (DEFAULT_MAX_ROTATIONS, DEFAULT_MAX_BYTES)
-MAX_UNLINKS_PER_CALL = 3  # retained name for API compat; unused (never-delete)
 
 CAP_RECEIPTS_FILE = "cap_receipts.jsonl"
 CAP_RECEIPTS_MAX_BYTES = 1 * MB  # one rotation -> at most ~2 MB on disk
@@ -224,17 +223,14 @@ def enforce_cap(
     *,
     max_rotations: int | None = None,
     max_bytes: int | None = None,
-    max_unlinks: int = MAX_UNLINKS_PER_CALL,
     receipt_writer: Callable[[str, dict[str, Any]], Any] | None = write_cap_receipt,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Never-delete rotation pressure check. R5: no custody gate; R25: no unlink.
 
-    ``max_unlinks`` is accepted for API compatibility and ignored — this path
-    never deletes. Over keep-N / byte / age pressure → stop-write + 70/85 alarm
-    and ``would_have_dropped`` telemetry only.
+    Over keep-N / byte / age pressure → stop-write + 70/85 alarm and
+    ``would_have_dropped`` telemetry only. No max_unlinks param (R22).
     """
-    del max_unlinks  # never-delete; kept for call-site compat
     kind, detail = classify(active_path)
     result: dict[str, Any] = {
         "path": os.path.basename(active_path), "class": kind, "deleted": [],
@@ -338,12 +334,11 @@ def enforce_cap(
     return result
 
 
-def sweep(root: str, *, families: Iterable[str] | None = None,
-          max_unlinks: int = MAX_UNLINKS_PER_CALL) -> list[dict[str, Any]]:
+def sweep(root: str, *, families: Iterable[str] | None = None) -> list[dict[str, Any]]:
     """Background pass over every allow-listed family under ``root`` (never deletes)."""
     results = []
     for base in sorted(families if families is not None else CAP_ALLOW):
-        res = enforce_cap(os.path.join(root, base), max_unlinks=max_unlinks)
+        res = enforce_cap(os.path.join(root, base))
         if res.get("would_have_dropped") or res.get("stop_write") or res.get("errors") or (
                 res.get("alarm_level") not in (None, "GREEN")):
             results.append(res)

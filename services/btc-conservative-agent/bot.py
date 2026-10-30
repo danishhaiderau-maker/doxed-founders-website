@@ -16971,8 +16971,7 @@ def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
         out["keep"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     steps = [
         ("locks", lambda: r5_retention.wipe_stale_locks(runtime_root, boot_ts=_R5_PROCESS_BOOT_TS, now=now)),
-        ("market_segments", lambda: r5_retention.cap_market_segments(
-            runtime_root, referenced=keep_info.get("segment_shas") or (), now=now)),
+        ("market_segments", lambda: r5_retention.cap_market_segments(runtime_root, now=now)),
         ("lifecycle_bundles", lambda: r5_retention.cap_lifecycle_bundles(
             runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", now=now)),
         ("retired_transfer_bundles", lambda: r5_retention.purge_retired_transfer_bundles(runtime_root, now=now)),

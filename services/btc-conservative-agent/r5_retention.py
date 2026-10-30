@@ -41,7 +41,6 @@ SEGMENT_CAP_BYTES = 5 * 1024 ** 3
 BUNDLE_CAP_BYTES = 256 * 1024 ** 2
 BUNDLE_MAX_AGE_SEC = 7 * 86400
 LOCK_MIN_AGE_SEC = 3600.0
-MAX_SEGMENT_UNLINKS_PER_CALL = 500  # API compat; cap_market_segments never unlinks
 MAX_BUNDLE_REMOVALS_PER_CALL = 50
 MAX_LOCK_UNLINKS_PER_CALL = 5000
 V22_DRAIN_MAX_SEC = 30 * 60
@@ -80,21 +79,18 @@ def count_market_segments(root: str | os.PathLike) -> int:
 
 
 def cap_market_segments(root: str | os.PathLike, *, max_bytes: int = SEGMENT_CAP_BYTES,
-                        referenced: Iterable[str] = (), max_unlinks: int = MAX_SEGMENT_UNLINKS_PER_CALL,
                         now: float | None = None) -> dict[str, Any]:
     """Never-delete market-segment byte-cap check (PR2).
 
     At/over ``max_bytes`` (default 5 GiB) or free-disk RED: latch stop-write +
-    70/85 alarms. Never unlinks referenced or unreferenced segments. ``referenced``
-    and ``max_unlinks`` remain for call-site compatibility only.
+    70/85 alarms. Never unlinks any segment (R22: no max_unlinks / referenced
+    delete-compat params).
     """
-    del max_unlinks  # never-delete
     root = Path(root)
     now = time.time() if now is None else now
-    refs = {str(r).removesuffix(".json") for r in referenced}
     rows = list(_iter_segments(root))
     total = sum(size for _, size, _ in rows)
-    rows.sort(key=lambda r: (r[2].stem in refs, r[0], r[2].name))
+    rows.sort(key=lambda r: (r[0], r[2].name))  # oldest first (telemetry only)
     would_drop: list[str] = []
     probe_total = total
     for _, size, path in rows:
@@ -111,7 +107,6 @@ def cap_market_segments(root: str | os.PathLike, *, max_bytes: int = SEGMENT_CAP
         receipt_dir=root,
         detail={
             "would_have_dropped": would_drop[:200],
-            "referenced_would_drop": sum(1 for name in would_drop if name.removesuffix(".json") in refs),
             "rule": "R25_NEVER_DELETE",
             "kind": "MARKET_SEGMENT_CAP_R5",
         },
@@ -128,7 +123,7 @@ def cap_market_segments(root: str | os.PathLike, *, max_bytes: int = SEGMENT_CAP
             )
     result = {
         "deleted": 0, "freed_bytes": 0, "remaining_bytes": total,
-        "over_cap": over_cap, "referenced_deleted": 0,
+        "over_cap": over_cap,
         "cap_bytes": int(max_bytes),
         "would_have_dropped": would_drop,
         "stop_write": bool(decision.get("stop_write")),
