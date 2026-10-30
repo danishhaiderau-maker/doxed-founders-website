@@ -1,7 +1,7 @@
 ## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
 
 - **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`
-- **Head sha:** `PLACEHOLDER`
+- **Head sha:** `6b8e48b1dbeaae973bbe0ad1c72327fc96005e89`
 - **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (HM COND PASS — no push)
 - **Base:** `origin/master` after #940+#938 (`cbe56608a`) via #943
 - **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams + B3 EMPTY_BECAUSE readers + killing tests for v62 ai_shadow sites; `data_health_report.repaired_stream_quality` EMPTY_BECAUSE; GS-01 signal path kept; B4/B5 clean
