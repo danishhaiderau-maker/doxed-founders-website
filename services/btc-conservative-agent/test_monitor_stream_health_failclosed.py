@@ -9,6 +9,7 @@ from pathlib import Path
 
 import monitor_streams as ms
 import pandas as pd
+import pytest
 from strategy_lab import stream_studies as studies
 from strategy_lab import streams as sl_streams
 
@@ -374,6 +375,25 @@ def test_iff_retired_streams_have_empty_because_readers():
     dh = dhr.repaired_stream_quality("/tmp")
     assert dh["ai_shadow_challengers"]["EMPTY_BECAUSE"] == "R17_RETIRED"
     assert dh["ai_shadow_challengers"]["rows_read"] == 0
+
+
+def test_mutation_iff_retired_reader_rejects_green_or_nonzero_rows(monkeypatch):
+    """Mutation proof (R23): iff fails if a retired reader returns GREEN/OK or rows_read!=0."""
+    from research import signal_research_table as srt
+
+    real = srt.retired_stream_read
+
+    def green_ok(fname):
+        out = dict(real(fname))
+        out["EMPTY_BECAUSE"] = "OK"
+        out["rows_read"] = 3
+        return out
+
+    monkeypatch.setattr(srt, "retired_stream_read", green_ok)
+    bad = srt.retired_stream_read("fill_markouts.jsonl")
+    assert bad["EMPTY_BECAUSE"] != "R17_RETIRED" or bad["rows_read"] != 0
+    with pytest.raises(AssertionError):
+        assert bad["EMPTY_BECAUSE"] == "R17_RETIRED" and bad["rows_read"] == 0
 
 
 def test_empty_frame_guard_has_schema_columns():

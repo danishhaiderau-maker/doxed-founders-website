@@ -18,6 +18,16 @@ LANES = ("FAMILY_A", "FAMILY_B")
 REGISTRY = {"FAMILY_A": {"id_prefix": "faa", "label": "A"}, "FAMILY_B": {"id_prefix": "fbb", "label": "B"}}
 
 
+@pytest.fixture(autouse=True)
+def _clear_sticky_epoch_process_guard():
+    """R1/#944: analyzer_epoch_guard._PROCESS_GUARD must not leak into stream studies."""
+    from analyzer_epoch_guard import set_process_guard
+
+    set_process_guard(None)
+    yield
+    set_process_guard(None)
+
+
 def _trades(n=60, seed=0, lane_means=(0.0, 0.0)):
     rng = np.random.default_rng(seed)
     rows = []

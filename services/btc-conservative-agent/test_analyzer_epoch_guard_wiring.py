@@ -16,13 +16,22 @@ PRE, POST = START - 3600, START + 3600
 
 @pytest.fixture
 def data_root(tmp_path, monkeypatch):
+    # _epoch_guard() also set_process_guard(guard); monkeypatching engine._EPOCH_GUARD
+    # alone leaves analyzer_epoch_guard._PROCESS_GUARD sticky and pollutes later modules
+    # (HM: 4 strategy_lab_insights failures after this file in collection order).
+    from analyzer_epoch_guard import set_process_guard
+
+    set_process_guard(None)
     monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("BTC_DATA_EPOCH_DIR", str(tmp_path))
     monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
     monkeypatch.setattr(engine, "_EPOCH_MANIFEST_DIR", None)
     pd.DataFrame({"trade_id": ["a", "b"], "ts": [de.utc_iso(PRE), de.utc_iso(POST)]}).to_csv(
         tmp_path / engine.TRADES_FILE, index=False)
-    return tmp_path
+    yield tmp_path
+    set_process_guard(None)
+    engine._EPOCH_GUARD = None
+    engine._EPOCH_MANIFEST_DIR = None
 
 
 def _declare(root):
