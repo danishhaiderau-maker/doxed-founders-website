@@ -168,6 +168,20 @@ def _iso(ts) -> Optional[str]:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(f)) if f else None
 
 
+def retired_empty_frame(columns: tuple[str, ...]) -> pd.DataFrame:
+    """Empty result with schema columns so callers never AttributeError on .group/.horizon_sec."""
+    return pd.DataFrame({c: pd.Series(dtype="object") for c in columns})
+
+
+TAKER_SUMMARY_COLUMNS = ("group", "value", "horizon", "n", "ev_exit_touch_bps", "ev_mid_bps")
+FILL_MARKOUT_COLUMNS = ("liquidity", "lane", "horizon", "n", "mean_bps")
+EXIT_REGRET_COLUMNS = (
+    "research_lane", "horizon_sec", "n", "hold_longer_mean_usd", "ci_lo_usd", "ci_hi_usd",
+    "p_cluster", "share_better_if_held", "mean_drift_pct_margin", "mean_missed_mfe_pct_margin",
+    "verdict",
+)
+
+
 # ------------------------------------------------------------------ post-exit regret
 
 def _post_exit_partial(path: str, epoch_start: float = 0.0) -> dict:
@@ -298,7 +312,8 @@ def post_exit_regret(files: list, cache: Cache, trades: pd.DataFrame, lane_of: d
                     "mean_missed_mfe_pct_margin": _r(float(mfe.mean()), 4) if mfe.notna().any() else None,
                     "verdict": _regret_verdict(c),
                 })
-    return per_trade, pd.DataFrame(summary)
+    # HM empty-frame guard: schema columns always present (no .horizon_sec AttributeError).
+    return per_trade, (pd.DataFrame(summary) if summary else retired_empty_frame(EXIT_REGRET_COLUMNS))
 
 
 def _regret_verdict(c: dict) -> str:
@@ -380,46 +395,13 @@ def _flat_markouts(r: dict, field: str) -> dict:
 
 def taker_counterfactuals(files: list, cache: Cache, trades: pd.DataFrame, epoch_start: float,
                           frozen=frozenset(), extra_rows: Iterable = ()) -> tuple:
-    def keep(r):
-        if r.get("schema") != "taker_signal_counterfactual_v1":
-            return None
-        return {"ts": _num(r.get("signal_ts")), "call": r.get("shared_ai_call_id"), "dir": r.get("direction"),
-                "lat": _num(r.get("latency_sec")), "ai": r.get("raw_ai_decision"),
-                "spread_bps": _spread_bps(r), "exit_touch": _flat_markouts(r, "markout_exit_touch_bps"),
-                "mid": _flat_markouts(r, "markout_mid_bps")}
-
-    rows = _markout_rows(files, cache, "taker_cf", epoch_start, keep, frozen, extra_rows,
-                         key=lambda p: (p["ts"], p["call"], p["dir"], p["lat"]))
-    tile_by_call = {}
-    if trades is not None and not trades.empty and "shared_ai_call_id" in trades.columns:
-        t = trades.drop_duplicates(subset=["trade_id"], keep="last")
-        dcol = "direction" if "direction" in t.columns else ("final_direction" if "final_direction" in t.columns else None)
-        for _, row in t.iterrows():
-            key = (str(row.get("shared_ai_call_id") or ""), str(row.get(dcol) or "").upper() if dcol else "")
-            tile_by_call.setdefault(key, set()).add(str(row.get("research_lane") or "").upper())
-    out = []
-    groups: dict = {}
-    for r in rows:
-        tiles = tile_by_call.get((str(r["call"] or ""), str(r["dir"] or "").upper()), set())
-        for g in [("ALL", "ALL"), ("AI_DECISION", str(r["ai"] or "UNKNOWN"))] + [("TILE", t) for t in sorted(tiles)]:
-            groups.setdefault(g + (r["lat"],), []).append(r)
-    for (kind, value, lat), sub in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or 0)):
-        for h in MARKOUT_HORIZONS:
-            vals = [s["exit_touch"].get(h) for s in sub]
-            ts = [s["ts"] for s in sub]
-            c = _ci([v if v is not None else np.nan for v in vals], ts)
-            mids = [s["mid"].get(h) for s in sub if s["mid"].get(h) is not None]
-            out.append({"group": kind, "value": value, "latency_sec": lat, "horizon": h, "n": c["n"],
-                        "ev_exit_touch_bps": _r(c["mean"], 4), "ci_lo_bps": _r(c["lo"], 4), "ci_hi_bps": _r(c["hi"], 4),
-                        "p_cluster": _r(c["p"]), "mean_mid_markout_bps": _r(np.mean(mids), 4) if mids else None,
-                        "mean_spread_bps": _r(np.nanmean([s["spread_bps"] for s in sub if s["spread_bps"] is not None]), 4)
-                        if any(s["spread_bps"] is not None for s in sub) else None})
-    meta = {"rows": len(rows), "signals": len({(r["call"], r["dir"]) for r in rows}),
-            "ai_decisions": _counts(r["ai"] for r in rows),
-            "last_signal_at": _iso(max((r["ts"] or 0) for r in rows)) if rows else None,
-            "last_reject_signal_at": _iso(max(((r["ts"] or 0) for r in rows if str(r["ai"]).upper() == "REJECT"),
-                                              default=0)) if rows else None}
-    return pd.DataFrame(out), meta
+    # R17: taker_signal_counterfactuals is retired (ticker/L1). Return empty with
+    # EMPTY_BECAUSE even when current-epoch rows exist on disk — never analyse them.
+    _ = (files, cache, trades, epoch_start, frozen, extra_rows)
+    meta = {"rows": 0, "rows_read": 0, "signals": 0, "ai_decisions": {},
+            "last_signal_at": None, "last_reject_signal_at": None,
+            "EMPTY_BECAUSE": "R17_RETIRED"}
+    return retired_empty_frame(TAKER_SUMMARY_COLUMNS), meta
 
 
 def _spread_bps(r: dict) -> Optional[float]:
@@ -438,33 +420,10 @@ def _counts(values: Iterable) -> dict:
 
 def fill_markouts(files: list, cache: Cache, lanes, epoch_start: float, frozen=frozenset(),
                   extra_rows: Iterable = ()) -> tuple:
-    def keep(r):
-        if r.get("schema") != "fill_markout_v1":
-            return None
-        return {"ts": _num(r.get("fill_ts")), "trade_id": r.get("trade_id"),
-                "lane": str(r.get("research_lane") or "").upper(), "liq": r.get("liquidity"),
-                "mid": _flat_markouts(r, "markout_mid_bps"), "touch": _flat_markouts(r, "markout_exit_touch_bps")}
-
-    rows = _markout_rows(files, cache, "fill_mk", epoch_start, keep, frozen, extra_rows,
-                         key=lambda p: (p["trade_id"], p["ts"], p["liq"]))
-    current = {str(l).upper() for l in lanes}
-    out = []
-    groups: dict = {}
-    for r in rows:
-        if current and r["lane"] not in current:
-            continue
-        for liq in ("ALL", str(r["liq"] or "UNKNOWN")):
-            groups.setdefault((r["lane"], liq), []).append(r)
-    for (lane, liq), sub in sorted(groups.items()):
-        for h in MARKOUT_HORIZONS:
-            c = _ci([s["mid"].get(h) if s["mid"].get(h) is not None else np.nan for s in sub], [s["ts"] for s in sub])
-            ct = _ci([s["touch"].get(h) if s["touch"].get(h) is not None else np.nan for s in sub], [s["ts"] for s in sub])
-            out.append({"research_lane": lane, "liquidity": liq, "horizon": h, "n": c["n"],
-                        "markout_mid_bps": _r(c["mean"], 4), "ci_lo_bps": _r(c["lo"], 4), "ci_hi_bps": _r(c["hi"], 4),
-                        "p_cluster": _r(c["p"]), "markout_exit_touch_bps": _r(ct["mean"], 4)})
-    meta = {"rows": len(rows), "trades": len({r["trade_id"] for r in rows}),
-            "last_fill_at": _iso(max((r["ts"] or 0) for r in rows)) if rows else None}
-    return pd.DataFrame(out), meta
+    # R17/HM: fill_markouts is ticker/L1-priced → EMPTY_BECAUSE, never analyse rows.
+    _ = (files, cache, lanes, epoch_start, frozen, extra_rows)
+    return retired_empty_frame(FILL_MARKOUT_COLUMNS), {
+        "rows": 0, "rows_read": 0, "EMPTY_BECAUSE": "R17_RETIRED", "last_fill_at": None}
 
 
 # ------------------------------------------------------------------ research events
@@ -618,9 +577,15 @@ def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registr
                                                       tier_a["fill_markouts.jsonl"]))
     ev = stage("research_events_v22", lambda: research_events(files["research_events_v22.jsonl"], cache, epoch_id,
                                                               lane_of, now, frozen))
-    tables["exit_regret_trades"], tables["exit_regret"] = pe if pe else (pd.DataFrame(), pd.DataFrame())
-    tables["taker_counterfactual"], tk_meta = tk if tk else (pd.DataFrame(), {})
-    tables["fill_markouts"], fm_meta = fm if fm else (pd.DataFrame(), {})
+    tables["exit_regret_trades"], tables["exit_regret"] = (
+        pe if pe else (pd.DataFrame(), retired_empty_frame(EXIT_REGRET_COLUMNS)))
+    tables["taker_counterfactual"], tk_meta = (
+        tk if tk else (retired_empty_frame(TAKER_SUMMARY_COLUMNS), {"rows": 0, "rows_read": 0,
+                                                                    "EMPTY_BECAUSE": "R17_RETIRED"}))
+    tables["fill_markouts"], fm_meta = (
+        fm if fm else (retired_empty_frame(FILL_MARKOUT_COLUMNS), {"rows": 0, "rows_read": 0,
+                                                                  "EMPTY_BECAUSE": "R17_RETIRED",
+                                                                  "last_fill_at": None}))
     tables["research_events"], ev_meta = ev if ev else (pd.DataFrame(), {})
     used = {"post_exit_replay.jsonl": len(tables["exit_regret_trades"]),
             "taker_signal_counterfactuals.jsonl": tk_meta.get("rows", 0),
@@ -650,10 +615,16 @@ def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registr
         "post_exit_horizons_sec": list(POST_EXIT_HORIZONS), "markout_horizons": list(MARKOUT_HORIZONS),
         "exit_regret": {"trades": len(tables["exit_regret_trades"]),
                         "by_tile": tables["exit_regret"].to_dict("records")},
-        "taker_counterfactual": {**tk_meta, "summary": tables["taker_counterfactual"][
-            tables["taker_counterfactual"]["group"].isin(["ALL", "TILE"])].to_dict("records")
-            if len(tables["taker_counterfactual"]) else []},
-        "fill_markouts": {**fm_meta, "curves": tables["fill_markouts"].to_dict("records")},
+        "taker_counterfactual": {**tk_meta, "summary": (
+            tables["taker_counterfactual"].loc[
+                tables["taker_counterfactual"]["group"].isin(["ALL", "TILE"])
+            ].to_dict("records")
+            if len(tables["taker_counterfactual"]) and "group" in tables["taker_counterfactual"].columns
+            else []
+        )},
+        "fill_markouts": {**fm_meta, "curves": (
+            tables["fill_markouts"].to_dict("records") if len(tables["fill_markouts"]) else []
+        )},
         "research_events": {**ev_meta, "mix": tables["research_events"].to_dict("records")},
         "stream_health": health, "errors": errors,
         "history_sources": history.describe() if history.enabled else {"archive_dirs": [], "tier_a_root": None},

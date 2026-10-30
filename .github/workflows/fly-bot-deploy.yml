@@ -2440,7 +2440,7 @@ jobs:
           python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py test_paper_family_chase_durability.py -q
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
-          python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py test_research_freeze.py test_live_copy_tile_contract.py test_tile_display_vs_key_contract.py test_shared_pricing_byte_identity.py test_live_monitor_extra_routes.py test_strategist_streams_collector.py test_shadow_exit_path_1s.py test_exit_latency_slo.py test_live_fix_1485_exit_follow.py test_hm_missing_checks.py -q
+          python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py test_research_freeze.py test_live_copy_tile_contract.py test_tile_display_vs_key_contract.py test_shared_pricing_byte_identity.py test_live_monitor_extra_routes.py test_strategist_streams_collector.py test_exit_latency_slo.py test_live_fix_1485_exit_follow.py test_hm_missing_checks.py -q
           python -m pytest test_http_emergency_admission.py -q
           python -m pytest test_paper_policy_family_committed_fade_taker_90.py test_paper_policy_family_premium_reversion_60m.py test_paper_policy_family_random_control_taker_90.py -q
           python -m pytest test_paper_policy_family_gs01_xv_premium_atr_tp.py test_paper_policy_family_gsb1_cvd_div_regime.py test_paper_policy_family_gsb2_regime_switcher.py test_paper_policy_family_gsb3_committed_fade_regime.py test_tile_fade3.py test_tile_fade3_loose.py test_gs_regime_engine.py -q

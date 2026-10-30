@@ -287,31 +287,23 @@ def test_stats_helpers_match_reference_values():
 
 
 def test_report_detects_llm_edge_and_keeps_random_null():
+    # R17/#944: ai_shadow_challengers analysis RETIRED — never OK/GREEN; rows_read must stay 0.
     rows, compact = _journal()
     rep = report_mod.build_ai_challenger_report(rows, compact, dead_input_threshold=5)
-    assert rep["status"] == "OK" and rep["current_prompt_id"] == "p1"
-    verdicts = {c["challenger"]: c for c in rep["primary_comparisons"]}
-    assert verdicts["inverted_ai"]["verdict"] == "LLM_BETTER"
-    assert verdicts["rule_vote"]["verdict"] == "NO_DETECTABLE_DIFFERENCE"
-    assert verdicts["rule_vote"]["mean_diff_net_bp"] == 0.0
-    assert all(c["q_bh"] is None or 0 <= c["q_bh"] <= 1 for c in rep["primary_comparisons"])
-    assert all(p["flag"] == "OK" for p in rep["random_placebo"])
-    cohort = rep["cohorts"]["p1"]
-    assert cohort["agreement_with_llm"]["rule_vote"]["agreement_rate"] == 1.0
-    assert cohort["llm_behaviour"]["raw_no_trade_but_tiles_admitted_side"] == 24
-    assert cohort["compact_v5"]["brier"] == 0.25 and cohort["compact_v5"]["scored_filled_questions"] == 240
-    assert cohort["geometry_proxy"]["lanes"]["tile_a"]["llm_score_led"]["fill_rate"] == 1.0
-    assert shadow.COMPACT_QUESTION_LANE not in cohort["geometry_proxy"]["lanes"]
-    dead = {d["path"] for d in cohort["dead_inputs"]["dead_fields"]}
-    assert dead == {"raw.stoch_rsi_k_3m"}
+    assert rep["status"] == "RETIRED_R17"
+    assert rep["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert rep["rows_read"] == 0
+    assert rep["calls"] == 0 and rep["cohorts"] == {}
+    assert rep.get("primary_comparisons") in (None, []) or "primary_comparisons" not in rep
 
 
 def test_report_gates_small_samples_and_empty_journal():
     rows, compact = _journal(n_calls=12)
     rep = report_mod.build_ai_challenger_report(rows, compact)
-    assert rep["status"] == "NOT_ENOUGH_DATA"
-    assert {c["verdict"] for c in rep["primary_comparisons"]} == {"NOT_ENOUGH_DATA"}
-    assert report_mod.build_ai_challenger_report([], [])["status"] == "NO_DATA"
+    assert rep["status"] == "RETIRED_R17"
+    assert rep["EMPTY_BECAUSE"] == "R17_RETIRED" and rep["rows_read"] == 0
+    empty = report_mod.build_ai_challenger_report([], [])
+    assert empty["status"] == "RETIRED_R17" and empty["rows_read"] == 0
 
 
 def test_report_cohorts_by_prompt_id_and_filters_epoch():
@@ -323,30 +315,31 @@ def test_report_cohorts_by_prompt_id_and_filters_epoch():
         if r.get("decision_ts"):
             r["decision_ts"] += 10_000_000
     rep = report_mod.build_ai_challenger_report(a + b, [])
-    assert set(rep["cohorts"]) == {"old", "new"} and rep["current_prompt_id"] == "new"
+    assert rep["status"] == "RETIRED_R17"
+    assert rep["EMPTY_BECAUSE"] == "R17_RETIRED" and rep["rows_read"] == 0
+    assert rep["cohorts"] == {}
     only = report_mod.build_ai_challenger_report(
         [dict(r, epoch_id=r.get("epoch_id", "E1")) for r in a + b], [], epoch_id="E2")
-    assert set(only["cohorts"]) == {"new"}
+    assert only["status"] == "RETIRED_R17" and only["rows_read"] == 0 and only["cohorts"] == {}
 
 
 def test_view_renders_truthfully_and_alarm_surfaces_dead_inputs():
     rows, compact = _journal()
     rep = report_mod.build_ai_challenger_report(rows, compact, dead_input_threshold=5)
+    assert rep["status"] == "RETIRED_R17" and rep["rows_read"] == 0
     page = view_mod.render_ai_challenger_html(
         rep, evidence={"status": "CURRENT_GENERATION", "generated_at_display": "now"},
         nav_links=(("Decision", "/decision"),))
-    assert "SHADOW ONLY, no orders" in page and "LLM_BETTER" in page and "aiChallengerMarkouts" in page
+    # Alarm/page must show retired state — never OK/GREEN analysis verdicts.
+    assert "SHADOW ONLY, no orders" in page
+    assert "RETIRED_R17" in page
+    assert "LLM_BETTER" not in page
+    assert "aiChallengerMarkouts" in page or "AI vs Challengers" in page
     stale = view_mod.render_ai_challenger_html(None, evidence={"status": "STALE", "blockers": ["x"]},
                                                nav_links=())
     assert "NO CURRENT DATA" in stale
     alarm = view_mod.dead_input_alarm(rep)
-    assert alarm["status"] == "DEAD_INPUT" and "raw.stoch_rsi_k_3m" in alarm["detail"]
-    from datetime import datetime, timezone
-    alarms = decision_view.collect_alarms(
-        freshness=None, analyzer_run=None, monitor_state=None, segment_status=None,
-        fly_segment_head=None, segment_parity=None, local_disk=None, local_wal=None,
-        now=datetime.now(timezone.utc), ai_input_health=alarm)
-    assert "AI_INPUT_DEAD_FIELD" in {a["code"] for a in alarms}
+    assert alarm is None  # no live cohorts → no DEAD_INPUT alarm from retired stub
 
 
 # ---------------------------------------------------------------------------
