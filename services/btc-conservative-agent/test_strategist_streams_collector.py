@@ -112,11 +112,34 @@ def test_fresh_second_is_not_flagged_carried(tmp_path):
     assert "carried" not in _rows(tmp_path / ssc.BOOK_FILE)[0]
 
 
-def test_rotation_is_bounded(tmp_path):
-    s = ssc.Sink(str(tmp_path / "x.jsonl"), rotate_bytes=50, keep=2)
+def test_rotation_never_unlinks(tmp_path):
+    """R25/R34: size rotate may rename to .N but must never remove a prior segment.
+
+    Mutation proof: restoring the old ``os.remove`` keep-N loop (or any unlink in
+    ``Sink._rotate``) makes ``len(rotated)`` stall at N while this assert requires
+    file count to grow with every rotate (here 40 writes → many ``x.jsonl.*``).
+    """
+    path = tmp_path / "x.jsonl"
+    s = ssc.Sink(str(path), rotate_bytes=50)
+    fingerprints = {}
     for i in range(40):
         s.write({"i": i, "pad": "x" * 30})
-    assert len(list(tmp_path.glob("x.jsonl.*"))) == 2
+        for p in tmp_path.glob("x.jsonl.*"):
+            if p.name not in fingerprints:
+                fingerprints[p.name] = p.read_bytes()
+    rotated = sorted(tmp_path.glob("x.jsonl.*"), key=lambda p: int(p.name.rsplit(".", 1)[-1]))
+    assert len(rotated) >= 8, f"expected many kept rotations, got {len(rotated)}"
+    for name, blob in fingerprints.items():
+        p = tmp_path / name
+        assert p.exists(), name
+        assert p.read_bytes() == blob, name
+    src = (Path(__file__).parent / "strategist_streams_collector.py").read_text()
+    sink_src = src[src.index("class Sink:"): src.index("\nclass BfxBook")]
+    # call-site guard (docstrings may say "never unlinks")
+    assert "os.remove(" not in sink_src and "os.unlink(" not in sink_src and "Path.unlink" not in sink_src
+    assert "KEEP_ROTATIONS" not in src and "STRATEGIST_STREAM_KEEP_ROTATIONS" not in src
+    assert not hasattr(ssc, "KEEP_ROTATIONS")
+    assert len(list(tmp_path.glob("x.jsonl*"))) == len(rotated) + (1 if path.exists() else 0)
 
 
 def test_entrypoint_and_stream_catalog_wired():

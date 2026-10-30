@@ -1,3 +1,6 @@
+## 31 Oct 2026 AEDT — book10 Sink._rotate keep-6 silent unlink (R25/R34) — env-stop queued; code PR open
+- Root: `strategist_streams_collector.py` `Sink._rotate` (`os.remove` keep-N, default `STRATEGIST_STREAM_KEEP_ROTATIONS=6` at :93/:131/:133 pre-fix) deletes rotated book10/sibling segments with no R21 receipt since #584 (`5a59beca`). Metric: file count only grows; `.7` present after 08:00 AEDT. Env-stop queued: set `STRATEGIST_STREAM_KEEP_ROTATIONS=0` only after deploy 41061326706 + HM revision + Boss announce ack (R30). Code: branch `cursor/book10-rotate-no-unlink-df73` removes unlink/keep knobs; merge/deploy only after RK+HM PASS; bundle with next deploy (not solo urgent). Stay disarmed. Plan: store `docs/plan-book10-rotate-killswitch-20261030.md`.
+
 ## 30 Oct 2026 — R8 pure revert #929+#930 (open, do not merge)
 - See `docs/TRACKER.md`. PR [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) `cursor/revert-929-930-12bb`. Trades since 19:59 AEDT non-countable; R21 dry-run package prepared only (no delete).
 

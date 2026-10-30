@@ -18,8 +18,9 @@ change or cancel an order. Writes three lean append-only JSONL streams in the ru
 * ``venue_bbo_1m.jsonl``     - Lighter + Paradex BTC perp best bid/ask, 60 per-second samples per
   UTC-minute row {"m": minute_ts, "lighter": [[bid, ask] | null x60], "paradex": [...]}.
 
-Each file rotates at ROTATE_BYTES to ``<file>.N`` and only KEEP_ROTATIONS rotated files are kept
-locally (the segment shipper mirrors them), so on-disk use stays bounded.
+Each file rotates at ROTATE_BYTES to ``<file>.N`` (rename only). Rotated segments are never
+unlinked here (R25/R34): deletion is R21-only. Disk growth is monitored; size pressure must
+stop writing + alarm, never prune.
 
 No look-ahead (RK, 24 Oct): second ``s`` is closed ~1.3-1.5 s after it starts. Every 1 s row describes the state as
 of the END of second ``s`` (receive time <= s+1): the book is frozen at the second boundary before later deltas are
@@ -90,7 +91,6 @@ def parse_deriv_status(body) -> Optional[dict]:
     return out if out["mark"] or out["fund_cur"] is not None else None
 LEVELS = 10
 ROTATE_BYTES = int(os.getenv("STRATEGIST_STREAM_ROTATE_BYTES", str(32 * 1024 * 1024)))
-KEEP_ROTATIONS = int(os.getenv("STRATEGIST_STREAM_KEEP_ROTATIONS", "6"))
 SILENT_RECONNECT_SEC = 30.0
 MAX_QUOTE_AGE_SEC = 2.0
 # A quiet book sends no delta; Bitfinex guarantees a heartbeat at least every 15 s on a live connection. While ANY message
@@ -112,14 +112,19 @@ def _f(v) -> Optional[float]:
 
 
 class Sink:
-    """Append-only JSONL with bounded rotation."""
+    """Append-only JSONL with size-based rename rotation (never unlinks)."""
 
-    def __init__(self, path: str, rotate_bytes: int = ROTATE_BYTES, keep: int = KEEP_ROTATIONS) -> None:
-        self.path, self.rotate_bytes, self.keep = path, rotate_bytes, keep
+    def __init__(self, path: str, rotate_bytes: int = ROTATE_BYTES) -> None:
+        self.path, self.rotate_bytes = path, rotate_bytes
         self.rows = self.failures = 0
         self._lock = threading.Lock()
 
     def _rotate(self) -> None:
+        """Rename the active file to ``<path>.N`` when it exceeds rotate_bytes.
+
+        Never unlinks any segment (R25). A keep-count / prune path is forbidden; disk
+        pressure must fail closed via write failure + log (stop writing + alarm), not delete.
+        """
         try:
             if os.path.getsize(self.path) <= self.rotate_bytes:
                 return
@@ -127,12 +132,6 @@ class Sink:
             return
         sufs = sorted(int(p.rsplit(".", 1)[-1]) for p in glob.glob(self.path + ".*") if p.rsplit(".", 1)[-1].isdigit())
         os.rename(self.path, f"{self.path}.{(sufs[-1] if sufs else 0) + 1}")
-        sufs = sorted(int(p.rsplit(".", 1)[-1]) for p in glob.glob(self.path + ".*") if p.rsplit(".", 1)[-1].isdigit())
-        for s in sufs[:-self.keep] if self.keep > 0 else []:
-            try:
-                os.remove(f"{self.path}.{s}")
-            except OSError:
-                pass
 
     def write(self, row: dict) -> None:
         line = json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n"
