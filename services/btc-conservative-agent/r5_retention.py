@@ -128,7 +128,8 @@ def cap_market_segments(root: str | os.PathLike, *, max_bytes: int = SEGMENT_CAP
         "cap_bytes": int(max_bytes),
         "would_have_dropped": would_drop,
         "stop_write": bool(decision.get("stop_write")),
-        "alarm_level": decision.get("alarm_level") or "GREEN",
+        # F3/R4 shared helper: missing/UNKNOWN → receipt RED (never soft-GREEN).
+        "alarm_level": retention_stop_write.receipt_alarm_level(decision.get("alarm_level")),
         "used_ratio": decision.get("used_ratio"),
         "amber_at": retention_stop_write.AMBER_RATIO,
         "red_at": retention_stop_write.RED_RATIO,
@@ -243,7 +244,8 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
         "aged_count": len(aged), "fresh_count": len(fresh), "unacked_count": len(unacked),
         "would_have_cap_dropped": would_cap,
         "stop_write": bool(decision.get("stop_write")),
-        "alarm_level": decision.get("alarm_level") or "GREEN",
+        # F3 locked: UNKNOWN/missing → receipt reports RED (not ambiguous UNKNOWN / soft-GREEN).
+        "alarm_level": retention_stop_write.receipt_alarm_level(decision.get("alarm_level")),
         "used_ratio": decision.get("used_ratio"),
         "amber_at": retention_stop_write.AMBER_RATIO,
         "red_at": retention_stop_write.RED_RATIO,

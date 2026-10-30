@@ -399,7 +399,8 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
         limit_age = STALE_AFTER_SEC.get(name)
         status = "OK" if age is not None and (limit_age is None or age <= limit_age) else (
             "STALE" if age is not None else "NO_TS")
-        if name in strategist_names and size_cap.get("level") == "RED":
+        # H1: size-cap RED or UNKNOWN → strategist stream status RED (alarm/health surface).
+        if name in strategist_names and size_cap.get("level") in ("RED", "UNKNOWN"):
             status = "RED"
         entry = {
             "file": rel, "exists": True, "status": status, "stale_after_sec": limit_age, "first_ts": first.get("first_ts"), "last_ts": last_ts,
@@ -416,6 +417,8 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
                 "level": size_cap.get("level"),
                 "reason": "STREAM_SIZE_CAP",
                 "card": (size_cap.get("status") or {}).get("card"),
+                "sinks": size_cap.get("sinks"),
+                "stop_writing": size_cap.get("stop_writing"),
             }
         out[name] = entry
     return {"schema": "monitor_stream_health_v1", "streams": out, "archive_locations": ARCHIVE_NOTE,

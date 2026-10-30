@@ -69,7 +69,11 @@ def used_ratio(used: float | int | None, cap: float | int | None) -> float | Non
 
 
 def level_for_ratios(*ratios: float | None) -> str:
-    """Worst level across cap ratios and free-disk (AMBER 0.70 / RED 0.85)."""
+    """Worst level across cap ratios and free-disk (AMBER 0.70 / RED 0.85).
+
+    UNKNOWN ranks below AMBER for fold (GREEN→UNKNOWN only). F1: UNKNOWN alone
+    must not stop-write — see ``should_stop_write`` / ``is_stopped``.
+    """
     level = "GREEN"
     for ratio in ratios:
         candidate = disk_alert.level_for_ratio(ratio)
@@ -82,9 +86,23 @@ def level_for_ratios(*ratios: float | None) -> str:
     return level
 
 
+def receipt_alarm_level(level: Any | None) -> str:
+    """F3/C3: lifecycle/market receipt reports RED for UNKNOWN/missing (never soft-GREEN).
+
+    Actuation stays separate — callers must not use this for stop-write / latch (F1).
+    """
+    text = str(level).strip() if level is not None else ""
+    if not text or text.upper() == "UNKNOWN":
+        return "RED"
+    return text
+
+
 def should_stop_write(*, used: float | int | None = None, cap: float | int | None = None,
                       volume_ratio: float | None = None, hard_over: bool = False) -> bool:
-    """Stop at hard over-cap, cap RED (>=85%), or free-disk RED (>=85%)."""
+    """Stop at hard over-cap, cap RED (>=85%), or free-disk RED (>=85%).
+
+    F1: measured RED ratio only — UNKNOWN alone must NOT stop-write.
+    """
     if hard_over:
         return True
     ratio = used_ratio(used, cap)

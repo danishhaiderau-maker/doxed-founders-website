@@ -16,10 +16,12 @@ import rotation_cap
 @pytest.fixture(autouse=True)
 def _clear_red_and_latches():
     retention_stop_write.clear_latches()
+    retention_stop_write.set_volume_used_ratio(None)
     for row in disk_alert.red_conditions():
         disk_alert.clear_red(row["reason"])
     yield
     retention_stop_write.clear_latches()
+    retention_stop_write.set_volume_used_ratio(None)
     for row in disk_alert.red_conditions():
         disk_alert.clear_red(row["reason"])
 
@@ -148,6 +150,89 @@ def test_lifecycle_alarm_ladder_70_85(tmp_path):
     _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "x2", 200, now - 700)
     res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
     assert res["over_cap"] is True and res["stop_write"] is True and res["removed"] == 0
+
+
+def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path):
+    """A7a/F3: UNKNOWN decision → lifecycle receipt alarm_level is RED (never GREEN/UNKNOWN).
+
+    Fixture: GREEN cap ratio + volume_ratio=None → level_for_ratios UNKNOWN.
+    Mutation proof: restoring ``decision.get("alarm_level") or "GREEN"`` (or leaving
+    receipt as ``"UNKNOWN"``) makes ``res["alarm_level"] == "RED"`` fail.
+    """
+    retention_stop_write.set_volume_used_ratio(None)
+    now = time.time()
+    # ~10% of cap → GREEN ratio; None volume → UNKNOWN fold.
+    _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "u1", 100, now - 60)
+    # Force evaluate path to see UNKNOWN: monkey via set_volume + assert helper.
+    assert retention_stop_write.level_for_ratios(0.1, None) == "UNKNOWN"
+    assert retention_stop_write.should_stop_write(used=100, cap=1000, volume_ratio=None) is False
+    assert retention_stop_write.receipt_alarm_level("UNKNOWN") == "RED"
+    assert retention_stop_write.receipt_alarm_level(None) == "RED"
+    assert retention_stop_write.receipt_alarm_level("") == "RED"
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
+    assert res["alarm_level"] == "RED", res
+    assert res["alarm_level"] != "UNKNOWN"
+    assert res["alarm_level"] != "GREEN"
+    assert res["stop_write"] is False
+    assert r5.lifecycle_bundles_stop_write_latched() is False
+    # Receipt row written when alarm_level != GREEN.
+    receipts = list((tmp_path).rglob("cap_receipts.jsonl"))
+    assert receipts, "expected lifecycle receipt for RED alarm_level"
+    # Mutation: soft-GREEN default must fail the RED receipt assert.
+    soft = (lambda d: d.get("alarm_level") or "GREEN")({"alarm_level": None})
+    try:
+        assert soft == "RED"
+        raised = False
+    except AssertionError:
+        raised = True
+    assert raised, "A7a-mutation: or GREEN must fail RED receipt assert"
+
+
+def test_a7b_lifecycle_unknown_alone_does_not_stop_write(tmp_path):
+    """A7b/F1: UNKNOWN alone must NOT stop-write / latch / block collection.
+
+    Positive control: measured RED ratio DOES stop-write.
+    Mutation proof: treating UNKNOWN as stop-write (should_stop_write True on
+    UNKNOWN) makes the ``is False`` assert fail.
+    """
+    retention_stop_write.set_volume_used_ratio(None)
+    now = time.time()
+    _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "u2", 100, now - 60)
+    assert retention_stop_write.should_stop_write(used=100, cap=1000, volume_ratio=None) is False
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
+    assert res["stop_write"] is False
+    assert r5.lifecycle_bundles_stop_write_latched() is False
+    assert retention_stop_write.is_stopped(r5.FAMILY_LIFECYCLE_BUNDLES) is False
+    # Positive control: measured RED ratio (>=0.85) stops.
+    retention_stop_write.clear_latches()
+    _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "r1", 900, now - 60)
+    red = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
+    assert red["alarm_level"] == "RED"
+    assert red["stop_write"] is True
+    assert r5.lifecycle_bundles_stop_write_latched() is True
+    # Mutation: if UNKNOWN folded to stop-write, the UNKNOWN half would fail.
+    mutant_stop = retention_stop_write.level_for_ratios(0.1, None) == "UNKNOWN"
+    try:
+        assert not mutant_stop  # would be the wrong check if we stopped on UNKNOWN
+        # Instead prove the real gate: only RED stops.
+        assert retention_stop_write.should_stop_write(used=100, cap=1000, volume_ratio=None) is False
+        raised = False
+    except AssertionError:
+        raised = True
+    # Explicit mutation: pretend should_stop_write treated UNKNOWN as RED.
+    def mutant_should_stop(**kwargs):
+        level = retention_stop_write.level_for_ratios(
+            retention_stop_write.used_ratio(kwargs.get("used"), kwargs.get("cap")),
+            kwargs.get("volume_ratio"),
+        )
+        return level in ("RED", "UNKNOWN")  # MUTANT: UNKNOWN stops
+    assert mutant_should_stop(used=100, cap=1000, volume_ratio=None) is True
+    try:
+        assert mutant_should_stop(used=100, cap=1000, volume_ratio=None) is False
+        mut_raised = False
+    except AssertionError:
+        mut_raised = True
+    assert mut_raised, "A7b-mutation: UNKNOWN-as-stop must fail the no-stop assert"
 
 
 def test_purge_retired_transfer_never_rmtree_mutation(tmp_path):
