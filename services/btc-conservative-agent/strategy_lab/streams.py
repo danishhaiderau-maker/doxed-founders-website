@@ -140,11 +140,15 @@ def stream_inventory(data_dir: str, now: Optional[float] = None, stale_after_sec
             status = "STALE" if meta.get("continuous") else "IDLE"
         else:
             status = "OK"
-        rows.append({
+        row = {
             "stream": name, "status": status, "continuous": bool(meta.get("continuous")),
             "analyzer_usage": meta["usage"], "consumers": "; ".join(meta.get("consumers") or []),
             "note": meta.get("note", ""), "files": len(gens),
             "rotations": max(len(gens) - (1 if os.path.isfile(path) else 0), 0),
             "bytes": int(sum(sizes)), "active_age_sec": round(age, 1) if age is not None else None,
-        })
+        }
+        if status == "RETIRED":
+            row["EMPTY_BECAUSE"] = "R17_RETIRED"
+            row["rows_read"] = 0
+        rows.append(row)
     return rows

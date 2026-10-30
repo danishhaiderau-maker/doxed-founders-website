@@ -405,33 +405,10 @@ def _counts(values: Iterable) -> dict:
 
 def fill_markouts(files: list, cache: Cache, lanes, epoch_start: float, frozen=frozenset(),
                   extra_rows: Iterable = ()) -> tuple:
-    def keep(r):
-        if r.get("schema") != "fill_markout_v1":
-            return None
-        return {"ts": _num(r.get("fill_ts")), "trade_id": r.get("trade_id"),
-                "lane": str(r.get("research_lane") or "").upper(), "liq": r.get("liquidity"),
-                "mid": _flat_markouts(r, "markout_mid_bps"), "touch": _flat_markouts(r, "markout_exit_touch_bps")}
-
-    rows = _markout_rows(files, cache, "fill_mk", epoch_start, keep, frozen, extra_rows,
-                         key=lambda p: (p["trade_id"], p["ts"], p["liq"]))
-    current = {str(l).upper() for l in lanes}
-    out = []
-    groups: dict = {}
-    for r in rows:
-        if current and r["lane"] not in current:
-            continue
-        for liq in ("ALL", str(r["liq"] or "UNKNOWN")):
-            groups.setdefault((r["lane"], liq), []).append(r)
-    for (lane, liq), sub in sorted(groups.items()):
-        for h in MARKOUT_HORIZONS:
-            c = _ci([s["mid"].get(h) if s["mid"].get(h) is not None else np.nan for s in sub], [s["ts"] for s in sub])
-            ct = _ci([s["touch"].get(h) if s["touch"].get(h) is not None else np.nan for s in sub], [s["ts"] for s in sub])
-            out.append({"research_lane": lane, "liquidity": liq, "horizon": h, "n": c["n"],
-                        "markout_mid_bps": _r(c["mean"], 4), "ci_lo_bps": _r(c["lo"], 4), "ci_hi_bps": _r(c["hi"], 4),
-                        "p_cluster": _r(c["p"]), "markout_exit_touch_bps": _r(ct["mean"], 4)})
-    meta = {"rows": len(rows), "trades": len({r["trade_id"] for r in rows}),
-            "last_fill_at": _iso(max((r["ts"] or 0) for r in rows)) if rows else None}
-    return pd.DataFrame(out), meta
+    # R17/HM: fill_markouts is ticker/L1-priced → EMPTY_BECAUSE, never analyse rows.
+    _ = (files, cache, lanes, epoch_start, frozen, extra_rows)
+    return pd.DataFrame(), {"rows": 0, "rows_read": 0, "EMPTY_BECAUSE": "R17_RETIRED",
+                            "last_fill_at": None}
 
 
 # ------------------------------------------------------------------ research events

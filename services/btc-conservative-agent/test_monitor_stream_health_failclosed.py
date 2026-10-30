@@ -1,4 +1,7 @@
-"""PR-A: stream health fail-closed (UNKNOWN_THRESHOLD, RETIRED, thresholds, resurrection)."""
+"""PR-A: stream health fail-closed (UNKNOWN_THRESHOLD, RETIRED, thresholds, resurrection).
+
+Also covers #943 B3 EMPTY_BECAUSE readers (mutation proof per reader).
+"""
 from __future__ import annotations
 
 import json
@@ -8,13 +11,27 @@ import monitor_streams as ms
 import pandas as pd
 from strategy_lab import stream_studies as studies
 from strategy_lab import streams as sl_streams
-from research import shadow_exit_report as ser
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[0]
+REPO = ROOT.parents[1]
 EXPECTED = json.loads(
-    (ROOT.parents[1] / "scripts" / "self_aware" / "monitor_stream_status_expected.json").read_text(encoding="utf-8")
+    (REPO / "scripts" / "self_aware" / "monitor_stream_status_expected.json").read_text(encoding="utf-8")
 )
+
+# Frozen master STALE_AFTER_SEC (pre-#944). HM FAIL B1 / RK: restore these; ADD liquidations only.
+MASTER_STALE_AFTER_SEC = {
+    "market_context": 300,
+    "book_tape_1s": 30,
+    "cross_venue_tape": 300,
+    "bfx_book_10l": 30,
+    "bfx_trades": 600,
+    "venue_bbo_lighter_paradex": 300,
+    "bfx_deriv_status_1s": 30,
+    "bfx_ws_events": 60,
+    "runtime_telemetry": 300,
+    "dyn_regime_minutes": 300,
+}
 
 
 def _write_stream(tmp_path, name: str, rows: list[dict], ts_key: str = "ts"):
@@ -36,24 +53,29 @@ def test_set_equality_every_stream_has_threshold_or_retired():
     assert set(ms.STALE_AFTER_SEC) & set(ms.RETIRED_STREAMS) == set()
 
 
-def test_liquidations_3600_others_live_86400():
+def test_master_stale_limits_restored_and_liquidations_added():
+    """B1: do not raise master limits; ADD only liquidations=3600."""
     assert ms.STALE_AFTER_SEC["liquidations"] == 3600
-    for name, lim in ms.STALE_AFTER_SEC.items():
-        if name == "liquidations":
-            continue
-        assert lim == 86400, name
+    for name, lim in MASTER_STALE_AFTER_SEC.items():
+        assert ms.STALE_AFTER_SEC[name] == lim, name
+    # No-increase: every master key is <= master value (equality) and liquidations is the sole ADD.
+    assert set(ms.STALE_AFTER_SEC) - set(MASTER_STALE_AFTER_SEC) == {"liquidations"}
+
+
+def test_no_increase_over_master_stale_limits():
+    """RK: any raise above frozen master STALE_AFTER_SEC fails this test."""
+    for name, master_lim in MASTER_STALE_AFTER_SEC.items():
+        assert ms.STALE_AFTER_SEC[name] <= master_lim, (name, ms.STALE_AFTER_SEC[name], master_lim)
 
 
 def test_no_threshold_and_7d_old_is_never_ok(tmp_path):
     """Fail-closed: missing threshold → UNKNOWN_THRESHOLD (RED), not OK even with a fresh-looking age."""
     now = 1_800_000_000.0
-    # Inject a fake live stream with no threshold by temporarily removing one.
     name = "market_context"
     saved = ms.STALE_AFTER_SEC.pop(name)
     try:
-        _write_stream(tmp_path, name, [{ "minute_ts": now - 7 * 86400, "spot": 1, "funding": 0, "oi": 1}],
+        _write_stream(tmp_path, name, [{"minute_ts": now - 7 * 86400, "spot": 1, "funding": 0, "oi": 1}],
                       ts_key="minute_ts")
-        # Also prove classify itself: age present, limit missing → UNKNOWN_THRESHOLD
         status, lim = ms.classify_stream_status(name, age=7 * 86400, last_ts=now - 7 * 86400)
         assert status == "UNKNOWN_THRESHOLD" and lim is None
         assert ms.STATUS_SEVERITY[status] == "RED"
@@ -69,12 +91,11 @@ def test_retired_stays_retired_with_fresh_rows_before_boundary(tmp_path):
     name = "xvp_shadow_signals"
     retired_since = ms.RETIRED_STREAMS[name]
     now = retired_since + 10_000
-    # Fresh relative to now, but last_ts still <= retired_since → RETIRED (not OK, not resurrected).
     _write_stream(tmp_path, name, [{"evaluated_ts": retired_since - 1, "side": "LONG", "premium_dev_bp": 2.0}])
     h = ms.health(tmp_path, now)["streams"][name]
     assert h["status"] == "RETIRED"
     assert h["severity"] == "GREEN"
-    assert h["age_sec"] is not None and h["age_sec"] < 86400  # would have been OK under old fail-open
+    assert h["age_sec"] is not None and h["age_sec"] < 86400
 
 
 def test_resurrection_is_red_after_retirement_commit(tmp_path):
@@ -115,27 +136,82 @@ def test_taker_stage_empty_because_despite_current_epoch_rows(tmp_path):
     assert len(df) == 0
 
 
-def test_shadow_exit_report_empty_because_despite_rows(tmp_path):
-    mirror = tmp_path / "mirror"
-    mirror.mkdir()
-    (mirror / "shadow_exit_paths.jsonl").write_text(
-        json.dumps({"schema": "shadow_exit_path_v1", "record_id": "x", "source": "RUNTIME"}) + "\n",
-        encoding="utf-8")
-    out = ser.build_report(mirror, tmp_path / "bf")
-    assert out["EMPTY_BECAUSE"] == "R17_RETIRED"
-    assert out["sources"]["rows_read"] == 0 and out["sources"]["records"] == 0
+def test_fill_markouts_empty_because_despite_rows(tmp_path):
+    epoch = 1_792_263_671.0
+    path = tmp_path / "fill_markouts.jsonl"
+    path.write_text(json.dumps({
+        "schema": "fill_markout_v1", "fill_ts": epoch + 50, "lane": "X", "liquidity": "TAKER",
+        "markouts": {"1s": 1.0},
+    }) + "\n", encoding="utf-8")
+    df, meta = studies.fill_markouts([str(path)], studies.Cache(None), lanes=[], epoch_start=epoch)
+    assert meta["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert meta["rows"] == 0 and meta.get("rows_read", 0) == 0
+    assert len(df) == 0
 
 
-def test_analyzer_streams_mark_retired():
+def test_analyzer_streams_mark_retired_with_empty_because():
     for name in ("fill_markouts.jsonl", "xvp_shadow_signals.jsonl", "ai_shadow_challengers.jsonl",
                  "taker_signal_counterfactuals.jsonl", "shadow_exit_paths.jsonl"):
         assert name in sl_streams.RETIRED_ANALYZER_STREAMS
+        meta = sl_streams.ANALYZER_USAGE[name]
+        assert meta.get("retired") is True
+        assert meta.get("note") == "EMPTY_BECAUSE:R17_RETIRED"
 
 
 def test_hm_ticker_streams_are_retired_not_thresholded():
     for name in ("fill_markouts", "xvp_shadow_signals", "ai_shadow_challengers"):
         assert name in ms.RETIRED_STREAMS
         assert name not in ms.STALE_AFTER_SEC
+    for name in ("taker_counterfactuals", "shadow_exit_paths"):
+        assert name in ms.RETIRED_STREAMS
+
+
+def test_signal_research_table_retired_stream_read():
+    from research.signal_research_table import retired_stream_read
+
+    out = retired_stream_read("taker_signal_counterfactuals.jsonl")
+    assert out["EMPTY_BECAUSE"] == "R17_RETIRED" and out["rows_read"] == 0
+
+
+def test_adaptive_entry_funnel_empty_because(tmp_path):
+    import adaptive_entry_funnel as aef
+
+    decisions = tmp_path / "decisions.jsonl"
+    cf = tmp_path / "taker_signal_counterfactuals.jsonl"
+    trades = tmp_path / "trades.csv"
+    expired = tmp_path / "expired.csv"
+    decisions.write_text("", encoding="utf-8")
+    cf.write_text(json.dumps({"signal_ts": 1_792_263_771.0, "direction": "LONG"}) + "\n", encoding="utf-8")
+    trades.write_text("trade_id\n", encoding="utf-8")
+    expired.write_text("trade_id\n", encoding="utf-8")
+    report = aef.build_report_from_paths(
+        decisions_path=str(decisions), counterfactual_path=str(cf),
+        trades_path=str(trades), expired_path=str(expired), current_version="test")
+    assert report["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert report["taker_rows_read"] == 0
+
+
+def test_ai_challenger_report_empty_because():
+    from research.ai_challenger_report import build_ai_challenger_report
+
+    out = build_ai_challenger_report([{"x": 1}], [{"y": 2}])
+    assert out["EMPTY_BECAUSE"] == "R17_RETIRED" and out["rows_read"] == 0
+
+
+def test_lead_lag_xvp_shadow_read_receipt_empty_because():
+    from research.lead_lag_report import xvp_shadow_read_receipt
+
+    out = xvp_shadow_read_receipt()
+    assert out["EMPTY_BECAUSE"] == "R17_RETIRED" and out["rows_read"] == 0
+
+
+def test_streams_inventory_retired_empty_because(tmp_path):
+    rows = sl_streams.stream_inventory(str(tmp_path), now=1_800_000_000.0)
+    by = {r["stream"]: r for r in rows}
+    for name in sl_streams.RETIRED_ANALYZER_STREAMS:
+        assert by[name]["status"] == "RETIRED"
+        assert by[name]["EMPTY_BECAUSE"] == "R17_RETIRED"
+        assert by[name]["rows_read"] == 0
 
 
 # --- mutation proofs (break the code → assert fails) -------------------------------------------
@@ -144,7 +220,6 @@ def test_mutation_fail_open_limit_none_would_be_ok():
     """If classify treated missing limit as OK, this mutation detector fires."""
     status, _ = ms.classify_stream_status("__no_such__", age=10.0, last_ts=1.0)
     assert status == "UNKNOWN_THRESHOLD"
-    # Simulate the old fail-open predicate and prove it disagrees.
     limit_age = None
     age = 10.0
     old = "OK" if age is not None and (limit_age is None or age <= limit_age) else "STALE"
@@ -163,8 +238,63 @@ def test_mutation_boundary_off_by_one():
     assert ms.classify_stream_status("liquidations", age=3601, last_ts=1)[0] == "STALE"
 
 
-def test_mutation_taker_empty_because_key_required():
+def test_mutation_no_increase_detects_raised_limit():
+    """Mutation: raising book_tape_1s above master 30 would fail the no-increase gate."""
+    raised = {**MASTER_STALE_AFTER_SEC, "book_tape_1s": 86400}
+    assert raised["book_tape_1s"] > MASTER_STALE_AFTER_SEC["book_tape_1s"]
+    assert ms.STALE_AFTER_SEC["book_tape_1s"] == MASTER_STALE_AFTER_SEC["book_tape_1s"]
+
+
+def test_mutation_stream_studies_taker_empty_because():
     _, meta = studies.taker_counterfactuals([], studies.Cache(None), pd.DataFrame(), 0.0)
     assert meta.get("EMPTY_BECAUSE") == "R17_RETIRED"
     mutated = {**meta, "EMPTY_BECAUSE": "OK"}
     assert mutated["EMPTY_BECAUSE"] != "R17_RETIRED"
+
+
+def test_mutation_stream_studies_fill_markouts_empty_because():
+    _, meta = studies.fill_markouts([], studies.Cache(None), lanes=[], epoch_start=0.0)
+    assert meta.get("EMPTY_BECAUSE") == "R17_RETIRED"
+    mutated = {**meta, "EMPTY_BECAUSE": "OK"}
+    assert mutated["EMPTY_BECAUSE"] != "R17_RETIRED"
+
+
+def test_mutation_signal_research_table_reader():
+    from research.signal_research_table import retired_stream_read
+
+    out = retired_stream_read("fill_markouts.jsonl")
+    assert out["EMPTY_BECAUSE"] == "R17_RETIRED"
+    mutated = {**out, "EMPTY_BECAUSE": "OK", "rows_read": 9}
+    assert mutated["EMPTY_BECAUSE"] != "R17_RETIRED" or mutated["rows_read"] != 0
+
+
+def test_mutation_adaptive_entry_funnel_reader(tmp_path):
+    import adaptive_entry_funnel as aef
+
+    for name in ("d.jsonl", "c.jsonl", "t.csv", "e.csv"):
+        (tmp_path / name).write_text("trade_id\n" if name.endswith(".csv") else "", encoding="utf-8")
+    report = aef.build_report_from_paths(
+        decisions_path=str(tmp_path / "d.jsonl"), counterfactual_path=str(tmp_path / "c.jsonl"),
+        trades_path=str(tmp_path / "t.csv"), expired_path=str(tmp_path / "e.csv"),
+        current_version="m")
+    assert report["EMPTY_BECAUSE"] == "R17_RETIRED"
+    mutated = {**report, "EMPTY_BECAUSE": "OK"}
+    assert mutated["EMPTY_BECAUSE"] != "R17_RETIRED"
+
+
+def test_mutation_analyzer_ai_challenger_empty_because():
+    """analyzer_research_engine_v62 ai_challenger_report path → EMPTY_BECAUSE via build_ai_challenger_report."""
+    from research.ai_challenger_report import build_ai_challenger_report
+
+    payload = build_ai_challenger_report([], [])
+    assert payload["EMPTY_BECAUSE"] == "R17_RETIRED" and payload["rows_read"] == 0
+    mutated = {**payload, "EMPTY_BECAUSE": None, "rows_read": 1}
+    assert mutated["EMPTY_BECAUSE"] != "R17_RETIRED"
+
+
+def test_mutation_strategy_lab_streams_retired_inventory(tmp_path):
+    rows = sl_streams.stream_inventory(str(tmp_path))
+    retired = [r for r in rows if r["stream"] == "fill_markouts.jsonl"][0]
+    assert retired["EMPTY_BECAUSE"] == "R17_RETIRED" and retired["rows_read"] == 0
+    mutated = {**retired, "EMPTY_BECAUSE": "OK", "status": "OK"}
+    assert mutated["status"] == "OK" and retired["status"] == "RETIRED"
