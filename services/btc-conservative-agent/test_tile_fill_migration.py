@@ -199,6 +199,31 @@ class _Clock:
         self.now += s
 
 
+class _RaceClock:
+    """Scripted wall clock: each time() pops the next sample (last value repeats).
+
+    sleep() mirrors CPython and raises ValueError on a negative duration.
+    """
+
+    def __init__(self, samples):
+        self._samples = [float(x) for x in samples]
+        self._i = 0
+        self.slept = []
+
+    def time(self):
+        if self._i < len(self._samples):
+            t = self._samples[self._i]
+            self._i += 1
+            return t
+        return self._samples[-1]
+
+    def sleep(self, s):
+        s = float(s)
+        if s < 0:
+            raise ValueError(f"sleep length must be non-negative, not {s}")
+        self.slept.append(s)
+
+
 def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None, **extra):
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
     return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_r0_stop_fill_reason", "_paper_exit_missing_book_seconds",
@@ -302,6 +327,40 @@ def test_realism_v2_forced_close_is_bot_sent_at_model_time(monkeypatch):
         assert marks["exit_status"] == "PAPER_FILL" and marks["exit_pricing_basis"] == "MODEL_TIME"
         assert marks["exit_order_class"] == "BOT_SENT" and marks["exit_model_fill_ts"] == 5001.5
         assert "exit_status" not in pos and "fresh_data_excluded" not in pos  # nothing written before the claim
+
+
+def test_paper_lane_exit_wait_clamps_negative_sleep_when_clock_crosses_model_fill(monkeypatch):
+    """Deploy 41050904036 root cause: while-check then sleep-arg are two clock samples.
+
+    If the first sample is just before model_fill and the next is after, the old
+    ``min(model_fill - now, 3)`` passed a negative duration into time.sleep → ValueError
+    → unhandled Flask 500 on /api/positions/close. Clamp must keep sleep >= 0 and still
+    complete the BOT_SENT exit.
+    """
+    _use_book(monkeypatch)
+    # Reads: now; while(<); sleep(arg past fill); while(>= exit); then pricing stamps.
+    clk = _RaceClock([5000.0, 5001.499, 5001.501, 5001.502] + [5001.502] * 24)
+    ns = _lane_ns(clk)
+    pos = {
+        "research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90",
+        "dir": "LONG",
+        "qty": 0.5,
+        "exit_trigger_ts": 5000.0,
+        "exit_sent_ts": 5000.01,
+    }
+    out, marks = ns["_paper_lane_exit"](pos, "ADMIN_MANUAL_CLOSE")
+    assert out is not None
+    px, sim = out
+    assert px == 99.0 and marks["exit_status"] == "PAPER_FILL"
+    assert clk.slept and clk.slept[0] == 0.0
+    assert all(s >= 0.0 for s in clk.slept)
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    wait = src[src.index("model_fill = t0 + float(delay_s)"):src.index("if cls == _om.BOT_SENT and not stop_rule")]
+    assert "time.sleep(max(0.0, min(model_fill - time.time(), 3.0)))" in wait
+    # Mutation proof: the unclamped expression on this race is negative (would ValueError).
+    model_fill = 5000.0 + 1.5
+    assert min(model_fill - 5001.501, 3.0) < 0.0
+    assert max(0.0, min(model_fill - 5001.501, 3.0)) == 0.0
 
 
 def test_realism_v2_no_book_exit_is_unpriced_never_a_ticker_fallback(monkeypatch):

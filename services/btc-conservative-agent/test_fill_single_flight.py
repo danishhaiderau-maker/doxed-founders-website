@@ -118,7 +118,7 @@ def test_touch_pass_skips_orders_already_in_fill_handoff():
 
 
 def test_maintenance_treats_already_closed_position_as_no_mutation():
-    start = WORKFLOW.index('reconciled = mutate_json("/api/positions/close", {"trade_id": trade_id})')
+    start = WORKFLOW.index('{"trade_id": trade_id, "reason": "DEPLOY_FORCE_FLAT"}')
     loop = WORKFLOW[start:WORKFLOW.index("maintenance boundary did not become flat", start)]
     absent = loop.index('print(f"Maintenance position already absent trade_id={trade_id}", flush=True)')
     assert loop.index("if exc.code != 404:") < absent
@@ -126,6 +126,8 @@ def test_maintenance_treats_already_closed_position_as_no_mutation():
     assert loop.index('if reconciled.get("status") != "closed":') < loop.index(
         'raise SystemExit("maintenance reconciliation generation is missing")'
     )
+    assert "Maintenance closing position trade_id=" in WORKFLOW
+    assert "Maintenance HTTPError path=" in WORKFLOW
     assert "/api/reconcile/phantom-cancel" not in WORKFLOW
 
 
