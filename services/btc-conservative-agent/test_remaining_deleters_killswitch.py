@@ -1,7 +1,7 @@
 """PR2 remaining-deleters kill-switch: never-delete + 70/85 + trading-safety.
 
 Plan sha 264913c4cd81. Rules RULES-R0-R45 sha 10f0b8daa510.
-Status PARTIAL until #949 merges (Sink keep-N is out of this PR).
+#949 Sink never-unlink is merged; W1 requires Sink delete residual count == 0.
 """
 from __future__ import annotations
 
@@ -82,7 +82,6 @@ def _slice_fn(src: str, start: str, end: str) -> str:
 def test_w1_delete_api_residuals_are_justified():
     """W1: grep unlink/os.remove/rmtree/remove( over the four scoped files."""
     justified = {
-        "strategist_streams_collector.py": "PARTIAL #949 Sink keep-N (G4); PR2 must not edit Sink",
         "r5_retention.py": "PR4 scope: cap_lifecycle_bundles / purge_retired_transfer_bundles / wipe_stale_locks / seal_drain_discard_v22",
     }
     bot_src = (HERE / "bot.py").read_text("utf-8")
@@ -115,7 +114,14 @@ def test_w1_delete_api_residuals_are_justified():
         if name in justified or name == "bot.py":
             continue
         pytest.fail(f"unjustified delete API {api} in {name}:{line_no}")
-    assert any(name == "strategist_streams_collector.py" for name, _, _ in residuals)
+    sink_residuals = [r for r in residuals if r[0] == "strategist_streams_collector.py"]
+    assert len(sink_residuals) == 0, sink_residuals
+    # Mutation: re-adding Sink os.remove(...) must make W1 fail (count != 0 / unjustified).
+    sink_src = (HERE / "strategist_streams_collector.py").read_text("utf-8")
+    mutated_sink = sink_src + "\nos.remove(_path)\n"
+    mutated_hits = list(DELETE_CALL_RE.finditer(mutated_sink))
+    assert len(mutated_hits) >= 1
+    assert any("os.remove" in m.group("api") for m in mutated_hits)
 
 
 # ---------------------------------------------------------------------------
