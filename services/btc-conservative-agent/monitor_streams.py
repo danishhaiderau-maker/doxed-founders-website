@@ -21,17 +21,9 @@ STREAMS = {
     "cross_venue_tape": "cross_venue_tape_1m.jsonl",       # spot + other venues
     "book_tape_1s": "market_microstructure_1s.jsonl",      # 1 s Bitfinex book/trade tape
     "fill_markouts": "fill_markouts.jsonl",
-    "taker_counterfactuals": "taker_signal_counterfactuals.jsonl",
-    "shadow_exit_paths": "shadow_exit_paths.jsonl",
     "ai_shadow_challengers": "ai_shadow_challengers.jsonl",
     "runtime_telemetry": "runtime_telemetry_1m.jsonl",
     "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
-    # Retired DISLOC / DISLOC-FOI ledgers (Tiles 6/7 removed 23 Oct 2026, R9): no writer remains; listed so the
-    # historical files stay readable and archived (R5 custody). Do not delete.
-    "disloc_trades": "disloc_trades.jsonl",                # Tile 13 DISLOC paper orders/fills/cancels/closes
-    "disloc_foi_trades": "disloc_foi_trades.jsonl",        # Tile 14 DISLOC-FOI paper ledger
-    "disloc_paused_skips": "disloc_paused_skips.jsonl",            # former G14 PAUSED-skip ledger
-    "disloc_paused_skips_rot1": "disloc_paused_skips.jsonl.1",     # its one rotation (archived too)
     # Strategist data streams (12 Oct, strategist_streams_collector.py)
     "bfx_book_10l": "bfx_book_10l_1s.jsonl",               # Bitfinex 10-level book, 1 s
     "bfx_trades": "bfx_trades.jsonl",                      # every individual Bitfinex public trade

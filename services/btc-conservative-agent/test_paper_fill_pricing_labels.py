@@ -164,13 +164,6 @@ def test_no_book_exit_marks_and_unpriced_leg_are_non_fills():
     assert '"fresh_epoch_id": _fresh_epoch_dv()' in BOT and '"all_legs_book10l": _all_legs_book10l(pos)' in BOT
 
 
-def test_shadow_exits_are_tagged_not_paper_fills():
-    import shadow_exit_paths
-    assert shadow_exit_paths.SHADOW_PRICING_MODEL.endswith("NOT_A_PAPER_FILL")
-    src = (ROOT / "shadow_exit_paths.py").read_text(encoding="utf-8")
-    assert src.count('"shadow_pricing_model": SHADOW_PRICING_MODEL') + src.count("shadow_pricing_model\": SHADOW_PRICING_MODEL") >= 2
-
-
 def test_analyzer_uses_the_same_strict_rule_as_the_monitors():
     src = (ROOT / "analysis_hygiene.py").read_text(encoding="utf-8")
     assert "_pf.row_fresh_strict(rec)" in src

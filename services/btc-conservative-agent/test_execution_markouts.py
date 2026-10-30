@@ -47,8 +47,6 @@ def test_book_is_bounded():
     assert book.dropped == 1
 
 
-def test_counterfactual_contract_is_collection_only_at_the_live_test_size():
+def test_fill_markout_horizons_contract():
     assert em.MARKOUT_HORIZONS_SEC == (1, 10, 60, 300)
-    assert em.TAKER_LATENCIES_SEC == (0.25, 1.0, 2.0)
-    assert em.COUNTERFACTUAL_MARGIN_USD == 0.25
-    assert em.COUNTERFACTUAL_LEVERAGE == 100.0
+    assert em.TAKER_FILE == "taker_signal_counterfactuals.jsonl"  # wipe basename only

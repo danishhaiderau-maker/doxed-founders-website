@@ -1,3 +1,6 @@
+## 30 Oct 2026 — R22 PR-B dead writers (open, FREEZE)
+- See `docs/TRACKER.md`. Branch `cursor/r22-dead-writers-018b head `052dbb2d60c6b6361451b2a8f689725bad61f74c`` head `76ead47b8746813126baf8f6b5d30ceaebc3b27e`. Grep proof 0; R21 dry-run only at store `internal/r21-pr-b-dead-writers/` (no data delete). No merge/deploy/arm.
+
 ## 30 Oct 2026 — R8 pure revert #929+#930 (open, do not merge)
 - See `docs/TRACKER.md`. PR [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) `cursor/revert-929-930-12bb`. Trades since 19:59 AEDT non-countable; R21 dry-run package prepared only (no delete).
 
