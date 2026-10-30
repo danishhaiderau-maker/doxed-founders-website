@@ -251,3 +251,16 @@ def test_run_37923569761_pending_cancel_windows_are_per_order():
     assert ns["extended_wait_open"]() is False
     ns["pending_cancel_deadlines"]["gb2"] = now + 600  # a later order gets its own window
     assert ns["extended_wait_open"]() is True
+
+
+def test_maintenance_close_logs_trade_id_status_body_and_sends_deploy_force_flat():
+    """Deploy 41050904036: close path must name trade_id and send DEPLOY_FORCE_FLAT."""
+    step = _step_python("Enter durable authenticated paper maintenance boundary")
+    helper = step[step.index("def request_json("):step.index("def pending_cancel_conflict(")]
+    assert "Maintenance HTTPError path=" in helper
+    assert "status={exc.code}" in helper and "body={body}" in helper
+    close = step[step.index("for trade_id in positions:"):]
+    assert 'print(f"Maintenance closing position trade_id={trade_id}"' in close
+    assert '{"trade_id": trade_id, "reason": "DEPLOY_FORCE_FLAT"}' in close
+    # Mutation proof: bare trade_id-only payload must not remain as the close call.
+    assert 'mutate_json("/api/positions/close", {"trade_id": trade_id})' not in step

@@ -1,3 +1,13 @@
+## 30 Oct 2026 — positions/close HTTP 500 (deploy 41050904036) — FREEZE pending HM/RK
+
+- **Branch:** `cursor/positions-close-500-harden-e96c`
+- **Root cause (HM Fly bot.log):** `_paper_lane_exit` `time.sleep(min(model_fill - time.time(), 3.0))` → ValueError negative sleep (two clock samples). `rnd-5e22404b5d77` raised before save (still open).
+- **Fix:** clamp sleep `max(0.0, min(...))`; workflow logs trade_id/status/body + `DEPLOY_FORCE_FLAT`; handler try/except → JSON 500 with `exception_type`.
+- **Regression:** `test_paper_lane_exit_wait_clamps_negative_sleep_when_clock_crosses_model_fill`
+- **R8:** bundles into next master-tip deploy — do not deploy from this row alone. Live stays disarmed.
+
+---
+
 ## 30 Oct 2026 — URGENT R8 pure revert #929 + #930 (do not merge yet)
 
 - **PR:** [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) branch `cursor/revert-929-930-12bb`
