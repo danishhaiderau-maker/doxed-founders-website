@@ -1,5 +1,12 @@
+## URGENT PR3 r5_segment_pass never-delete (HM-mapped)
+- Remove auto-unlink (`shipper` r5_segment_pass / `execute_r5_segment_prune` R22-deleted) + hard-coded prune arm; fail-closed on missing status; R5a eligibility via `validate_custody`+`analyzer_consumed_seq`+parity GREEN+2 ACK cycles+min(custody,ack,analyzer); tripwires (−500 seq / 2 h ACK); stop-write RED; PR4 for lifecycle/v22 deleters; R44+R31 before `RESEARCH_SEGMENTS_ENABLED=1`. **Success:** zero auto-unlinks; greps clean; two-cycle R31 read-back; live OFF. Plan `90f0a5491850`; rules `10f0b8daa510`; restacked by merge onto #951 tip `6360e9e228f8` (prior PASS @37b3c0cd80da voided).
+
 ## 31 Oct 2026 AEDT — URGENT partial 1 of 5 — book10 Sink never-unlink (R0–R45 `10f0b8daa510`)
 - Root: `Sink._rotate` keep-N `os.remove` since #584. #949 Sink-only: no unlink; running byte total (R43); AMBER@70% / RED `STREAM_SIZE_CAP`@85% (monitor/status); hard stop @100%; card **8 GiB × 5 streams = 40 GiB**. Keep Fly secret `STRATEGIST_STREAM_KEEP_ROTATIONS=0` (Boss). Remaining deleters = sibling PRs. Merge only after green CI + HM exact-head + RK PASS + Boss announce (0b). Live OFF.
+
+## URGENT PR2 remaining deleters (31 Oct 2026) — #949 merged; W1 Sink residual == 0
+- Tip follows #950 head (post-6801ebdbc W1 invert). #949 Sink in via merge parent; merge order #950→#951→#952. Live OFF.
+- Stop rotation_cap (no env gate; next deletes ~09:00–14:30 AEDT) + market_segments + analyzer keep-3 + runtime-log/doRollover/_trim/maintain_fresh_collection_files + R22-delete reset_all_csv; sweeper already 111 files / 2,407,788,012 B (24 Oct 19:26–31 Oct 02:32); laptop 102 OBSERVED / 9 INFERRED lost (cd6960e96f23). Order PR2→PR4→PR3. Success: R31 ≥2 full rotation_cap sweeper cycles; no new rotation_cap delete receipts; .N retained; 70/85 on GET; W1 Sink delete residual count == 0 (mutation: re-add os.remove fails); greps/mutations green; live OFF.
 
 ## 30 Oct 2026 — R8 pure revert #929+#930 (open, do not merge)
 - See `docs/TRACKER.md`. PR [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) `cursor/revert-929-930-12bb`. Trades since 19:59 AEDT non-countable; R21 dry-run package prepared only (no delete).
@@ -75,3 +82,5 @@
 - Can count only when pool key n>=10 of REAL current-epoch live acks (live_ack_pool.py docstring) -> unmeetable while live disarmed, except EXCHANGE_RESIDENT_NO_DELAY exit legs.
 - Q2: WS_TICK = wake-up source only (WS trade print, bot.py:29796 -> 30437 -> 30463); the tick price is discarded; mark = get_mark_price (bot.py:30479, 7466-7475) -> book_exit_mark -> quote_trigger.book_exit_price on bfx_book_10l rows (7450-7463); ticker fallback refused. Not an R3 ticker trigger.
 - Q3: /api/system-health 11:25Z: RED analyzer.generation/reports/cycle, laptop.chain_monitor (ANALYZER_NO_COMPLETION), ledger.reconciliation, fly.exit_latency; mostly stale analyzer stuck RUNNING 3h on rev 346ef2bf vs Fly 63b462ed (deploy 21:43 AEDT) + in-memory 1231 cache.
+## URGENT PR4 r5_retention_loop stop (rebase on #950)
+- R22-remove lifecycle/transfer/v22 deletes only; **must not touch `cap_market_segments` (PR2/#950)**; no rotate-discard; v22 70/85; wipe_stale_locks pin (1 h + older-than-boot); ≥512 MiB v22 fixture; book10 safety; order PR2→PR4→PR3. **Success:** greps clean — no delete reachable from `r5_retention_once` except `wipe_stale_locks`; live OFF. Plan `51dde5f11446`; rules `10f0b8daa510`.

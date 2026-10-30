@@ -204,6 +204,7 @@ from combo_pathway_config import (
 import shadow_chase_buckets
 import rotation_cap
 import disk_alert
+import retention_stop_write
 from normalized_market_indicators import (
     normalize_market_indicators,
 )
@@ -378,23 +379,64 @@ class AsciiSafeFormatter(logging.Formatter):
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
+    """Rotating file handler that never drops backups (PR2 / R25).
+
+    Stdlib ``RotatingFileHandler.doRollover`` unlinks the oldest backup when
+    ``backupCount > 0``. Here, size pressure latches stop-write + 70/85 RED and
+    refuses further file emits. Console / stderr handlers are unaffected so
+    force-flat, disarm, and R20 keep logging.
+    """
+
     def __init__(self, *args, **kwargs):
         kwargs.setdefault('delay', True)
+        # Preserve configured count for telemetry; force 0 so stdlib never drops.
+        self._configured_backup_count = int(kwargs.get("backupCount") or 0)
+        kwargs["backupCount"] = 0
         super().__init__(*args, **kwargs)
         self._rollover_failed = False
+        self._stop_write = False
 
     def shouldRollover(self, record):
-        if self._rollover_failed:
+        if self._rollover_failed or self._stop_write:
             return False
         return super().shouldRollover(record)
 
+    def emit(self, record):
+        if self._stop_write:
+            return
+        super().emit(record)
+
     def doRollover(self):
-        if self._rollover_failed:
+        if self._rollover_failed or self._stop_write:
             return
         try:
-            super().doRollover()
+            # Never call super().doRollover() — it truncates when backupCount==0
+            # and unlinks oldest backups when backupCount>0.
+            try:
+                size = os.path.getsize(self.baseFilename) if os.path.exists(self.baseFilename) else 0
+            except OSError:
+                size = 0
+            cap = int(self.maxBytes or LOG_MAX_BYTES or 1)
+            retention_stop_write.evaluate_and_latch(
+                "runtime_log",
+                used=size,
+                cap=cap,
+                reason="RUNTIME_LOG_ROLLOVER_STOP_WRITE",
+                detail={
+                    "path": self.baseFilename,
+                    "configured_backup_count": self._configured_backup_count,
+                    "rule": "R25_NEVER_DELETE",
+                },
+            )
+            self._stop_write = True
+            retention_stop_write.latch(
+                "runtime_log", reason="RUNTIME_LOG_ROLLOVER_STOP_WRITE",
+                used=size, cap=cap,
+                detail={"path": self.baseFilename},
+            )
         except (PermissionError, OSError):
             self._rollover_failed = True
+            self._stop_write = True
 
 NEAR_EDGE_LOG_MAX_BYTES = int(os.getenv("NEAR_EDGE_LOG_MAX_BYTES", str(100 * 1024 * 1024)))
 WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "45"))
@@ -817,9 +859,24 @@ def evaluate_momentum_alignment(direction: str, features: dict) -> tuple:
     return False, None
 
 def _trim_oversized_log(path: str, max_bytes: int):
+    """PR2: never truncate/delete. At size pressure → stop-write + 70/85 RED."""
     try:
-        if max_bytes > 0 and os.path.exists(path) and os.path.getsize(path) > max_bytes:
-            os.remove(path)
+        if max_bytes <= 0 or not os.path.exists(path):
+            return
+        size = os.path.getsize(path)
+        if size <= max_bytes and size < max_bytes * retention_stop_write.AMBER_RATIO:
+            return
+        family = f"aux_log:{os.path.basename(path)}"
+        retention_stop_write.evaluate_and_latch(
+            family, used=size, cap=max_bytes,
+            reason="AUX_LOG_SIZE_STOP_WRITE",
+            detail={"path": path, "rule": "R25_NEVER_DELETE"},
+        )
+        if size > max_bytes:
+            retention_stop_write.latch(
+                family, reason="AUX_LOG_SIZE_STOP_WRITE", used=size, cap=max_bytes,
+                detail={"path": path},
+            )
     except Exception:
         pass
 
@@ -13680,19 +13737,8 @@ def update_debug_state_always(stage=None, extra=None, *args, **kwargs):
     except Exception as e:
         logger.error(f"[DEBUG STATE ERROR] {e} [PIPELINE ENFORCEMENT]")
 
-def reset_all_csv():
-    logger.warning("[RESET] Deleting all CSV files for fresh session [PIPELINE ENFORCEMENT]")
-    files = [
-        CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
-        CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
-    ]
-    for f in files:
-        try:
-            if os.path.exists(f):
-                os.remove(f)
-                logger.info(f"[RESET] Deleted {f} [PIPELINE ENFORCEMENT]")
-        except Exception as e:
-            logger.error(f"[RESET ERROR] Failed to delete {f}: {e} [PIPELINE ENFORCEMENT]")
+# R22 (PR2): reset_all_csv removed. Fresh CSV epoch only via sanctioned R21.
+# validate_startup must not delete or recreate anything after this removal.
 
 def update_logger_level():
     try:
@@ -14697,10 +14743,17 @@ def _finalize_position_open_lifecycle(pos, master, signal, order, fill_px, opene
 
 
 def validate_startup():
-    required = ["reset_all_csv","update_logger_level","prune_signals","process_signal","evaluate_signal_with_ai","execute_order","pipeline_state_sync","persist_signal","compute_edge_score","update_debug_state_always"]
+    """Verify critical callables exist. Never deletes or recreates files (PR2 / RK)."""
+    required = [
+        "update_logger_level", "prune_signals", "process_signal",
+        "evaluate_signal_with_ai", "execute_order", "pipeline_state_sync",
+        "persist_signal", "compute_edge_score", "update_debug_state_always",
+    ]
     for fn in required:
         if fn not in globals():
             raise Exception(f"[STARTUP ERROR] Missing function: {fn}")
+    if "reset_all_csv" in globals():
+        raise Exception("[STARTUP ERROR] reset_all_csv must stay deleted (R22/PR2)")
     logger.info("[STARTUP] All critical functions verified [PIPELINE ENFORCEMENT]")
 
 def track_event(trade_id, stage):
@@ -16887,25 +16940,19 @@ _R5_PROCESS_BOOT_TS = time.time()
 _r5_retention_status: dict = {"alive": False}
 
 
-def _r5_v22_drain_probe(started_ts: float):
-    """Pending marker for the bounded v22 drain (reads the reconcile loop's status only)."""
-    def drain():
-        status = _collector_v3_reconcile_status
-        finished = float(status.get("last_finished_ts") or 0.0)
-        if finished >= started_ts and status.get("last_passed"):
-            return []
-        detail = str(status.get("last_error") or "RECONCILE_NOT_CAUGHT_UP")[:200]
-        return [f"RECONCILE_PENDING:{detail}"]
-    return drain
-
-
 def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
-    """One R5 retention pass; each step is independent and never raises."""
+    """One R5 retention pass; each step is independent and never raises.
+
+    PR4: lifecycle / transfer / v22 never delete (stop-write + 70/85).
+    ``cap_market_segments`` is PR2 never-delete (do not reintroduce unlinks).
+    ``wipe_stale_locks`` remains the only unlink path reachable from this once.
+    """
     import r5_keep
     import r5_retention
+    import retention_stop_write
     now = time.time() if now is None else float(now)
     runtime_root = _data_sync_runtime_root()
-    out: dict = {"ts": now}
+    out: dict = {"ts": now, "stop_write": retention_stop_write.latch_state()}
     # HM C7 (RK: keep only for open lifecycles or prereg tests): one read-only keep set.
     try:
         keep_info = r5_keep.open_lifecycles(runtime_root)
@@ -16915,21 +16962,19 @@ def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
         out["keep"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     steps = [
         ("locks", lambda: r5_retention.wipe_stale_locks(runtime_root, boot_ts=_R5_PROCESS_BOOT_TS, now=now)),
-        ("market_segments", lambda: r5_retention.cap_market_segments(
-            runtime_root, referenced=keep_info.get("segment_shas") or (), now=now)),
+        ("market_segments", lambda: r5_retention.cap_market_segments(runtime_root, now=now)),
         ("lifecycle_bundles", lambda: r5_retention.cap_lifecycle_bundles(
             runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", now=now)),
         ("retired_transfer_bundles", lambda: r5_retention.purge_retired_transfer_bundles(runtime_root, now=now)),
     ]
     if v22:
-        steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(
-            os.getcwd(), drain=_r5_v22_drain_probe(time.time()),
-            sleep=lambda sec: shutdown_event.wait(sec))))
+        steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(os.getcwd())))
     for name, step in steps:
         try:
             out[name] = step()
         except Exception as exc:
             out[name] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    out["stop_write"] = retention_stop_write.latch_state()
     return out
 
 
@@ -36312,22 +36357,30 @@ def _delete_paths(paths) -> tuple:
     return deleted, errors
 
 def _reset_runtime_log_handlers():
-    """Truncate the rotating runtime log without restarting the process."""
+    """PR2: never delete runtime log parts. Latch stop-write + 70/85 instead."""
     for h in logger.handlers:
         if not isinstance(h, RotatingFileHandler):
             continue
         try:
             with h.lock:
+                try:
+                    size = os.path.getsize(h.baseFilename) if os.path.exists(h.baseFilename) else 0
+                except OSError:
+                    size = 0
+                cap = int(getattr(h, "maxBytes", None) or LOG_MAX_BYTES or 1)
+                retention_stop_write.evaluate_and_latch(
+                    "runtime_log", used=size, cap=cap,
+                    reason="RUNTIME_LOG_RESET_STOP_WRITE",
+                    detail={"path": getattr(h, "baseFilename", LOG_FILE), "rule": "R25_NEVER_DELETE"},
+                )
+                if isinstance(h, SafeRotatingFileHandler):
+                    h._stop_write = True
+                # Close the file stream so we stop appending; do not unlink parts.
                 if h.stream:
                     h.stream.close()
                     h.stream = None
-                for i in range(LOG_BACKUP_COUNT + 5, -1, -1):
-                    path = h.baseFilename if i == 0 else f"{h.baseFilename}.{i}"
-                    if os.path.exists(path):
-                        os.remove(path)
-                h.stream = h._open()
         except Exception as e:
-            logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
+            logger.error(f"[FRESH COLLECTION] Log handler stop-write failed: {e} [PIPELINE ENFORCEMENT]")
 
 def reset_all_research_files(*, archive_path: str = None) -> dict:
     """Delete live epoch research files AND permanently purge quarantine trees.
@@ -36385,10 +36438,20 @@ def reset_all_research_files(*, archive_path: str = None) -> dict:
     }
 
 def maintain_fresh_collection_files():
-    """Periodic trim when fresh-collection mode is on (prevents silent re-accumulation)."""
+    """Periodic size pressure check when fresh-collection mode is on (PR2: never delete)."""
     prune_aux_logs_on_startup()
     log_path = os.getenv("BOT_LOG_FILE", "bot_runtime.log")
-    if os.path.exists(log_path) and os.path.getsize(log_path) > LOG_MAX_BYTES:
+    try:
+        size = os.path.getsize(log_path) if os.path.exists(log_path) else 0
+    except OSError:
+        size = 0
+    if size > 0:
+        retention_stop_write.evaluate_and_latch(
+            "runtime_log", used=size, cap=LOG_MAX_BYTES,
+            reason="FRESH_COLLECTION_LOG_PRESSURE",
+            detail={"path": log_path, "rule": "R25_NEVER_DELETE"},
+        )
+    if size > LOG_MAX_BYTES:
         _reset_runtime_log_handlers()
 
 _FRESH_RESET_RETRYABLE_PREMUTATION_ERRORS = frozenset({
@@ -55648,7 +55711,7 @@ def _active_analyzer_mirror_dir() -> Path | None:
 
 
 def _prune_analyzer_generations(active_generation: str, keep: int = 3) -> None:
-    """Bound immutable snapshot storage while never deleting the active tree."""
+    """PR2: never rmtree generation trees. At would-exceed keep-N → stop-publish + receipt."""
     root = _analyzer_generations_dir()
     try:
         generations = sorted(
@@ -55658,11 +55721,51 @@ def _prune_analyzer_generations(active_generation: str, keep: int = 3) -> None:
         )
     except OSError:
         return
-    retained = {path.name for path in generations[:max(1, keep)]}
-    retained.add(active_generation)
-    for path in generations:
-        if path.name not in retained:
-            shutil.rmtree(path, ignore_errors=True)
+    retained_names = [path.name for path in generations[:max(1, keep)]]
+    if active_generation not in retained_names:
+        retained_names.append(active_generation)
+    retained = set(retained_names)
+    would_drop = [path.name for path in generations if path.name not in retained]
+    used = len(generations)
+    cap = max(1, int(keep))
+    receipt_dir = _data_sync_runtime_root() / "retention"
+    try:
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Treat generation count vs keep as the binding cap for 70/85.
+    decision = retention_stop_write.evaluate_and_latch(
+        "analyzer_generations",
+        used=used,
+        cap=cap,
+        reason="GENERATION_CAP_STOP_WRITE" if would_drop else "GENERATION_CAP_OK",
+        receipt_dir=receipt_dir,
+        detail={
+            "active_generation": active_generation,
+            "keep": keep,
+            "retained_names": retained_names,
+            "would_have_dropped_names": would_drop,
+        },
+    )
+    if would_drop or decision.get("stop_write") or decision.get("alarm_level") in ("AMBER", "RED"):
+        receipt = {
+            "schema": retention_stop_write.ANALYZER_GENERATION_RECEIPT_SCHEMA,
+            "ts": time.time(),
+            "active_generation": active_generation,
+            "keep": keep,
+            "retained_names": retained_names,
+            "would_have_dropped_names": would_drop,
+            "alarm_level": "RED" if would_drop else (decision.get("alarm_level") or "GREEN"),
+            "used_ratio": decision.get("used_ratio"),
+            "reason": "GENERATION_CAP_STOP_WRITE" if would_drop else "DISK_PRESSURE_STOP_WRITE",
+        }
+        retention_stop_write.write_receipt(receipt_dir, receipt)
+        if would_drop:
+            retention_stop_write.latch(
+                "analyzer_generations", reason="GENERATION_CAP_STOP_WRITE",
+                used=used, cap=cap, detail={"would_have_dropped_names": would_drop},
+            )
+    # Never rmtree. Old keep-N delete path removed (R22).
 
 
 def _safe_analyzer_bundle_members(archive: zipfile.ZipFile) -> list:
@@ -59830,26 +59933,35 @@ def save_persistent_config():
         logger.debug(f"Saved persistent config -> {config_path}")
 
 def rotate_log(file, max_rotations=None, max_bytes=None):
-    """Rotate at 20 MB, then enforce the per-family rotation cap.
+    """Rotate at 20 MB, then check the per-family rotation cap (PR2: never delete).
 
-    DISK-CAP (23 Oct): ``rotation_cap.CAP_ALLOW`` is the per-family table
-    (default 10 rotations / <=500 MB; the count binds). Only ``^base\\.(\\d+)$``
-    siblings are candidates, oldest first (``.1`` is the OLDEST); never the
-    active file, never PROTECTED or exempt bases, at most 3 unlinks per call.
+    DISK-CAP: ``rotation_cap.CAP_ALLOW`` is the per-family table (default 10
+    rotations / <=500 MB). Only ``^base\\.(\\d+)$`` siblings are candidates;
+    oldest first (``.1`` is the OLDEST); never the active file; never PROTECTED
+    or exempt bases. At pressure: stop-write + 70/85 — no unlinks (R25).
     R5: never gated on custody or ack. PRIME RULE: neutral (retention only).
     """
+    family = f"rotation:{os.path.basename(file)}"
+    if retention_stop_write.is_stopped(family):
+        return
     rotated = False
     try:
         if os.path.exists(file) and os.path.getsize(file) > 20 * 1024 * 1024:
-            # Retention may remove older siblings and leave gaps. Counting the
-            # files can then collide with a surviving suffix, so always advance
-            # from the greatest numeric rotation.
+            # Rename-only; never unlink older siblings (PR2). Advance from the
+            # greatest numeric rotation so surviving suffixes never collide.
             suffixes = []
             for path in glob.glob(file + ".*"):
                 suffix = path.rsplit(".", 1)[-1]
                 if suffix.isdigit():
                     suffixes.append(int(suffix))
             next_index = max(suffixes, default=0) + 1
+            # Probe cap first: if rename would require a drop under old policy,
+            # latch stop-write and refuse the rename.
+            probe = rotation_cap.enforce_cap(
+                file, max_rotations=max_rotations, max_bytes=max_bytes,
+            )
+            if probe.get("stop_write") or probe.get("would_have_dropped"):
+                return
             os.rename(file, f"{file}.{next_index}")
             rotated = True
     except OSError as e:
