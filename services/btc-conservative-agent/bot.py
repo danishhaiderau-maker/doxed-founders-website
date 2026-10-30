@@ -55738,7 +55738,7 @@ _ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671  # 2026-10-18 06:01:11 AEDT, the re
 FRESH_START_TS = _ANALYZER_BUNDLE_FRESH_FLOOR_TS
 FRESH_START_UTC = datetime.fromtimestamp(FRESH_START_TS, timezone.utc).isoformat()
 _ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
-# Fix A (plan sha 8991dd90b044): mirror status must advertise an explicit RED label —
+# Fix A (plan sha e448f5f67f8a): mirror status must advertise an explicit RED label —
 # never HTTP 404 — when no validated analyzer_mirror_bundle_v2 is installed.
 _ANALYZER_BUNDLE_NO_VALIDATED_REASON = "NO_VALIDATED_ANALYZER_BUNDLE"
 

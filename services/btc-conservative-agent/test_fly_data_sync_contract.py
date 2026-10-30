@@ -978,7 +978,7 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
         assert response.json["required_schema"] == "analyzer_mirror_bundle_v2"
         assert (legacy / "analysis_dashboard.html").read_text(encoding="utf-8") == "forensic legacy"
         status = client.get("/api/analyzer-mirror/status")
-        # Fix A (8991dd90b044): no-bundle is explicit RED, never HTTP 404-as-missing.
+        # Fix A (e448f5f67f8a): no-bundle is explicit RED, never HTTP 404-as-missing.
         assert status.status_code == 200
         assert status.json["available"] is False
         assert status.json["status"] == "RED"
