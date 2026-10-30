@@ -12491,15 +12491,16 @@ def tile_paired_comparison_report(trades) -> dict:
     print(f"\n=== TILE PAIRED COMPARISON {PIPELINE_ENFORCEMENT_TAG} ===")
     try:
         import tile_paired_comparison
-        from ai_shadow_challengers import CHALLENGER_FILE
+        # R17: ai_shadow_challengers retired — 0 rows / EMPTY_BECAUSE (never open the journal).
         rows = trades.to_dict("records") if trades is not None and not getattr(trades, "empty", True) else []
-        revisions = tile_paired_comparison.call_input_revisions(
-            _load_jsonl_rows_all_generations(CHALLENGER_FILE, contains='"CALL"'))
+        revisions = tile_paired_comparison.call_input_revisions([])
+        report_retired = {"EMPTY_BECAUSE": "R17_RETIRED", "rows_read": 0, "source": "ai_shadow_challengers"}
         report = tile_paired_comparison.build_report(
             trades=rows, registry=ACTIVE_TILE_REGISTRY, tile_order=CURRENT_RESEARCH_LANES,
             call_revisions=revisions,
         )
         report["cohort"] = EXPECTED_BOT_VERSION
+        report["ai_shadow_challengers"] = report_retired
     except Exception as exc:
         report = {"schema": "tile_paired_comparison_v1", "status": "UNAVAILABLE", "error": str(exc)}
     try:
@@ -12787,19 +12788,16 @@ def fixed_vs_dynamic_selector_report(session=None):
 
 def ai_challenger_report(session=None):
     """Publish LLM vs shadow challengers from the per-call challenger journal."""
-    from ai_shadow_challengers import CHALLENGER_FILE, COMPACT_PROMPT_FILE
     from research.ai_challenger_report import build_ai_challenger_report
 
     session = session or load_research_session()
+    # R17: never read ai_shadow_challengers / compact prompt files — EMPTY_BECAUSE.
     try:
-        payload = build_ai_challenger_report(
-            _load_jsonl_rows(CHALLENGER_FILE),
-            _load_jsonl_rows(COMPACT_PROMPT_FILE),
-            epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
-        )
+        payload = build_ai_challenger_report([], [], epoch_id=None)
     except Exception as exc:  # the challenger view must never stop the analyzer
         payload = {"schema": "ai_challenger_report_v1", "status": "ERROR",
-                   "error": f"{type(exc).__name__}: {exc}"}
+                   "error": f"{type(exc).__name__}: {exc}",
+                   "EMPTY_BECAUSE": "R17_RETIRED", "rows_read": 0}
     return _write_aux_report(AI_CHALLENGER_REPORT_FILE, payload, session)
 
 
@@ -18740,21 +18738,6 @@ LADDER_SIM_PROFILES = {
 }
 
 
-def shadow_exit_cycle_report():
-    """Side-by-side shadow exits on recorded paths; observation-only and isolated from the cycle."""
-    print(f"\n=== SHADOW EXITS {ANALYZER_SYNC_ID} ===")
-    try:
-        from research import shadow_exit_report
-
-        mirror = Path(_agent_data_path(shadow_exit_report.sxp.FILE_NAME)).parent
-        out_dir = Path(os.getenv("SHADOW_EXIT_OUT_DIR", shadow_exit_report.DEFAULT_OUT_DIR))
-        report = shadow_exit_report.build_report(mirror, out_dir / "backfill")
-        path = shadow_exit_report.write_report(report, out_dir)
-        print(f"   shadow exits: {report['sources']['records']} records -> {path} ({report['build_sec']}s)")
-    except Exception as exc:  # noqa: BLE001 - one report must not stop the analyzer cycle
-        print(f"   shadow exits report failed: {type(exc).__name__}: {exc}")
-
-
 def exit_ladder_simulator_report(trades=None, session=None):
     """Replay tick paths with alternate ladder rungs — data-driven exit optimization."""
     if session is None:
@@ -20146,7 +20129,6 @@ def pre_test_analytics_reports(
     exit_combinations_report(trades=trades, session=session)
     exit_leakage_by_reason_report(trades=trades, session=session)
     exit_ladder_simulator_report(trades=trades, session=session)
-    shadow_exit_cycle_report()
     correlated_price_cluster_report(session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
     first_15m_outcome_report(trades=trades, session=session)

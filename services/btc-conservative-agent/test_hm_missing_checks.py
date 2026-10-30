@@ -13,7 +13,7 @@ REMOTE = {"REMOTE_ADDR": "203.0.113.9"}
 ROUTES = ("/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
           "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
           "/api/monitor/exits/latency-guard", "/api/monitor/alerts",
-          "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets")
+          "/api/monitor/chase_buckets", "/api/monitor/gap_buckets")
 
 
 def test_late_window_table_matches_hm_audit():

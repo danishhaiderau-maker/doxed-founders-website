@@ -352,7 +352,7 @@ def test_routes_never_take_trade_lock_or_touch_exchange_relay_or_ai(bot, monkeyp
 def test_handlers_have_no_writes_or_order_calls():
     src = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
     block = src.split("# Read-only tile audit data API (/api/monitor/tiles/*", 1)[1].split(
-        "\n@app.route('/api/research/shadow_exits')", 1)[0]
+        "\n# ---------------------------------------------------------------------------\n# API-GAP-SWEEP-20261012 monitor routes", 1)[0]
     # The archive-receipt append-only audit log is the one deliberate writer in this region (own auth + cap,
     # covered by test_archive_receipt_v2); everything else stays write-free.
     block = block.split("def _archive_receipt_log(", 1)[0] + block.split("def _int_field(", 1)[1]

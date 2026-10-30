@@ -19,8 +19,29 @@ def test_registry_owns_a_paper_only_non_ai_premium_tile():
 def test_own_evaluator_reuses_the_premium_rule_without_a_shadow_file():
     evaluator = policy.make_evaluator()
     assert isinstance(evaluator, GsPremiumEvaluator) and isinstance(evaluator, PremiumEvaluator)
-    assert evaluator.SHADOW_FILE == "xvp_shadow_signals.jsonl" and evaluator.ID_PREFIX == "gsxvp"
+    # HM 30 Oct: xvp stream RETIRED — SHADOW_FILE None stops recording; signal path intact.
+    assert evaluator.SHADOW_FILE is None and evaluator.ID_PREFIX == "gsxvp"
     assert evaluator.policy_id == policy.POLICY_ID
+
+
+def test_gs01_still_triggers_via_premium_rule_side_for():
+    """Retiring the xvp stream must not disable GS-01: drive PremiumRule.side_for + TRIGGER_FEATURE_KEY."""
+    from cross_venue_premium import LONG
+
+    evaluator = policy.make_evaluator()
+    assert evaluator.SHADOW_FILE is None
+    # Real premium path on the live evaluator rule (not a hardcoded gsxvp_trigger_id inject).
+    side = evaluator.rule.side_for(2.0)
+    assert side == LONG
+    tid = f"{evaluator.ID_PREFIX}-alive"
+    feature_key = evaluator.TRIGGER_FEATURE_KEY
+    ai_feature = {
+        f"{evaluator.ID_PREFIX}_trigger_id": tid,
+        feature_key: {"trigger_id": tid, "side": side, "premium_dev_bp": 2.0},
+    }
+    assert feature_key == f"{evaluator.ID_PREFIX}_trigger"
+    d = decide(policy, direction=side, engine_bar=bar(), ai_feature=ai_feature)
+    assert d["action"] == "TAKER" and d["trigger_kind"] == "CROSS_VENUE_PREMIUM"
 
 
 def test_premium_trigger_is_a_taker_in_every_regime():
