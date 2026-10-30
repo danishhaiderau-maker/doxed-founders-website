@@ -802,6 +802,7 @@ TILE_FILL_SITES = {
 # baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
 # non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
 # Step B (HM 13:16): DISLOC and DISLOC-FOI migrated (both removed 23 Oct 2026).
+# R22 residual (FREEZE item 7, 2026-10-30): still no DISLOC fill sites; do not reintroduce.
 PENDING_MIGRATION = frozenset()  # 16 Oct 2026: tiles 1-5 migrated (tile_fill.py); must stay empty
 PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this
 # GS-FADE3-TP30 (gf3, paper only; RK PASS 25 Oct 06:24 AEDT): a NEW tile on paper_fill from day one (registered after

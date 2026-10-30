@@ -27,7 +27,8 @@ STREAMS = {
     "runtime_telemetry": "runtime_telemetry_1m.jsonl",
     "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
     # Retired DISLOC / DISLOC-FOI ledgers (Tiles 6/7 removed 23 Oct 2026, R9): no writer remains; listed so the
-    # historical files stay readable and archived (R5 custody). Do not delete.
+    # historical files stay readable and archived (R5 custody). Do not delete. R22 residual (FREEZE item 7):
+    # KEEP these stream names — removing them would hide opaque archive evidence.
     "disloc_trades": "disloc_trades.jsonl",                # Tile 13 DISLOC paper orders/fills/cancels/closes
     "disloc_foi_trades": "disloc_foi_trades.jsonl",        # Tile 14 DISLOC-FOI paper ledger
     "disloc_paused_skips": "disloc_paused_skips.jsonl",            # former G14 PAUSED-skip ledger

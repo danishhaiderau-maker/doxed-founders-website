@@ -1679,7 +1679,9 @@ RETIRED_TILE_LANES = frozenset({
     # DISLOC and Tile 7 DISLOC-FOI. Unlike earlier retirements the engine, policy
     # modules and tests are DELETED (no kept policy module); paper + live were
     # already OFF and all evidence files stay on disk (R5 custody, no backfill).
-    # Active tiles stay 1..5: CTRL, GS-01, B1, B2, GS-06 (display-only renumber).
+    # R22 residual (FREEZE item 7, 2026-10-30): no executable DISLOC path remains;
+    # KEEP this token ≥1 release, reserved dsl/dsf cids, and monitor_streams ledger
+    # names for opaque archive readback. Do not re-add COMBO_LANE_SPECS / fill sites.
     "FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M",
     # Retired 2026-10-28 (owner Danish APPROVED Rule 22; RK A=PASS): GS-06 committed
     # fade patient-exit mid-epoch tile. Policy module + dedicated tests DELETED;
