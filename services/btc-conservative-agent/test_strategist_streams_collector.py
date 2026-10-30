@@ -343,8 +343,17 @@ def test_size_cap_a6_corrupt_or_missing_level_never_green(tmp_path):
     assert folded["level"] == "UNKNOWN"
     assert folded["level"] != "GREEN"
     src = (Path(__file__).parent / "strategist_streams_collector.py").read_text()
-    assert 'f"{dest}.tmp.{os.getpid()}.{threading.get_ident()}"' in src or ".tmp." in src
+    # H2 strengthened: unique per-writer tmp (pid+thread), not a shared ".tmp" clobber name;
+    # and the publish lock must wrap the write+replace (inspect source).
+    assert 'f"{dest}.tmp.{os.getpid()}.{threading.get_ident()}"' in src
     assert "_size_cap_publish_lock" in src
+    assert "with _size_cap_publish_lock:" in src
+    publish_src = src[src.index("def _publish_status") : src.index("\n    def ", src.index("def _publish_status") + 1)]
+    assert "os.replace(tmp, dest)" in publish_src
+    lock_at = publish_src.index("with _size_cap_publish_lock:")
+    tmp_at = publish_src.index('f"{dest}.tmp.{os.getpid()}.{threading.get_ident()}"')
+    replace_at = publish_src.index("os.replace(tmp, dest)")
+    assert lock_at < tmp_at < replace_at, "tmp write+replace must sit under _size_cap_publish_lock"
 
 
 def test_size_cap_h1_unknown_is_red_on_alarm_health_not_stop_writing(tmp_path, monkeypatch):

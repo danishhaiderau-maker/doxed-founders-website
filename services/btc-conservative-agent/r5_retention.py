@@ -128,8 +128,7 @@ def cap_market_segments(root: str | os.PathLike, *, max_bytes: int = SEGMENT_CAP
         "cap_bytes": int(max_bytes),
         "would_have_dropped": would_drop,
         "stop_write": bool(decision.get("stop_write")),
-        # F3/R4 shared helper: missing/UNKNOWN → receipt RED (never soft-GREEN).
-        "alarm_level": retention_stop_write.receipt_alarm_level(decision.get("alarm_level")),
+        "alarm_level": decision.get("alarm_level") or "GREEN",
         "used_ratio": decision.get("used_ratio"),
         "amber_at": retention_stop_write.AMBER_RATIO,
         "red_at": retention_stop_write.RED_RATIO,

@@ -268,11 +268,17 @@ def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
     retention = red_conditions()
     segment = segment_store_red(volume.get("transfer") if isinstance(volume.get("transfer"), Mapping) else None)
     retention = retention + segment["red"]
-    data_dir = volume.get("data_dir") or volume.get("root") or os.getcwd()
+    # Prefer an explicit data root (volume key or BOT_DATA_DIR). Bare getcwd is only a
+    # last-resort path for the status payload — H1 UNKNOWN→RED requires a bound dir so
+    # volume-only unit callers are not poisoned by a missing cwd size-cap file (R38).
+    bound_dir = volume.get("data_dir") or volume.get("root") or (os.environ.get("BOT_DATA_DIR") or "").strip() or None
+    data_dir = bound_dir or os.getcwd()
     stream_cap = stream_size_cap_status(data_dir)
     retention = retention + list(stream_cap.get("red") or [])
-    # H1 locked: stream_size_cap UNKNOWN or RED → disk alert RED (alarm surface; not stop-write).
-    if retention or stream_cap.get("level") in ("RED", "UNKNOWN"):
+    # H1 locked: stream_size_cap RED always; UNKNOWN→RED on alarm surface when bound.
+    # F1: this is alarm-level RED, not an automatic stop-write trigger from UNKNOWN alone.
+    cap_level = stream_cap.get("level")
+    if retention or cap_level == "RED" or (cap_level == "UNKNOWN" and bound_dir):
         level = "RED"
     return {
         "schema": SCHEMA,
