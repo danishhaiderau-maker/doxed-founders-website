@@ -161,13 +161,17 @@ def test_adaptive_funnel_reads_only_epoch_rows(data_root, monkeypatch):
         return {"schema": "adaptive_entry_funnel_v1"}
 
     monkeypatch.setattr(funnel, "build_report", capture)
-    funnel.build_report_from_paths(
+    report = funnel.build_report_from_paths(
         decisions_path=str(data_root / "adaptive_entry_decisions.jsonl"),
         counterfactual_path=str(data_root / "taker_signal_counterfactuals.jsonl"),
         trades_path=str(data_root / engine.TRADES_FILE), expired_path=str(data_root / engine.EXPIRED_ORDERS_FILE),
         current_version="v", admit=engine._epoch_admit)
-    for key in ("decisions", "taker_counterfactuals", "expired"):
-        assert [r["trade_id"] for r in seen[key]] == ["new"], key
+    # R17/#944: taker stream retired — EMPTY_BECAUSE + rows_read 0; never epoch-filtered live rows.
+    assert report["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert report["taker_rows_read"] == 0
+    assert seen["taker_counterfactuals"] == []
+    assert [r["trade_id"] for r in seen["decisions"]] == ["new"]
+    assert [r["trade_id"] for r in seen["expired"]] == ["new"]
     assert [r["trade_id"] for r in seen["trades"]] == ["b"]
 
 

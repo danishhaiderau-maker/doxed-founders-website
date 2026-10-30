@@ -132,20 +132,28 @@ def test_stream_studies_end_to_end_and_cache(tmp_path):
     payload, tables = SS.run_stream_studies(data, **kw)
     assert payload["status"] == "OK" and not payload["errors"]
     regret = tables["exit_regret"]
+    assert "horizon_sec" in regret.columns  # HM empty-frame guard
     one_h = regret[regret.horizon_sec == 3600]
     assert set(one_h.research_lane) == set(LANES)
     assert (one_h.hold_longer_mean_usd.round(6) == 0.01).all()          # +4% of a $0.25 margin
     assert len(tables["exit_regret_trades"]) == len(tr)
+    # R17/#944: taker + fill_markouts retired — EMPTY_BECAUSE, rows_read 0, schema columns, no crash.
     tk = tables["taker_counterfactual"]
-    all_1s = tk[(tk.group == "ALL") & (tk.horizon == "1s")].iloc[0]
-    assert all_1s.n == len(tr) and all_1s.ev_exit_touch_bps == pytest.approx(-2.0)
-    assert set(tk[tk.group == "TILE"].value) == set(LANES)
+    assert "group" in tk.columns and "horizon" in tk.columns and len(tk) == 0
+    _ = tk[tk.group == "ALL"]  # must not AttributeError
+    assert payload["taker_counterfactual"]["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert payload["taker_counterfactual"]["rows_read"] == 0
     fm = tables["fill_markouts"]
-    assert set(fm.liquidity) == {"ALL", "MAKER"}
+    assert "liquidity" in fm.columns and len(fm) == 0
+    assert payload["fill_markouts"]["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert payload["fill_markouts"]["rows_read"] == 0
     ev = tables["research_events"]
     assert ev.n.sum() == len(tr) and set(ev.lane) == set(LANES)
     health = tables["stream_study_health"].set_index("stream")
-    assert (health.status == "ANALYSED").all()
+    assert health.loc["post_exit_replay.jsonl", "status"] == "ANALYSED"
+    assert health.loc["research_events_v22.jsonl", "status"] == "ANALYSED"
+    assert health.loc["taker_signal_counterfactuals.jsonl", "rows_used"] == 0
+    assert health.loc["fill_markouts.jsonl", "rows_used"] == 0
     again, _ = SS.run_stream_studies(data, **kw)
     assert again["cache"]["hits"] >= 1 and again["exit_regret"]["trades"] == len(tr)
 

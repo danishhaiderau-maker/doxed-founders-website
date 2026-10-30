@@ -168,6 +168,20 @@ def _iso(ts) -> Optional[str]:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(f)) if f else None
 
 
+def retired_empty_frame(columns: tuple[str, ...]) -> pd.DataFrame:
+    """Empty result with schema columns so callers never AttributeError on .group/.horizon_sec."""
+    return pd.DataFrame({c: pd.Series(dtype="object") for c in columns})
+
+
+TAKER_SUMMARY_COLUMNS = ("group", "value", "horizon", "n", "ev_exit_touch_bps", "ev_mid_bps")
+FILL_MARKOUT_COLUMNS = ("liquidity", "lane", "horizon", "n", "mean_bps")
+EXIT_REGRET_COLUMNS = (
+    "research_lane", "horizon_sec", "n", "hold_longer_mean_usd", "ci_lo_usd", "ci_hi_usd",
+    "p_cluster", "share_better_if_held", "mean_drift_pct_margin", "mean_missed_mfe_pct_margin",
+    "verdict",
+)
+
+
 # ------------------------------------------------------------------ post-exit regret
 
 def _post_exit_partial(path: str, epoch_start: float = 0.0) -> dict:
@@ -298,7 +312,8 @@ def post_exit_regret(files: list, cache: Cache, trades: pd.DataFrame, lane_of: d
                     "mean_missed_mfe_pct_margin": _r(float(mfe.mean()), 4) if mfe.notna().any() else None,
                     "verdict": _regret_verdict(c),
                 })
-    return per_trade, pd.DataFrame(summary)
+    # HM empty-frame guard: schema columns always present (no .horizon_sec AttributeError).
+    return per_trade, (pd.DataFrame(summary) if summary else retired_empty_frame(EXIT_REGRET_COLUMNS))
 
 
 def _regret_verdict(c: dict) -> str:
@@ -386,7 +401,7 @@ def taker_counterfactuals(files: list, cache: Cache, trades: pd.DataFrame, epoch
     meta = {"rows": 0, "rows_read": 0, "signals": 0, "ai_decisions": {},
             "last_signal_at": None, "last_reject_signal_at": None,
             "EMPTY_BECAUSE": "R17_RETIRED"}
-    return pd.DataFrame(), meta
+    return retired_empty_frame(TAKER_SUMMARY_COLUMNS), meta
 
 
 def _spread_bps(r: dict) -> Optional[float]:
@@ -407,8 +422,8 @@ def fill_markouts(files: list, cache: Cache, lanes, epoch_start: float, frozen=f
                   extra_rows: Iterable = ()) -> tuple:
     # R17/HM: fill_markouts is ticker/L1-priced → EMPTY_BECAUSE, never analyse rows.
     _ = (files, cache, lanes, epoch_start, frozen, extra_rows)
-    return pd.DataFrame(), {"rows": 0, "rows_read": 0, "EMPTY_BECAUSE": "R17_RETIRED",
-                            "last_fill_at": None}
+    return retired_empty_frame(FILL_MARKOUT_COLUMNS), {
+        "rows": 0, "rows_read": 0, "EMPTY_BECAUSE": "R17_RETIRED", "last_fill_at": None}
 
 
 # ------------------------------------------------------------------ research events
@@ -562,9 +577,15 @@ def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registr
                                                       tier_a["fill_markouts.jsonl"]))
     ev = stage("research_events_v22", lambda: research_events(files["research_events_v22.jsonl"], cache, epoch_id,
                                                               lane_of, now, frozen))
-    tables["exit_regret_trades"], tables["exit_regret"] = pe if pe else (pd.DataFrame(), pd.DataFrame())
-    tables["taker_counterfactual"], tk_meta = tk if tk else (pd.DataFrame(), {})
-    tables["fill_markouts"], fm_meta = fm if fm else (pd.DataFrame(), {})
+    tables["exit_regret_trades"], tables["exit_regret"] = (
+        pe if pe else (pd.DataFrame(), retired_empty_frame(EXIT_REGRET_COLUMNS)))
+    tables["taker_counterfactual"], tk_meta = (
+        tk if tk else (retired_empty_frame(TAKER_SUMMARY_COLUMNS), {"rows": 0, "rows_read": 0,
+                                                                    "EMPTY_BECAUSE": "R17_RETIRED"}))
+    tables["fill_markouts"], fm_meta = (
+        fm if fm else (retired_empty_frame(FILL_MARKOUT_COLUMNS), {"rows": 0, "rows_read": 0,
+                                                                  "EMPTY_BECAUSE": "R17_RETIRED",
+                                                                  "last_fill_at": None}))
     tables["research_events"], ev_meta = ev if ev else (pd.DataFrame(), {})
     used = {"post_exit_replay.jsonl": len(tables["exit_regret_trades"]),
             "taker_signal_counterfactuals.jsonl": tk_meta.get("rows", 0),
@@ -594,10 +615,16 @@ def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registr
         "post_exit_horizons_sec": list(POST_EXIT_HORIZONS), "markout_horizons": list(MARKOUT_HORIZONS),
         "exit_regret": {"trades": len(tables["exit_regret_trades"]),
                         "by_tile": tables["exit_regret"].to_dict("records")},
-        "taker_counterfactual": {**tk_meta, "summary": tables["taker_counterfactual"][
-            tables["taker_counterfactual"]["group"].isin(["ALL", "TILE"])].to_dict("records")
-            if len(tables["taker_counterfactual"]) else []},
-        "fill_markouts": {**fm_meta, "curves": tables["fill_markouts"].to_dict("records")},
+        "taker_counterfactual": {**tk_meta, "summary": (
+            tables["taker_counterfactual"].loc[
+                tables["taker_counterfactual"]["group"].isin(["ALL", "TILE"])
+            ].to_dict("records")
+            if len(tables["taker_counterfactual"]) and "group" in tables["taker_counterfactual"].columns
+            else []
+        )},
+        "fill_markouts": {**fm_meta, "curves": (
+            tables["fill_markouts"].to_dict("records") if len(tables["fill_markouts"]) else []
+        )},
         "research_events": {**ev_meta, "mix": tables["research_events"].to_dict("records")},
         "stream_health": health, "errors": errors,
         "history_sources": history.describe() if history.enabled else {"archive_dirs": [], "tier_a_root": None},

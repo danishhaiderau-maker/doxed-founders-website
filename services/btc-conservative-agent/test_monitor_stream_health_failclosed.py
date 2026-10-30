@@ -348,3 +348,45 @@ def test_mutation_strategy_lab_streams_retired_inventory(tmp_path):
     assert retired["EMPTY_BECAUSE"] == "R17_RETIRED" and retired["rows_read"] == 0
     mutated = {**retired, "EMPTY_BECAUSE": "OK", "status": "OK"}
     assert mutated["status"] == "OK" and retired["status"] == "RETIRED"
+
+def test_iff_retired_streams_have_empty_because_readers():
+    """Standing: every HM/R17 retired analyzer stream name has an EMPTY_BECAUSE reader stub (iff)."""
+    from research.signal_research_table import retired_stream_read
+    from research.ai_challenger_report import build_ai_challenger_report
+    from research import data_health_report as dhr
+    from strategy_lab import stream_studies as studies
+
+    # monitor RETIRED names that analyzer still "reads"
+    for name in ("fill_markouts", "xvp_shadow_signals", "ai_shadow_challengers",
+                 "taker_counterfactuals", "shadow_exit_paths"):
+        assert name in ms.RETIRED_STREAMS
+    for fname in ("fill_markouts.jsonl", "taker_signal_counterfactuals.jsonl",
+                  "xvp_shadow_signals.jsonl", "ai_shadow_challengers.jsonl",
+                  "shadow_exit_paths.jsonl"):
+        out = retired_stream_read(fname)
+        assert out["EMPTY_BECAUSE"] == "R17_RETIRED" and out["rows_read"] == 0
+    _, tk_meta = studies.taker_counterfactuals([], studies.Cache(None), pd.DataFrame(), 0.0)
+    _, fm_meta = studies.fill_markouts([], studies.Cache(None), lanes=[], epoch_start=0.0)
+    assert tk_meta["EMPTY_BECAUSE"] == "R17_RETIRED" and tk_meta["rows_read"] == 0
+    assert fm_meta["EMPTY_BECAUSE"] == "R17_RETIRED" and fm_meta["rows_read"] == 0
+    chall = build_ai_challenger_report([{"x": 1}], [])
+    assert chall["status"] == "RETIRED_R17" and chall["rows_read"] == 0
+    dh = dhr.repaired_stream_quality("/tmp")
+    assert dh["ai_shadow_challengers"]["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert dh["ai_shadow_challengers"]["rows_read"] == 0
+
+
+def test_empty_frame_guard_has_schema_columns():
+    """HM: strategy_lab empty frames must expose schema columns (no .group/.horizon_sec AttributeError)."""
+    from strategy_lab import stream_studies as studies
+
+    tk, _ = studies.taker_counterfactuals([], studies.Cache(None), pd.DataFrame(), 0.0)
+    fm, _ = studies.fill_markouts([], studies.Cache(None), lanes=[], epoch_start=0.0)
+    assert "group" in tk.columns and "horizon" in tk.columns
+    _ = tk[tk.group == "ALL"]  # must not AttributeError
+    assert "liquidity" in fm.columns
+    _ = fm[fm.liquidity == "ALL"]
+    empty_regret = studies.retired_empty_frame(studies.EXIT_REGRET_COLUMNS)
+    assert "horizon_sec" in empty_regret.columns
+    _ = empty_regret[empty_regret.horizon_sec == 3600]
+
