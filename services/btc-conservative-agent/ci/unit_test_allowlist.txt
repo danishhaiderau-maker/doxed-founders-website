@@ -622,6 +622,7 @@ test_disk_alert.py
 test_r5_retention.py
 test_r5_keep.py
 test_rotation_cap.py
+test_remaining_deleters_killswitch.py
 test_taker_counterfactual_r17.py
 test_signal_replay_r17.py
 test_v22_retired_r17.py

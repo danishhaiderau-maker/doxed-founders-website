@@ -1,9 +1,12 @@
 """Bounded rotation cap for rotate_log families (DISK-CAP, 23 Oct 2026).
 
 Pure stdlib. ``rotate_log`` renames ``base`` to ``base.N`` with N = max + 1,
-so ``base.1`` is always the OLDEST surviving rotation. ``enforce_cap`` keeps at
-most ``max_rotations`` numbered rotations (and at most ``max_bytes`` across
-them), deleting the oldest first.
+so ``base.1`` is always the OLDEST surviving rotation.
+
+PR2 remaining-deleters kill-switch (R25/R34): ``enforce_cap`` **never deletes**.
+At keep-N / byte / age pressure it latches stop-write + 70/85 alarms
+(``retention_stop_write`` / ``disk_alert`` AMBER=0.70 RED=0.85) and records
+``would_have_dropped`` telemetry. Real deletion is R21-only.
 
 Hard rules encoded here:
 * only files matching ``^<base>\\.(\\d+)$`` are ever candidates; the active
@@ -11,9 +14,7 @@ Hard rules encoded here:
 * PROTECTED bases (v3/**, research_events_v22*, ledgers, receipts,
   quarantine) and CAP_EXEMPT bases are never capped;
 * R5: the cap is never gated on custody, export or ack state;
-* at most ``max_unlinks`` deletions per call (a background sweep finishes
-  any backlog);
-* a failed cap receipt never blocks the cap.
+* a failed cap receipt never blocks the stop-write latch.
 
 PRIME RULE: neutral. Retention only; no fill, price or exit input changes.
 """
@@ -26,11 +27,12 @@ import threading
 import time
 from typing import Any, Callable, Iterable
 
+import retention_stop_write
+
 MB = 1024 * 1024
 DEFAULT_MAX_ROTATIONS = 10
 DEFAULT_MAX_BYTES = 500 * MB
 DEFAULT_CAP = (DEFAULT_MAX_ROTATIONS, DEFAULT_MAX_BYTES)
-MAX_UNLINKS_PER_CALL = 3
 
 CAP_RECEIPTS_FILE = "cap_receipts.jsonl"
 CAP_RECEIPTS_MAX_BYTES = 1 * MB  # one rotation -> at most ~2 MB on disk
@@ -221,13 +223,19 @@ def enforce_cap(
     *,
     max_rotations: int | None = None,
     max_bytes: int | None = None,
-    max_unlinks: int = MAX_UNLINKS_PER_CALL,
     receipt_writer: Callable[[str, dict[str, Any]], Any] | None = write_cap_receipt,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Delete the oldest numbered rotations beyond the cap. R5: no custody gate."""
+    """Never-delete rotation pressure check. R5: no custody gate; R25: no unlink.
+
+    Over keep-N / byte / age pressure → stop-write + 70/85 alarm and
+    ``would_have_dropped`` telemetry only. No max_unlinks param (R22).
+    """
     kind, detail = classify(active_path)
-    result: dict[str, Any] = {"path": os.path.basename(active_path), "class": kind, "deleted": []}
+    result: dict[str, Any] = {
+        "path": os.path.basename(active_path), "class": kind, "deleted": [],
+        "would_have_dropped": [], "stop_write": False, "alarm_level": "GREEN",
+    }
     if kind != "ALLOW":
         return result
     cap_rot, cap_bytes = detail
@@ -246,53 +254,93 @@ def enforce_cap(
             sizes[path], mtimes[path] = 0, 0.0
     total = sum(sizes.values())
     remaining = list(rotations)
-    freed = 0
+    would_drop: list[str] = []
     active_abs = os.path.abspath(active_path)
-    while remaining and len(result["deleted"]) < max(0, int(max_unlinks)):
-        aged_out = bool(days) and clock_now - mtimes.get(remaining[0][1], 0.0) > days[0] * 86400
-        if len(remaining) <= cap_rot and total <= cap_bytes and not aged_out:
+    # Telemetry only: which victims the old keep-N deleter would have removed.
+    probe = list(remaining)
+    probe_total = total
+    while probe:
+        aged_out = bool(days) and clock_now - mtimes.get(probe[0][1], 0.0) > days[0] * 86400
+        if len(probe) <= cap_rot and probe_total <= cap_bytes and not aged_out:
             break
-        _, victim = remaining.pop(0)
-        if os.path.abspath(victim) == active_abs:  # defensive; regex excludes it
+        _, victim = probe.pop(0)
+        if os.path.abspath(victim) == active_abs:
             continue
-        try:
-            os.unlink(victim)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            result.setdefault("errors", []).append(f"{os.path.basename(victim)}: {exc}")
-            continue
-        total -= sizes.get(victim, 0)
-        freed += sizes.get(victim, 0)
-        result["deleted"].append(os.path.basename(victim))
+        would_drop.append(os.path.basename(victim))
+        probe_total -= sizes.get(victim, 0)
+    # Binding pressure ratios: rotations vs keep-N and bytes vs byte cap.
+    rot_ratio = (len(remaining) / float(cap_rot)) if cap_rot > 0 else None
+    byte_ratio = retention_stop_write.used_ratio(total, cap_bytes)
+    candidates = [r for r in (rot_ratio, byte_ratio) if r is not None]
+    binding_ratio = max(candidates) if candidates else None
+    hard_over = bool(would_drop) or (len(remaining) > cap_rot) or (total > cap_bytes)
+    family = f"rotation:{result['path']}"
+    if hard_over or (binding_ratio is not None and binding_ratio >= retention_stop_write.AMBER_RATIO):
+        # Represent pressure as used/cap so 70/85 ladders apply; hard_over forces RED stop.
+        pressure_used = 1.0 if hard_over else float(binding_ratio or 0.0)
+        decision = retention_stop_write.evaluate_and_latch(
+            family,
+            used=pressure_used,
+            cap=1.0,
+            reason="ROTATION_CAP_STOP_WRITE" if hard_over else "ROTATION_CAP_PRESSURE",
+            receipt_dir=os.path.dirname(os.path.abspath(active_path)),
+            detail={
+                "would_have_dropped": would_drop[:50],
+                "remaining_rotations": len(remaining),
+                "remaining_bytes": total,
+                "cap": [cap_rot, cap_bytes],
+                "rule": "R25_NEVER_DELETE",
+            },
+            now=clock_now,
+        )
+        if hard_over:
+            decision["stop_write"] = True
+            decision["alarm_level"] = "RED"
+            retention_stop_write.latch(
+                family, reason="ROTATION_CAP_STOP_WRITE", used=pressure_used, cap=1.0,
+                detail={"would_have_dropped": would_drop[:50]}, now=clock_now,
+            )
+    else:
+        decision = {"alarm_level": "GREEN", "stop_write": False, "used_ratio": binding_ratio}
     result.update({
         "remaining_rotations": len(remaining), "remaining_bytes": total,
-        "freed_bytes": freed, "backlog": len(remaining) > cap_rot or total > cap_bytes,
+        "freed_bytes": 0, "backlog": len(remaining) > cap_rot or total > cap_bytes,
         "cap": [cap_rot, cap_bytes],
+        "would_have_dropped": would_drop,
+        "stop_write": bool(decision.get("stop_write") or hard_over),
+        "alarm_level": decision.get("alarm_level") or "GREEN",
+        "used_ratio": decision.get("used_ratio"),
+        "deleted": [],  # never-delete invariant
     })
     if days:
         result["cap_days"] = days[0]
-    if result["deleted"] and receipt_writer is not None:
+    if (result["stop_write"] or result["would_have_dropped"] or result["alarm_level"] != "GREEN") and receipt_writer is not None:
         try:
             receipt_writer(os.path.dirname(os.path.abspath(active_path)), {
                 "schema": "rotation_cap_receipt_v1",
-                "ts": float(now if now is not None else time.time()),
-                "family": result["path"], "deleted": result["deleted"],
-                "freed_bytes": freed, "cap": result["cap"],
-                "remaining_rotations": len(remaining), "rule": "R5",
+                "ts": clock_now,
+                "family": result["path"],
+                "deleted": [],
+                "would_have_dropped": would_drop[:50],
+                "freed_bytes": 0, "cap": result["cap"],
+                "remaining_rotations": len(remaining),
+                "stop_write": result["stop_write"],
+                "alarm_level": result["alarm_level"],
+                "used_ratio": result.get("used_ratio"),
+                "rule": "R25_NEVER_DELETE",
             })
         except Exception:  # noqa: BLE001
             pass
     return result
 
 
-def sweep(root: str, *, families: Iterable[str] | None = None,
-          max_unlinks: int = MAX_UNLINKS_PER_CALL) -> list[dict[str, Any]]:
-    """Background pass over every allow-listed family under ``root``."""
+def sweep(root: str, *, families: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    """Background pass over every allow-listed family under ``root`` (never deletes)."""
     results = []
     for base in sorted(families if families is not None else CAP_ALLOW):
-        res = enforce_cap(os.path.join(root, base), max_unlinks=max_unlinks)
-        if res.get("deleted") or res.get("errors"):
+        res = enforce_cap(os.path.join(root, base))
+        if res.get("would_have_dropped") or res.get("stop_write") or res.get("errors") or (
+                res.get("alarm_level") not in (None, "GREEN")):
             results.append(res)
     return results
 
