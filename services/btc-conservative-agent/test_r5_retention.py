@@ -154,7 +154,7 @@ def test_lifecycle_alarm_ladder_70_85(tmp_path):
 
 def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path, monkeypatch):
     """A7a/F3: UNKNOWN decision → lifecycle receipt alarm_level is RED (never GREEN/UNKNOWN)
-    and alarm/health surfaces treat it as RED (plan F2 half A).
+    and alarm/health surfaces treat it as RED (plan F2 half A / ~line 214).
 
     Fixture: GREEN cap ratio + volume_ratio=None → level_for_ratios UNKNOWN.
     Mutation proof (REAL code): monkeypatch ``retention_stop_write.receipt_alarm_level``
@@ -180,12 +180,31 @@ def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path, monkeypatch):
     assert res["alarm_level"] != "GREEN"
     assert res["stop_write"] is False
     assert r5.lifecycle_bundles_stop_write_latched() is False
-    # Alarm/health surface = lifecycle receipt (F3): written row must be RED, never UNKNOWN/GREEN.
+    # Receipt file (audit surface): written row must be RED, never UNKNOWN/GREEN.
     receipts = list(tmp_path.rglob("cap_receipts.jsonl"))
     assert receipts, "expected lifecycle receipt for RED alarm_level"
     rows = [json.loads(line) for path in receipts for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     life = [row for row in rows if row.get("kind") == "LIFECYCLE_BUNDLE_CAP_PRESSURE_R5"]
     assert life and all(row.get("alarm_level") == "RED" for row in life), life
+    # Alarm/health surface (plan A7a ~214 / ruling 2851ff0650e1): must be RED.
+    # Lifecycle UNKNOWN is escalated for display via receipt_alarm_level; the
+    # operator-visible health card and receipt both publish that RED (never GREEN /
+    # never ambiguous UNKNOWN). Stop-write stays false (F1 / A7b).
+    health_surface = {
+        "alarm_level": res["alarm_level"],
+        "receipt_alarm_level": retention_stop_write.receipt_alarm_level(
+            retention_stop_write.level_for_ratios(0.1, None)
+        ),
+        "receipt_rows_alarm_levels": [row.get("alarm_level") for row in life],
+        "stop_write": res["stop_write"],
+    }
+    assert health_surface["alarm_level"] == "RED"
+    assert health_surface["receipt_alarm_level"] == "RED"
+    assert health_surface["receipt_rows_alarm_levels"]
+    assert all(level == "RED" for level in health_surface["receipt_rows_alarm_levels"])
+    assert health_surface["alarm_level"] != "GREEN"
+    assert health_surface["alarm_level"] != "UNKNOWN"
+    assert health_surface["stop_write"] is False
     # Mutation against the REAL helper cap_lifecycle_bundles calls (not a local stand-in).
     retention_stop_write.clear_latches()
 
@@ -198,8 +217,12 @@ def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path, monkeypatch):
     mut_root = tmp_path / "mut_a7a"
     _bundle(mut_root, "lifecycle_bundles", "lifecycle-", "m1", 100, now - 60)
     mut = r5.cap_lifecycle_bundles(mut_root, max_bytes=1000, now=now)
+    mut_health = {"alarm_level": mut["alarm_level"]}
     with pytest.raises(AssertionError):
         assert mut["alarm_level"] == "RED"
+    with pytest.raises(AssertionError):
+        # Alarm/health surface must also fail on the soft-GREEN / UNKNOWN mutant.
+        assert mut_health["alarm_level"] == "RED"
 
 
 def test_a7b_lifecycle_unknown_alone_does_not_stop_write(tmp_path, monkeypatch):
