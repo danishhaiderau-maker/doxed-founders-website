@@ -1,3 +1,49 @@
+## 30 Oct 2026 — thread_health / monitor_gaps fail-closed (BOT-29)
+
+- **PR:** [#947](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/947) branch `cursor/thread-health-failclosed-2758`
+- **Base:** [#946](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/946) (stacked; rebase onto post-HM #944 tip before freeze push)
+- **Change:** missing `stale_after` on a started loop → `unknown_threshold` / `UNKNOWN_THRESHOLD` RED (never OK)
+- **RK merge order (do not merge):** #945 → #943 → #944 → #946 → #947 → #948; #943+#944 same bundled deploy
+- **B1 loop table** (`WORKER_EXPECTATIONS`; `stale_after = max(3×interval, min_stale)`; bot may tighten heartbeat/pipeline/uptime after merge):
+
+| loop | interval_s | min_stale_s | stale_after_s |
+|------|------------|-------------|---------------|
+| start_websocket | 5 | 120 | 120 |
+| ws_tick_lifecycle_worker | 0.5 | 30 | 30 |
+| protective_exit_worker | 0.25 | 30 | 30 |
+| state_monitor_loop | 1 | 30 | 30 |
+| bbo_refresh_loop | 1 | 60 | 60 |
+| order_book_refresh_loop | 1 | 60 | 60 |
+| ohlcv_refresh_loop | 5 | 120 | 120 |
+| microstructure_capture_loop | 1 | 60 | 60 |
+| xvl_evaluator_thread | 1 | 60 | 60 |
+| gf3_paper_thread / gf3l_paper_thread | 1 | 60 | 60 |
+| _platform_health_loop | 180 | 600 | 600 |
+| ai_shadow_maturation_loop | 5 | 120 | 120 |
+| engine_loop | 1 | 120 | 120 |
+| tick_execution_engine | 0.25 | 30 | 30 |
+| ws_watchdog | 3 | 60 | 60 |
+| analytics_loop | 60 | 0 | 180 |
+| position_manager | 1 | 60 | 60 |
+| ttl_monitor | 30 | 300 | 300 |
+| periodic_pipeline_loop | 30 | 300 | 300 |
+| watchdog_loop | 5 | 120 | 120 |
+| dashboard_http_watchdog_loop | 30 | 120 | 120 |
+| bitfinex_live_reconcile_loop | 30 | 300 | 300 |
+| _platform_relay_connection_keepalive_loop | 30 | 600 | 600 |
+| _live_copy_delivery_loop | 15 | 120 | 120 |
+| heartbeat_loop | 30 | 300 | 300 |
+| runtime_uptime_loop | 60 | 600 | 600 |
+| live_guardian_loop | 1 | 30 | 30 |
+| api_state_cache_refresher | 5 | 900 | 900 |
+| main_supervisor_loop | 60 | 0 | 180 |
+| r5_retention_loop | 600 | 1800 | 1800 |
+
+- **Tests:** real UNKNOWN_THRESHOLD mutation (source token + RED), started⊆monitored, boundary age==limit OK / +ε STALE, `expected=THREAD_HEALTH_MONITORED.keys()` pin
+- **FREEZE** — no merge / deploy / arm
+
+---
+
 ## 30 Oct 2026 — R22 delete ticker stream writers (BOT-28)
 
 - **PR:** [#946](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/946) branch `cursor/r22-retire-ticker-streams-2758`

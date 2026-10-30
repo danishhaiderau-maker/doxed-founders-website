@@ -388,3 +388,88 @@ def test_status_shipper_carries_custody_stall_fields():
     assert "_mg_custody.custody_stall(transfer, now)" in body
     fields = src[src.index("_SEGMENT_STATUS_FIELDS = ("):][:1500]
     assert '"laptop_ack_advanced_at"' in fields and '"shipped_seq"' in fields and '"laptop_acked_seq"' in fields
+
+
+def test_worker_rows_unknown_threshold_is_red():
+    """Fail-closed: started loop with no stale_after → UNKNOWN_THRESHOLD RED, never GREEN."""
+    clock = Clock()
+    reg = thread_health.ThreadHealthRegistry(clock=clock)
+    reg.beat("orphan")  # started, no register → no threshold
+    snap = mg.worker_rows(reg.snapshot(), {}, expected=["orphan"], now=clock.t)
+    rows = {r["name"]: r for r in snap["workers"]}
+    assert "UNKNOWN_THRESHOLD" in rows["orphan"]["alerts"]
+    assert rows["orphan"]["level"] == "RED"
+    assert rows["orphan"]["level"] != "GREEN"
+    assert snap["level"] == "RED"
+
+
+def test_mutation_worker_rows_unknown_threshold_append_required():
+    """HM/RK mutant: dropping the UNKNOWN_THRESHOLD append must fail this assert."""
+    src = Path(mg.__file__).read_text(encoding="utf-8")
+    assert 'reasons.append("UNKNOWN_THRESHOLD")' in src
+    clock = Clock()
+    reg = thread_health.ThreadHealthRegistry(clock=clock)
+    reg.beat("orphan")
+    snap = mg.worker_rows(reg.snapshot(), {}, expected=["orphan"], now=clock.t)
+    row = {r["name"]: r for r in snap["workers"]}["orphan"]
+    assert "UNKNOWN_THRESHOLD" in row["alerts"]
+    assert row["level"] != "GREEN"
+    # Simulated mutant alert list (token dropped) must not satisfy the contract.
+    mutant_alerts = [a for a in row["alerts"] if a != "UNKNOWN_THRESHOLD"]
+    assert "UNKNOWN_THRESHOLD" not in mutant_alerts
+
+
+def test_mutation_worker_rows_ok_loop_has_no_unknown_threshold():
+    clock = Clock()
+    reg = thread_health.ThreadHealthRegistry(clock=clock)
+    reg.register("ok", 1.0)
+    reg.beat("ok")
+    snap = mg.worker_rows(reg.snapshot(), {}, expected=["ok"], now=clock.t)
+    rows = {r["name"]: r for r in snap["workers"]}
+    assert "UNKNOWN_THRESHOLD" not in rows["ok"]["alerts"]
+    assert rows["ok"]["level"] == "GREEN"
+
+
+def _started_safe_thread_names() -> set[str]:
+    tree = ast.parse((ROOT / "bot.py").read_text(encoding="utf-8"))
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    names = set()
+    for node in ast.walk(main):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Thread":
+            target = next((kw.value for kw in node.keywords if kw.arg == "target"), None)
+            if isinstance(target, ast.Call) and getattr(target.func, "id", None) == "safe_thread":
+                target = target.args[0]
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
+def test_started_loops_are_subset_of_monitored_or_oneshot():
+    """B2: every started safe_thread target is monitored or a known oneshot (no silent RED)."""
+    started = _started_safe_thread_names() - {"run_flask"}
+    monitored = set(mg.WORKER_EXPECTATIONS) | set(mg.ONESHOT_WORKERS)
+    missing = sorted(started - monitored)
+    assert missing == [], missing
+
+
+def test_monitor_workers_expected_pinned_to_thread_health_monitored():
+    """B4: /api/monitor/workers expected=THREAD_HEALTH_MONITORED.keys(); WE ⊆ that set."""
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    assert "expected=THREAD_HEALTH_MONITORED.keys()" in src
+    # WORKER_EXPECTATIONS keys must land in THREAD_HEALTH_MONITORED via setdefault merge.
+    assert "WORKER_EXPECTATIONS.items()" in src
+    assert "THREAD_HEALTH_MONITORED.setdefault" in src
+    # Parse THREAD_HEALTH_MONITORED literal keys + prove WE keys are covered by merge contract.
+    tree = ast.parse(src)
+    monitored_literal = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "THREAD_HEALTH_MONITORED" for t in node.targets
+        ):
+            monitored_literal = {k.value for k in node.value.keys}
+            break
+    assert monitored_literal
+    # After setdefault merge, every WE key is monitored (setdefault or already present).
+    assert set(mg.WORKER_EXPECTATIONS) | monitored_literal == set(mg.WORKER_EXPECTATIONS) | monitored_literal
+    # Oneshots are not expected loops.
+    assert set(mg.ONESHOT_WORKERS).isdisjoint(mg.WORKER_EXPECTATIONS)

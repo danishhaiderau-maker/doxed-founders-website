@@ -99,6 +99,7 @@ def worker_rows(threads: Mapping[str, Mapping], oneshots: Mapping[str, Mapping] 
             "expected_interval_s": row.get("interval_sec"),
             "stale_after_s": row.get("stale_after_sec"),
             "stale": bool(row.get("stale")),
+            "unknown_threshold": bool(row.get("unknown_threshold")),
         }
         reasons = []
         if not row:
@@ -107,13 +108,21 @@ def worker_rows(threads: Mapping[str, Mapping], oneshots: Mapping[str, Mapping] 
             reasons.append("UNMONITORED")
         elif not entry["started"]:
             reasons.append("NOT_STARTED")
-        if entry["stale"]:
+        # Fail-closed: missing stale_after is UNKNOWN_THRESHOLD (never OK), same as streams.
+        if entry.get("unknown_threshold") or (
+            row and entry.get("stale_after_s") is None and (entry["monitored"] or entry["started"])
+        ):
+            reasons.append("UNKNOWN_THRESHOLD")
+        if entry["stale"] and "UNKNOWN_THRESHOLD" not in reasons:
             reasons.append("STALE")
         if entry["alive"] is False:
             reasons.append("DEAD")
         restart_age = entry["last_restart_age_s"]
         if entry["restarts"] and restart_age is not None and restart_age <= 900:
             reasons.append("RESTARTED_15M")
+        # De-dupe while preserving order
+        seen = set()
+        reasons = [r for r in reasons if not (r in seen or seen.add(r))]
         entry["alerts"] = reasons
         entry["level"] = RED if reasons else GREEN
         if reasons:
