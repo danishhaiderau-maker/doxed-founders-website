@@ -40,6 +40,36 @@ REASON_UNPROVEN = "R17_UNPROVEN"
 REASON_UNVERIFIED = "R17_LIST_UNVERIFIED"
 REASON_STAMPED = "R17_STAMPED"
 REASON_PRECOUNT = "R17_PRECOUNT"
+# 30 Oct 2026 19:59 Australia/Sydney: #929/#930 deployed. Rows from that moment
+# that were not priced by this fix are non-countable. Rows are not deleted.
+REASON_INTEGRITY_WINDOW = "INTEGRITY_GATE_WINDOW_20261030"
+REASON_NO_BOOK_RETRY = "ENTRY_NO_BOOK_RETRY_UNPROVEN"
+INTEGRITY_WINDOW_FROM_TS = 1793350740.0
+
+
+def _row_times(row) -> list:
+    times = []
+    blobs = [row]
+    for key in ("entry_fill_sim", "fill_sim", "event_timestamps"):
+        blob = row.get(key)
+        if isinstance(blob, dict):
+            blobs.append(blob)
+    for blob in blobs:
+        for key in ("entry_ts", "signal_ts", "signal_created_ts", "ts", "close_ts", "exit_ts", "fill_ts"):
+            n = _num(blob.get(key))
+            if n is not None and n > 1_000_000_000:
+                times.append(n)
+    return times
+
+
+def _flag(row, name) -> bool:
+    if _truthy(row.get(name)):
+        return True
+    for key in ("entry_fill_sim", "fill_sim"):
+        blob = row.get(key)
+        if isinstance(blob, dict) and _truthy(blob.get(name)):
+            return True
+    return False
 
 
 def _ids_from(payload) -> set:
@@ -292,6 +322,11 @@ def non_countable_reason(row, *, ids=None, load_errors=None):
     failed = proof_failures(row)
     if failed:
         parts.append(REASON_UNPROVEN + ":" + "|".join(failed))
+    if _flag(row, "entry_no_book_retried"):
+        parts.append(REASON_NO_BOOK_RETRY)
+    times = _row_times(row)
+    if times and min(times) >= INTEGRITY_WINDOW_FROM_TS and not _flag(row, "integrity_entry_ok"):
+        parts.append(REASON_INTEGRITY_WINDOW)
     out = []
     for part in parts:
         if part not in out:

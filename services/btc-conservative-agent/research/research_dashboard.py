@@ -40,7 +40,6 @@ from research import archive_history_view as _archive_history_view
 from research import dashboard_sections as _dashboard_sections
 from research import research_api_cache as _research_cache
 from research import r3_quarantine as _r3_quarantine
-from research.generation_receipt import _is_retired_required_study_error
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -3487,21 +3486,14 @@ def api_status():
     freshness = _generation_freshness_meta(manifest)
     source_revision_parity = freshness["revision_parity"]
     required_report_status = manifest.get("required_report_status") or {}
-    # Parity with generation_receipt (#918): declared R17 retirements stay visible as
-    # retired/AMBER debt and must not hard-fail :9001 required_reports_ok / analyzer.reports.
-    required_report_retired = sorted(
-        str(name)
-        for name, status in required_report_status.items()
-        if isinstance(status, dict)
-        and status.get("generation_error")
-        and _is_retired_required_study_error(str(status.get("generation_error") or ""))
-    )
-    retired_required_set = set(required_report_retired)
+    # Fail closed (#918/#922 reverted). A generation_error is a required-report failure.
+    # The retired 1s library is handled by writing an honest coverage report, not by
+    # ignoring the error.
+    required_report_retired: list[str] = []
     required_report_failures = sorted(
         str(name)
         for name, status in required_report_status.items()
-        if name not in retired_required_set
-        and (
+        if (
             not isinstance(status, dict)
             or status.get("available_in_generation") is not True
             or bool(status.get("generation_error"))

@@ -278,9 +278,9 @@ def test_status_soft_excludes_r17_retired_required_report(monkeypatch):
     )
     payload = client.get("/api/status").get_json()
 
-    assert payload["required_reports_ok"] is True
-    assert payload["required_report_failures"] == []
-    assert payload["required_report_retired"] == ["evidence_coverage_triage_report.json"]
+    assert payload["required_reports_ok"] is False
+    assert payload["required_report_failures"] == ["evidence_coverage_triage_report.json"]
+    assert payload["required_report_retired"] == []
 
 
 def test_status_r17_soft_exclude_keeps_real_required_errors_hard_fail(monkeypatch):
@@ -310,7 +310,9 @@ def test_status_r17_soft_exclude_keeps_real_required_errors_hard_fail(monkeypatc
     payload = client.get("/api/status").get_json()
 
     assert payload["required_reports_ok"] is False
-    assert payload["required_report_failures"] == ["best_policy_research_report.json"]
-    assert payload["required_report_retired"] == ["evidence_coverage_triage_report.json"]
-    assert "evidence_coverage_triage_report.json" not in payload["required_report_failures"]
+    assert payload["required_report_failures"] == [
+        "best_policy_research_report.json",
+        "evidence_coverage_triage_report.json",
+    ]
+    assert payload["required_report_retired"] == []
 

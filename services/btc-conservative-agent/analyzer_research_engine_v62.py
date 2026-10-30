@@ -20929,10 +20929,35 @@ def _write_evidence_coverage_triage_report(canonical_root, binding_status, conse
         raise ValueError("EVIDENCE_COVERAGE_ROOT_NOT_CANONICAL")
     from research.r3_quarantine import is_retired_payload
     if is_retired_payload(conservative_status):
-        # RK R1 ruling (25 Oct 2026): honest interim error.  The conservative results this report reconciles
-        # are retired (R17, 1 s evaluate_limit_fill) until rebuilt on book_limit_entry; the retired stub carries
-        # no generation, which used to surface as the misleading EVIDENCE_COVERAGE_GENERATION_MISMATCH.
-        raise ValueError("CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17: evidence coverage awaits the book_limit_entry rebuild")
+        # The 1s limit-fill library is retired (R17). Write the coverage report from V3
+        # ledger counts and say the terminal library is absent. Do not raise a marker
+        # that a status route can ignore (#918/#922), and do not wait on book_limit_entry.
+        source_counts = ledger_source_counts(root / "v3")
+        report = build_evidence_coverage_triage_report(
+            {"bindings": []}, (), source_counts=source_counts,
+            archive_summary={"status": "RETIRED_SOURCE_ABSENT"},
+        )
+        report["conservative_source_status"] = "CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17"
+        report["coverage_basis"] = "V3_LEDGER_COUNTS_ONLY"
+        report["terminal_library"] = "ABSENT"
+        report["note"] = (
+            "CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17: the 1s limit-fill library is retired. "
+            "This report is V3 ledger counts only."
+        )
+        material = dict(report)
+        material.pop("report_payload_sha256", None)
+        from research.policy_evidence_schema import canonical_json
+        report["report_payload_sha256"] = hashlib.sha256(
+            canonical_json(material).encode("utf-8")
+        ).hexdigest()
+        target = Path(EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return report, _atomic_mirror_analyzer_report(target.name)
     binding_generation = binding_status.get("generation") or {}
     conservative_generation = conservative_status.get("generation") or {}
     if not binding_generation or binding_generation != conservative_generation:
@@ -21755,6 +21780,15 @@ def _record_ledger_reconciliation(raw, cohort, quarantine, session, session_trad
             lanes=CURRENT_RESEARCH_LANES, epoch_id=str((session or {}).get("collector_v22_epoch_id") or ""),
             epoch_cutoff_ts=cutoff,
         )
+        if V3_READ_AUTHORITY_FAILURES:
+            recon = _CURRENT_LEDGER_RECONCILIATION
+            recon["level"] = "RED"
+            recon["analyzer_cohort_unreadable"] = True
+            detail = "; ".join(f"{k}: {v}" for k, v in list(V3_READ_AUTHORITY_FAILURES.items())[:4])
+            recon.setdefault("reasons", []).append(
+                f"v3_read_authority refused the ledger read ({detail[:240]}). "
+                "A zero analyzer cohort is not an empty book."
+            )
     except Exception as exc:
         _CURRENT_LEDGER_RECONCILIATION = {
             "schema": "ledger_reconciliation_v1", "level": "RED", "lanes": list(CURRENT_RESEARCH_LANES),

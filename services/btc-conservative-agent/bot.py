@@ -7483,12 +7483,38 @@ def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
     if isinstance(cached, dict):
         return cached
     res = _paper_lane_entry_core(order, now, force=force)
+    if isinstance(res, dict) and res.get("status") in ("FILLED", "PARTIAL") and res.get("price") \
+            and not res.get("entry_no_book_retried"):
+        res["integrity_entry_ok"] = True
     return _paper_stamp_pool(res, str(order.get("research_lane") or "").upper(), "entry")
 
 
 # BTC-476: entry IOC fill-second book often lands 1-2 s late (same race exit retries). Cap retries so a true
 # missing book still terminates as PAPER_IOC_REJECT_NO_BOOK before / at the entry TTL.
 ENTRY_NO_BOOK_RETRY_S = 3.0
+
+
+def _entry_quote_age_fresh(order: dict) -> bool:
+    """True only when the recorded signal-time quote age is finite and at most 2 seconds."""
+    if order.get("entry_quote_stale"):
+        return False
+    try:
+        age = float(order.get("entry_quote_selected_age_s"))
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= age <= 2.0
+
+
+def _entry_quote_latch_skips(order: dict, signal_ts: float) -> bool:
+    """Latch skips the gate only after a fresh pass whose signal-second book row is gone."""
+    if order.get("entry_quote_gate_ok") is not True or not _entry_quote_age_fresh(order):
+        return False
+    import paper_fill as _pf
+    try:
+        book = _pf.book10l_at(float(signal_ts))
+    except Exception:  # noqa: BLE001
+        book = None
+    return book is None
 
 
 def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
@@ -7506,13 +7532,15 @@ def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
         return None
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     order.setdefault("requested_qty", order.get("qty"))
-    # F2 quote gate is a one-shot signal-time check. Latch a pass so long MAKER_REST (B1/B2, 600-1200 s)
-    # does not re-fail when BookTail.keep=600 drops the signal-second row (~599 s rest -> false QUOTE_STALE).
-    if order.get("entry_quote_gate_ok"):
+    # F2 quote gate is a one-shot signal-time check. A recorded fresh pass may skip a later
+    # re-check only when the signal-second book row is gone (BookTail eviction). If that row
+    # is still present, the gate runs again: a stale quote cannot ride a latch.
+    if _entry_quote_latch_skips(order, signal_ts):
         stale = None
     else:
+        order["entry_quote_gate_ok"] = False
         stale = _paper_entry_quote_gate(order, lane, direction, signal_ts)
-        if not stale:
+        if not stale and _entry_quote_age_fresh(order):
             order["entry_quote_gate_ok"] = True
     if stale:
         # REALISM_V2 F2: the tile's trigger source was older than 2 s at the signal -> the entry is skipped (never
@@ -7529,20 +7557,34 @@ def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
         return _paper_entry_maker_rest(order, direction, signal_ts, delay_s, delay_source, model, now, force=force)
     walk = order.get("_entry_walk_result")
     if not isinstance(walk, dict):
-        walk = _tf.entry_fill(direction, float(order.get("requested_qty") or order.get("qty") or 0),
-                              signal_ts, delay_s, delay_source)
+        qty = float(order.get("requested_qty") or order.get("qty") or 0)
+        if order.get("_entry_no_book_retry"):
+            # A previous miss: price only the send+delay book. Do not reuse the signal quote.
+            walk = _tf.entry_fill_at_send_delay(direction, qty, signal_ts, delay_s, delay_source)
+        else:
+            walk = _tf.entry_fill(direction, qty, signal_ts, delay_s, delay_source)
         if walk.get("status") == "REJECT_NO_BOOK":
             if force:
                 return walk  # a forced (immediate) look is not cached: the gate path may still price it later
-            # Do not cache on first miss: fill-second 1s book often lands after delay (CTRL/GS IOC race).
-            # Keep pending until grace / entry TTL, then cache REJECT_NO_BOOK (PAPER_IOC_REJECT_NO_BOOK).
-            fill_ts = signal_ts + float(delay_s)
-            grace_until = fill_ts + float(ENTRY_NO_BOOK_RETRY_S)
-            entry_deadline = float(order.get("entry_expires_ts") or grace_until)
-            if now < min(grace_until, entry_deadline):
-                return None
-            order["paper_fill_result"] = walk
-            return walk
+            order["_entry_no_book_retry"] = True
+            retried = walk if order.get("_entry_no_book_retry") and walk.get("priced_at") == "SEND_PLUS_DELAY" \
+                else _tf.entry_fill_at_send_delay(direction, qty, signal_ts, delay_s, delay_source)
+            if retried.get("status") != "REJECT_NO_BOOK":
+                retried["entry_no_book_retried"] = True
+                walk = retried
+            else:
+                fill_ts = float(retried.get("fill_target_ts") or (signal_ts + float(delay_s)))
+                grace_until = fill_ts + float(ENTRY_NO_BOOK_RETRY_S)
+                entry_deadline = float(order.get("entry_expires_ts") or grace_until)
+                if now < min(grace_until, entry_deadline):
+                    return None
+                order["paper_fill_result"] = retried
+                return retried
+        elif walk.get("status") in ("FILLED", "PARTIAL") and walk.get("price"):
+            if order.get("_entry_no_book_retry"):
+                walk["entry_no_book_retried"] = True
+            else:
+                walk["integrity_entry_ok"] = True
         order["_entry_walk_result"] = walk
     if model.get("entry_order_model") != "WALK_THEN_REST" or walk.get("status") == "FILLED" \
             or walk.get("cap_px") is None or walk.get("fill_ts") is None:
@@ -8199,6 +8241,10 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
                               (round(float(efs["price_age_s"]) * 1000) if efs.get("price_age_s") is not None else None))
                              if paper else None,
         "entry_price_stale": (bool(efs.get("price_stale")) if efs.get("price_stale") is not None else None) if paper else None,
+        "entry_no_book_retried": True if efs.get("entry_no_book_retried") else False,
+        "integrity_entry_ok": True if efs.get("integrity_entry_ok") else False,
+        "elapsed_delay_s": efs.get("elapsed_delay_s"),
+        "priced_at": efs.get("priced_at"),
         # RK/HM #851: the entry book row's MEASURED receive time (r17 BOOK_RECEIVE_TS_MISSING when absent)
         **_book_receive_row_fields("entry", efs if paper else None),
     }
@@ -45757,7 +45803,14 @@ def api_analyzer_summary():
     """Proxy to research dashboard /api/summary — full-session PnL/WR/trade count."""
     if (os.getenv("FLY_APP_NAME") or "").strip():
         if _active_analyzer_mirror_dir() is None:
-            resp = jsonify({"ok": False, "error": _ANALYZER_BUNDLE_NO_VALID})
+            # Fail closed: no validated bundle is not a successful empty summary.
+            # cohort_readable is false so a 0-row mirror is not treated as the book.
+            resp = jsonify({
+                "ok": False,
+                "error": _ANALYZER_BUNDLE_NO_VALID,
+                "analyzer_mirror": "ABSENT",
+                "cohort_readable": False,
+            })
             resp.headers["Cache-Control"] = "no-store"
             return resp, 503
         return _external_analyzer_response("summary")
@@ -62075,13 +62128,13 @@ def main():
     # DISK-CAP E4b/E4c + v3/.locks (R5): never custody/ack-gated.
     threading.Thread(target=safe_thread(r5_retention_loop), daemon=True,
                      name="r5_retention").start()
-    # R17 (23 Oct): the future-path worker subprocess is stopped (HM R17 (B)1).
-    # It wrote LIVE_1S future-path market_segments from L1 microstructure,
-    # which no fill, exit or tile decision reads.
-    with state_lock:
-        state["all_opportunity_future_path_evidence"] = {
-            "status": "disabled: R17", "retired": "R17", "worker_started": False,
-        }
+    # The loop is started so /api/monitor/workers can see it (#916 had dropped it
+    # from expectations instead). The worker itself stays R17-retired: it writes
+    # no market_segment and prices nothing (FUTURE_PATH_WORKER_RETIRED_R17).
+    threading.Thread(
+        target=safe_thread(all_opportunity_future_path_evidence_loop),
+        name="future-path-evidence", daemon=True,
+    ).start()
     threading.Thread(target=safe_thread(position_manager), daemon=True).start()
     threading.Thread(target=retired_tile_boundary_worker, daemon=True).start()
     threading.Thread(target=safe_thread(ttl_monitor), daemon=True).start()

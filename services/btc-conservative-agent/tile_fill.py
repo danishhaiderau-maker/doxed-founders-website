@@ -79,6 +79,43 @@ def entry_fill(direction: str, qty: float, signal_ts: float, delay_s, delay_sour
     return {**res, "cap_px": cap, "ioc_cap_bp": IOC_CAP_BP}
 
 
+def entry_fill_at_send_delay(direction: str, qty: float, signal_ts: float, delay_s, delay_source: str) -> dict:
+    """IOC retry price: the book at signal + delay, walked for the full requested size.
+
+    The cap and the walk both come from that fill-time book. The signal-time quote is not
+    a price. ``elapsed_delay_s`` is fill_ts - signal_ts; ``price_age_s`` is the pricer's
+    age of that book row. A missing fill-time book is REJECT_NO_BOOK.
+    """
+    try:
+        raw = float(delay_s)
+    except (TypeError, ValueError):
+        raw = paper_fill.DEFAULT_DELAY_S
+    delay = max(paper_fill.MIN_DELAY_S, raw)
+    target = float(signal_ts) + delay
+    book = paper_fill.book10l_at(target)
+    levels = (book or {}).get("a" if str(direction).upper() == "LONG" else "b") or []
+    try:
+        touch = float(levels[0][0])
+    except (IndexError, TypeError, ValueError):
+        touch = None
+    base = {"fill_model": paper_fill.FILL_MODEL, "fill_model_version": paper_fill.FILL_MODEL_VERSION,
+            "leg": "entry", "delay_s": round(delay, 3), "delay_source": delay_source,
+            "signal_ts": float(signal_ts), "fill_target_ts": target, "priced_at": "SEND_PLUS_DELAY",
+            "signal_quote_used": False, "elapsed_delay_s": round(delay, 3)}
+    if touch is None:
+        return {**base, "status": "REJECT_NO_BOOK", "price": None, "filled_qty": 0.0, "price_source": None,
+                "cap_px": None}
+    k = IOC_CAP_BP / 1e4
+    cap = touch * (1 + k) if str(direction).upper() == "LONG" else touch * (1 - k)
+    res = price_entry({"side": str(direction).upper(), "qty": qty, "signal_ts": float(signal_ts),
+                       "delay_s": delay, "delay_source": delay_source, "ioc_cap_px": cap})
+    elapsed = round(delay, 3)
+    if res.get("fill_ts") is not None:
+        elapsed = round(float(res["fill_ts"]) - float(signal_ts), 3)
+    return {**res, **base, "cap_px": cap, "ioc_cap_bp": IOC_CAP_BP, "elapsed_delay_s": elapsed,
+            "signal_quote_used": False}
+
+
 def exit_fill(direction: str, qty: float, trigger_ts: float, delay_s, delay_source: str) -> dict:
     return price_exit({"side": str(direction).upper(), "open_qty": qty},
                       {"trigger_ts": float(trigger_ts), "delay_s": delay_s, "delay_source": delay_source})
