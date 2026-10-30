@@ -654,11 +654,14 @@ class RegimeComparator:
 # ----------------------------------------------------------------------------
 # A7 shipper custody
 # ----------------------------------------------------------------------------
-# HM C5 / RK (23 Oct): under R5 the store is pruned by cap/age regardless of the laptop, so a laptop ACK that does
-# not advance while shipped_seq is ahead means data loss. One RED, keyed on laptop_acked_seq vs shipped_seq and the
-# time the ACK last advanced; never on prune_mode, never a gate. (The laptop polls every ~5 min; 2 h is a real stall.)
-LAPTOP_ACK_STALL_RED_SEC = 2 * 3600.0
-CUSTODY_STALL_RED_SEC = LAPTOP_ACK_STALL_RED_SEC  # back-compat alias
+# BTC-480 / HM (30 Oct): false GREEN when laptop_acked_seq kept advancing while custody_through_seq
+# stayed stuck (live: custody_through_seq=5093 since ~24 Oct, shipped_seq≈9.5k). Stall clock is keyed on
+# custody_through_seq advancing (CustodyLag observes seq; single-shot falls back to custody_received_at).
+# RED alert is the shipped-minus-custody lag after CUSTODY_STALL_RED_SEC with no custody seq advance.
+# Never on prune_mode, never a gate. laptop_ack_* fields stay informational / back-compat aliases.
+CUSTODY_STALL_RED_SEC = 2 * 3600.0
+LAPTOP_ACK_STALL_RED_SEC = CUSTODY_STALL_RED_SEC  # back-compat alias
+SHIPPED_MINUS_CUSTODY_LAG = "SHIPPED_MINUS_CUSTODY_LAG"
 
 
 def _iso_ts(value):
@@ -673,50 +676,73 @@ def _iso_ts(value):
         return None
 
 
-def custody_stall(transfer: Mapping | None, now: float) -> dict:
-    """Laptop-ACK stall (HM C5): RED when the ACK has not advanced for LAPTOP_ACK_STALL_RED_SEC while shipped_seq
-    is ahead of it. ``laptop_ack_advanced_at`` is written by the shipper's ACK poll (status.json, survives restarts).
-    Independent of prune_mode (the custody-gated prune is retired, HM C4). Alert only, never a gate.
-
-    The ``custody_*`` keys are kept for /health readers; they now describe the laptop ACK."""
-    t = dict(transfer or {})
-    ts = _iso_ts(t.get("laptop_ack_advanced_at"))
-    shipped, acked = t.get("shipped_seq"), t.get("laptop_acked_seq")
+def _seq_int(value) -> int | None:
+    if value is None:
+        return None
     try:
-        behind = shipped is not None and int(shipped) > int(acked or 0)
+        return int(value)
     except (TypeError, ValueError):
-        behind = False
+        return None
+
+
+def custody_stall(transfer: Mapping | None, now: float, *, seq_advanced_at: float | None = None) -> dict:
+    """Custody seq stall: RED when shipped_seq - custody_through_seq > 0 and custody_through_seq has not
+    advanced for CUSTODY_STALL_RED_SEC. Stall clock prefers ``seq_advanced_at`` (from CustodyLag when the
+    seq last increased); single-shot /health uses ``custody_received_at`` (receipt time for that through
+    seq). Never keys on laptop_ack_advanced_at or prune_mode. Alert only, never a gate."""
+    t = dict(transfer or {})
+    shipped = _seq_int(t.get("shipped_seq"))
+    custody = _seq_int(t.get("custody_through_seq"))
+    lag = (shipped - custody) if (shipped is not None and custody is not None) else None
+    behind = lag is not None and lag > 0
+    ts = seq_advanced_at if seq_advanced_at is not None else _iso_ts(t.get("custody_received_at"))
     stalled_s = round(max(0.0, now - ts), 1) if (ts is not None and behind) else (0.0 if ts is not None else None)
     reason = None
-    if behind and stalled_s is not None and stalled_s > LAPTOP_ACK_STALL_RED_SEC:
-        reason = "LAPTOP_ACK_NOT_ADVANCING"
+    if behind and stalled_s is not None and stalled_s > CUSTODY_STALL_RED_SEC:
+        reason = SHIPPED_MINUS_CUSTODY_LAG
     return {"custody_last_advanced_utc": (None if ts is None else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))),
             "custody_stalled_s": stalled_s,
             "custody_stall_reason": reason,
-            "laptop_ack_stall_red": reason is not None,
+            "custody_lag_segments": lag,
+            "custody_stall_red": reason is not None,
+            "laptop_ack_stall_red": reason is not None,  # back-compat alias for /health readers
             "custody_last_error": (("SHIPPER: " + str(t.get("last_error")))[:200] if t.get("last_error") else None)}
 
 
 class CustodyLag:
-    """Laptop-ACK lag for /api/monitor/shipper: GREEN, or a single RED LAPTOP_ACK_NOT_ADVANCING (HM C5)."""
+    """Shipper custody lag for /api/monitor/shipper: GREEN, or RED SHIPPED_MINUS_CUSTODY_LAG (BTC-480)."""
 
     def __init__(self, clock=time.time):
         self._clock = clock
         self.samples: deque = deque(maxlen=120)
+        self._last_custody_seq: int | None = None
+        self._seq_advanced_at: float | None = None
 
     def observe(self, transfer: Mapping | None) -> dict:
         transfer = dict(transfer or {})
         now = float(self._clock())
         acked, shipped = transfer.get("laptop_acked_seq"), transfer.get("shipped_seq")
+        custody = _seq_int(transfer.get("custody_through_seq"))
+        if custody is not None:
+            if self._last_custody_seq is None:
+                self._last_custody_seq = custody
+                # Bootstrap from the receipt time for the stuck through-seq when present.
+                self._seq_advanced_at = _iso_ts(transfer.get("custody_received_at")) or now
+            elif custody > self._last_custody_seq:
+                self._last_custody_seq = custody
+                self._seq_advanced_at = now
         try:
-            lag = int(shipped) - int(acked or 0) if shipped is not None else None
+            ack_lag = int(shipped) - int(acked or 0) if shipped is not None else None
         except (TypeError, ValueError):
-            lag = None
-        if lag is not None and (not self.samples or now - self.samples[-1][0] >= 60):
-            self.samples.append((now, lag))
-        stall = custody_stall(transfer, now)
-        alerts = ["LAPTOP_ACK_NOT_ADVANCING"] if stall["laptop_ack_stall_red"] else []
+            ack_lag = None
+        stall = custody_stall(transfer, now, seq_advanced_at=self._seq_advanced_at)
+        sample_lag = stall.get("custody_lag_segments")
+        if sample_lag is None:
+            sample_lag = ack_lag
+        if sample_lag is not None and (not self.samples or now - self.samples[-1][0] >= 60):
+            self.samples.append((now, sample_lag))
+        alerts = [SHIPPED_MINUS_CUSTODY_LAG] if stall["custody_stall_red"] else []
         return {"schema": SHIPPER_SCHEMA, **stall, "shipped_seq": shipped, "laptop_acked_seq": acked,
-                "ack_lag_segments": lag, "custody_through_seq": transfer.get("custody_through_seq"),
+                "ack_lag_segments": ack_lag, "custody_through_seq": transfer.get("custody_through_seq"),
                 "prune_mode": "off", "retention": "R5_AGE_CAP_NO_CUSTODY_GATE",
                 "alerts": alerts, "level": RED if alerts else GREEN}
