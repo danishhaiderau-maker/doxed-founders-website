@@ -157,25 +157,44 @@ def test_status_and_ready_expose_thread_health():
 def test_started_loop_without_threshold_is_unknown_threshold():
     """Fail-closed: beat/bind without register → unknown_threshold, never OK/not-stale."""
     clock, reg = clocked()
-    # beat without register creates a started row with stale_after_sec=None
     reg.beat("orphan")
     snap = reg.snapshot()
     row = snap["orphan"]
     assert row["started"] is True
     assert row["stale_after_sec"] is None
     assert row["unknown_threshold"] is True
-    assert row["stale"] is True  # treated as unhealthy
+    assert row["stale"] is True
     assert row["monitored"] is False
-    # Mutation: old fail-open would set stale=False when stale_after is None
-    stale_after = None
-    started = True
-    alive = True
-    reference_age = 1.0
-    old_stale = bool(
-        stale_after is not None and started
-        and (alive is False or (reference_age is not None and reference_age > stale_after))
-    )
-    assert old_stale is False and row["stale"] is True and row["stale"] != old_stale
+
+
+def test_mutation_unknown_threshold_flag_required_in_snapshot_source():
+    """HM mutant: dropping ``unknown_threshold = bool(started and stale_after is None)`` fails CI."""
+    src = Path(th.__file__).read_text(encoding="utf-8")
+    assert "unknown_threshold = bool(started and stale_after is None)" in src
+    assert "unknown_threshold" in src.split("stale = bool(", 1)[1].split(")", 1)[0]
+    clock, reg = clocked()
+    reg.beat("orphan")
+    assert reg.snapshot()["orphan"]["unknown_threshold"] is True
+    assert reg.snapshot()["orphan"]["stale"] is True
+
+
+def test_boundary_age_equal_stale_after_not_stale_plus_eps_is():
+    """B3: age == stale_after is not stale; stale_after + ε is stale."""
+    clock, reg = clocked()
+    reg.register("loop", 10.0)  # stale_after = 3 * 10 = 30
+    reg.bind("loop", thread=threading.current_thread())
+    reg.beat("loop")
+    limit = reg.snapshot()["loop"]["stale_after_sec"]
+    assert limit == 30.0
+    clock["now"] += limit  # age == stale_after
+    snap = reg.snapshot()
+    assert snap["loop"]["last_tick_age_sec"] == limit
+    assert snap["loop"]["stale"] is False
+    assert snap["loop"]["unknown_threshold"] is False
+    clock["now"] += 0.001  # ε past the limit
+    snap2 = reg.snapshot()
+    assert snap2["loop"]["stale"] is True
+    assert snap2["loop"]["last_tick_age_sec"] > limit
 
 
 def test_mutation_registered_loop_still_uses_stale_after_limit():
