@@ -51,14 +51,19 @@ def test_absent_and_valid_fences_remain_distinct(tmp_path):
         assert_local_generation_available(tmp_path, stage="fixture")
 
 
-# Linux CI pwsh cold-start can exceed 15s; sibling EncodedCommand tests use 30+.
-# [absent] is first in the parametrize list and previously absorbed TimeoutExpired
-# (returncode -9) while later shapes passed — raise budget + warm once per module.
-_PWSH_TIMEOUT_SEC = 60
+# R23 restore (#913): keep the pre-weaken EncodedCommand budget at 15s.
+# Module warm-up + telemetry opt-out from #913 stay as CI reliability helpers
+# (do not raise the assertion timeout); both need RK review on this head.
+_PWSH_TIMEOUT_SEC = 15
 _PWSH_ENV = {
     "POWERSHELL_TELEMETRY_OPTOUT": "1",
     "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
 }
+
+
+def test_pwsh_fence_parity_timeout_stays_at_pre_913_budget():
+    """R23 pin: #913 raised this to 60; FREEZE item (4) restores 15."""
+    assert _PWSH_TIMEOUT_SEC == 15
 
 
 @pytest.fixture(scope="module")
