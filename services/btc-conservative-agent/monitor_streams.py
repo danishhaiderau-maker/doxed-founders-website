@@ -20,10 +20,8 @@ STREAMS = {
     "liquidations": "liquidations.jsonl",
     "cross_venue_tape": "cross_venue_tape_1m.jsonl",       # spot + other venues
     "book_tape_1s": "market_microstructure_1s.jsonl",      # 1 s Bitfinex book/trade tape
-    "fill_markouts": "fill_markouts.jsonl",
     "taker_counterfactuals": "taker_signal_counterfactuals.jsonl",  # RETIRED (R17/R22 writer deleted)
     "shadow_exit_paths": "shadow_exit_paths.jsonl",                # RETIRED (R17/R22 recorder deleted)
-    "ai_shadow_challengers": "ai_shadow_challengers.jsonl",
     "runtime_telemetry": "runtime_telemetry_1m.jsonl",
     "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
     # RETIRED DISLOC / DISLOC-FOI ledgers (Tiles 6/7 removed 23 Oct 2026, R9): no writer;
@@ -39,7 +37,6 @@ STREAMS = {
     # DATA-GAPS-20261012 (Strategist c, g)
     "bfx_deriv_status_1s": "bfx_deriv_status_1s.jsonl",    # Bitfinex funding / mark / OI, 1 s
     "bfx_ws_events": "bfx_ws_events.jsonl",                # Bitfinex WS events + heartbeats (incl. trades hb), recv time r
-    "xvp_shadow_signals": "xvp_shadow_signals.jsonl",      # cross-venue premium shadow triggers/outcomes
 }
 
 # Row timestamp keys tried in order (seconds, epoch UTC) for since/until filtering.
@@ -56,7 +53,6 @@ KEY_FIELDS = {
     "venue_bbo_lighter_paradex": ("m", "lighter", "paradex"),
     "bfx_deriv_status_1s": ("s", "mark", "fund_cur", "oi"),
     "bfx_ws_events": ("r", "ev"),
-    "xvp_shadow_signals": ("evaluated_ts", "side", "premium_dev_bp"),
     "liquidations": ("ts", "venue", "liq_side"),
     "runtime_telemetry": ("ts",),
     "dyn_regime_minutes": ("minute_ts", "rv15_bp", "drift15_bp"),
@@ -81,10 +77,8 @@ STALE_AFTER_SEC = {
 # R17 / HM / R22: ticker/L1-priced or dead writers. No STALE_AFTER_SEC entry.
 # Value = unix ts after which a new row is resurrection (RED). Quiet retired → RETIRED.
 RETIRED_STREAMS: dict[str, float] = {
-    # HM/RK 30 Oct: ticker/L1-priced — status RETIRED (writers may still exist; resurrection RED).
-    "fill_markouts": 1793359800.0,
-    "xvp_shadow_signals": 1793359800.0,
-    "ai_shadow_challengers": 1793359800.0,
+    # R22 ticker writers deleted (fill_markouts / xvp_shadow_signals / ai_shadow_challengers):
+    # gone from STREAMS + RETIRED (not custody keys). Wipe-list basenames remain elsewhere.
     # R22 PR-B / R17-stopped writers (custody keys stay in STREAMS).
     "taker_counterfactuals": 1792830060.0,
     "shadow_exit_paths": 1792830060.0,

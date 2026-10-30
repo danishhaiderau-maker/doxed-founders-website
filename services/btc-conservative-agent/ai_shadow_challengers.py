@@ -22,7 +22,7 @@ MARKOUT_SCHEMA = "ai_shadow_challenger_markout_v1"
 GEOMETRY_SCHEMA = "ai_shadow_challenger_geometry_v1"
 COMPACT_PROMPT_SCHEMA = "ai_shadow_compact_prompt_v1"
 INPUT_HEALTH_SCHEMA = "ai_input_health_v1"
-CHALLENGER_FILE = "ai_shadow_challengers.jsonl"
+CHALLENGER_FILE = "ai_shadow_challengers.jsonl"  # wipe-list basename only (R22 writer deleted)
 COMPACT_PROMPT_FILE = "ai_shadow_compact_prompt.jsonl"
 COMPACT_PROMPT_ID = "shadow_compact_forecast_v5_20261001"
 RANDOM_SEED = "ai-shadow-random-v1"
@@ -503,163 +503,12 @@ def simulate_geometry(ts_list, rows, *, decision_ts: float, side: str, price: fl
 # --------------------------------------------------------------------------
 # Pending book and maturation
 # --------------------------------------------------------------------------
-class ChallengerBook:
-    """Calls awaiting markout/geometry maturation from the tape ring."""
 
-    def __init__(self, max_pending: int = 256) -> None:
-        self._lock = threading.Lock()
-        self._pending: dict = {}
-        self._max_pending = int(max_pending)
-        self.stats = {"registered": 0, "markouts_written": 0, "geometry_written": 0, "evicted": 0}
-
-    def register(self, call_row: Mapping[str, Any]) -> bool:
-        call_id = str(call_row.get("shared_ai_call_id") or "")
-        decision_ts = _finite(call_row.get("decision_ts"))
-        if not call_id or decision_ts is None:
-            return False
-        with self._lock:
-            if call_id in self._pending:
-                return False
-            if len(self._pending) >= self._max_pending:
-                oldest = min(self._pending, key=lambda k: self._pending[k]["decision_ts"])
-                self._pending.pop(oldest, None)
-                self.stats["evicted"] += 1
-            self._pending[call_id] = {
-                "decision_ts": decision_ts,
-                "price": _finite(call_row.get("decision_price")),
-                "atr_pct": _finite(call_row.get("atr14_pct_3m")),
-                "geometry_specs": list(call_row.get("geometry_specs") or []),
-                "done_horizons": set(call_row.get("_done_horizons") or ()),
-                "geometry_done": bool(call_row.get("_geometry_done")),
-                "epoch_id": call_row.get("epoch_id"),
-                "prompt_id": call_row.get("prompt_id"),
-            }
-            self.stats["registered"] += 1
-        return True
-
-    def pending_count(self) -> int:
-        with self._lock:
-            return len(self._pending)
-
-    def mature(self, ring: TapeRing, now: float) -> list:
-        ts_list, rows = ring.snapshot()
-        latest = ts_list[-1] if ts_list else None
-        out = []
-        with self._lock:
-            items = list(self._pending.items())
-        for call_id, item in items:
-            d = item["decision_ts"]
-            t0 = d + ENTRY_DELAY_SEC
-            for h in MARKOUT_HORIZONS_SEC:
-                if h in item["done_horizons"]:
-                    continue
-                th = t0 + h
-                covered = latest is not None and latest >= th
-                if not covered and now < th + MATURITY_GRACE_SEC:
-                    continue
-                out.append(_markout_row(call_id, item, h, ts_list, rows, t0, th))
-                item["done_horizons"].add(h)
-            if not item["geometry_done"]:
-                horizon_end = d + GEOMETRY_FILL_WINDOW_SEC + max(
-                    [s.get("max_duration_sec", 7200) for s in item["geometry_specs"]] or [0])
-                covered = latest is not None and latest >= horizon_end
-                if covered or now >= horizon_end + MATURITY_GRACE_SEC:
-                    out.append(_geometry_row(call_id, item, ts_list, rows))
-                    item["geometry_done"] = True
-            if item["geometry_done"] and len(item["done_horizons"]) == len(MARKOUT_HORIZONS_SEC):
-                with self._lock:
-                    self._pending.pop(call_id, None)
-        with self._lock:
-            self.stats["markouts_written"] += sum(1 for r in out if r["schema"] == MARKOUT_SCHEMA)
-            self.stats["geometry_written"] += sum(1 for r in out if r["schema"] == GEOMETRY_SCHEMA)
-        return out
+# R22: ChallengerBook + markout/pending-call writers deleted with ai_shadow_challengers.jsonl.
+# CHALLENGER_FILE basename above is wipe-list only. TapeRing / tape_features / mid_at stay
+# for XVL/GS-01 quote path and decision-feature maturation.
 
 
-def _markout_row(call_id, item, h, ts_list, rows, t0, th) -> dict:
-    q0 = quote_at(ts_list, rows, t0)
-    qh = quote_at(ts_list, rows, th)
-    gap = max_gap(ts_list, t0, th)
-    row = {
-        "schema": MARKOUT_SCHEMA,
-        "row_kind": "MARKOUT",
-        "shared_ai_call_id": call_id,
-        "epoch_id": item.get("epoch_id"),
-        "prompt_id": item.get("prompt_id"),
-        "decision_ts": item["decision_ts"],
-        "horizon_sec": h,
-        "tape_ok": False,
-        "maturity": "TAPE_GAP",
-        "mid_ret_bp": None,
-        "spread_in_bp": None,
-        "spread_out_bp": None,
-        "max_gap_s": gap,
-    }
-    if q0 is None or qh is None or gap is None or gap > max(MAX_PRICE_LAG_SEC, min(MAX_TAPE_GAP_SEC, h)):
-        return row
-    m0 = (q0[0] + q0[1]) / 2.0
-    mh = (qh[0] + qh[1]) / 2.0
-    row.update({
-        "tape_ok": True,
-        "maturity": "MATURED",
-        "mid_ret_bp": round((mh / m0 - 1.0) * 1e4, 4),
-        "spread_in_bp": round((q0[1] - q0[0]) / m0 * 1e4, 4),
-        "spread_out_bp": round((qh[1] - qh[0]) / mh * 1e4, 4),
-    })
-    return row
-
-
-def _geometry_row(call_id, item, ts_list, rows) -> dict:
-    results = []
-    for spec in item["geometry_specs"]:
-        for side in (LONG, SHORT):
-            results.append(simulate_geometry(
-                ts_list, rows, decision_ts=item["decision_ts"], side=side,
-                price=item["price"], atr_pct=item["atr_pct"], spec=spec,
-            ))
-    return {
-        "schema": GEOMETRY_SCHEMA,
-        "row_kind": "GEOMETRY",
-        "shared_ai_call_id": call_id,
-        "epoch_id": item.get("epoch_id"),
-        "prompt_id": item.get("prompt_id"),
-        "decision_ts": item["decision_ts"],
-        "geometry_model": GEOMETRY_MODEL,
-        "geometry_note": GEOMETRY_NOTE,
-        "results": results,
-    }
-
-
-def pending_calls_from_rows(rows: Iterable[Mapping[str, Any]], now: float) -> list:
-    """Rebuild unmatured calls after a restart from the challenger journal tail."""
-    calls, done_h, geo = {}, {}, set()
-    for row in rows:
-        call_id = str(row.get("shared_ai_call_id") or "")
-        if not call_id:
-            continue
-        kind = row.get("row_kind")
-        if kind == "CALL":
-            calls[call_id] = dict(row)
-        elif kind == "MARKOUT":
-            done_h.setdefault(call_id, set()).add(row.get("horizon_sec"))
-        elif kind == "GEOMETRY":
-            geo.add(call_id)
-    out = []
-    for call_id, row in calls.items():
-        decision_ts = _finite(row.get("decision_ts"))
-        if decision_ts is None or now - decision_ts > TAPE_RING_SECONDS:
-            continue
-        horizons = done_h.get(call_id, set())
-        if call_id in geo and len(horizons) >= len(MARKOUT_HORIZONS_SEC):
-            continue
-        row["_done_horizons"] = horizons
-        row["_geometry_done"] = call_id in geo
-        out.append(row)
-    return out
-
-
-# --------------------------------------------------------------------------
-# Shadow compact prompt (logged only; never gates orders)
-# --------------------------------------------------------------------------
 COMPACT_SYSTEM_PROMPT = (
     "You are a calibrated forecaster for BTC-USD perpetual, 30-minute horizon.\n"
     "You receive precomputed, normalized facts. Do not recompute them.\n"

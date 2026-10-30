@@ -1,3 +1,16 @@
+## 30 Oct 2026 — R22 delete ticker stream writers (BOT-28)
+
+- **PR:** (open) branch `cursor/r22-retire-ticker-streams-2758`
+- **Base:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) FREEZE tip `e034e1bcca0e6b2378280aceee7c79f7ca845655` (stacked on #943)
+- **Deleted writers:** `fill_markouts` (`_register_fill_markout` / MarkoutBook), `ai_shadow_challengers.jsonl` (ChallengerBook + CALL/MARKOUT appends), xvp stream already `SHADOW_FILE=None` (stream+shadow_outcome only)
+- **Kept:** GS-01 / `cross_venue_premium` / `regime_adaptive_binding` premium trigger; TapeRing for XVL quotes; wipe-list basenames
+- **STREAMS/RETIRED:** removed `fill_markouts`, `xvp_shadow_signals`, `ai_shadow_challengers` (gone, not custody)
+- **bot.py:** 64081 → 64012 lines
+- **R21:** dry-run only under store `internal/r21-retire-ticker-streams/` (no execute delete)
+- **FREEZE** — no merge / deploy / arm
+
+---
+
 ## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
 
 - **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`

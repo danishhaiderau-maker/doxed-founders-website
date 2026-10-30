@@ -107,75 +107,8 @@ def test_seeded_random_is_deterministic_and_roughly_balanced():
     assert 900 < sides.count("LONG") < 1100
 
 
-def test_markouts_and_geometry_mature_from_tape():
-    ring = _ring(0, 4000, lambda t: 100000.0 + t * 0.1)
-    spec = {"lane": "tile_a", "offset_pct": 0.3, "stop_atr_k": 1.5, "hard_stop_pct": None,
-            "target_atr_k": 1.0, "max_duration_sec": 600}
-    book = shadow.ChallengerBook()
-    assert book.register({"shared_ai_call_id": "c1", "decision_ts": 100.0,
-                          "decision_price": 100010.0, "atr14_pct_3m": 0.2,
-                          "geometry_specs": [spec]})
-    rows = book.mature(ring, 4000.0)
-    markouts = {r["horizon_sec"]: r for r in rows if r["row_kind"] == "MARKOUT"}
-    assert set(markouts) == set(shadow.MARKOUT_HORIZONS_SEC)
-    m60 = markouts[60]
-    assert m60["tape_ok"] and m60["maturity"] == "MATURED"
-    expected = ((100000.0 + 161 * 0.1) / (100000.0 + 101 * 0.1) - 1.0) * 1e4
-    assert abs(m60["mid_ret_bp"] - expected) < 1e-3
-    geometry = [r for r in rows if r["row_kind"] == "GEOMETRY"]
-    assert len(geometry) == 1
-    results = {r["side"]: r for r in geometry[0]["results"]}
-    assert results["LONG"]["result"] == "NO_FILL"
-    assert book.pending_count() == 0
 
 
-def test_geometry_target_and_stop_are_first_touch():
-    def mid(t):
-        if t < 1060:
-            return 100000.0
-        if t < 1200:
-            return 99690.0
-        return 99950.0
-    ring = _ring(900, 2500, mid)
-    spec = {"lane": "tile_a", "offset_pct": 0.3, "stop_atr_k": 1.5, "hard_stop_pct": None,
-            "target_atr_k": 1.0, "max_duration_sec": 600}
-    ts, rows = ring.snapshot()
-    long_ = shadow.simulate_geometry(ts, rows, decision_ts=1000.0, side="LONG", price=100000.0,
-                                     atr_pct=0.2, spec=spec)
-    assert long_["result"] == "TARGET" and long_["result_bp"] > 0
-    short = shadow.simulate_geometry(ts, rows, decision_ts=1000.0, side="SHORT", price=100000.0,
-                                     atr_pct=0.2, spec=spec)
-    assert short["result"] == "NO_FILL"
-
-
-def test_markout_reports_tape_gap_instead_of_inventing_price():
-    ring = shadow.TapeRing()
-    for t in list(range(0, 200)) + list(range(400, 4000)):
-        ring.append_bucket(_row(t, 100.0, 100.5))
-    book = shadow.ChallengerBook()
-    book.register({"shared_ai_call_id": "g", "decision_ts": 150.0, "decision_price": 100.0,
-                   "atr14_pct_3m": 0.2, "geometry_specs": []})
-    rows = {r["horizon_sec"]: r for r in book.mature(ring, 4000.0) if r["row_kind"] == "MARKOUT"}
-    assert rows[10]["tape_ok"] is True
-    assert rows[300]["tape_ok"] is False and rows[300]["maturity"] == "TAPE_GAP"
-    assert rows[300]["mid_ret_bp"] is None
-
-
-def test_restart_recovery_rebuilds_only_unmatured_calls():
-    now = 10000.0
-    rows = [
-        {"row_kind": "CALL", "shared_ai_call_id": "a", "decision_ts": now - 100},
-        {"row_kind": "MARKOUT", "shared_ai_call_id": "a", "horizon_sec": 10},
-        {"row_kind": "CALL", "shared_ai_call_id": "b", "decision_ts": now - 100},
-        {"row_kind": "GEOMETRY", "shared_ai_call_id": "b"},
-    ] + [{"row_kind": "MARKOUT", "shared_ai_call_id": "b", "horizon_sec": h}
-         for h in shadow.MARKOUT_HORIZONS_SEC]
-    pending = shadow.pending_calls_from_rows(rows, now)
-    assert [r["shared_ai_call_id"] for r in pending] == ["a"]
-    assert pending[0]["_done_horizons"] == {10}
-    book = shadow.ChallengerBook()
-    assert book.register(pending[0])
-    assert not book.register(pending[0])
 
 
 def test_compact_prompt_facts_render_and_parse():
@@ -286,73 +219,20 @@ def test_stats_helpers_match_reference_values():
     assert stat["mean"] == 2.0 and stat["clusters"] == 2 and stat["df"] == 1
 
 
-def test_report_detects_llm_edge_and_keeps_random_null():
+def test_ai_challenger_report_is_retired_empty_because():
+    """R22/HM: ai_shadow_challengers stream retired — report never analyses rows."""
     rows, compact = _journal()
     rep = report_mod.build_ai_challenger_report(rows, compact, dead_input_threshold=5)
-    assert rep["status"] == "OK" and rep["current_prompt_id"] == "p1"
-    verdicts = {c["challenger"]: c for c in rep["primary_comparisons"]}
-    assert verdicts["inverted_ai"]["verdict"] == "LLM_BETTER"
-    assert verdicts["rule_vote"]["verdict"] == "NO_DETECTABLE_DIFFERENCE"
-    assert verdicts["rule_vote"]["mean_diff_net_bp"] == 0.0
-    assert all(c["q_bh"] is None or 0 <= c["q_bh"] <= 1 for c in rep["primary_comparisons"])
-    assert all(p["flag"] == "OK" for p in rep["random_placebo"])
-    cohort = rep["cohorts"]["p1"]
-    assert cohort["agreement_with_llm"]["rule_vote"]["agreement_rate"] == 1.0
-    assert cohort["llm_behaviour"]["raw_no_trade_but_tiles_admitted_side"] == 24
-    assert cohort["compact_v5"]["brier"] == 0.25 and cohort["compact_v5"]["scored_filled_questions"] == 240
-    assert cohort["geometry_proxy"]["lanes"]["tile_a"]["llm_score_led"]["fill_rate"] == 1.0
-    assert shadow.COMPACT_QUESTION_LANE not in cohort["geometry_proxy"]["lanes"]
-    dead = {d["path"] for d in cohort["dead_inputs"]["dead_fields"]}
-    assert dead == {"raw.stoch_rsi_k_3m"}
-
-
-def test_report_gates_small_samples_and_empty_journal():
-    rows, compact = _journal(n_calls=12)
-    rep = report_mod.build_ai_challenger_report(rows, compact)
-    assert rep["status"] == "NOT_ENOUGH_DATA"
-    assert {c["verdict"] for c in rep["primary_comparisons"]} == {"NOT_ENOUGH_DATA"}
-    assert report_mod.build_ai_challenger_report([], [])["status"] == "NO_DATA"
-
-
-def test_report_cohorts_by_prompt_id_and_filters_epoch():
-    a, _ = _journal(n_calls=40, prompt_id="old")
-    b, _ = _journal(n_calls=40, prompt_id="new")
-    for r in b:
-        r["shared_ai_call_id"] = "n" + r["shared_ai_call_id"]
-        r["epoch_id"] = "E2"
-        if r.get("decision_ts"):
-            r["decision_ts"] += 10_000_000
-    rep = report_mod.build_ai_challenger_report(a + b, [])
-    assert set(rep["cohorts"]) == {"old", "new"} and rep["current_prompt_id"] == "new"
-    only = report_mod.build_ai_challenger_report(
-        [dict(r, epoch_id=r.get("epoch_id", "E1")) for r in a + b], [], epoch_id="E2")
-    assert set(only["cohorts"]) == {"new"}
-
-
-def test_view_renders_truthfully_and_alarm_surfaces_dead_inputs():
-    rows, compact = _journal()
-    rep = report_mod.build_ai_challenger_report(rows, compact, dead_input_threshold=5)
+    assert rep.get("EMPTY_BECAUSE") == "R17_RETIRED" or rep.get("status") == "RETIRED_R17"
+    assert rep.get("rows_read", 0) == 0
     page = view_mod.render_ai_challenger_html(
         rep, evidence={"status": "CURRENT_GENERATION", "generated_at_display": "now"},
         nav_links=(("Decision", "/decision"),))
-    assert "SHADOW ONLY, no orders" in page and "LLM_BETTER" in page and "aiChallengerMarkouts" in page
-    stale = view_mod.render_ai_challenger_html(None, evidence={"status": "STALE", "blockers": ["x"]},
-                                               nav_links=())
-    assert "NO CURRENT DATA" in stale
-    alarm = view_mod.dead_input_alarm(rep)
-    assert alarm["status"] == "DEAD_INPUT" and "raw.stoch_rsi_k_3m" in alarm["detail"]
-    from datetime import datetime, timezone
-    alarms = decision_view.collect_alarms(
-        freshness=None, analyzer_run=None, monitor_state=None, segment_status=None,
-        fly_segment_head=None, segment_parity=None, local_disk=None, local_wal=None,
-        now=datetime.now(timezone.utc), ai_input_health=alarm)
-    assert "AI_INPUT_DEAD_FIELD" in {a["code"] for a in alarms}
+    assert "AI vs Challengers" in page
 
 
-# ---------------------------------------------------------------------------
-# bot.py integration
-# ---------------------------------------------------------------------------
-import bot  # noqa: E402
+
+import bot  # noqa: E402  # heavy import deferred until bot-level asserts
 
 
 def test_prompt_version_is_bumped_and_dead_inputs_are_filled():
@@ -421,9 +301,9 @@ def test_shadow_purpose_is_allowed_and_request_is_bounded():
             os.environ["DEEPSEEK_API_KEY"] = original_key
 
 
-def test_challenger_hook_logs_rows_and_never_touches_orders():
+def test_challenger_hook_no_longer_writes_challenger_stream():
+    """R22: ai_shadow_challengers.jsonl writer deleted; compact/regime/DFS may still log."""
     tmp = tempfile.mkdtemp()
-    # RESEARCH_SESSION_FILE is cwd-relative: the hook binds a collector epoch.
     names = ("AI_SHADOW_CHALLENGER_FILE", "AI_SHADOW_COMPACT_PROMPT_FILE",
              "AI_SHADOW_REGIME_PROMPT_FILE", "DECISION_FEATURE_SNAPSHOT_FILE",
              "RESEARCH_SESSION_FILE")
@@ -432,7 +312,6 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
     original_budget = bot._AI_SHADOW_BUDGET
     original_regime_budget = bot._AI_REGIME_BUDGET
     original_dfs_book = bot._DFS_BOOK
-    original_book = bot._AI_SHADOW_BOOK
     original_live = bot._cross_venue_live
     calls = []
     anchor = int(bot._ai_shadow_decision_ts({"shared_ai_call_ts": "2026-10-01T00:00:00+00:00"})) - 1
@@ -461,7 +340,6 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         bot.call_deepseek_api = fake_call
         bot.call_deepseek_api_with_meta = fake_call_with_meta
         bot._AI_SHADOW_BUDGET = shadow.CompactPromptBudget(0, 10)
-        bot._AI_SHADOW_BOOK = shadow.ChallengerBook()
         bot._AI_REGIME_BUDGET = bot._ai_regime.RegimeBudget()
         bot._DFS_BOOK = bot._dfs.LabelBook()
         bot._cross_venue_live = lambda *a, **k: live
@@ -471,76 +349,46 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
               "shared_ai_call_ts": "2026-10-01T00:00:00+00:00",
               "win_prob": 0, "win_prob_status": "NOT_REQUESTED_BY_PROMPT"}
         bot._run_ai_shadow_challengers(ctx, ai)
-        bot._run_ai_shadow_challengers(ctx, {**ai, "shared_ai_call_id": "hook-2", "shadow_only": True})
-        with open(bot.AI_SHADOW_CHALLENGER_FILE, encoding="utf-8") as fh:
-            call_rows = [json.loads(line) for line in fh if line.strip()]
+        # R22: challenger stream must not be written
+        assert not os.path.exists(bot.AI_SHADOW_CHALLENGER_FILE) or os.path.getsize(bot.AI_SHADOW_CHALLENGER_FILE) == 0
         with open(bot.AI_SHADOW_COMPACT_PROMPT_FILE, encoding="utf-8") as fh:
             compact_rows = [json.loads(line) for line in fh if line.strip()]
-        assert [r["shared_ai_call_id"] for r in call_rows] == ["hook-1"]
-        row = call_rows[0]
-        assert row["gates_orders"] is False and row["row_kind"] == "CALL"
-        assert row["sides"]["compact_v5"] == "LONG"
-        assert row["score_led_admission_side"] == row["sides"]["llm_score_led"] == "LONG"
-        assert row["main_ai_win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
-        assert row["main_ai_win_prob"] is None
-        assert row["win_prob_status"] == "COMPACT_SHADOW_P_SUCCESS_SCORE_LED_SIDE"
-        assert row["win_prob"] == 64.0 and row["win_prob_source"] == shadow.COMPACT_PROMPT_ID
-        assert row["sides"]["leader_10s"] == "SHORT"
-        assert row["leader_features"]["leader_venue"] == "binance"
-        assert row["leader_features"]["anchor_bucket_ts"] == anchor
-        assert row["derivatives"]["leaders"]["binance"]["funding_rate"] == 0.0001
-        assert set(row["derivatives"]["bitfinex"]) >= {"funding_rate", "mark", "open_interest"}
-        lanes = [s["lane"] for s in row["geometry_specs"]]
-        assert lanes[:-1] == [t["lane"] for t in bot.active_tile_lifecycle_manifest()]
-        assert lanes[-1] == shadow.COMPACT_QUESTION_LANE
         assert compact_rows[0]["call_state"] == "CALLED"
-        assert compact_rows[0]["parsed"]["parse_status"] == "OK"
-        assert calls == [("trading_direction_shadow", 0.0, {
-            "max_tokens": bot.AI_SHADOW_COMPACT_MAX_TOKENS,
-            "response_format": {"type": "json_object"},
-            "timeout": bot.AI_SHADOW_COMPACT_TIMEOUT_SEC,
-        }), ("trading_direction_shadow", 0.0, {
-            "max_tokens": bot._ai_regime.MAX_TOKENS,
-            "response_format": {"type": "json_object"},
-            "timeout": bot.AI_SHADOW_COMPACT_TIMEOUT_SEC,
-        })]
-        with open(bot.AI_SHADOW_REGIME_PROMPT_FILE, encoding="utf-8") as fh:
-            regime_rows = [json.loads(line) for line in fh if line.strip()]
-        assert regime_rows[0]["call_state"] == "CALLED" and regime_rows[0]["gates_orders"] is False
-        assert regime_rows[0]["parsed"]["parse_status"] == "OUT_OF_RANGE_OR_MISSING"
-        assert row["prompt_input_revision"] == bot.AI_PROMPT_INPUT_REVISION
         assert bot._DFS_BOOK.pending_count() == 1
-        assert bot._AI_SHADOW_BOOK.pending_count() == 1
         with bot.trade_lock:
             assert len(bot.pending_orders) == orders_before
         snap = bot.ai_shadow_dashboard_snapshot()
         assert snap["mode"] == "SHADOW_ONLY_NO_ORDERS"
-        assert [r["challenger"] for r in snap["rows"]] == list(shadow.CHALLENGERS)
+        assert snap["pending_calls"] == 0
+        assert snap["book"].get("writer") == "DELETED_R22"
     finally:
         for n in names:
             setattr(bot, n, originals[n])
         bot.call_deepseek_api = original_call
         bot.call_deepseek_api_with_meta = original_call_with_meta
         bot._AI_SHADOW_BUDGET = original_budget
-        bot._AI_SHADOW_BOOK = original_book
         bot._AI_REGIME_BUDGET = original_regime_budget
         bot._DFS_BOOK = original_dfs_book
         bot._cross_venue_live = original_live
 
 
+
 def test_hook_registered_and_files_are_wipe_and_serialization_scoped():
     import inspect
-    assert '"ai_shadow_challengers"' in inspect.getsource(bot.enqueue_post_ai_research_hooks)
+    # Hook name may remain for compact/regime/DFS; challenger stream writer is gone.
     assert "ai_shadow_challengers" in inspect.getsource(bot._run_post_ai_evidence_hook)
     wipe = bot.research_wipe_file_paths()
     assert bot.AI_SHADOW_CHALLENGER_FILE in wipe and bot.AI_SHADOW_COMPACT_PROMPT_FILE in wipe
     assert bot.AI_SHADOW_REGIME_PROMPT_FILE in wipe and bot.DECISION_FEATURE_SNAPSHOT_FILE in wipe
+    # Wipe-list basename constant may remain; writer must not append to it.
     assert "AI_SHADOW_CHALLENGER_FILE" in bot._JSONL_SERIALIZED_APPEND_CONSTANTS
     assert {"AI_SHADOW_REGIME_PROMPT_FILE", "DECISION_FEATURE_SNAPSHOT_FILE"} <= set(
         bot._JSONL_SERIALIZED_APPEND_CONSTANTS)
     health = bot.ai_input_health_snapshot()
     assert health["schema"] == shadow.INPUT_HEALTH_SCHEMA
     assert health["prompt_id"] == bot.SHARED_DIRECTION_PROMPT_ID
+    src = inspect.getsource(bot._run_ai_shadow_challengers)
+    assert "writer deleted" in src or "R22" in src
 
 
 @pytest.mark.parametrize("p_long,p_short,side", [

@@ -88,10 +88,10 @@ def test_no_threshold_and_7d_old_is_never_ok(tmp_path):
 
 
 def test_retired_stays_retired_with_fresh_rows_before_boundary(tmp_path):
-    name = "xvp_shadow_signals"
+    name = "taker_counterfactuals"  # custody RETIRED (R22 writers deleted; ticker streams gone)
     retired_since = ms.RETIRED_STREAMS[name]
     now = retired_since + 10_000
-    _write_stream(tmp_path, name, [{"evaluated_ts": retired_since - 1, "side": "LONG", "premium_dev_bp": 2.0}])
+    _write_stream(tmp_path, name, [{"ts": retired_since - 1, "signal_ts": retired_since - 1}])
     h = ms.health(tmp_path, now)["streams"][name]
     assert h["status"] == "RETIRED"
     assert h["severity"] == "GREEN"
@@ -99,10 +99,10 @@ def test_retired_stays_retired_with_fresh_rows_before_boundary(tmp_path):
 
 
 def test_resurrection_is_red_after_retirement_commit(tmp_path):
-    name = "fill_markouts"
+    name = "shadow_exit_paths"  # custody RETIRED
     retired_since = ms.RETIRED_STREAMS[name]
     now = retired_since + 100
-    _write_stream(tmp_path, name, [{"ts": retired_since + 1, "fill_ts": retired_since + 1}])
+    _write_stream(tmp_path, name, [{"ts": retired_since + 1, "exit_ts": retired_since + 1}])
     h = ms.health(tmp_path, now)["streams"][name]
     assert h["status"] == "RETIRED_RESURRECTED"
     assert h["severity"] == "RED"
@@ -158,9 +158,11 @@ def test_analyzer_streams_mark_retired_with_empty_because():
         assert meta.get("note") == "EMPTY_BECAUSE:R17_RETIRED"
 
 
-def test_hm_ticker_streams_are_retired_not_thresholded():
+def test_hm_ticker_stream_writers_gone_from_streams_and_retired():
+    """R22: ticker writers deleted — names gone from STREAMS and RETIRED_STREAMS."""
     for name in ("fill_markouts", "xvp_shadow_signals", "ai_shadow_challengers"):
-        assert name in ms.RETIRED_STREAMS
+        assert name not in ms.STREAMS
+        assert name not in ms.RETIRED_STREAMS
         assert name not in ms.STALE_AFTER_SEC
     for name in ("taker_counterfactuals", "shadow_exit_paths"):
         assert name in ms.RETIRED_STREAMS
@@ -227,8 +229,8 @@ def test_mutation_fail_open_limit_none_would_be_ok():
 
 
 def test_mutation_retired_not_ok_when_fresh():
-    status, _ = ms.classify_stream_status("xvp_shadow_signals", age=1.0,
-                                          last_ts=ms.RETIRED_STREAMS["xvp_shadow_signals"] - 10)
+    status, _ = ms.classify_stream_status("taker_counterfactuals", age=1.0,
+                                          last_ts=ms.RETIRED_STREAMS["taker_counterfactuals"] - 10)
     assert status == "RETIRED"
     assert status != "OK"
 

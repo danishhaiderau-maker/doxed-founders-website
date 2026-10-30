@@ -6567,10 +6567,11 @@ _microstructure_io_write_failures = 0
 # Read-only monitor telemetry (GET /api/monitor/integrity); observers never raise.
 _TAPE_CONTINUITY = _monitor_integrity.TapeContinuityTracker() if _monitor_integrity else None
 _AI_CALL_WINDOW = _monitor_integrity.AiCallWindow() if _monitor_integrity else None
+# R22: fill_markouts writer deleted (ticker/L1). Wipe-list basename kept in DATA lists.
+# Empty aggregator kept only so /api/monitor/integrity still exposes fill_quality shape.
 _FILL_MARKOUT_AGG = _monitor_integrity.FillMarkoutAggregator() if _monitor_integrity else None
-_fill_markout_book = execution_markouts.MarkoutBook()
 _execution_markout_counters = {
-    "fill_rows_written": 0, "write_failures": 0,
+    "fill_rows_written": 0, "write_failures": 0,  # frozen (writer gone)
 }
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
 _adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "by_lane": {}, "last": None}
@@ -27921,10 +27922,7 @@ def fill_order(order):
     ai = meta.get("ai", {}) or signal.get("ai", {})
     if direction not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
-    try:
-        _register_fill_markout(order, tick, signal)
-    except Exception as exc:
-        logger.warning(f"[FILL MARKOUT] register failed trade_id={order.get('trade_id')}: {exc}")
+    # R22: fill_markouts writer deleted - no register-on-fill.
     candidate_pos = _build_open_position(order, signal, ai)
     candidate_pos["fill_revalidation_count"] = int(order.get("fill_revalidation_count") or 0)
     frozen_paper_identity = paper_policy_identity_for_sources(
@@ -30147,60 +30145,8 @@ def microstructure_capture_loop():
 
 
 def _sample_execution_markouts(bid, ask, last, quote_ts) -> None:
-    now = time.time()
-    for book, path, label, counter in (
-        (_fill_markout_book, execution_markouts.FILL_FILE, "FILL_MARKOUT", "fill_rows_written"),
-    ):
-        for row in book.sample(now=now, bid=bid, ask=ask, last=last, quote_ts=quote_ts):
-            fill_agg = globals().get("_FILL_MARKOUT_AGG") if label == "FILL_MARKOUT" else None
-            if fill_agg is not None:  # read-only monitor telemetry; never raises
-                fill_agg.observe(row, now=now)
-            if _safe_append_jsonl(path, row, label=label, fallback_on_error=False):
-                _execution_markout_counters[counter] += 1
-            else:
-                _execution_markout_counters["write_failures"] += 1
-
-
-def _register_fill_markout(order: dict, fill_price, signal: dict = None) -> None:
-    """Anchor post-fill markouts for one paper fill; evidence only."""
-    fill_sim = order.get("fill_sim") or {}
-    is_taker = bool(
-        order.get("fee_type") == "TAKER"
-        or order.get("entry_type") in ("SIM_MARKET", "MARKET")
-        or fill_sim.get("is_taker")
-    )
-    signal = signal if isinstance(signal, dict) else {}
-    now = time.time()
-    with state_lock:
-        bid, ask = state.get("bid"), state.get("ask")
-    trade_id = str(order.get("trade_id") or "")
-    _fill_markout_book.register(
-        f"fill:{trade_id}", anchor_ts=now, entry_price=fill_price,
-        direction=order.get("signal_dir"),
-        row={
-            "schema": execution_markouts.FILL_SCHEMA,
-            "trade_id": trade_id,
-            "research_lane": order.get("research_lane"),
-            "raw_policy_id": order.get("raw_policy_id"),
-            "shared_ai_call_id": order.get("shared_ai_call_id") or signal.get("shared_ai_call_id"),
-            "direction": order.get("signal_dir"),
-            "fill_ts": round(now, 3),
-            "fill_price": _buf_float(fill_price, 0.0),
-            "limit_price": order.get("limit_price"),
-            "signal_price": order.get("signal_price"),
-            "qty": order.get("qty"),
-            "liquidity": "TAKER" if is_taker else "MAKER",
-            "bid_at_fill": bid, "ask_at_fill": ask,
-            "adaptive_liquidity_intent": signal.get("adaptive_liquidity_intent"),
-            "fee_profile": EXCHANGE_FEE_PROFILE,
-            "tile_registry_signature": active_tile_registry_signature(),
-        },
-    )
-
-
-# Wipe-list filename only (R22): taker_signal_counterfactuals writer deleted;
-# keep the basename so reset/wipe lists still find old copies.
-TAKER_SIGNAL_COUNTERFACTUAL_FILE = "taker_signal_counterfactuals.jsonl"
+    """R22: fill_markouts writer deleted - no pending markouts to sample."""
+    return
 
 
 def _record_adaptive_entry_decision(lane: str, decision: dict, *, quote_ctx: dict | None = None) -> None:
@@ -30260,11 +30206,14 @@ SHADOW_EXIT_PATH_FILE = "shadow_exit_paths.jsonl"
 
 
 def execution_markout_status_snapshot() -> dict:
+    """R22: fill_markouts writer deleted; counters stay for dashboard shape."""
     return {
         **dict(_execution_markout_counters),
-        "fill_pending": _fill_markout_book.pending_count(),
-        "dropped": _fill_markout_book.dropped,
-        "horizons_sec": list(execution_markouts.MARKOUT_HORIZONS_SEC),
+        "fill_pending": 0,
+        "dropped": 0,
+        "horizons_sec": [],
+        "writer": "DELETED_R22",
+        "fill_file": execution_markouts.FILL_FILE,  # wipe-list basename only
     }
 
 
@@ -33182,7 +33131,7 @@ def close_position(pos: dict, exit_reason: str):
 
 import ai_shadow_challengers as _ai_shadow
 
-AI_SHADOW_CHALLENGER_FILE = _ai_shadow.CHALLENGER_FILE
+AI_SHADOW_CHALLENGER_FILE = _ai_shadow.CHALLENGER_FILE  # wipe-list basename only (R22 writer deleted)
 AI_SHADOW_COMPACT_PROMPT_FILE = _ai_shadow.COMPACT_PROMPT_FILE
 AI_SHADOW_COMPACT_PROMPT_ENABLED = os.getenv("AI_SHADOW_COMPACT_PROMPT_ENABLED", "1").strip() == "1"
 AI_SHADOW_COMPACT_MAX_TOKENS = max(32, int(os.getenv("AI_SHADOW_COMPACT_MAX_TOKENS", "120")))
@@ -33300,7 +33249,7 @@ def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
             trade_row.setdefault("exit_book_top_missing", True)
     except Exception:
         trade_row.setdefault("exit_book_top_missing", True)
-_AI_SHADOW_BOOK = _ai_shadow.ChallengerBook()
+# R22: ChallengerBook (ai_shadow_challengers.jsonl writer) deleted; TapeRing kept for XVL/GS-01.
 _AI_SHADOW_OI = _ai_shadow.OpenInterestHistory()
 _AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
     min_interval_sec=float(os.getenv("AI_SHADOW_COMPACT_MIN_INTERVAL_SEC", "150")),
@@ -34906,14 +34855,14 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "prompt_payload": payload,
         "gates_orders": False,
     }
-    _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, call_row, label="AI_SHADOW_CHALLENGER")
+    # R22: ai_shadow_challengers.jsonl writer deleted (ticker/L1).
     _safe_append_jsonl(AI_SHADOW_COMPACT_PROMPT_FILE, compact_row, label="AI_SHADOW_COMPACT_PROMPT")
     _safe_append_jsonl(AI_SHADOW_REGIME_PROMPT_FILE, regime_row, label="AI_SHADOW_REGIME_PROMPT")
     _log_decision_feature_snapshot(
         call_id=call_id, decision_ts=decision_ts, ctx=ctx, ai_result=ai_result, tape=tape,
         leader=leader, premium=premium, compact_row=compact_row, regime_row=regime_row,
     )
-    _AI_SHADOW_BOOK.register(call_row)
+    # R22: ChallengerBook register removed with stream writer.
     with _AI_SHADOW_LOCK:
         _ai_shadow_status["calls_logged"] += 1
         _ai_shadow_status["last_call_ts"] = time.time()
@@ -34922,19 +34871,6 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
             "sides": dict(challengers["sides"]),
             "markouts": {},
         })
-
-
-def _ai_shadow_note_matured(row: dict) -> None:
-    if row.get("row_kind") != "MARKOUT" or not row.get("tape_ok"):
-        return
-    with _AI_SHADOW_LOCK:
-        for entry in _ai_shadow_status["recent"]:
-            if entry["call_id"] == row.get("shared_ai_call_id"):
-                entry["markouts"][int(row["horizon_sec"])] = (
-                    float(row["mid_ret_bp"]),
-                    float(row.get("spread_in_bp") or 0.0) / 2.0 + float(row.get("spread_out_bp") or 0.0) / 2.0,
-                )
-                break
 
 
 def _read_jsonl_tail(path: str, max_bytes: int) -> list:
@@ -34963,10 +34899,7 @@ def _read_jsonl_tail(path: str, max_bytes: int) -> list:
 def _ai_shadow_boot_recover() -> None:
     history = _read_jsonl_tail(MICROSTRUCTURE_TAPE_FILE, 12 * 1024 * 1024)
     hydrated = _AI_SHADOW_TAPE.merge_history(history)
-    pending = _ai_shadow.pending_calls_from_rows(
-        _read_jsonl_tail(AI_SHADOW_CHALLENGER_FILE, 8 * 1024 * 1024), time.time(),
-    )
-    recovered = sum(1 for row in pending if _AI_SHADOW_BOOK.register(row))
+    recovered = 0
     snapshots = _dfs.pending_from_rows(
         _read_jsonl_tail(DECISION_FEATURE_SNAPSHOT_FILE, 4 * 1024 * 1024), time.time(),
     )
@@ -34990,9 +34923,7 @@ def ai_shadow_maturation_loop():
         if shutdown_event.wait(5.0):
             break
         try:
-            for row in _AI_SHADOW_BOOK.mature(_AI_SHADOW_TAPE, time.time()):
-                _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, row, label="AI_SHADOW_CHALLENGER")
-                _ai_shadow_note_matured(row)
+            # R22: ChallengerBook maturation/writes removed with ai_shadow_challengers stream.
             labels = _DFS_BOOK.mature(_AI_SHADOW_TAPE, time.time())
             for row in labels:
                 _safe_append_jsonl(DECISION_FEATURE_SNAPSHOT_FILE, row, label="DECISION_FEATURE_SNAPSHOT")
@@ -35045,8 +34976,8 @@ def ai_shadow_dashboard_snapshot() -> dict:
         "regime_enabled": AI_SHADOW_REGIME_PROMPT_ENABLED,
         "decision_snapshot_version": _dfs.FEATURE_SET_VERSION,
         "decision_label_pending": _DFS_BOOK.pending_count(),
-        "pending_calls": _AI_SHADOW_BOOK.pending_count(),
-        "book": dict(_AI_SHADOW_BOOK.stats),
+        "pending_calls": 0,  # R22: ChallengerBook deleted with ai_shadow_challengers writer
+        "book": {"writer": "DELETED_R22"},
         "tape_ring_seconds": len(_AI_SHADOW_TAPE),
         "win_prob_status": "NOT_REQUESTED_BY_PROMPT (ai_threshold has no effect)",
         "input_health": ai_input_health_snapshot(),

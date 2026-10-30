@@ -185,7 +185,6 @@ test_execution_admission_pause_truth.py
 test_execution_cost_receipt_adapter.py
 test_execution_funnel_ttl.py
 test_execution_latency_evidence.py
-test_execution_markouts.py
 test_execution_panel_atomic_sources.py
 test_execution_tail_repair.py
 test_exhaustive_policy_persistence.py

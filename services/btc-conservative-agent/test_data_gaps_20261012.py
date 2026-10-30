@@ -44,8 +44,9 @@ def test_gs01_does_not_write_xvp_shadow_stream_anymore():
     for cls in (rab.Gs5PremiumEvaluator, rab.Gs7PremiumEvaluator, rab.DanishRouterPremiumEvaluator,
                 rab.FadePoolPremiumEvaluator):
         assert cls.SHADOW_FILE is None
-    assert ms.STREAMS["xvp_shadow_signals"] == "xvp_shadow_signals.jsonl"
-    assert "xvp_shadow_signals" in ms.RETIRED_STREAMS
+    # R22: stream key gone from STREAMS/RETIRED (writer deleted); wipe-list basename remains elsewhere.
+    assert "xvp_shadow_signals" not in ms.STREAMS
+    assert "xvp_shadow_signals" not in ms.RETIRED_STREAMS
 
 
 # (h) rotated parts + time range + health ------------------------------------------------------
