@@ -19,7 +19,8 @@ def test_registry_owns_a_paper_only_non_ai_premium_tile():
 def test_own_evaluator_reuses_the_premium_rule_without_a_shadow_file():
     evaluator = policy.make_evaluator()
     assert isinstance(evaluator, GsPremiumEvaluator) and isinstance(evaluator, PremiumEvaluator)
-    assert evaluator.SHADOW_FILE == "xvp_shadow_signals.jsonl" and evaluator.ID_PREFIX == "gsxvp"
+    # R22 (HM 46a97b4debee): xvp shadow writers removed unconditionally.
+    assert evaluator.SHADOW_FILE is None and evaluator.ID_PREFIX == "gsxvp"
     assert evaluator.policy_id == policy.POLICY_ID
 
 

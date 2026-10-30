@@ -50,7 +50,8 @@ def test_rule_keeps_the_frozen_premium_thresholds_with_a_sixty_minute_hold():
 def test_evaluator_writes_the_registered_premium_shadow_file():
     evaluator = policy.make_evaluator()
     assert isinstance(evaluator, PremiumEvaluator)
-    assert evaluator.SHADOW_FILE == "xvp_shadow_signals.jsonl"
+    # R22: PremiumEvaluator no longer appends xvp_shadow_signals.jsonl.
+    assert evaluator.SHADOW_FILE is None
     assert evaluator.policy_id == policy.POLICY_ID and evaluator.policy_signature == policy.POLICY_SIGNATURE
 
 

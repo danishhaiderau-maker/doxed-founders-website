@@ -203,10 +203,79 @@ def _edge_ts(path: Path, size: int, first: bool) -> float | None:
     return None
 
 
-def part_bounds(data_dir, name: str, part: dict) -> dict:
+# Short TTL cache for part edge bounds (mtime+inode+size keyed). Health polls
+# for large rotation sets (book_tape_1s / disloc_* / dyn_regime_minutes) must
+# not rescan every request (daily-5 (4) / R0c plan eb14e8711d31).
+_PART_BOUNDS_CACHE: dict[tuple, tuple[float, dict]] = {}
+_PART_BOUNDS_TTL_SEC = 30.0
+_PART_BOUNDS_BUDGET_SEC = 2.5
+
+
+def part_bounds(data_dir, name: str, part: dict, *, include_edge_ts: bool = True) -> dict:
+    """Attach first/last timestamps to one part. Empty files skip I/O.
+
+    ``include_edge_ts=False`` (``?meta=1``) returns metadata only — fast health path.
+    """
+    base = dict(part)
+    size = int(part.get("bytes") or 0)
+    if size <= 0 or not include_edge_ts:
+        base["first_ts"] = None
+        base["last_ts"] = None
+        if not include_edge_ts:
+            base["edge_ts_skipped"] = "meta"
+        elif size <= 0:
+            base["edge_ts_skipped"] = "empty"
+        return base
     path = Path(data_dir) / part["file"]
-    return {**part, "first_ts": _edge_ts(path, part["bytes"], True),
-            "last_ts": _edge_ts(path, part["bytes"], False)}
+    key = (
+        str(path),
+        int(part.get("inode") or 0),
+        size,
+        float(part.get("mtime") or 0.0),
+    )
+    now = __import__("time").time()
+    hit = _PART_BOUNDS_CACHE.get(key)
+    if hit and now - hit[0] <= _PART_BOUNDS_TTL_SEC:
+        return {**base, **hit[1]}
+    bounds = {
+        "first_ts": _edge_ts(path, size, True),
+        "last_ts": _edge_ts(path, size, False),
+    }
+    _PART_BOUNDS_CACHE[key] = (now, bounds)
+    if len(_PART_BOUNDS_CACHE) > 4096:
+        # Drop oldest half on overflow (bounded memory; never blocks append path).
+        for stale in sorted(_PART_BOUNDS_CACHE, key=lambda k: _PART_BOUNDS_CACHE[k][0])[:2048]:
+            _PART_BOUNDS_CACHE.pop(stale, None)
+    return {**base, **bounds}
+
+
+def parts_with_bounds(data_dir, name: str, *, include_edge_ts: bool = True,
+                      budget_sec: float | None = None) -> dict:
+    """Assemble parts list with optional edge ts under a wall-clock budget.
+
+    Returns ``{"parts": [...], "truncated": bool, "edge_ts": bool}``. When the
+    budget is exhausted remaining parts are returned as metadata-only and
+    ``truncated`` is True (AMBER contract for health — never hang / proxy-timeout RED).
+    """
+    import time as _time
+    budget = float(_PART_BOUNDS_BUDGET_SEC if budget_sec is None else budget_sec)
+    started = _time.monotonic()
+    plist = parts(data_dir, name)
+    out = []
+    truncated = False
+    for i, part in enumerate(plist):
+        elapsed = _time.monotonic() - started
+        allow_edge = include_edge_ts and elapsed < budget
+        if include_edge_ts and not allow_edge:
+            truncated = True
+        out.append(part_bounds(data_dir, name, part, include_edge_ts=allow_edge))
+        if include_edge_ts and not allow_edge and i + 1 < len(plist):
+            # Fill remaining as meta-only without further edge work.
+            for rest in plist[i + 1:]:
+                out.append(part_bounds(data_dir, name, rest, include_edge_ts=False))
+            truncated = True
+            break
+    return {"parts": out, "truncated": truncated, "edge_ts": include_edge_ts}
 
 
 def offset_for_ts(path: Path, since: float) -> int:

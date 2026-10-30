@@ -13,6 +13,11 @@ Route: `GET /api/monitor/ledger-unstamped?since=<unix_ts>`. Module: `ledger_stam
   `recover_archived_future_paths.SEGMENT_WRITES_RETIRED_R17`, `qualification_horizon_index.SEGMENT_WRITES_RETIRED_R17`.
 - Any write since the cutoff to a retired stream (stamped or not): **RED** `WRITE_TO_RETIRED_STREAM`.
 - A non-allowlisted stream with no write since the cutoff (or no file): **RED** `NO_WRITE_SINCE_NOT_ALLOWLISTED`.
+- **R21 same-run fingerprint (R0c / plan `eb14e8711d31`):** when an R21 dry→execute changes any file covered by
+  `RETIREMENT_FINGERPRINTS` in `retired_streams.py`, the same run must re-measure live rows/size/mtime/sha256 and
+  land the matching fingerprint update in that run’s code PR (or a paired PR citing the R21 receipt). On mismatch
+  vs a declared plan pin → STOP / R34 RED / do not merge / escalate RK / never land a surprise measured value.
+  Keep the prior module as a sha-named `.bak-<sha12>`. No hand edits to the data file.
 - mtime boundary (`FILE_MTIME_BEFORE_SINCE`) is cross-checked against the generation's last stamp, because a
   timestamp-preserving restore/copy can make mtime lie: no stamp -> warning `MTIME_BOUNDARY_UNCONFIRMED_BY_STAMP`;
   stamp >= since -> warning `MTIME_BOUNDARY_CONTRADICTED_BY_STAMP` + unverified (not GREEN).

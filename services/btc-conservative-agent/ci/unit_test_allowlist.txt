@@ -318,7 +318,9 @@ test_monitor_ladder_legs_and_route_floor.py
 test_monitor_lanes_funnel_epoch_scope.py
 test_monitor_lanes_self_sim_closes.py
 test_monitor_streams.py
+test_monitor_streams_parts_budget.py
 test_monitor_tiles_api.py
+test_monitor_tiles_fade3_totals_parity.py
 test_multiverse_maturation_starvation.py
 test_multiverse_tape_maturation.py
 test_neighborhood_qualification_wiring.py
@@ -659,8 +661,10 @@ test_exit_lag_regression.py
 test_exit_lag_rk_gate.py
 test_exit_scan_stamps.py
 test_trigger_receive_stamp.py
+test_r22_stop_write_streams_gone.py
 test_retired_stream_identity.py
 test_retired_stream_identity_bot.py
+test_safe_append_stop_write_latch.py
 test_live_copy_arming_guards.py
 test_monitor_trade_count_and_force_paper.py
 test_live_total_loss_cap.py

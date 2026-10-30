@@ -38,6 +38,9 @@ from cross_venue_lead import (
     _mid,
 )
 
+# Basename kept for wipe/monitor/readers of historical files. R22: writers removed
+# (HM 46a97b4debee NOT REQUIRED) — PremiumEvaluator.SHADOW_FILE is None so the
+# shared _xvl_append path never opens this file.
 SHADOW_FILE = "xvp_shadow_signals.jsonl"
 TRIGGER_SCHEMA = "xvp_shadow_trigger_v1"
 OUTCOME_SCHEMA = "xvp_shadow_outcome_v1"
@@ -276,7 +279,7 @@ class PremiumEvaluator(LeadEvaluator):
     ID_PREFIX = "xvp"
     TRIGGER_SCHEMA = TRIGGER_SCHEMA
     OUTCOME_SCHEMA = OUTCOME_SCHEMA
-    SHADOW_FILE = SHADOW_FILE
+    SHADOW_FILE = None  # R22: no xvp_shadow_signals.jsonl appends (NOT REQUIRED)
     SIGNAL_KEY = "premium_dev_bp"
     TRIGGER_FEATURE_KEY = "xvp_trigger"
     TRIGGER_FEATURE_FIELDS = (

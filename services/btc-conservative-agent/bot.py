@@ -16547,47 +16547,11 @@ def _ensure_collector_v22_epoch() -> str:
 
 
 def _arm_chase_offset_touch_grid(signal: dict):
-    """Paper path-touch grid at 0.01–0.30%. Does not change live 0.1% orig."""
-    if not isinstance(signal, dict):
-        return
-    if is_patient_chase_lane(signal.get("research_lane")):
-        # Family tiles keep their exact paper anchors. Discovery grid is armed
-        # once per shared AI call via `_arm_shared_discovery_touch_grid`.
-        return
-    try:
-        price = float(
-            signal.get("signal_price_at_approve")
-            or signal.get("signal_price")
-            or signal.get("price")
-            or 0
-        )
-        if price <= 0:
-            return
-        tid = str(signal.get("trade_id") or "")
-        if not tid:
-            return
-        direction = signal.get("final_direction") or signal.get("direction") or "SHORT"
-        ts = float(signal.get("created_ts_ts") or signal.get("snapshot_ts") or time.time())
-        ttl = float(signal.get("expires_ts") or 0)
-        ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
-        rows = arm_touch_grid_rows(
-            trade_id=tid,
-            direction=direction,
-            signal_price=price,
-            signal_ts=ts,
-            ttl_sec=ttl_sec,
-            live_offset_pct=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
-            invert_on=_coerce_invert_on(signal),
-        )
-        for row in rows:
-            _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
-        _touch_grid_book[tid] = new_grid_state(rows)
-        logger.info(
-            f"[TOUCH GRID] armed trade_id={tid} offsets=0.01-0.30 live_orig="
-            f"{DETERMINISTIC_ENTRY_OFFSET_PCT * 100:.2f}% paper_only [PIPELINE ENFORCEMENT]"
-        )
-    except Exception as exc:
-        logger.warning(f"[TOUCH GRID] arm failed: {exc} [PIPELINE ENFORCEMENT]")
+    """R22 retired: chase_offset_touch_grid.jsonl writers removed (STOP-WRITE / NOT NEEDED).
+
+    Hook kept so call sites stay visible; no durable append and no in-memory book growth.
+    """
+    return
 
 
 def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str, str]:
@@ -16667,6 +16631,7 @@ def _recover_compressed_shadow_chases_once(now: float = None) -> None:
 
 
 def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None, ask_qty=None):
+    """Poll chase/shadow books in memory. R22: no chase_offset_touch_grid.jsonl appends."""
     if price is None or float(price) <= 0:
         return
     now = time.time()
@@ -16677,7 +16642,8 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None
                 if now > float(grid.get("expires_ts") or 0):
                     dead.append(tid)
                     continue
-                for row in poll_grid_state(
+                # R22: durable TOUCH_GRID appends removed (STOP-WRITE / NOT NEEDED).
+                poll_grid_state(
                     grid,
                     now_ts=now,
                     last=float(price),
@@ -16687,8 +16653,7 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None
                     ask=None if not ask else float(ask),
                     bid_qty=None if not bid_qty else float(bid_qty),
                     ask_qty=None if not ask_qty else float(ask_qty),
-                ):
-                    _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+                )
             except Exception as exc:
                 logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
         for tid in dead:
@@ -16734,10 +16699,7 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None
                 logger.warning(
                     f"[SHADOW CHASE BUCKET] observe failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]"
                 )
-    # Disk validation, rotation and fsync are deliberately outside the
-    # ownership lock so an AI arm is never queued behind research I/O.
-    for row in shadow_rows:
-        _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="SHADOW_CHASE")
+    # R22: durable SHADOW_CHASE appends removed; in-memory notes + multiverse remain.
     _note_shadow_chase_bucket_records(shadow_rows)
     _maybe_complete_pending_order_multiverse()
 
@@ -20393,31 +20355,22 @@ def _record_compressed_shadow_arm_result(
     trade_id: str = "",
     epoch_id: str = "",
 ) -> bool:
-    """Durably explain why one shared-call shadow schedule did or did not arm.
+    """Explain why one shared-call shadow schedule did or did not arm.
 
-    This receipt is evidence-only.  It is deliberately a different schema from
-    ``compressed_chase_shadow_v1`` so analyzers cannot mistake an arm attempt
-    for a price-path observation or executable fill.
+    R22: chase_offset_touch_grid.jsonl writers removed (STOP-WRITE / NOT NEEDED).
+    Receipt is log-only; never appends. Schema kept in the log line for greppability.
     """
     shared_call = str(call_id or "").strip()
     if not shared_call:
         return False
-    return _safe_append_jsonl(
-        CHASE_OFFSET_TOUCH_GRID_FILE,
-        {
-            "schema": "compressed_chase_arm_receipt_v1",
-            "ts": utc_iso(),
-            "shared_ai_call_id": shared_call,
-            "trade_id": str(trade_id or "") or None,
-            "epoch_id": str(epoch_id or "") or None,
-            "direction": str(direction or "").upper() or None,
-            "status": str(status or "UNKNOWN").upper(),
-            "reason": str(reason or "UNKNOWN"),
-            "shadow_only": True,
-            "places_order": False,
-        },
-        label="SHADOW_CHASE_ARM_RECEIPT",
+    logger.info(
+        "[SHADOW_CHASE_ARM_RECEIPT] schema=compressed_chase_arm_receipt_v1 "
+        f"shared_ai_call_id={shared_call} trade_id={trade_id or None} "
+        f"epoch_id={epoch_id or None} direction={(direction or '').upper() or None} "
+        f"status={str(status or 'UNKNOWN').upper()} reason={str(reason or 'UNKNOWN')} "
+        "shadow_only=True places_order=False r22_no_append=1 [PIPELINE ENFORCEMENT]"
     )
+    return True
 
 
 def _discovery_touch_grid_admission(ai: dict) -> tuple:
@@ -20499,7 +20452,7 @@ def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
         row["ai_verdict_executes"] = raw_ai_executes
         row["tile_admission_basis"] = admission_basis
         row["note"] = "discovery path-touch only; no paper/live order"
-        _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+        # R22: chase_offset_touch_grid.jsonl append removed (STOP-WRITE / NOT NEEDED).
     _touch_grid_book[trade_id] = new_grid_state(rows)
     _discovery_touch_grid_seen_call_ids.add(call_id)
     _collector_record_touch_grid_call(armed=True, ai_executes=raw_ai_executes)
@@ -20613,9 +20566,10 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
             event_source_revision=_runtime_git_rev(),
             event_config_signature=active_tile_registry_signature(),
         )
-        durable = _safe_append_jsonl(
-            CHASE_OFFSET_TOUCH_GRID_FILE, stage_zero, label="SHADOW_CHASE",
-        )
+        # R22: no chase_offset_touch_grid.jsonl append (STOP-WRITE / NOT NEEDED).
+        # In-memory book still arms so poll/buckets can observe without disk growth.
+        del stage_zero
+        durable = True
     except Exception as exc:
         with _compressed_shadow_lock:
             _compressed_shadow_seen_call_ids.discard(call_id)
@@ -20643,7 +20597,7 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
         )
         return False
     _record_compressed_shadow_arm_result(
-        call_id, "ARMED", "STAGE_ZERO_DURABLE",
+        call_id, "ARMED", "STAGE_ZERO_IN_MEMORY_R22",
         direction=direction, trade_id=trade_id, epoch_id=epoch_id,
     )
     logger.info(
@@ -48885,7 +48839,13 @@ def _monitor_tiles_scope(args, *, include_forced_default: bool) -> dict:
 
 
 def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "expired")) -> dict:
-    """``tile_trade_row_v1`` rows per lane for the scope (no trade lock, no file I/O)."""
+    """``tile_trade_row_v1`` rows per lane for the scope (no trade lock).
+
+    Closed status also overlays self-sim FADE3 private ledgers (gf3/gf3l) so
+    ``/api/monitor/tiles/totals`` parity matches ``tile_route_counts.closed``
+    (daily-5 (3) / R0c plan eb14e8711d31). Those tiles never write the shared
+    ``trades`` book.
+    """
     lanes = set(scope["lanes"])
     short = _monitor_tile_short_names()
     fills = _tile_fill_index_snapshot()
@@ -48906,6 +48866,26 @@ def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "exp
                 continue
             row = monitor_tiles.tile_trade_row(
                 raw, status=status, short_names=short, epoch_id=scope["epoch"],
+                forced_reasons=STATS_EXCLUDED_EXIT_REASONS,
+                fill_evidence=fills.get(str(raw.get("trade_id") or "")),
+                parse_ts=parse_ts, be_band_bp=scope["be_band_bp"])
+            if not monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
+                continue
+            if scope.get("fresh_only") and not monitor_tiles.row_is_fresh(row):
+                continue
+            out[lane].append(row)
+    if "closed" in statuses:
+        # Same countable close basis as tile_route_counts / /api/monitor/lanes.
+        since = scope.get("since")
+        session_start = float(since) if isinstance(since, (int, float)) and since else 0.0
+        for raw in _self_sim_paper_trade_rows(session_start):
+            if not isinstance(raw, dict):
+                continue
+            lane = _normalize_lane_key(raw.get("research_lane") or "")
+            if lane not in lanes:
+                continue
+            row = monitor_tiles.tile_trade_row(
+                raw, status="closed", short_names=short, epoch_id=scope["epoch"],
                 forced_reasons=STATS_EXCLUDED_EXIT_REASONS,
                 fill_evidence=fills.get(str(raw.get("trade_id") or "")),
                 parse_ts=parse_ts, be_band_bp=scope["be_band_bp"])
@@ -49994,15 +49974,25 @@ _STREAM_HEALTH_CACHE: dict = {}
 
 @app.route('/api/monitor/streams/<name>/parts', methods=["GET"])
 def monitor_streams_parts(name):
-    """DATA-GAPS-20261012 (h): rotated parts (oldest -> newest, current = part 0) with first/last ts."""
+    """DATA-GAPS-20261012 (h): rotated parts (oldest -> newest, current = part 0) with first/last ts.
+
+    ``?meta=1`` skips edge timestamps (fast health). Shared ``parts_with_bounds``
+    applies a wall-clock budget so large rotation sets (book_tape_1s / disloc_* /
+    dyn_regime_minutes) never proxy-timeout RED (daily-5 (4) / R0c eb14e8711d31).
+    """
     if not monitor_integrity_authorized():
         return jsonify({"error": "unauthorized"}), 401
     import monitor_streams
+    meta_only = str(request.args.get("meta") or "").strip().lower() in ("1", "true", "yes")
     try:
-        plist = [monitor_streams.part_bounds(os.getcwd(), name, p) for p in monitor_streams.parts(os.getcwd(), name)]
+        assembled = monitor_streams.parts_with_bounds(
+            os.getcwd(), name, include_edge_ts=not meta_only,
+        )
     except monitor_streams.BadRequest as exc:
         return jsonify({"error": "bad_request", "reason": str(exc)[:160]}), 400
-    return jsonify({"schema": "monitor_stream_parts_v1", "stream": name, "parts": plist,
+    return jsonify({"schema": "monitor_stream_parts_v1", "stream": name,
+                    "parts": assembled["parts"], "truncated": assembled["truncated"],
+                    "edge_ts": assembled["edge_ts"], "meta": meta_only,
                     "archive_locations": monitor_streams.ARCHIVE_NOTE, "server_ts": time.time()})
 
 
@@ -60141,7 +60131,7 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "AI_SHADOW_REGIME_PROMPT_FILE",
     "DECISION_FEATURE_SNAPSHOT_FILE",
     "CSV_FALLBACK_JSONL",
-    "CHASE_OFFSET_TOUCH_GRID_FILE",
+    # R22: CHASE_OFFSET_TOUCH_GRID_FILE writers removed — not a serialized append target.
     "OPPORTUNITY_CAPTURE_FILE",
     "CYCLE_3M_UNIVERSE_FILE",
     "LANE_OPPORTUNITY_CAPTURE_FILE",
@@ -60175,7 +60165,7 @@ _JSONL_SERIALIZED_APPEND_LITERALS = (
     "shadow_runner_study.jsonl",
     "fill_markouts.jsonl",
     "taker_signal_counterfactuals.jsonl",
-    "xvp_shadow_signals.jsonl",
+    # R22: xvp_shadow_signals.jsonl writers removed (HM 46a97b4debee NOT REQUIRED).
     "xvs_shadow_signals.jsonl",
 )
 
@@ -60620,6 +60610,27 @@ def _safe_append_jsonl(
             label, admission["reason"], admission["threshold"],
         )
         return False
+
+    def _stop_write_latched() -> bool:
+        # R0c: rotation-cap latch must refuse appends (shared helper; chase motivating case).
+        family = f"rotation:{os.path.basename(path)}"
+        try:
+            return bool(retention_stop_write.is_stopped(family))
+        except Exception:  # noqa: BLE001 - fail closed on latch read errors
+            logger.error(
+                "[%s] stop-write latch check failed for %s; refusing append [PIPELINE ENFORCEMENT]",
+                label, family,
+            )
+            return True
+
+    if _stop_write_latched():
+        if outcome is not None:
+            outcome["status"] = "STOP_WRITE_LATCHED"
+        logger.warning(
+            "[%s] append refused: STOP_WRITE_LATCHED family=rotation:%s [PIPELINE ENFORCEMENT]",
+            label, os.path.basename(path),
+        )
+        return False
     stamp_epoch = globals().get("_data_epoch_row")
     line = json.dumps(stamp_epoch(path, row) if stamp_epoch else row, default=str) + "\n"
     last_err = None
@@ -60633,6 +60644,16 @@ def _safe_append_jsonl(
             try:
                 _validate_or_quarantine_jsonl(path, label)
                 rotate_log(path)
+                # Latch may be set during rotate_log (cap hard_over); re-check before open.
+                if _stop_write_latched():
+                    if outcome is not None:
+                        outcome["status"] = "STOP_WRITE_LATCHED"
+                    logger.warning(
+                        "[%s] append refused after rotate: STOP_WRITE_LATCHED "
+                        "family=rotation:%s [PIPELINE ENFORCEMENT]",
+                        label, os.path.basename(path),
+                    )
+                    return False
                 with open(path, "a", encoding="utf-8") as f:
                     f.write(line)
                     f.flush()

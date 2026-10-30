@@ -181,7 +181,9 @@ def test_every_static_serialized_jsonl_target_is_declared_before_first_write():
     assert observed_literals <= declared_literals
     assert {"XVL_SHADOW_FILE", "ADAPTIVE_ENTRY_DECISIONS_FILE", "RETIRED_TILE_BOUNDARY_FILE"} <= declared_constants
     assert {"fill_markouts.jsonl", "taker_signal_counterfactuals.jsonl",
-            "xvp_shadow_signals.jsonl", "xvs_shadow_signals.jsonl"} <= declared_literals
+            "xvs_shadow_signals.jsonl"} <= declared_literals
+    # R22: xvp_shadow_signals writers removed — must not be a serialized append literal.
+    assert "xvp_shadow_signals.jsonl" not in declared_literals
     assert "FILL_QUALITY_FILE" in declared_constants
     assert "TYPE_B_RESEARCH_V2_EVENT_FILE" not in declared_constants
     assert "execution_funnel.jsonl" in declared_literals

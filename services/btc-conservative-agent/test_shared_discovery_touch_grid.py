@@ -72,12 +72,8 @@ def test_shared_discovery_touch_grid_arms_once_without_paper_orders(tmp_path, mo
 
     assert arm(ctx, ai) is True
     assert arm(ctx, ai) is False  # duplicate shared call
-    assert len(appended) == 3
-    assert all(row["places_live_order"] is False for row in appended)
-    assert all(row["discovery_shadow_only"] is True for row in appended)
-    assert all(row["shared_ai_call_id"] == "scan-discovery-1" for row in appended)
-    assert all(row["tile_admission_basis"] == "AI_APPROVE" for row in appended)
-    assert all(row["ai_verdict_executes"] is True for row in appended)
+    # R22: chase_offset_touch_grid writers removed — durable appends must stay empty.
+    assert appended == []
     assert len(book) == 1
     assert "scan-discovery-1" in seen
     assert coverage == [{"armed": True, "ai_executes": True}]
@@ -89,12 +85,8 @@ def test_ai_rejected_tile_eligible_call_still_arms_discovery_grid(tmp_path):
     ai = {"decision": "REJECT", "direction": "NO_TRADE", "shared_ai_call_ts": "2026-09-03T10:03:00+00:00"}
 
     assert arm({"price": 100000.0}, ai) is True
-    assert len(appended) == 3
-    assert all(row["direction"] == "LONG" for row in appended)
-    assert all(row["ai_decision"] == "REJECT" for row in appended)
-    assert all(row["ai_verdict_executes"] is False for row in appended)
-    assert all(row["tile_admission_basis"] == "SCORE_LED_ADMISSION" for row in appended)
-    assert all(row["places_live_order"] is False for row in appended)
+    assert appended == []  # R22: no durable chase grid append
+    assert len(book) == 1
     assert coverage == [{"armed": True, "ai_executes": False}]
 
 
