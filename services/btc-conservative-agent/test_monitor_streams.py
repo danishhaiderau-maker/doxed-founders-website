@@ -15,9 +15,9 @@ def test_unknown_stream_and_rotation(tmp_path):
     import pytest
     with pytest.raises(ms.BadRequest):
         ms.read_page(tmp_path, "../etc/passwd")
-    f = tmp_path / ms.STREAMS["fill_markouts"]
+    f = tmp_path / ms.STREAMS["liquidations"]
     f.write_bytes(b'{"x":1}\n')
-    h, body = ms.read_page(tmp_path, "fill_markouts", 999)
+    h, body = ms.read_page(tmp_path, "liquidations", 999)
     assert h["rotated"] and body == b'{"x":1}\n'
 
 

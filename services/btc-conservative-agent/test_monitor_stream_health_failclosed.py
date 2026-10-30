@@ -159,11 +159,14 @@ def test_analyzer_streams_mark_retired_with_empty_because():
 
 
 def test_hm_ticker_streams_are_retired_not_thresholded():
+    """R22 writers deleted; STREAMS + RETIRED custody kept (resurrection RED)."""
     for name in ("fill_markouts", "xvp_shadow_signals", "ai_shadow_challengers"):
+        assert name in ms.STREAMS
         assert name in ms.RETIRED_STREAMS
         assert name not in ms.STALE_AFTER_SEC
     for name in ("taker_counterfactuals", "shadow_exit_paths"):
-        assert name in ms.RETIRED_STREAMS
+        assert name in ms.STREAMS and name in ms.RETIRED_STREAMS
+    assert "xvp_shadow_signals" in ms.KEY_FIELDS
 
 
 def test_signal_research_table_retired_stream_read():
@@ -227,8 +230,8 @@ def test_mutation_fail_open_limit_none_would_be_ok():
 
 
 def test_mutation_retired_not_ok_when_fresh():
-    status, _ = ms.classify_stream_status("xvp_shadow_signals", age=1.0,
-                                          last_ts=ms.RETIRED_STREAMS["xvp_shadow_signals"] - 10)
+    status, _ = ms.classify_stream_status("taker_counterfactuals", age=1.0,
+                                          last_ts=ms.RETIRED_STREAMS["taker_counterfactuals"] - 10)
     assert status == "RETIRED"
     assert status != "OK"
 

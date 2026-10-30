@@ -222,7 +222,8 @@ def test_bot_wires_both_hooks_without_touching_order_paths():
     outcome = src.split("def record_ai_provider_outcome(", 1)[1].split("\ndef ", 1)[0]
     assert 'globals().get("_AI_CALL_WINDOW")' in outcome and "ai_window.observe(" in outcome
     sampler = src.split("def _sample_execution_markouts(", 1)[1].split("\ndef ", 1)[0]
-    assert 'globals().get("_FILL_MARKOUT_AGG")' in sampler and "fill_agg.observe(" in sampler
+    assert "fill_markouts writer deleted" in sampler or "return" in sampler
+    assert "_FILL_MARKOUT_AGG" not in sampler and "fill_agg.observe(" not in sampler
     route = src.split("def monitor_integrity():", 1)[1].split("\n@app.route", 1)[0]
     for forbidden in ("state_lock", "trade_lock", "open(", "requests.", "_place_", "cancel"):
         assert forbidden not in route, forbidden

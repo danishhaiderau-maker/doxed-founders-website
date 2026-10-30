@@ -25,22 +25,48 @@ def test_own_evaluator_reuses_the_premium_rule_without_a_shadow_file():
 
 
 def test_gs01_still_triggers_via_premium_rule_side_for():
-    """Retiring the xvp stream must not disable GS-01: drive PremiumRule.side_for + TRIGGER_FEATURE_KEY."""
-    from cross_venue_premium import LONG
+    """Retiring the xvp stream must not disable GS-01: drive evaluator.evaluate() on venue+BFX mids."""
+    from cross_venue_premium import LONG, STATUS_TRIGGER
+    import cross_venue_tape as cvt
 
     evaluator = policy.make_evaluator()
     assert evaluator.SHADOW_FILE is None
-    # Real premium path on the live evaluator rule (not a hardcoded gsxvp_trigger_id inject).
-    side = evaluator.rule.side_for(2.0)
-    assert side == LONG
+    rule = evaluator.rule
+    start = 1_800_000_000
+    # Warm the trailing mean the same way evaluate() does (tracker.observe).
+    for i in range(rule.min_mean_samples):
+        evaluator.tracker.observe(start + i, {v: 100_000.0 for v in rule.venues}, 100_000.0)
+    trigger_bucket = start + rule.min_mean_samples
+    venue_mid = 100_000.0 * (1.0 + 3.0e-4)  # +3 bp premium vs BFX
+    now = float(trigger_bucket + 1)
+    live = {
+        "schema": cvt.LIVE_SCHEMA,
+        "written_ts": now - 0.1,
+        "history_start_ts": trigger_bucket,
+        "mids": {v: [venue_mid] for v in rule.venues},
+        "venues": {
+            v: {"last_bbo_ts": now - 0.1, "bid": venue_mid, "ask": venue_mid}
+            for v in rule.venues
+        },
+    }
+    bfx = 100_000.0
+    ev = evaluator.evaluate(
+        now=now, live=live,
+        bfx_quotes={trigger_bucket: (bfx - 0.5, bfx + 0.5)},
+        bfx_bbo_ts=now - 0.1,
+    )
+    assert ev["status"] == STATUS_TRIGGER and ev["side"] == LONG
+    assert float(ev["premium_dev_bp"]) >= rule.long_threshold_bps
     tid = f"{evaluator.ID_PREFIX}-alive"
     feature_key = evaluator.TRIGGER_FEATURE_KEY
     ai_feature = {
         f"{evaluator.ID_PREFIX}_trigger_id": tid,
-        feature_key: {"trigger_id": tid, "side": side, "premium_dev_bp": 2.0},
+        feature_key: {
+            "trigger_id": tid, "side": ev["side"], "premium_dev_bp": float(ev["premium_dev_bp"]),
+        },
     }
     assert feature_key == f"{evaluator.ID_PREFIX}_trigger"
-    d = decide(policy, direction=side, engine_bar=bar(), ai_feature=ai_feature)
+    d = decide(policy, direction=ev["side"], engine_bar=bar(), ai_feature=ai_feature)
     assert d["action"] == "TAKER" and d["trigger_kind"] == "CROSS_VENUE_PREMIUM"
 
 
