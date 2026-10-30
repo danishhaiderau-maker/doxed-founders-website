@@ -325,7 +325,8 @@ def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path):
     assert "r5_retention" not in sink and "retention_stop_write" not in sink
     import strategist_streams_collector as ssc
     path = tmp_path / "book10.jsonl"
-    s = ssc.Sink(str(path), rotate_bytes=10_000, keep=5)
+    # #949 Sink: keep= removed; cap is max_total_bytes (merge-adapt only).
+    s = ssc.Sink(str(path), rotate_bytes=10_000, max_total_bytes=10 * 1024 * 1024)
     s.write({"m": 1, "pad": "ok"})
     assert path.exists() and s.rows >= 1
 
