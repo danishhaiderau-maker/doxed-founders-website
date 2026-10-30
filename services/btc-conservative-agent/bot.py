@@ -55738,6 +55738,28 @@ _ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671  # 2026-10-18 06:01:11 AEDT, the re
 FRESH_START_TS = _ANALYZER_BUNDLE_FRESH_FLOOR_TS
 FRESH_START_UTC = datetime.fromtimestamp(FRESH_START_TS, timezone.utc).isoformat()
 _ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
+# Fix A (plan sha b2b3986939ec): mirror status must advertise an explicit RED label —
+# never HTTP 404 — when no validated analyzer_mirror_bundle_v2 is installed.
+_ANALYZER_BUNDLE_NO_VALIDATED_REASON = "NO_VALIDATED_ANALYZER_BUNDLE"
+
+
+def _analyzer_mirror_no_validated_bundle_payload(*, legacy_preserved: bool) -> dict:
+    """Honest no-bundle body for /api/analyzer-mirror/status (status/health/alarm RED)."""
+    detail = "no complete validated analyzer bundle is installed"
+    return {
+        "available": False,
+        "status": "RED",
+        "health": "RED",
+        "reason": _ANALYZER_BUNDLE_NO_VALIDATED_REASON,
+        "detail": detail,
+        "required_schema": _ANALYZER_BUNDLE_SCHEMA,
+        "legacy_data_preserved": bool(legacy_preserved),
+        "alarms": [{
+            "code": _ANALYZER_BUNDLE_NO_VALIDATED_REASON,
+            "severity": "critical",
+            "detail": detail,
+        }],
+    }
 
 
 def _analyzer_bundle_fresh_gate(report_manifest) -> None:
@@ -56185,13 +56207,13 @@ def api_analyzer_mirror_status():
         return jsonify({"error": "unauthorized"}), 401
     active = _active_analyzer_mirror_dir()
     if active is None:
+        # Fix A: non-404 RED — 404 was misread as "route missing" (R36).
         legacy_preserved = _analyzer_mirror_dir().exists()
-        return jsonify({
-            "available": False,
-            "reason": "no complete validated analyzer bundle is installed",
-            "required_schema": _ANALYZER_BUNDLE_SCHEMA,
-            "legacy_data_preserved": legacy_preserved,
-        }), 404
+        resp = jsonify(_analyzer_mirror_no_validated_bundle_payload(
+            legacy_preserved=legacy_preserved,
+        ))
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
     try:
         payload = json.loads(
             (active / "status.json").read_text(encoding="utf-8")
@@ -56200,7 +56222,10 @@ def api_analyzer_mirror_status():
         resp.headers['Cache-Control'] = 'no-store'
         return resp
     except (OSError, ValueError, TypeError):
-        return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
+        # Same honesty contract: never 404-as-missing when the route itself is fine.
+        resp = jsonify(_analyzer_mirror_no_validated_bundle_payload(legacy_preserved=True))
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
 
 
 @app.route('/analysis')
