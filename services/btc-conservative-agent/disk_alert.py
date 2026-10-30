@@ -147,6 +147,32 @@ def level_for_ratio(ratio: float | None) -> str:
     return "GREEN"
 
 
+def stream_size_cap_status(data_dir: str | os.PathLike | None) -> dict[str, Any]:
+    """Read strategist collector size-cap status (cross-process; RED => STREAM_SIZE_CAP)."""
+    if not data_dir:
+        return {"level": "UNKNOWN", "red": []}
+    path = Path(data_dir) / "strategist_stream_size_cap.json"
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"level": "UNKNOWN", "red": [], "exists": False}
+    if not isinstance(row, dict):
+        return {"level": "UNKNOWN", "red": [], "exists": False}
+    level = str(row.get("level") or "UNKNOWN")
+    red = []
+    if level == "RED" or row.get("stop_writing"):
+        red.append({
+            "reason": str(row.get("reason") or "STREAM_SIZE_CAP"),
+            "source": "strategist_streams",
+            "path": row.get("path"),
+            "ratio": row.get("ratio"),
+            "used_bytes": row.get("used_bytes"),
+            "cap_bytes": row.get("cap_bytes"),
+            "card": row.get("card"),
+        })
+    return {"level": level, "red": red, "exists": True, "status": row}
+
+
 def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
     volume = volume or {}
     total, used = volume.get("total_bytes"), volume.get("used_bytes")
@@ -160,7 +186,10 @@ def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
     retention = red_conditions()
     segment = segment_store_red(volume.get("transfer") if isinstance(volume.get("transfer"), Mapping) else None)
     retention = retention + segment["red"]
-    if retention:
+    data_dir = volume.get("data_dir") or volume.get("root") or os.getcwd()
+    stream_cap = stream_size_cap_status(data_dir)
+    retention = retention + list(stream_cap.get("red") or [])
+    if retention or stream_cap.get("level") == "RED":
         level = "RED"
     return {
         "schema": SCHEMA,
@@ -172,4 +201,5 @@ def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
         "retention_red": retention,
         "red_hold_seconds": RED_HOLD_SECONDS,
         "segment_store": segment,
+        "stream_size_cap": stream_cap,
     }
