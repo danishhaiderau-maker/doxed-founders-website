@@ -42,13 +42,13 @@ ABSTAIN_GAP_FLOOR = 5
 COMPACT_MIN_GAP = 0.04
 COMPACT_SIDE_RULE = "relative_gap_0.04_v2"
 
+# Report-facing labels only (analyzer ai_challenger_report). Runtime geometry proxy deleted.
 GEOMETRY_MODEL = "TILE_GEOMETRY_PROXY_V1"
-GEOMETRY_FILL_WINDOW_SEC = 1200
 GEOMETRY_NOTE = (
-    "Proxy, not tile P&L: static limit at the registry entry offset (chase not "
-    "modelled), filled on a BBO touch within 20 min, then first touch of "
-    "target vs stop from registry ATR multiples, time exit at max_duration."
+    "R22: geometry proxy writer deleted with ai_shadow_challengers; historical CALL "
+    "rows may still carry results for analyzer readback."
 )
+COMPACT_QUESTION_LANE = "compact_v5_question"
 
 LONG, SHORT, NONE = "LONG", "SHORT", "NONE"
 CHALLENGERS = (
@@ -402,109 +402,8 @@ def compute_challenger_sides(ctx: Mapping[str, Any], ai_result: Mapping[str, Any
     }
 
 
-# --------------------------------------------------------------------------
-# Tile geometry proxy
-# --------------------------------------------------------------------------
-def tile_geometry_specs(manifest: Iterable[Mapping[str, Any]], leverage: float) -> list:
-    """Registry-derived triple-barrier proxies; one per active tile in order."""
-    lev = _finite(leverage) or 0.0
-    specs = []
-    for tile in manifest or ():
-        entry = tile.get("entry_policy") or {}
-        exit_ = tile.get("exit_policy") or {}
-        offset_pct = _finite(entry.get("offset_pct"))
-        if offset_pct is None:
-            continue
-        partials = exit_.get("partial_take_profits") or []
-        first_partial = _finite(partials[0][0]) if partials and partials[0] else None
-        target_k = (
-            _finite(exit_.get("atr_tp_k"))
-            or first_partial
-            or _finite(exit_.get("trail_activation_atr_k"))
-            or 1.0
-        )
-        hard_margin = _finite(exit_.get("hard_stop_margin_pct"))
-        specs.append({
-            "lane": str(tile.get("lane")),
-            "entry_mode": entry.get("mode"),
-            "offset_pct": offset_pct,
-            "stop_atr_k": _finite(exit_.get("initial_stop_atr_k")),
-            "hard_stop_pct": None if not hard_margin or lev <= 0 else round(hard_margin / lev, 6),
-            "target_atr_k": target_k,
-            "max_duration_sec": int(_finite(exit_.get("max_duration_sec")) or 7200),
-        })
-    return specs
-
-
-def simulate_geometry(ts_list, rows, *, decision_ts: float, side: str, price: float,
-                      atr_pct: Optional[float], spec: Mapping[str, Any]) -> dict:
-    sign = side_sign(side)
-    atr_frac = None if atr_pct is None else atr_pct / 100.0
-    base = {"lane": spec["lane"], "side": side}
-    if not sign or not price or atr_frac is None or atr_frac <= 0:
-        return {**base, "result": "UNAVAILABLE_ATR_OR_PRICE"}
-    offset = spec["offset_pct"] / 100.0
-    limit = price * (1.0 - offset) if sign > 0 else price * (1.0 + offset)
-    fill_end = decision_ts + GEOMETRY_FILL_WINDOW_SEC
-    fill_gap = max_gap(ts_list, decision_ts, fill_end)
-    lo = bisect.bisect_right(ts_list, decision_ts)
-    hi = bisect.bisect_right(ts_list, fill_end)
-    fill_idx = None
-    for i in range(lo, hi):
-        bid, ask = rows[i][0], rows[i][1]
-        if (sign > 0 and ask <= limit) or (sign < 0 and bid >= limit):
-            fill_idx = i
-            break
-    if fill_idx is None:
-        if fill_gap is None or fill_gap > MAX_TAPE_GAP_SEC:
-            return {**base, "result": "TAPE_GAP", "phase": "FILL_WINDOW", "max_gap_s": fill_gap}
-        return {**base, "result": "NO_FILL", "limit": round(limit, 2)}
-    fill_ts = ts_list[fill_idx]
-    stop_dist = None
-    if spec.get("stop_atr_k"):
-        stop_dist = spec["stop_atr_k"] * atr_frac * limit
-    if spec.get("hard_stop_pct"):
-        hard = spec["hard_stop_pct"] / 100.0 * limit
-        stop_dist = hard if stop_dist is None else min(stop_dist, hard)
-    target_dist = spec["target_atr_k"] * atr_frac * limit
-    exit_end = fill_ts + spec["max_duration_sec"]
-    hold_gap = max_gap(ts_list, fill_ts, exit_end)
-    if hold_gap is None or hold_gap > MAX_TAPE_GAP_SEC:
-        return {**base, "result": "TAPE_GAP", "phase": "HOLD", "max_gap_s": hold_gap,
-                "fill_ts": fill_ts, "limit": round(limit, 2)}
-    result, exit_price, exit_ts = "TIME", None, None
-    end_idx = bisect.bisect_right(ts_list, exit_end)
-    for i in range(fill_idx + 1, end_idx):
-        bid, ask = rows[i][0], rows[i][1]
-        mark = bid if sign > 0 else ask
-        move = (mark - limit) * sign
-        if stop_dist is not None and move <= -stop_dist:
-            result, exit_price, exit_ts = "STOP", mark, ts_list[i]
-            break
-        if move >= target_dist:
-            result, exit_price, exit_ts = "TARGET", mark, ts_list[i]
-            break
-    if exit_price is None:
-        last = rows[end_idx - 1] if end_idx > 0 else rows[fill_idx]
-        exit_price = last[0] if sign > 0 else last[1]
-        exit_ts = ts_list[end_idx - 1] if end_idx > 0 else fill_ts
-    return {
-        **base,
-        "result": result,
-        "limit": round(limit, 2),
-        "fill_delay_s": fill_ts - decision_ts,
-        "hold_s": exit_ts - fill_ts,
-        "result_bp": round((exit_price - limit) / limit * 1e4 * sign, 3),
-        "target_bp": round(target_dist / limit * 1e4, 3),
-        "stop_bp": None if stop_dist is None else round(stop_dist / limit * 1e4, 3),
-    }
-
-
-# --------------------------------------------------------------------------
-# Pending book and maturation
-# --------------------------------------------------------------------------
-
 # R22: ChallengerBook + markout/pending-call writers deleted with ai_shadow_challengers.jsonl.
+# Geometry proxy (tile_geometry_specs / simulate_geometry) deleted — no callers after writer removal.
 # CHALLENGER_FILE basename above is wipe-list only. TapeRing / tape_features / mid_at stay
 # for XVL/GS-01 quote path and decision-feature maturation.
 
@@ -549,19 +448,6 @@ COMPACT_GEOMETRY = {
     "stop_atr": 1.5,
     "horizon_min": 30,
 }
-COMPACT_QUESTION_LANE = "compact_v5_question"
-
-
-def compact_question_spec() -> dict:
-    """Geometry spec that matures the compact prompt's exact question for Brier scoring."""
-    return {
-        "lane": COMPACT_QUESTION_LANE,
-        "offset_pct": COMPACT_GEOMETRY["entry_offset_bp"] / 100.0,
-        "stop_atr_k": COMPACT_GEOMETRY["stop_atr"],
-        "hard_stop_pct": None,
-        "target_atr_k": COMPACT_GEOMETRY["target_atr"],
-        "max_duration_sec": COMPACT_GEOMETRY["horizon_min"] * 60,
-    }
 
 
 class OpenInterestHistory:

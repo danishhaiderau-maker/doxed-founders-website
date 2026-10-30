@@ -1,11 +1,11 @@
 ## 30 Oct 2026 — R22 delete ticker stream writers (BOT-28)
 
-- **PR:** (open) branch `cursor/r22-retire-ticker-streams-2758`
+- **PR:** [#946](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/946) branch `cursor/r22-retire-ticker-streams-2758`
 - **Base:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) FREEZE tip `e034e1bcca0e6b2378280aceee7c79f7ca845655` (stacked on #943)
 - **Deleted writers:** `fill_markouts` (`_register_fill_markout` / MarkoutBook), `ai_shadow_challengers.jsonl` (ChallengerBook + CALL/MARKOUT appends), xvp stream already `SHADOW_FILE=None` (stream+shadow_outcome only)
-- **Kept:** GS-01 / `cross_venue_premium` / `regime_adaptive_binding` premium trigger; TapeRing for XVL quotes; wipe-list basenames
-- **STREAMS/RETIRED:** removed `fill_markouts`, `xvp_shadow_signals`, `ai_shadow_challengers` (gone, not custody)
-- **bot.py:** 64081 → 64012 lines
+- **Kept:** GS-01 / `cross_venue_premium` / `regime_adaptive_binding` premium trigger; TapeRing for XVL quotes; wipe-list basenames; live `SHADOW_EXIT_SET` (tile cards)
+- **STREAMS/RETIRED (locked RK+HM):** KEEP `fill_markouts`, `ai_shadow_challengers`, `xvp_shadow_signals`, `shadow_exit_paths`, `taker_counterfactuals` in STREAMS + RETIRED_STREAMS (+ xvp KEY_FIELDS); writers deleted; resurrection RED
+- **Also deleted:** callerless `tile_geometry_specs` / `simulate_geometry`; recorder-specs helper `tile_shadow_exit_set` / `_shadow_exit_recorder_specs`; zero-filled stubs (`pending_calls`, `DELETED_R22`, dashboard-shape counters)
 - **R21:** dry-run only under store `internal/r21-retire-ticker-streams/` (no execute delete)
 - **FREEZE** — no merge / deploy / arm
 

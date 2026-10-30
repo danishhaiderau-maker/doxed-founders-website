@@ -88,10 +88,10 @@ def test_no_threshold_and_7d_old_is_never_ok(tmp_path):
 
 
 def test_retired_stays_retired_with_fresh_rows_before_boundary(tmp_path):
-    name = "taker_counterfactuals"  # custody RETIRED (R22 writers deleted; ticker streams gone)
+    name = "xvp_shadow_signals"
     retired_since = ms.RETIRED_STREAMS[name]
     now = retired_since + 10_000
-    _write_stream(tmp_path, name, [{"ts": retired_since - 1, "signal_ts": retired_since - 1}])
+    _write_stream(tmp_path, name, [{"evaluated_ts": retired_since - 1, "side": "LONG", "premium_dev_bp": 2.0}])
     h = ms.health(tmp_path, now)["streams"][name]
     assert h["status"] == "RETIRED"
     assert h["severity"] == "GREEN"
@@ -99,10 +99,10 @@ def test_retired_stays_retired_with_fresh_rows_before_boundary(tmp_path):
 
 
 def test_resurrection_is_red_after_retirement_commit(tmp_path):
-    name = "shadow_exit_paths"  # custody RETIRED
+    name = "fill_markouts"
     retired_since = ms.RETIRED_STREAMS[name]
     now = retired_since + 100
-    _write_stream(tmp_path, name, [{"ts": retired_since + 1, "exit_ts": retired_since + 1}])
+    _write_stream(tmp_path, name, [{"ts": retired_since + 1, "fill_ts": retired_since + 1}])
     h = ms.health(tmp_path, now)["streams"][name]
     assert h["status"] == "RETIRED_RESURRECTED"
     assert h["severity"] == "RED"
@@ -158,14 +158,15 @@ def test_analyzer_streams_mark_retired_with_empty_because():
         assert meta.get("note") == "EMPTY_BECAUSE:R17_RETIRED"
 
 
-def test_hm_ticker_stream_writers_gone_from_streams_and_retired():
-    """R22: ticker writers deleted — names gone from STREAMS and RETIRED_STREAMS."""
+def test_hm_ticker_streams_are_retired_not_thresholded():
+    """R22 writers deleted; STREAMS + RETIRED custody kept (resurrection RED)."""
     for name in ("fill_markouts", "xvp_shadow_signals", "ai_shadow_challengers"):
-        assert name not in ms.STREAMS
-        assert name not in ms.RETIRED_STREAMS
+        assert name in ms.STREAMS
+        assert name in ms.RETIRED_STREAMS
         assert name not in ms.STALE_AFTER_SEC
     for name in ("taker_counterfactuals", "shadow_exit_paths"):
-        assert name in ms.RETIRED_STREAMS
+        assert name in ms.STREAMS and name in ms.RETIRED_STREAMS
+    assert "xvp_shadow_signals" in ms.KEY_FIELDS
 
 
 def test_signal_research_table_retired_stream_read():

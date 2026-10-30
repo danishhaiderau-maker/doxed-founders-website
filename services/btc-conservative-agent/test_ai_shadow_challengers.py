@@ -359,8 +359,8 @@ def test_challenger_hook_no_longer_writes_challenger_stream():
             assert len(bot.pending_orders) == orders_before
         snap = bot.ai_shadow_dashboard_snapshot()
         assert snap["mode"] == "SHADOW_ONLY_NO_ORDERS"
-        assert snap["pending_calls"] == 0
-        assert snap["book"].get("writer") == "DELETED_R22"
+        assert "pending_calls" not in snap
+        assert "book" not in snap
     finally:
         for n in names:
             setattr(bot, n, originals[n])
