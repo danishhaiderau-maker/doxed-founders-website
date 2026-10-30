@@ -52,7 +52,7 @@ def test_byte_backstop(tmp_path):
 def test_protected_exempt_and_unclassified_untouched(tmp_path):
     for base in ("lane_pnl_ledger_epoch_receipts.jsonl", "pre_entry_evidence_handoffs.jsonl",
                  "bfx_book_10l_1s.jsonl", "research_events_v22.jsonl", "mystery.jsonl",
-                 "rotation_cap_quarantine.jsonl"):
+                 "relay_outbox_quarantine.jsonl"):  # named live safety (BOT-36)
         active = _make(tmp_path, base, 15)
         res = rotation_cap.enforce_cap(str(active))
         assert res["deleted"] == [], base
@@ -60,6 +60,9 @@ def test_protected_exempt_and_unclassified_untouched(tmp_path):
     assert rotation_cap.classify("v3/anything.jsonl")[0] == "PROTECTED"
     assert rotation_cap.classify("bfx_book_10l_1s.jsonl")[0] == "EXEMPT"  # paper_fill path unchanged
     assert rotation_cap.classify("x.malformed_rows.jsonl")[0] == "EXEMPT"
+    # R22: bare "*quarantine*" substring no longer protects; named live files are CAP_EXEMPT.
+    assert rotation_cap.classify("rotation_cap_quarantine.jsonl")[0] == "UNCLASSIFIED"
+    assert rotation_cap.classify("relay_outbox_quarantine.jsonl")[0] == "EXEMPT"
 
 
 def test_cap_receipts_self_capped_and_failure_never_blocks(tmp_path):

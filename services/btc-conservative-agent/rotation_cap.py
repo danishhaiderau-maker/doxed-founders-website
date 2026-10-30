@@ -128,13 +128,17 @@ CAP_EXEMPT: dict[str, str] = {
     "retired_tile_boundary_receipts.jsonl": "receipt (protected)",
     "disloc_trades.jsonl": "DISLOC tile trade ledger",
     "disloc_foi_trades.jsonl": "DISLOC-FOI tile trade ledger",
+    # Live safety quarantines (HM audit 30 Oct) — named only, not substring "quarantine".
+    "relay_outbox_quarantine.jsonl": "relay outbox safety quarantine",
 }
 # Suffix-classified exempt families (dynamic paths).
 CAP_EXEMPT_SUFFIXES: dict[str, str] = {
     ".malformed_rows.jsonl": "CSV malformed-row quarantine sidecar",
 }
 
-_PROTECTED_SUBSTRINGS = ("ledger", "receipt", "quarantine")
+# R22 BOT-36: do not blanket-protect every "*quarantine*" name (retention hole).
+# Named live safety quarantines are CAP_EXEMPT below; substring covers ledger/receipt only.
+_PROTECTED_SUBSTRINGS = ("ledger", "receipt")
 
 
 def is_protected(path: str) -> bool:
@@ -156,7 +160,7 @@ def classify(path: str) -> tuple[str, Any]:
         if base.endswith(suffix):
             return "EXEMPT", reason
     if is_protected(path):
-        return "PROTECTED", "never capped (v3/ledger/receipt/quarantine/research_events_v22)"
+        return "PROTECTED", "never capped (v3/ledger/receipt/research_events_v22)"
     if base in CAP_ALLOW:
         return "ALLOW", CAP_ALLOW[base]
     return "UNCLASSIFIED", None

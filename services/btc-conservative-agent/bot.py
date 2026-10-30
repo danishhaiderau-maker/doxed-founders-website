@@ -67,7 +67,7 @@ from lifecycle_cleanup_transaction import (
     verify_bundle as verify_lifecycle_cleanup_bundle,
 )
 from research_v3_store import set_collection_config_signature_provider
-from raw_generation_cleanup_owner import RawGenerationCleanupOwner
+# R22 BOT-36: raw_generation_cleanup_owner deleted (dead quarantine path).
 from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
@@ -55043,27 +55043,6 @@ def _audit_lifecycle_purge_recovery() -> list:
 _RAW_GENERATION_GATE_LOCAL = threading.local()
 
 
-def _raw_generation_cleanup_identity() -> dict:
-    current = _data_sync_lifecycle_cleanup_current_identity()
-    return {
-        "source_revision": current["source_git_rev"],
-        "deployed_revision": current["deployed_git_rev"],
-        "collection_epoch_id": current["collection_epoch_id"],
-        "tile_registry_signature": current["tile_registry_signature"],
-        "config_signature": current["config_signature"],
-    }
-
-
-def _raw_generation_cleanup_leases(_generation_id: str) -> dict:
-    """Conservatively translate all known owners into generation leases."""
-    active = _data_sync_lifecycle_cleanup_active_references()
-    return {
-        "reader": list(active.get("runtime") or []) + list(active.get("lifecycle_worker") or []),
-        "sync": list(active.get("sync") or []),
-        "analyzer": [] if getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None) else list(active.get("analyzer") or []),
-    }
-
-
 def _raw_generation_cleanup_gate_acquire() -> bool:
     runtime = _LIFECYCLE_PIPELINE_RUNTIME
     if runtime is not None and not runtime.acquire_cleanup_lease(timeout=0.0):
@@ -55088,27 +55067,8 @@ def _raw_generation_cleanup_gate_release() -> None:
         if hasattr(_RAW_GENERATION_GATE_LOCAL, name): delattr(_RAW_GENERATION_GATE_LOCAL, name)
 
 
-def _raw_generation_cleanup_owner(*, purge: bool = False) -> RawGenerationCleanupOwner:
-    enabled = os.getenv("RAW_GENERATION_CLEANUP_ENABLED", "false").lower() == "true"
-    if purge:
-        enabled = enabled and os.getenv("RAW_GENERATION_PURGE_ENABLED", "false").lower() == "true"
-    return RawGenerationCleanupOwner(
-        _data_sync_volume_root(), enabled=enabled,
-        identity=_raw_generation_cleanup_identity,
-        leases=_raw_generation_cleanup_leases,
-        gate_acquire=_raw_generation_cleanup_gate_acquire,
-        gate_release=_raw_generation_cleanup_gate_release,
-    )
-
-
-def _audit_raw_generation_cleanup_recovery() -> list:
-    """Startup visibility only: never move or delete interrupted generations."""
-    try:
-        rows = _raw_generation_cleanup_owner().audit_recovery()
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        rows = [{"status": "RAW_GENERATION_RECOVERY_AUDIT_FAILED", "reason": str(exc)[:240]}]
-    if rows: logger.warning("raw generation cleanup requires explicit replay states=%s", rows)
-    return rows
+# R22 BOT-36: RawGenerationCleanupOwner + recovery audit deleted (mutation path was unreachable).
+# Gate acquire/release above stay as fresh-reset mutual exclusion (MirrorGenerationLease).
 
 
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
@@ -61372,7 +61332,7 @@ def main():
     _prime_data_sync_identity_epoch_cache()
     _reconcile_lifecycle_cleanup_transactions()
     _audit_lifecycle_purge_recovery()
-    _audit_raw_generation_cleanup_recovery()
+    # R22 BOT-36: raw_generation_cleanup recovery audit removed with dead owner.
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()

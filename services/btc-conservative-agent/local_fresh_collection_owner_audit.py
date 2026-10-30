@@ -25,7 +25,6 @@ OWNER_COMMAND_PATTERNS = (
     "migrate_canonical_research_store",
     "archive-research-data",
     "fly-mirror-quarantine",
-    "raw_generation_cleanup_owner",
     "canonical_generation_retirement",
     "research-stability-supervisor.py",
     "start-research-stability-supervisor.ps1",

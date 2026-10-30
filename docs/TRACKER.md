@@ -1,3 +1,16 @@
+## 30 Oct 2026 — Quarantine plan steps 1–2 + corrupt_evidence R21 (BOT-36)
+
+- **PR:** (open) branch `cursor/quarantine-r21-r22-2758`
+- **Base:** [#947](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/947) BOT-29 tip `0427fffc2b519924a2c212e6bb4444fa056d3bd9`
+- **Step 1 R22:** deleted `raw_generation_cleanup.py` + `_owner.py` + recovery audit/tests; kept fresh-reset lease gate
+- **Step 2 R22:** narrowed `rotation_cap` protection (no blanket `*quarantine*`); named `relay_outbox_quarantine.jsonl` CAP_EXEMPT
+- **Step 4 partial:** `corrupt_evidence_r21.py` dry-run sha-list + confirm_delete (R21 expiry); default dry-run
+- **Kept:** r3_quarantine fence; tombstone/relay/CSV/lifecycle safety (step 5–6)
+- **Deferred to follow-up:** full retention/archive R21 convert (audit step 3); r3 producer deletion (step 5 long-term); safety id-pointer alerts polish (step 6)
+- **FREEZE** — no merge / deploy / arm; never touch gs-export temp / `.puller-backup-*`
+
+---
+
 ## 30 Oct 2026 — thread_health / monitor_gaps fail-closed (BOT-29)
 
 - **PR:** [#947](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/947) branch `cursor/thread-health-failclosed-2758`
