@@ -1,13 +1,15 @@
 ## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
 
 - **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`
-- **Head sha:** `PENDING_AFTER_MASTER_MERGE`
+- **Head sha:** `e9a8c42d15eb077c982d59fd4d682b9e6db7b67b`
 - **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (HM COND PASS — no push)
 - **Base:** `origin/master` after #940+#938 (`cbe56608a`) via #943
 - **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams + B3 EMPTY_BECAUSE readers + killing tests for v62 ai_shadow sites; `data_health_report.repaired_stream_quality` EMPTY_BECAUSE; GS-01 signal path kept; B4/B5 clean
 - **Test-fix (HM `4a12d569` + RK):** R23 retarget failures 1–6 to `RETIRED_R17`/`EMPTY_BECAUSE` + `rows_read==0`; strategy_lab empty-frame schema guard; standing iff retired-reader test; failure 7 separate commit — cleanup fixture exact 149 after #943 deleted 3 shadow-exit GETs (note `152 -> 149`, not a silent bump)
 - **Liquidations 3600s proposal (Boss):** `/cursor/stores/bc-a981dbda-0693-5ea9-bded-58742aa4e031/internal/proposal-3600s-liquidations-interarrival-20261031.md` sha256 `0d967569171dfd765d47cdd2733559d2b6ac6533ab5208122deadb9f8aed3b42` — no further liquidations code until RK PASS on that file
-- **CI pandas:** unit-tests resolve **pandas 3.1.0** (`requirements.txt` `pandas>=2.0`)
+- **CI pandas:** pinned **pandas==3.1.0** (was `>=2.0`; matches CI resolve)
+- **strategy_lab_insights R1:** sticky `_PROCESS_GUARD` from epoch-wiring tests (not pandas); cleared on teardown — see store `internal/pr944-strategy-lab-insights-r1-20261031.md`
+- **Rule book:** `RULES-R0-R45-20261031.md` sha `10f0b8daa510…` (verified)
 - **RK liquidations (a):** staleness **3600s** at `services/btc-conservative-agent/monitor_streams.py:78` (`STALE_AFTER_SEC["liquidations"]=3600`) — sole ADD vs master (master had no liquidations key); equals pre-existing inventory default `strategy_lab/streams.py:118` `stale_after_sec=3600`; **not raised**
 - **RK liquidations (b):** signal/feature input only (event-study `H2_LIQ_BURST_*` / `research/data_health_report.py:128` `load_liquidations`) — **never** fill/stop/exit pricing (R3). Price age recorded: `exch_ts` at `market_context_tape.py:191`, `recv_ts`/`ts` at `market_context_collector.py:352-355`
 - **RK merge order (later, not now):** **#945 → #943 → #944**. #943+#944 MUST ship in the same bundled deploy (R8); otherwise hold #943 until #944 is ready. Do not merge from this entry.
