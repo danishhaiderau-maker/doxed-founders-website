@@ -2087,7 +2087,11 @@ jobs:
                   raise SystemExit(0)
               for trade_id in positions:
                   try:
-                      result = request_json("/api/positions/close", {"trade_id": trade_id})
+                      print(f"Predeploy closing position trade_id={trade_id}", flush=True)
+                      result = request_json(
+                          "/api/positions/close",
+                          {"trade_id": trade_id, "reason": "DEPLOY_FORCE_FLAT"},
+                      )
                       actions.append({"kind": "position", "trade_id": trade_id, "ok": result.get("status") == "closed"})
                   except Exception as exc:
                       actions.append({"kind": "position", "trade_id": trade_id, "error": type(exc).__name__})
@@ -2657,8 +2661,22 @@ jobs:
                   headers={**headers, **({"Content-Type": "application/json"} if data else {})},
                   method="POST" if data else "GET",
               )
-              with urllib.request.urlopen(request, timeout=timeout) as response:
-                  return json.load(response)
+              try:
+                  with urllib.request.urlopen(request, timeout=timeout) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  # Always name the trade_id / status / body before re-raising (deploy 41050904036).
+                  body = ""
+                  try:
+                      body = (exc.read() or b"").decode("utf-8", "replace")[:2000]
+                  except Exception:
+                      body = ""
+                  print(
+                      f"Maintenance HTTPError path={path} trade_id={(payload or {}).get('trade_id')} "
+                      f"status={exc.code} body={body}",
+                      flush=True,
+                  )
+                  raise
           def pending_cancel_conflict(exc):
               """True only for the bot's retriable 409 "pending cancel unconfirmed"."""
               if getattr(exc, "code", None) != 409:
@@ -2893,8 +2911,12 @@ jobs:
               for trade_id in positions:
                   # Paper positions close through normal accounting. The relay
                   # phantom-cancel endpoint refuses paper-only tiles (#193).
+                  print(f"Maintenance closing position trade_id={trade_id}", flush=True)
                   try:
-                      reconciled = mutate_json("/api/positions/close", {"trade_id": trade_id})
+                      reconciled = mutate_json(
+                          "/api/positions/close",
+                          {"trade_id": trade_id, "reason": "DEPLOY_FORCE_FLAT"},
+                      )
                   except urllib.error.HTTPError as exc:
                       if exc.code != 404:
                           raise
@@ -3301,9 +3323,23 @@ jobs:
               def postdeploy_mutation(path, trade_id):
                   # An unconfirmed or already-absent mutation proves nothing;
                   # the round resamples generation-current authority instead.
+                  payload = {"trade_id": trade_id}
+                  if path == "/api/positions/close":
+                      payload["reason"] = "DEPLOY_FORCE_FLAT"
+                      print(f"Postdeploy closing position trade_id={trade_id}", flush=True)
                   try:
-                      return request_json(path, {"trade_id": trade_id}, timeout=90)
+                      return request_json(path, payload, timeout=90)
                   except urllib.error.HTTPError as exc:
+                      body = ""
+                      try:
+                          body = (exc.read() or b"").decode("utf-8", "replace")[:2000]
+                      except Exception:
+                          body = ""
+                      print(
+                          f"Postdeploy HTTPError path={path} trade_id={trade_id} "
+                          f"status={exc.code} body={body}",
+                          flush=True,
+                      )
                       if exc.code == 404:
                           print(f"Postdeploy maintenance target already absent trade_id={trade_id}", flush=True)
                           return None

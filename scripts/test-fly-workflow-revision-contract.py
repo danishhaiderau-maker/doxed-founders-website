@@ -325,7 +325,10 @@ def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     assert 'status.get("bitfinex_live_enabled") is False' in DEPLOY
     assert 'status.get("force_paper_mode") is True' in DEPLOY
     assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in DEPLOY
-    assert 'mutate_json("/api/positions/close", {"trade_id": trade_id})' in DEPLOY
+    assert '{"trade_id": trade_id, "reason": "DEPLOY_FORCE_FLAT"}' in DEPLOY
+    assert 'mutate_json("/api/positions/close", {"trade_id": trade_id})' not in DEPLOY
+    assert "Maintenance closing position trade_id=" in DEPLOY
+    assert "Maintenance HTTPError path=" in DEPLOY
     assert "/api/reconcile/phantom-cancel" not in DEPLOY
     assert "pause mutation attempt={attempt}" in DEPLOY
     assert "checking durable state" in DEPLOY
@@ -341,7 +344,8 @@ def test_postdeploy_restart_boundary_is_exact_generation_fenced_and_flat():
     assert exact < pause
     assert 'status.get("execution_paused") is True' in block
     assert 'status.get("manual_admin_pause") is True' in block
-    assert 'return request_json(path, {"trade_id": trade_id}, timeout=90)' in block
+    assert 'return request_json(path, payload, timeout=90)' in block
+    assert 'payload["reason"] = "DEPLOY_FORCE_FLAT"' in block
     assert 'postdeploy_mutation("/api/orders/cancel", trade_id)' in block
     assert 'postdeploy_mutation("/api/positions/close", trade_id)' in block
     assert 'generation <= round_generation' in block

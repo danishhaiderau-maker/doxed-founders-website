@@ -1,7 +1,7 @@
 ## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
 
 - **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`
-- **Head sha:** `b9b5d92aebb5d038263c7ebbb98cb8e528767008`
+- **Head sha:** `PENDING_AFTER_MASTER_MERGE`
 - **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (HM COND PASS — no push)
 - **Base:** `origin/master` after #940+#938 (`cbe56608a`) via #943
 - **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams + B3 EMPTY_BECAUSE readers + killing tests for v62 ai_shadow sites; `data_health_report.repaired_stream_quality` EMPTY_BECAUSE; GS-01 signal path kept; B4/B5 clean
@@ -13,6 +13,15 @@
 - **RK merge order (later, not now):** **#945 → #943 → #944**. #943+#944 MUST ship in the same bundled deploy (R8); otherwise hold #943 until #944 is ready. Do not merge from this entry.
 - **Tests:** `test_monitor_stream_health_failclosed.py` + `test_signal_research_table` (no `counterfactual_direction`) + mutation proofs; awaiting CI green on this tip then HM→RK→Boss
 - **Do not merge / deploy / arm from this entry alone** · Live OFF
+
+---
+## 30 Oct 2026 — positions/close HTTP 500 (deploy 41050904036) — MERGED #945
+
+- **PR:** [#945](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/945) merge on `origin/master` `f6974f4d6`
+- **Root cause (HM Fly bot.log):** `_paper_lane_exit` `time.sleep(min(model_fill - time.time(), 3.0))` → ValueError negative sleep (two clock samples). `rnd-5e22404b5d77` raised before save (still open).
+- **Fix:** clamp sleep `max(0.0, min(...))`; workflow logs trade_id/status/body + `DEPLOY_FORCE_FLAT`; handler try/except → JSON 500 with `exception_type`.
+- **Regression:** `test_paper_lane_exit_wait_clamps_negative_sleep_when_clock_crosses_model_fill`
+- **R8:** already on master; bundles into next Fly deploy with #943+#944 when ready. Live stays disarmed.
 
 ---
 ## 30 Oct 2026 — R22 PR-B dead writers (taker CF + shadow_exit + disloc streams)

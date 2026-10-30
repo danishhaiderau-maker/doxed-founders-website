@@ -8044,7 +8044,9 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         return out, {**base, **marks}
     model_fill = t0 + float(delay_s)
     while time.time() < model_fill:
-        time.sleep(min(model_fill - time.time(), 3.0))
+        # Clamp to >=0: the while check and the sleep-arg read are two clock samples.
+        # Crossing model_fill between them used to raise ValueError (deploy 41050904036).
+        time.sleep(max(0.0, min(model_fill - time.time(), 3.0)))
     if cls == _om.BOT_SENT and not stop_rule and _is_paper_book_lane(pos):
         # race: did the resident stop trigger while this bot order was in flight (t0, t0 + delay]?
         hit = _exchange_stop_trigger(dict(pos), t0, model_fill)
@@ -52050,27 +52052,38 @@ def api_close_showcase_position():
     # DEPLOY_FORCE_FLAT tags the pre-deploy flatten (stats-excluded like every forced close).
     close_reason = "DEPLOY_FORCE_FLAT" if str(body.get("reason") or "").upper() == "DEPLOY_FORCE_FLAT" else "ADMIN_MANUAL_CLOSE"
     close_origin = _forced_close_origin(close_reason)
-    with trade_lock:
-        _stamp_admin_close_trigger(matches[0], close_reason, time.time())
-    close_position(matches[0], close_reason)
-    with state_lock:
-        still_open = any(
-            str(pos.get("trade_id") or "") == trade_id
-            and pos.get("status") != "CLOSED"
-            for pos in open_positions
+    try:
+        with trade_lock:
+            _stamp_admin_close_trigger(matches[0], close_reason, time.time())
+        close_position(matches[0], close_reason)
+        with state_lock:
+            still_open = any(
+                str(pos.get("trade_id") or "") == trade_id
+                and pos.get("status") != "CLOSED"
+                for pos in open_positions
+            )
+        if still_open:
+            return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
+        with trade_lock:
+            paper_orders = _fast_state_copy(pending_orders)
+            paper_positions = _fast_state_copy(open_positions)
+            paper_trades = _fast_state_copy(trades[-50:])
+        _patch_api_state_cache_fields(
+            orders=paper_orders,
+            positions=paper_positions,
+            trades=paper_trades,
         )
-    if still_open:
-        return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
-    with trade_lock:
-        paper_orders = _fast_state_copy(pending_orders)
-        paper_positions = _fast_state_copy(open_positions)
-        paper_trades = _fast_state_copy(trades[-50:])
-    _patch_api_state_cache_fields(
-        orders=paper_orders,
-        positions=paper_positions,
-        trades=paper_trades,
-    )
-    cache_generation = _invalidate_relay_execution_snapshot()
+        cache_generation = _invalidate_relay_execution_snapshot()
+    except Exception as exc:
+        # Never return Flask's unhandled HTML 500: maintenance needs trade_id + exception type.
+        logger.exception(
+            "[ADMIN] Showcase paper position close failed trade_id=%s", trade_id,
+        )
+        return jsonify({
+            "error": "showcase close failed",
+            "trade_id": trade_id,
+            "exception_type": type(exc).__name__,
+        }), 500
     logger.warning("[ADMIN] Showcase paper position closed trade_id=%s origin=%s", trade_id, close_origin)
     return jsonify({
         "status": "closed",

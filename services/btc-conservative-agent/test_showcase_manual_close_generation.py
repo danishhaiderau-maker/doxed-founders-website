@@ -111,3 +111,29 @@ def test_manual_close_returns_the_advanced_relay_money_generation(isolated_manua
     fresh_payload = fresh.get_json()
     assert fresh_payload["money_state_generation"] == payload["money_state_generation"]
     assert fresh_payload["positions"] == []
+
+
+def test_manual_close_forced_raise_returns_json_500_with_exception_type(isolated_manual_close, monkeypatch, caplog):
+    """Deploy 41050904036: close exceptions must be JSON 500, never unhandled Flask HTML."""
+    import logging
+
+    def boom(target, reason):
+        raise RuntimeError("forced close boom")
+
+    monkeypatch.setattr(bot, "close_position", boom)
+    with caplog.at_level(logging.ERROR):
+        with bot.app.test_client() as client:
+            response = client.post(
+                "/api/positions/close",
+                json={"trade_id": isolated_manual_close["trade_id"]},
+                environ_base={"REMOTE_ADDR": "127.0.0.1", "HTTP_X_BOT_ADMIN_TOKEN": "test-admin-token-rk4"},
+            )
+    assert response.status_code == 500
+    payload = response.get_json()
+    assert payload["error"] == "showcase close failed"
+    assert payload["trade_id"] == isolated_manual_close["trade_id"]
+    assert payload["exception_type"] == "RuntimeError"
+    assert "text/html" not in (response.content_type or "")
+    assert any("Showcase paper position close failed" in r.getMessage() for r in caplog.records)
+    # still open: raise was before save
+    assert any(p.get("trade_id") == isolated_manual_close["trade_id"] for p in bot.open_positions)
