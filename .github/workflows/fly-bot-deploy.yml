@@ -1,17 +1,12 @@
 name: Deploy Fly BTC bot
-# deploy-trigger: land #910+#913 tip fa4c4c6d5
+# R8 deploy lock: a push to master does not deploy. GitHub reads this file
+# from the pushed commit, so the commit that drops `on.push` does not start
+# a deploy. The only trigger is workflow_dispatch. mode=deploy ships only
+# inputs.expected_deploy_sha, and only when that value is the dispatched HEAD.
+# Dispatch a head HM and RK have passed, after a full R16 check. R9 checks
+# are required before anything is armed. This workflow does not arm Bitfinex.
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "services/btc-conservative-agent/**"
-      # Tests validate an image but are not copied into or imported by the
-      # running Fly service. A test-only push must not claim a new deployed
-      # source revision.
-      - "!services/btc-conservative-agent/test*.py"
-      - "scripts/check-relay-flat.mjs"
-      - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
     inputs:
       mode:
@@ -53,6 +48,10 @@ on:
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
+      expected_deploy_sha:
+        description: mode=deploy only. Exact 40-character SHA of a head HM and RK have passed, after a full R16 check. Must equal the dispatched HEAD. R9 checks are required before anything is armed. This input does not arm Bitfinex.
+        required: false
+        type: string
       keep_maintenance_pause:
         description: Keep ADMIN_MANUAL true-flat after accept; skip paper resume (maintenance sticky)
         required: false
@@ -3176,16 +3175,36 @@ jobs:
           print("Maintenance boundary remains paused, disarmed, and flat immediately before deploy")
           PY
 
+      - name: Refuse deploy unless the dispatched head is the exact reviewed SHA
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
+        env:
+          EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}
+        run: |
+          python - <<'PY'
+          import os, re, subprocess
+          expected = str(os.environ.get("EXPECTED_DEPLOY_SHA") or "").strip().lower()
+          if not re.fullmatch(r"[0-9a-f]{40}", expected):
+              raise SystemExit("expected_deploy_sha must be the exact 40-character head HM and RK passed")
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip().lower()
+          dispatched = str(os.environ.get("GITHUB_SHA") or "").strip().lower()
+          if head != expected or dispatched != expected:
+              raise SystemExit("refusing to deploy a head that is not the exact reviewed SHA")
+          print("deploy pinned to the exact reviewed SHA")
+          PY
+
       - name: Deploy the exact source revision
         id: deploy_source
         # The helper preserves the normal Fly argv, including
         # --build-arg SOURCE_GIT_REV="${GITHUB_SHA}", and appends only the
-        # three validated reset-recovery overrides.
+        # three validated reset-recovery overrides. mode=deploy overrides
+        # GITHUB_SHA with expected_deploy_sha after the pin step proved it
+        # equals the dispatched HEAD. Recovery modes keep github.sha.
         run: python ../../scripts/fly_deploy_reset_proof.py deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           DEPLOY_MODE: ${{ inputs.mode }}
           LIFECYCLE_RESET_PROOF: ${{ inputs.lifecycle_reset_proof }}
+          GITHUB_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' && inputs.expected_deploy_sha || github.sha }}
 
       - name: Re-enter maintenance and flatten the exact deployed revision
         env:

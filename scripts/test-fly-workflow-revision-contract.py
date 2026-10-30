@@ -10,20 +10,61 @@ MONITOR = (ROOT / ".github/workflows/fly-bot-monitor.yml").read_text(encoding="u
 MONITOR_RUNNER = (ROOT / "scripts/fly_monitor_run.py").read_text(encoding="utf-8")
 BOOTSTRAP_HELPER = (ROOT / "scripts/fly_resume_bootstrap.py").read_text(encoding="utf-8")
 PREDEPLOY_ABORT_HELPER = (ROOT / "scripts/fly_resume_predeploy_abort.py").read_text(encoding="utf-8")
-TEST_PATH = "services/btc-conservative-agent/test*.py"
 
 
-def test_test_only_changes_are_excluded_from_deploy():
-    assert f'- "!{TEST_PATH}"' in DEPLOY
+def _on_event_keys(workflow: str) -> list[str]:
+    """Return event keys indented two spaces under the top-level `on:` block."""
+    lines = workflow.splitlines()
+    try:
+        start = lines.index("on:")
+    except ValueError as exc:
+        raise AssertionError("workflow is missing an on: block") from exc
+    keys: list[str] = []
+    for line in lines[start + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            break
+        if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+            keys.append(line.strip()[:-1])
+    return keys
 
 
-def test_runtime_and_deploy_contract_changes_remain_deploy_triggers():
-    for path in (
-        "services/btc-conservative-agent/**",
-        "scripts/check-relay-flat.mjs",
-        ".github/workflows/fly-bot-deploy.yml",
-    ):
-        assert path in DEPLOY
+def test_deploy_triggers_only_on_workflow_dispatch():
+    """Fail closed if a push trigger is reintroduced. RK-signed R23 rewrite."""
+    keys = _on_event_keys(DEPLOY)
+    assert keys == ["workflow_dispatch"]
+    assert "push" not in keys
+    on_block = DEPLOY.split("\non:\n", 1)[1].split("\npermissions:\n", 1)[0]
+    assert "\n  push:" not in "\n" + on_block
+    assert not on_block.lstrip().startswith("push")
+    assert "\non: push\n" not in DEPLOY
+    assert "\non: [push" not in DEPLOY and "\non: [workflow_dispatch, push" not in DEPLOY
+
+
+def test_deploy_is_pinned_to_expected_deploy_sha():
+    """mode=deploy must ship the input SHA, and only when it is the dispatched HEAD."""
+    assert "\n      expected_deploy_sha:\n" in DEPLOY
+    description = DEPLOY.split("\n      expected_deploy_sha:\n", 1)[1].split("\n      keep_maintenance_pause:\n", 1)[0]
+    assert "HM and RK have passed" in description
+    assert "full R16 check" in description
+    assert "R9 checks are required before anything is armed" in description
+    assert "does not arm Bitfinex" in description
+    pin_at = DEPLOY.index("- name: Refuse deploy unless the dispatched head is the exact reviewed SHA")
+    deploy_at = DEPLOY.index("- name: Deploy the exact source revision")
+    assert pin_at < deploy_at
+    pin_block = DEPLOY[pin_at:deploy_at]
+    assert "if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'" in pin_block
+    assert "EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}" in pin_block
+    assert 're.fullmatch(r"[0-9a-f]{40}", expected)' in pin_block
+    assert '["git", "rev-parse", "HEAD"]' in pin_block
+    assert 'str(os.environ.get("GITHUB_SHA") or "").strip().lower()' in pin_block
+    assert "refusing to deploy a head that is not the exact reviewed SHA" in pin_block
+    deploy_block = DEPLOY[deploy_at:].split("\n      - name:", 1)[0]
+    assert (
+        "GITHUB_SHA: ${{ github.event_name == 'workflow_dispatch' && "
+        "inputs.mode == 'deploy' && inputs.expected_deploy_sha || github.sha }}"
+    ) in deploy_block
 
 
 def test_monitor_expects_latest_successful_deploy_on_master():
