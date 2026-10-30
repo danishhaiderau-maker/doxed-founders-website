@@ -1,23 +1,50 @@
-## 30 Oct 2026 — positions/close HTTP 500 (deploy 41050904036) — FREEZE pending HM/RK
+## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
 
-- **PR:** [#945](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/945) branch `cursor/positions-close-500-harden-e96c`
-- **Head:** `532ebfe8c3b6552674749a1d33c3e6aa7b74cf99`
+- **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`
+- **Head sha:** `ab7163c2912efe49096fc3e869c7fe5004274cc4`
+- **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (HM COND PASS — no push)
+- **Base:** `origin/master` after #940+#938 (`cbe56608a`) via #943
+- **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams + B3 EMPTY_BECAUSE readers + killing tests for v62 ai_shadow sites; `data_health_report.repaired_stream_quality` EMPTY_BECAUSE; GS-01 signal path kept; B4/B5 clean
+- **Test-fix (HM `4a12d569` + RK):** R23 retarget failures 1–6 to `RETIRED_R17`/`EMPTY_BECAUSE` + `rows_read==0`; strategy_lab empty-frame schema guard; standing iff retired-reader test; failure 7 separate commit — cleanup fixture exact 149 after #943 deleted 3 shadow-exit GETs (note `152 -> 149`, not a silent bump)
+- **Liquidations 3600s proposal (Boss):** `/cursor/stores/bc-a981dbda-0693-5ea9-bded-58742aa4e031/internal/proposal-3600s-liquidations-interarrival-20261031.md` sha256 `0d967569171dfd765d47cdd2733559d2b6ac6533ab5208122deadb9f8aed3b42` — no further liquidations code until RK PASS on that file
+- **CI pandas:** pinned **pandas==3.0.6** (analyzer v62 validated version; HM CONDITIONAL P2)
+- **strategy_lab_insights R1:** sticky `_PROCESS_GUARD` from epoch-wiring tests (not pandas); cleared on teardown — see store `internal/pr944-strategy-lab-insights-r1-20261031.md`
+- **Rule book:** `RULES-R0-R45-20261031.md` sha `10f0b8daa510…` (verified)
+- **RK liquidations (a):** staleness **3600s** at `services/btc-conservative-agent/monitor_streams.py:78` (`STALE_AFTER_SEC["liquidations"]=3600`) — sole ADD vs master (master had no liquidations key); equals pre-existing inventory default `strategy_lab/streams.py:118` `stale_after_sec=3600`; **not raised**
+- **RK liquidations (b):** signal/feature input only (event-study `H2_LIQ_BURST_*` / `research/data_health_report.py:128` `load_liquidations`) — **never** fill/stop/exit pricing (R3). Price age recorded: `exch_ts` at `market_context_tape.py:191`, `recv_ts`/`ts` at `market_context_collector.py:352-355`
+- **RK merge order (later, not now):** **#945 → #943 → #944**. #943+#944 MUST ship in the same bundled deploy (R8); otherwise hold #943 until #944 is ready. Do not merge from this entry.
+- **Tests:** `test_monitor_stream_health_failclosed.py` + `test_signal_research_table` (no `counterfactual_direction`) + mutation proofs; awaiting CI green on this tip then HM→RK→Boss
+- **Do not merge / deploy / arm from this entry alone** · Live OFF
+
+---
+## 30 Oct 2026 — positions/close HTTP 500 (deploy 41050904036) — MERGED #945
+
+- **PR:** [#945](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/945) merge on `origin/master` `f6974f4d6`
 - **Root cause (HM Fly bot.log):** `_paper_lane_exit` `time.sleep(min(model_fill - time.time(), 3.0))` → ValueError negative sleep (two clock samples). `rnd-5e22404b5d77` raised before save (still open).
 - **Fix:** clamp sleep `max(0.0, min(...))`; workflow logs trade_id/status/body + `DEPLOY_FORCE_FLAT`; handler try/except → JSON 500 with `exception_type`.
 - **Regression:** `test_paper_lane_exit_wait_clamps_negative_sleep_when_clock_crosses_model_fill`
-- **R8:** bundles into next master-tip deploy — do not deploy from this row alone. Live stays disarmed.
+- **R8:** already on master; bundles into next Fly deploy with #943+#944 when ready. Live stays disarmed.
 
 ---
+## 30 Oct 2026 — R22 PR-B dead writers (taker CF + shadow_exit + disloc streams)
 
-## 30 Oct 2026 — URGENT R8 pure revert #929 + #930 (do not merge yet)
+- **PR:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) branch `cursor/r22-dead-writers-018b`
+- **Head sha:** `6e6248436f0d97e075820a02c74c4d495ca14ad0`
+- **Base:** `origin/master` after #940 (`cbe56608a78d8280d2849c7b12e80f40c49d340f`; #938 also on tip)
+- **Root cause:** R17-retired writers/flags/routes left as dead code; STREAMS keys must stay for R5 custody (HM FAIL B2).
+- **Change:** delete dead writers/flags/`_r17_retired_view` routes; restore `taker_counterfactuals` / `shadow_exit_paths` / 4 disloc in `STREAMS` as `RETIRED_STREAMS` (R5); keep wipe basenames; keep live `SHADOW_EXIT_SET` / `tile_shadow_exit_set` (tile cards + registry).
+- **B3 deferred:** analyzer EMPTY_BECAUSE / taker_counterfactual readers → [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) (PR-A). **RK order: #945 → #943 → #944; #943+#944 same bundled deploy (R8).**
+- **Success metric:** nav test 26 sections green; STREAMS contains retired custody names; grep proof for allowlist/fixture deletions; bot.py shrinks.
+- **Line counts (code commit):** bot.py 64232→64081 (−151); analyzer_research_engine_v62.py 23850→23834 (−16)
+- **Freeze:** one push after HM FAIL fixes; no merge/deploy/arm.
 
-- **PR:** [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) branch `cursor/revert-929-930-12bb`
-- **Base:** `origin/master` `93aa39a4caccb3673ed415587af0130367607233`
-- **Revert commits:** `a423ac1764c2bd820530482d0487ee6ed83abcc5` (undo #930 `93aa39a4`) then `dec6800c94838a57cd1e35765e167883b6679897` (undo #929 `da4f7475`); revert-tree equals pre-#929 tip `c7c51f4b` (`#927`/`#928` stay); tracker commit follows
-- **Head sha:** `3c743708eda4684d90e46af59abe0ffaf031a489`
+---
+## 30 Oct 2026 — URGENT R8 pure revert #929 + #930 (MERGED #940)
+
+- **PR:** [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) merge `b4b6b11d4`
+- **Base was:** `origin/master` `93aa39a4caccb3673ed415587af0130367607233`
 - **Why:** restores fail-closed after #929 VIOLATION (soft-exclude retired tile_config); makes #930 retry path non-applicable until a later fixed PR
-- **Trades since 19:59 AEDT 30 Oct 2026:** **non-countable** (31 CLOSED fingerprinted in store R21 dry-run package; OPEN since cutoff also non-countable). No stamp code in this PR. **No delete executed** — R21 package only at store `internal/r21-dryrun-trades-1959aedt.md`
-- **Do not merge / deploy / arm from this entry alone**
+- **Trades since 19:59 AEDT 30 Oct 2026:** **non-countable**. No delete executed — R21 package only at store `internal/r21-dryrun-trades-1959aedt.md`
 
 ---
 
