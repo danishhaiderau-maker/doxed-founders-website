@@ -1,12 +1,14 @@
 ## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
 
 - **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`
-- **Head sha:** `a276caa6bcf4dd73b6ef3e3c5353400aede57e22`
-- **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (frozen HM fix)
+- **Head sha:** `PLACEHOLDER`
+- **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (HM COND PASS — no push)
 - **Base:** `origin/master` after #940+#938 (`cbe56608a`) via #943
-- **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams (`fill_markouts`/`xvp_shadow_signals`/`ai_shadow_challengers` + #943 taker/shadow_exit/disloc); resurrection RED; watcher `scripts/self_aware/monitor_stream_status_expected.json`; B3 EMPTY_BECAUSE readers (`stream_studies`, `signal_research_table`, `analyzer_research_engine_v62`, `adaptive_entry_funnel`, `strategy_lab/streams`) + mutation tests; GS-01 signal path kept (`SHADOW_FILE=None` only); thread_health/monitor_gaps unchanged (B4)
-- **Merge order:** **#944 must merge before or same deploy as #943**
-- **Tests:** `test_monitor_stream_health_failclosed.py` (+ allowlist) with mutation proofs
+- **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams + B3 EMPTY_BECAUSE readers + killing tests for v62 ai_shadow sites; `data_health_report.repaired_stream_quality` EMPTY_BECAUSE; GS-01 signal path kept; B4/B5 clean
+- **RK liquidations (a):** staleness **3600s** at `services/btc-conservative-agent/monitor_streams.py:78` (`STALE_AFTER_SEC["liquidations"]=3600`) — sole ADD vs master (master had no liquidations key); equals pre-existing inventory default `strategy_lab/streams.py:118` `stale_after_sec=3600`; **not raised**
+- **RK liquidations (b):** signal/feature input only (event-study `H2_LIQ_BURST_*` / `research/data_health_report.py:128` `load_liquidations`) — **never** fill/stop/exit pricing (R3). Price age recorded: `exch_ts` at `market_context_tape.py:191`, `recv_ts`/`ts` at `market_context_collector.py:352-355`
+- **RK merge order (later, not now):** **#945 → #943 → #944**. #943+#944 MUST ship in the same bundled deploy (R8); otherwise hold #943 until #944 is ready. Do not merge from this entry.
+- **Tests:** `test_monitor_stream_health_failclosed.py` + `test_signal_research_table` (no `counterfactual_direction`) + mutation proofs; green Python unit-tests
 - **Do not merge / deploy / arm from this entry alone**
 
 ---
@@ -17,7 +19,7 @@
 - **Base:** `origin/master` after #940 (`cbe56608a78d8280d2849c7b12e80f40c49d340f`; #938 also on tip)
 - **Root cause:** R17-retired writers/flags/routes left as dead code; STREAMS keys must stay for R5 custody (HM FAIL B2).
 - **Change:** delete dead writers/flags/`_r17_retired_view` routes; restore `taker_counterfactuals` / `shadow_exit_paths` / 4 disloc in `STREAMS` as `RETIRED_STREAMS` (R5); keep wipe basenames; keep live `SHADOW_EXIT_SET` / `tile_shadow_exit_set` (tile cards + registry).
-- **B3 deferred:** analyzer EMPTY_BECAUSE / taker_counterfactual readers → [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) (PR-A). **#944 must merge before or same deploy as #943.**
+- **B3 deferred:** analyzer EMPTY_BECAUSE / taker_counterfactual readers → [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) (PR-A). **RK order: #945 → #943 → #944; #943+#944 same bundled deploy (R8).**
 - **Success metric:** nav test 26 sections green; STREAMS contains retired custody names; grep proof for allowlist/fixture deletions; bot.py shrinks.
 - **Line counts (code commit):** bot.py 64232→64081 (−151); analyzer_research_engine_v62.py 23850→23834 (−16)
 - **Freeze:** one push after HM FAIL fixes; no merge/deploy/arm.

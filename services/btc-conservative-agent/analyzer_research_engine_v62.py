@@ -12491,7 +12491,7 @@ def tile_paired_comparison_report(trades) -> dict:
     print(f"\n=== TILE PAIRED COMPARISON {PIPELINE_ENFORCEMENT_TAG} ===")
     try:
         import tile_paired_comparison
-        # R17: ai_shadow_challengers retired — 0 rows / EMPTY_BECAUSE (do not load CHALLENGER_FILE).
+        # R17: ai_shadow_challengers retired — 0 rows / EMPTY_BECAUSE (never open the journal).
         rows = trades.to_dict("records") if trades is not None and not getattr(trades, "empty", True) else []
         revisions = tile_paired_comparison.call_input_revisions([])
         report_retired = {"EMPTY_BECAUSE": "R17_RETIRED", "rows_read": 0, "source": "ai_shadow_challengers"}

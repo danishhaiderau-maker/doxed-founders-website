@@ -292,6 +292,56 @@ def test_mutation_analyzer_ai_challenger_empty_because():
     assert mutated["EMPTY_BECAUSE"] != "R17_RETIRED"
 
 
+def test_v62_tile_paired_comparison_never_loads_ai_shadow_challengers():
+    """Killing test (~12494): restoring pre-fix CHALLENGER_FILE load must fail."""
+    import inspect
+    import analyzer_research_engine_v62 as eng
+
+    src = inspect.getsource(eng.tile_paired_comparison_report)
+    assert "EMPTY_BECAUSE" in src and "R17_RETIRED" in src
+    assert 'source": "ai_shadow_challengers"' in src or "source': 'ai_shadow_challengers'" in src
+    assert "from ai_shadow_challengers import" not in src
+    assert "_load_jsonl_rows_all_generations" not in src
+    assert "call_input_revisions([])" in src
+    assert "report[\"ai_shadow_challengers\"]" in src or "report['ai_shadow_challengers']" in src
+
+
+def test_v62_ai_challenger_report_never_loads_challenger_file():
+    """Killing test (~12790): restoring pre-fix CHALLENGER_FILE / COMPACT_PROMPT_FILE load must fail."""
+    import inspect
+    import analyzer_research_engine_v62 as eng
+
+    src = inspect.getsource(eng.ai_challenger_report)
+    assert "build_ai_challenger_report([], [], epoch_id=None)" in src
+    assert "from ai_shadow_challengers import" not in src
+    assert "COMPACT_PROMPT_FILE" not in src
+    assert "_load_jsonl_rows(" not in src
+    assert "EMPTY_BECAUSE" in src
+
+
+def test_data_health_repaired_streams_ai_shadow_empty_because(tmp_path):
+    from research import data_health_report as dhr
+
+    (tmp_path / "ai_shadow_challengers.jsonl").write_text(
+        json.dumps({"row_kind": "CALL", "sides": {"compact_v5": "LONG"}, "compact": {"side_rule": True}}) + "\n",
+        encoding="utf-8")
+    out = dhr.repaired_stream_quality(str(tmp_path))
+    assert out["ai_shadow_challengers"]["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert out["ai_shadow_challengers"]["rows_read"] == 0
+    assert out["compact_v5"]["EMPTY_BECAUSE"] == "R17_RETIRED"
+    assert out["compact_v5"]["calls"] == 0  # file on disk must not be analysed
+    assert out["win_prob"]["EMPTY_BECAUSE"] == "R17_RETIRED"
+
+
+def test_mutation_data_health_ai_shadow_empty_because(tmp_path):
+    from research import data_health_report as dhr
+
+    out = dhr.repaired_stream_quality(str(tmp_path))
+    assert out["ai_shadow_challengers"]["EMPTY_BECAUSE"] == "R17_RETIRED"
+    mutated = {**out["ai_shadow_challengers"], "EMPTY_BECAUSE": "OK", "rows_read": 9}
+    assert mutated["EMPTY_BECAUSE"] != "R17_RETIRED"
+
+
 def test_mutation_strategy_lab_streams_retired_inventory(tmp_path):
     rows = sl_streams.stream_inventory(str(tmp_path))
     retired = [r for r in rows if r["stream"] == "fill_markouts.jsonl"][0]
