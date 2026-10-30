@@ -167,19 +167,41 @@ def test_n5_red_clear_needs_fresh_evidence_after_the_red():
         assert ns["_live_guardian_red_clear_if_flat"](NOW) is expect, (fetched, age)
 
 
-# ---- AMEND5 rev 4 FINAL (sha 4407d5a2): F1/F2 backstop 18 bp, G3 in-trade liq check, G4 outcomes, G5 source, G6 FADE3 gate --
-_AMEND5 = pathlib.Path("/workspace") / ltg.AMEND5_FILE
+# ---- AMEND5 rev 4 FINAL (sha 4407d5a2): F1/F2 backstop 18 bp, G3 in-trade liq check, G4 outcomes, G5 source; G6 FADE3 gate VOID (R22) --
+def _amend5_prereg_path() -> pathlib.Path | None:
+    """Resolve the AMEND5 prereg from common roots; None when absent (constants still pin without it)."""
+    roots = (
+        pathlib.Path("/workspace"),
+        pathlib.Path(__file__).resolve().parents[2],  # repo root from services/btc-conservative-agent/
+        pathlib.Path.cwd(),
+        pathlib.Path.cwd().parent,
+        pathlib.Path.cwd().parent.parent,
+    )
+    for root in roots:
+        p = root / ltg.AMEND5_FILE
+        if p.is_file():
+            return p
+    return None
 
 
 def test_amend5_constants_pinned():
-    import hashlib, pytest
-    if not _AMEND5.exists():
-        pytest.skip("AMEND5 prereg not present (CI / image build)")
-    raw = _AMEND5.read_bytes()
+    """Always runs (no pytest.skip): binding/void constants + optional prereg file pin when present."""
+    import hashlib
+    # Always-on: binding + VOID ranges (G6 FADE3 arm gate deleted R22 — not in AMEND5_LINES)
+    assert ltg.STOP_BACKSTOP_PAST_STOP_BP == 18.0 and ltg.LIQ_CHECK_MAX_BP == 15.0 and ltg.LIQ_NORMAL_MIN_BP == 28.0
+    assert ltg.LIQ_CLAMP_RATE_MAX == 0.05 and ltg.LIQ_CLAMP_MIN_N == 20
+    assert ltg.AMEND5_BINDING == ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5")
+    assert "G6" not in ltg.AMEND5_BINDING and "G6" not in ltg.AMEND5_LINES
+    assert ltg.AMEND5_VOID_LINES == {"F3": (8, 12), "G4(c)": 25, "REV3": (28, 34), "G6": 43}
+    assert ltg.AMEND5_VOID_LINES["G6"] == 43
+    path = _amend5_prereg_path()
+    if path is None:
+        return  # constants already asserted; prereg file pin is environment-local
+    raw = path.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == ltg.AMEND5_SHA256
     lines = raw.decode("utf-8").splitlines()
     at = lambda n: lines[n - 1]
-    for tag in ("F1", "F2", "F4", "G1", "G2", "G3", "G5", "G6"):
+    for tag in ("F1", "F2", "F4", "G1", "G2", "G3", "G5"):  # G6 is VOID — not in AMEND5_LINES
         assert at(ltg.AMEND5_LINES[tag]).startswith(f"- **{tag}"), tag
     assert at(ltg.AMEND5_LINES["G4"]).startswith("- **G4 (HM 1)")
     assert at(ltg.AMEND5_LINES["G4(a)"]).strip().startswith("- (a) L at least 28 bp past the stop")
@@ -189,12 +211,10 @@ def test_amend5_constants_pinned():
     assert "Rev 4" in at(36) and "FINAL" in at(36)
     assert "18" in at(6) and "CLOSER" in at(7) and "15 bp or less" in at(18) and "(inclusive)" in at(18)
     assert "#851" in at(13) or "receive" in at(13)
-    # void text is cited, never coded
+    # void text is cited, never coded (incl. G6 at VOID range line 43)
     assert at(8).startswith("- **F3 ") and at(25).strip().startswith("- (c) L 15 bp or less") and at(28).startswith("## Rev 3")
-    assert ltg.STOP_BACKSTOP_PAST_STOP_BP == 18.0 and ltg.LIQ_CHECK_MAX_BP == 15.0 and ltg.LIQ_NORMAL_MIN_BP == 28.0
-    assert ltg.LIQ_CLAMP_RATE_MAX == 0.05 and ltg.LIQ_CLAMP_MIN_N == 20
-    assert ltg.AMEND5_BINDING == ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5")
-    assert "G6" not in ltg.AMEND5_BINDING and "G6" in ltg.AMEND5_VOID_LINES
+    g6_line = at(ltg.AMEND5_VOID_LINES["G6"])
+    assert "G6" in g6_line
 
 
 def test_amend5_void_rules_have_no_code():
@@ -294,7 +314,7 @@ def test_g4c_arm_gate_no_fade3_g6_path():
     assert not hasattr(ltg, "G6_GATED_TILE") and not hasattr(ltg, "DENY_G6_NO_FIRST_L")
     for o in (ltg.G4_A, ltg.G4_B):
         assert ltg.arm_gate_block("gs1", {"outcome": o}) is None
-        assert ltg.arm_gate_block("gf3", {"outcome": o}, "PASS:hm") is None  # reserved key; no G6 gate
+        assert ltg.arm_gate_block("gf3", {"outcome": o}) is None  # reserved key; no G6 gate
     assert ltg.arm_gate_block("gb1", c) is None                             # (c') names GS-01 only
 
 
@@ -838,16 +858,16 @@ def test_rk_l27_arm_gate_refuses_until_a_new_amendment_passes(monkeypatch):
     monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
     rec = {"ts": NOW - 100, "stop_liq_distance_bp": 12.0, "amendment_at_record": ""}
     for tile in ("gs1", "gb2", "gb1"):                                      # every tile, account-wide
-        assert ltg.arm_gate_block(tile, {"outcome": ltg.G4_A}, "PASS:hm", rec) == ltg.DENY_L27_LATEST_L
-    assert ltg.arm_gate_block("gb1", None, None, rec, "FAIL") == ltg.DENY_L27_LATEST_L
-    assert ltg.arm_gate_block("gb1", None, None, rec, "PASS:" + _SHA1) == ltg.DENY_L27_LATEST_L   # env alone: no pass record
-    assert ltg.arm_gate_block("gb1", None, None, rec, "PASS:" + _SHA1, _pass()) is None
-    assert ltg.arm_gate_block("gb1", None, None, rec, _SHA1, _pass()) is None                    # bare sha form
+        assert ltg.arm_gate_block(tile, {"outcome": ltg.G4_A}, rec) == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, rec, "FAIL") == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, rec, "PASS:" + _SHA1) == ltg.DENY_L27_LATEST_L   # env alone: no pass record
+    assert ltg.arm_gate_block("gb1", None, rec, "PASS:" + _SHA1, _pass()) is None
+    assert ltg.arm_gate_block("gb1", None, rec, _SHA1, _pass()) is None                    # bare sha form
     old = dict(rec, amendment_at_record="PASS:" + _SHA1)                  # the amendment already in force when L was read
-    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:" + _SHA1, _pass()) == ltg.DENY_L27_LATEST_L
-    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:" + _SHA2, _pass(_SHA2)) is None
-    assert ltg.arm_gate_block("gb1", None, None, dict(rec, stop_liq_distance_bp=16.0)) is None
-    assert ltg.arm_gate_block("gb1", None, None, None) is None             # nothing recorded: no estimate, no refusal
+    assert ltg.arm_gate_block("gb1", None, old, "PASS:" + _SHA1, _pass()) == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, old, "PASS:" + _SHA2, _pass(_SHA2)) is None
+    assert ltg.arm_gate_block("gb1", None, dict(rec, stop_liq_distance_bp=16.0)) is None
+    assert ltg.arm_gate_block("gb1", None, None) is None             # nothing recorded: no estimate, no refusal
 
 
 def test_rk_l27_admit_entry_carries_the_l27_refusal():
@@ -855,7 +875,7 @@ def test_rk_l27_admit_entry_carries_the_l27_refusal():
                               entry_margin_usd=1.0, latest_l={"stop_liq_distance_bp": 1.0})[1]
     assert reasons   # unknown tile key fails closed first; the L27 refusal is wired via arm_gate_block (source test below)
     src = pathlib.Path(ltg.__file__).read_text()
-    assert "g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment, amendment_pass)" in src
+    assert "g = arm_gate_block(key, g4_first_l, latest_l, stop_amendment, amendment_pass)" in src
 
 
 def test_rk2_l27_amendment_refusals_mismatch_unsigned_half_signed_stale_unstamped(monkeypatch):
@@ -932,15 +952,15 @@ def test_rk_l27_refusal_persists_across_a_restart(tmp_path, monkeypatch):
     p2 = _persist_ns(tmp_path)                                              # Fly restart
     p2["_live_guardian_restore"](NOW + 60)
     latest = p2["_LIVE_GUARDIAN_STATE"].get("liq_latest_l")
-    assert latest and ltg.arm_gate_block("gb1", None, None, latest, None) == ltg.DENY_L27_LATEST_L
-    assert ltg.arm_gate_block("gb1", None, None, latest, "PASS:" + _SHA1, _pass(ts=NOW + 1)) is None
+    assert latest and ltg.arm_gate_block("gb1", None, latest, None) == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, latest, "PASS:" + _SHA1, _pass(ts=NOW + 1)) is None
     # HM C-R3-2: STICKY - a later live position with a SAFE real L does NOT replace the too-close record ...
     ns, st2 = _rec_ns({"tile": "gs1", "trade_id": "t2", "positions": [dict(_L27_ROW, stop_liq_distance_bp=30.0)]},
                       {"liq_latest_l": latest})
     ns["_live_guardian_record_protection"](NOW + 90, [])
     assert st2["liq_latest_l"]["trade_id"] == "t1" and st2["liq_latest_l"]["too_close"]
     assert st2["liq_latest_l_safe_seen"]["trade_id"] == "t2"
-    assert ltg.arm_gate_block("gb1", None, None, st2["liq_latest_l"], None) == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, st2["liq_latest_l"], None) == ltg.DENY_L27_LATEST_L
     # ... until a persisted amendment-pass record exists (signed sha, actor, ts after the L); then the safe L replaces it
     monkeypatch.setenv(ltg.STOP_AMENDMENT_ENV, "PASS:" + _SHA1)
     ns, st2b = _rec_ns({"tile": "gs1", "trade_id": "t2", "positions": [dict(_L27_ROW, stop_liq_distance_bp=30.0)]},
@@ -952,7 +972,7 @@ def test_rk_l27_refusal_persists_across_a_restart(tmp_path, monkeypatch):
                        {"liq_latest_l": st2b["liq_latest_l"], "l27_amendment_pass": _pass(ts=NOW + 1)})
     ns["_live_guardian_record_protection"](NOW + 120, [])
     assert st2c["liq_latest_l"]["trade_id"] == "t4" and st2c["liq_latest_l"]["too_close"]
-    assert ltg.arm_gate_block("gb1", None, None, st2c["liq_latest_l"], "PASS:" + _SHA1,
+    assert ltg.arm_gate_block("gb1", None, st2c["liq_latest_l"], "PASS:" + _SHA1,
                               st2c["l27_amendment_pass"]) == ltg.DENY_L27_LATEST_L
     monkeypatch.delenv(ltg.STOP_AMENDMENT_ENV, raising=False)
     # G5: a non-Bitfinex L is never recorded

@@ -71,9 +71,6 @@ def test_route_uses_allowlist_not_retired_denylist():
     assert "operator_eligibility_refusal(lane)" in body and "RETIRED_TILE_LANES" not in body
 
 
-def test_hm_gate_helper_still_requires_pass_colon_nonempty_ref():
-    """Utility kept for stop-amendment style PASS:<ref> checks; FADE3 G6 env path deleted."""
-    for bad in ("PASS", "PASSED", "pass", "PASS:", "PASS:   ", "PASSX:ref", "FAIL:ref", "", None):
-        assert not ltg.hm_gate_passed(bad), bad
-    for good in ("PASS:hm-r3", " pass : ref-1 "):
-        assert ltg.hm_gate_passed(good)
+def test_hm_gate_helper_deleted_with_fade3_g6():
+    """FADE3 G6 HM gate + hm_gate_passed removed R22 2026-10-30."""
+    assert not hasattr(ltg, "hm_gate_passed")

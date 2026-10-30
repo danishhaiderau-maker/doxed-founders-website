@@ -200,12 +200,6 @@ def operator_eligibility_refusal(lane: str | None, registry: Mapping[str, Mappin
     return None
 
 
-def hm_gate_passed(value: Any) -> bool:
-    """HM R3 nit (mirrors #877): the HM gate is passed only by `PASS:<non-empty ref>`; bare PASS / PASSED / PASS: fail."""
-    head, sep, ref = str(value or "").strip().partition(":")
-    return head.strip().upper() == "PASS" and bool(sep) and bool(ref.strip())
-
-
 def tile_key_for_trade_id(trade_id: str | None) -> str | None:
     tid = str(trade_id or "").strip().lower()
     for wrap in ("adopt:", "relink:"):
@@ -335,7 +329,7 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
                 decisions: Iterable[tuple], armed_lanes: Iterable[str], entry_margin_usd: float,
                 caps: Mapping[str, Any] | None = None, registry: Mapping[str, Mapping] | None = None,
                 book: Mapping[str, Any] | None = None, g4_first_l: Mapping[str, Any] | None = None,
-                hm_gate: str | None = None, latest_l: Mapping[str, Any] | None = None,
+                latest_l: Mapping[str, Any] | None = None,
                 stop_amendment: str | None = None,
                 amendment_pass: Mapping[str, Any] | None = None) -> tuple[bool, list, dict]:
     """(ok, reasons, info) for the FIRST entry event of a live trade. Pure; fail closed on any error.
@@ -364,7 +358,7 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         if others:
             reasons.append(SKIP_MUTEX)
         # 2. AMEND5 G4(c'): GS-01 disarmed after a (c') first L (FADE3 G6 arm gate retired R22)
-        g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment, amendment_pass)
+        g = arm_gate_block(key, g4_first_l, latest_l, stop_amendment, amendment_pass)
         info["g4_first_l_outcome"] = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
         if g:
             reasons.append(g)
@@ -605,13 +599,11 @@ def paper_only_arm_block(lane: str | None = None, tile_key: str | None = None) -
     return None
 
 
-def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, hm_gate: str | None = None,
+def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None,
                    latest_l: Mapping[str, Any] | None = None, stop_amendment: str | None = None,
                    amendment_pass: Mapping[str, Any] | None = None) -> str | None:
     """AMEND5 G4(c') arm/entry gate (pure, shared). GS-01 arms first; after a G4(c') reading it stays disarmed.
-    ``hm_gate`` kept for call-site compat (FADE3 G6 path deleted R22 2026-10-30).
     RK L27: every tile is refused while the latest recorded real L is too close and no new stop amendment has passed."""
-    del hm_gate  # FADE3 G6 HM gate removed
     l27 = l27_arm_block(latest_l, stop_amendment, amendment_pass)
     if l27:
         return l27
