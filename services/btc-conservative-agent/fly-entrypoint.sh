@@ -72,8 +72,9 @@ else
   echo "[fly-entrypoint] BOT_CONTROL_SECRET missing -> relay-state publisher disabled."
 fi
 
-# Sealed research-segment shipper (shadow mode, pruning not implemented).
-# Separate niced process: no trade lock, no HTTP, no bot import. Default OFF.
+# Sealed research-segment shipper (shadow; PR3 never-delete — R5a eligibility +
+# stop-write only; real deletes only via later R21). Separate niced process:
+# no trade lock, no HTTP, no bot import. Default OFF.
 if [ "${RESEARCH_SEGMENTS_ENABLED:-0}" = "1" ]; then
   SEGMENT_LOG="$DATA_DIR/segment-shipper.log"
   if [ -f "$SEGMENT_LOG" ] && [ "$(wc -c < "$SEGMENT_LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
