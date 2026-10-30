@@ -1,5 +1,5 @@
-## 31 Oct 2026 AEDT — book10 Sink._rotate keep-6 silent unlink — URGENT R8 per RK ruling on d1973581, partial 1 of 5
-- Root: `strategist_streams_collector.py` `Sink._rotate` keep-N `os.remove` (pre-fix `:93/:131/:133`) since #584. Metric: file count only grows; `.7` present after 08:00 AEDT. Env-stop (`STRATEGIST_STREAM_KEEP_ROTATIONS=0`) = Boss applies. #949 Sink-only: no unlink + `MAX_TOTAL_BYTES` stop-writing + `ALARM STREAM_SIZE_CAP`. Remaining 4 deleters = sibling scope plan (not this PR). Merge only after green CI + HM exact-head + RK PASS + announce to Boss (0b). Stay disarmed; live OFF.
+## 31 Oct 2026 AEDT — URGENT partial 1 of 5 — book10 Sink never-unlink (R0–R45 `10f0b8daa510`)
+- Root: `Sink._rotate` keep-N `os.remove` since #584. #949 Sink-only: no unlink; running byte total (R43); AMBER@70% / RED `STREAM_SIZE_CAP`@85% (monitor/status); hard stop @100%; card **8 GiB × 5 streams = 40 GiB**. Keep Fly secret `STRATEGIST_STREAM_KEEP_ROTATIONS=0` (Boss). Remaining deleters = sibling PRs. Merge only after green CI + HM exact-head + RK PASS + Boss announce (0b). Live OFF.
 
 ## 30 Oct 2026 — R8 pure revert #929+#930 (open, do not merge)
 - See `docs/TRACKER.md`. PR [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) `cursor/revert-929-930-12bb`. Trades since 19:59 AEDT non-countable; R21 dry-run package prepared only (no delete).
