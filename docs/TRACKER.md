@@ -1,7 +1,7 @@
 ## 30 Oct 2026 — R22 PR-B dead writers (taker CF + shadow_exit + disloc streams)
 
 - **PR:** (open after push) branch `cursor/r22-dead-writers-018b`
-- **Head sha:** (filled after push — see PR)
+- **Head sha:** `51d396aeeb9d20768e3df166d5ddf63815698061`
 - **Base:** `origin/master` after #940 (`cbe56608a78d8280d2849c7b12e80f40c49d340f`; #938 also on tip)
 - **Root cause:** R17-retired writers/flags/routes and DISLOC STREAMS entries left as dead code (RK-AUDIT R22 leftovers / dead writers).
 - **Change:** delete `_capture_taker_signal_counterfactual` + taker MarkoutBook, `shadow_exit_paths.py`, `research/shadow_exit_backfill.py` + report, flags `TAKER_SIGNAL_COUNTERFACTUAL_ENABLED` / `SHADOW_EXIT_RECORDER_ENABLED`, `_r17_retired_view` routes/status/dashboard; remove taker/shadow_exit/4 disloc keys from `STREAMS`; keep wipe-list basenames; fill_markouts writer kept (PR-A owns stream retirement).
