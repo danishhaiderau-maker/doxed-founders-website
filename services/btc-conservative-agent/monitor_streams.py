@@ -21,9 +21,17 @@ STREAMS = {
     "cross_venue_tape": "cross_venue_tape_1m.jsonl",       # spot + other venues
     "book_tape_1s": "market_microstructure_1s.jsonl",      # 1 s Bitfinex book/trade tape
     "fill_markouts": "fill_markouts.jsonl",
+    "taker_counterfactuals": "taker_signal_counterfactuals.jsonl",  # RETIRED (R17/R22 writer deleted)
+    "shadow_exit_paths": "shadow_exit_paths.jsonl",                # RETIRED (R17/R22 recorder deleted)
     "ai_shadow_challengers": "ai_shadow_challengers.jsonl",
     "runtime_telemetry": "runtime_telemetry_1m.jsonl",
     "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
+    # RETIRED DISLOC / DISLOC-FOI ledgers (Tiles 6/7 removed 23 Oct 2026, R9): no writer;
+    # kept in STREAMS for R5 custody / readable archive. Do not delete files here.
+    "disloc_trades": "disloc_trades.jsonl",
+    "disloc_foi_trades": "disloc_foi_trades.jsonl",
+    "disloc_paused_skips": "disloc_paused_skips.jsonl",
+    "disloc_paused_skips_rot1": "disloc_paused_skips.jsonl.1",
     # Strategist data streams (12 Oct, strategist_streams_collector.py)
     "bfx_book_10l": "bfx_book_10l_1s.jsonl",               # Bitfinex 10-level book, 1 s
     "bfx_trades": "bfx_trades.jsonl",                      # every individual Bitfinex public trade
@@ -32,6 +40,18 @@ STREAMS = {
     "bfx_deriv_status_1s": "bfx_deriv_status_1s.jsonl",    # Bitfinex funding / mark / OI, 1 s
     "bfx_ws_events": "bfx_ws_events.jsonl",                # Bitfinex WS events + heartbeats (incl. trades hb), recv time r
     "xvp_shadow_signals": "xvp_shadow_signals.jsonl",      # cross-venue premium shadow triggers/outcomes
+}
+
+# R22 PR-B: mark dead-writer streams RETIRED (R5 custody). Stay in STREAMS.
+# Health fail-closed / resurrection RED for these + fill_markouts/xvp/ai_shadow is #944 (PR-A).
+# Value = unix ts after which a new row would be resurrection once #944 lands.
+RETIRED_STREAMS: dict[str, float] = {
+    "taker_counterfactuals": 1792830060.0,
+    "shadow_exit_paths": 1792830060.0,
+    "disloc_trades": 1792830060.0,
+    "disloc_foi_trades": 1792830060.0,
+    "disloc_paused_skips": 1792830060.0,
+    "disloc_paused_skips_rot1": 1792830060.0,
 }
 
 # Row timestamp keys tried in order (seconds, epoch UTC) for since/until filtering.

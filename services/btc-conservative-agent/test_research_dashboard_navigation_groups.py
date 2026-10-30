@@ -12,7 +12,7 @@ def test_navigation_preserves_all_sections_and_remaps_saved_sections():
     assert len(groups)==4  # Overview, Strategy Research, Execution, Diagnostics & Historical
     assert [gid for gid,_,_ in groups]==['overview','lanes-group','trading-group','deep-group']
     assert groups[-1][1]=='Diagnostics & Historical'
-    assert len(ids)==27 and set(ids)==expected
+    assert len(ids)==26 and set(ids)==expected
     for sid in ids:
         assert f'id="sec-{sid}"' in dashboard.DASHBOARD_HTML
     page=dashboard.DASHBOARD_HTML

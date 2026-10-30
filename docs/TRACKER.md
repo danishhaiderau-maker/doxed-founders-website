@@ -1,16 +1,16 @@
 ## 30 Oct 2026 — R22 PR-B dead writers (taker CF + shadow_exit + disloc streams)
 
-- **PR:** (open after push) branch `cursor/r22-dead-writers-018b`
-- **Head sha:** `51d396aeeb9d20768e3df166d5ddf63815698061`
+- **PR:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) branch `cursor/r22-dead-writers-018b`
+- **Head sha:** `3f39ef9ff2ddec8cddd2611933e03d8a8d9bf08c`
 - **Base:** `origin/master` after #940 (`cbe56608a78d8280d2849c7b12e80f40c49d340f`; #938 also on tip)
-- **Root cause:** R17-retired writers/flags/routes and DISLOC STREAMS entries left as dead code (RK-AUDIT R22 leftovers / dead writers).
-- **Change:** delete `_capture_taker_signal_counterfactual` + taker MarkoutBook, `shadow_exit_paths.py`, `research/shadow_exit_backfill.py` + report, flags `TAKER_SIGNAL_COUNTERFACTUAL_ENABLED` / `SHADOW_EXIT_RECORDER_ENABLED`, `_r17_retired_view` routes/status/dashboard; remove taker/shadow_exit/4 disloc keys from `STREAMS`; keep wipe-list basenames; fill_markouts writer kept (PR-A owns stream retirement).
-- **Success metric:** grep proof 0 live matches for deleted symbols; bot.py shrinks; R21 data sha-list dry-run only under store `internal/r21-pr-b-dead-writers/` (no delete executed).
-- **Line counts:** bot.py 64232→64081 (−151); analyzer_research_engine_v62.py 23850→23834 (−16)
-- **Freeze:** one push; no merge/deploy/arm from this entry.
+- **Root cause:** R17-retired writers/flags/routes left as dead code; STREAMS keys must stay for R5 custody (HM FAIL B2).
+- **Change:** delete dead writers/flags/`_r17_retired_view` routes; restore `taker_counterfactuals` / `shadow_exit_paths` / 4 disloc in `STREAMS` as `RETIRED_STREAMS` (R5); keep wipe basenames; keep live `SHADOW_EXIT_SET` / `tile_shadow_exit_set` (tile cards + registry).
+- **B3 deferred:** analyzer EMPTY_BECAUSE / taker_counterfactual readers → [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) (PR-A). **#944 must merge before or same deploy as #943.**
+- **Success metric:** nav test 26 sections green; STREAMS contains retired custody names; grep proof for allowlist/fixture deletions; bot.py shrinks.
+- **Line counts (code commit):** bot.py 64232→64081 (−151); analyzer_research_engine_v62.py 23850→23834 (−16)
+- **Freeze:** one push after HM FAIL fixes; no merge/deploy/arm.
 
 ---
-
 ## 30 Oct 2026 — URGENT R8 pure revert #929 + #930 (do not merge yet)
 
 - **PR:** [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) branch `cursor/revert-929-930-12bb`
