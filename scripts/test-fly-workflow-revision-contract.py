@@ -42,6 +42,31 @@ def test_deploy_triggers_only_on_workflow_dispatch():
     assert "\non: [push" not in DEPLOY and "\non: [workflow_dispatch, push" not in DEPLOY
 
 
+PIN_STEP_NAME = "- name: Refuse deploy unless the dispatched head is the exact reviewed SHA"
+ANCESTOR_REFUSE = (
+    'if subprocess.call(["git", "merge-base", "--is-ancestor", expected, "origin/master"]) != 0:'
+)
+DEPLOY_MARKERS = (
+    'run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}"',
+    "run: python ../../scripts/fly_deploy_reset_proof.py deploy",
+)
+
+
+def _deploy_sites(workflow: str) -> list[tuple[str, int]]:
+    """Return (marker, index) for every real image-deploy step in the workflow."""
+    sites: list[tuple[str, int]] = []
+    for marker in DEPLOY_MARKERS:
+        start = 0
+        while True:
+            at = workflow.find(marker, start)
+            if at < 0:
+                break
+            sites.append((marker, at))
+            start = at + len(marker)
+    sites.sort(key=lambda item: item[1])
+    return sites
+
+
 def test_deploy_is_pinned_to_expected_deploy_sha():
     """Deploy and recover modes ship the input SHA only when it is the dispatched HEAD on master."""
     assert "\n      expected_deploy_sha:\n" in DEPLOY
@@ -52,11 +77,13 @@ def test_deploy_is_pinned_to_expected_deploy_sha():
     assert "does not arm Bitfinex" in description
     assert "recover-unready" in description
     assert "recover-stalled-runtime" in description
+    assert "recover-startup-crash" in description
     assert "reachable from (or equal to) master" in description
-    pin_at = DEPLOY.index("- name: Refuse deploy unless the dispatched head is the exact reviewed SHA")
     deploy_at = DEPLOY.index("- name: Deploy the exact source revision")
-    assert pin_at < deploy_at
+    pin_at = DEPLOY.rfind(PIN_STEP_NAME, 0, deploy_at)
+    assert pin_at >= 0
     pin_block = DEPLOY[pin_at:deploy_at]
+    # test-and-deploy pin still lists the modes that share that job.
     assert (
         "if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || "
         "inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'"
@@ -68,6 +95,7 @@ def test_deploy_is_pinned_to_expected_deploy_sha():
     assert "refusing to deploy a head that is not the exact reviewed SHA" in pin_block
     assert '["git", "fetch", "--no-tags", "origin", "master"]' in pin_block
     assert '["git", "merge-base", "--is-ancestor", expected, "origin/master"]' in pin_block
+    assert ANCESTOR_REFUSE in pin_block
     assert "refusing to deploy a head that is not reachable from master" in pin_block
     deploy_block = DEPLOY[deploy_at:].split("\n      - name:", 1)[0]
     assert (
@@ -78,14 +106,49 @@ def test_deploy_is_pinned_to_expected_deploy_sha():
 
 
 def test_deploy_checkout_pins_reviewed_sha_not_github_sha():
-    """test-and-deploy must checkout expected_deploy_sha; a ref: github.sha mutant fails."""
-    job_at = DEPLOY.index("  test-and-deploy:")
-    setup_at = DEPLOY.index("      - uses: actions/setup-python@v5", job_at)
-    checkout_block = DEPLOY[job_at:setup_at]
-    assert "uses: actions/checkout@v4" in checkout_block
-    assert "ref: ${{ inputs.expected_deploy_sha }}" in checkout_block
-    assert "fetch-depth: 0" in checkout_block
-    assert "ref: ${{ github.sha }}" not in checkout_block
+    """Deploy jobs must checkout expected_deploy_sha; a ref: github.sha mutant fails."""
+    for job_name in ("  test-and-deploy:", "  recover-startup-crash:"):
+        job_at = DEPLOY.index(job_name)
+        # First checkout in the job is the source tree for the deploy.
+        checkout_at = DEPLOY.index("      - uses: actions/checkout@v4", job_at)
+        after = DEPLOY[checkout_at:]
+        # Bound the checkout block to the next top-level step under steps.
+        end_markers = (
+            "\n      - uses: actions/setup-python@v5",
+            "\n      - uses: superfly/flyctl-actions/setup-flyctl@master",
+            "\n      - name:",
+        )
+        ends = [after.find(m) for m in end_markers if after.find(m) > 0]
+        checkout_block = after[: min(ends)]
+        assert "ref: ${{ inputs.expected_deploy_sha }}" in checkout_block
+        assert "fetch-depth: 0" in checkout_block
+        assert "ref: ${{ github.sha }}" not in checkout_block
+
+
+def test_every_fly_deploy_is_preceded_by_reviewed_sha_pin():
+    """Every flyctl / fly_deploy_reset_proof deploy must sit behind the pin; S1/S2 mutants fail."""
+    sites = _deploy_sites(DEPLOY)
+    assert sites, "expected at least one deploy step in fly-bot-deploy.yml"
+    # Grep contract: these two run-line markers are the only image-deploy paths.
+    assert {marker for marker, _ in sites} == set(DEPLOY_MARKERS)
+    assert len(sites) == 2
+    assert DEPLOY.count(DEPLOY_MARKERS[0]) == 1
+    assert DEPLOY.count(DEPLOY_MARKERS[1]) == 1
+    assert DEPLOY.count(ANCESTOR_REFUSE) == len(sites)
+    # S1: ancestor refuse must use `!= 0` (a mutant `== 99` drops this count).
+    assert ANCESTOR_REFUSE.replace("!= 0", "== 99") not in DEPLOY
+
+    for marker, deploy_at in sites:
+        pin_at = DEPLOY.rfind(PIN_STEP_NAME, 0, deploy_at)
+        assert pin_at >= 0, f"missing pin before {marker}"
+        between = DEPLOY[pin_at:deploy_at]
+        assert ANCESTOR_REFUSE in between
+        assert "EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}" in between
+        assert "refusing to deploy a head that is not the exact reviewed SHA" in between
+        assert "refusing to deploy a head that is not reachable from master" in between
+        # S2: no checkout of github.sha between the pin and the deploy step.
+        assert "ref: ${{ github.sha }}" not in between
+        assert "uses: actions/checkout@" not in between
 
 
 def test_monitor_expects_latest_successful_deploy_on_master():

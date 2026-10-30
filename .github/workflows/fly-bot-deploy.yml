@@ -1,8 +1,9 @@
 name: Deploy Fly BTC bot
 # R8 deploy lock: a push to master does not deploy. GitHub reads this file
 # from the pushed commit, so the commit that drops `on.push` does not start
-# a deploy. The only trigger is workflow_dispatch. mode=deploy,
-# recover-unready, and recover-stalled-runtime ship only
+# a deploy. The only trigger is workflow_dispatch. Every mode that runs
+# flyctl deploy / fly_deploy_reset_proof.py deploy (deploy, recover-unready,
+# recover-stalled-runtime, recover-startup-crash) ships only
 # inputs.expected_deploy_sha, and only when that value is the dispatched HEAD
 # and is reachable from (or equal to) master. Dispatch a head HM and RK have
 # passed, after a full R16 check. R9 checks are required before anything is
@@ -51,7 +52,7 @@ on:
           - close-paper-position
           - flatten-paper-exposure
       expected_deploy_sha:
-        description: mode=deploy, recover-unready, or recover-stalled-runtime. Exact 40-character SHA of a head HM and RK have passed, after a full R16 check. Must equal the dispatched HEAD and be reachable from (or equal to) master. R9 checks are required before anything is armed. This input does not arm Bitfinex.
+        description: Required for every mode that deploys (deploy, recover-unready, recover-stalled-runtime, recover-startup-crash). Exact 40-character SHA of a head HM and RK have passed, after a full R16 check. Must equal the dispatched HEAD and be reachable from (or equal to) master. R9 checks are required before anything is armed. This input does not arm Bitfinex.
         required: false
         type: string
       keep_maintenance_pause:
@@ -2234,6 +2235,11 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pin the tree to the reviewed SHA. A mutant `ref: github.sha` is
+          # refused by scripts/test-fly-workflow-revision-contract.py.
+          ref: ${{ inputs.expected_deploy_sha }}
+          fetch-depth: 0
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -2301,17 +2307,37 @@ jobs:
           printf '%s\n' "$guest_output"
           printf '%s\n' "$guest_output" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0]["schema"]=="startup_crash_before_v1" and rows[0]["open_positions"]==0 and rows[0]["pending_orders"]==0'
 
+      - name: Refuse deploy unless the dispatched head is the exact reviewed SHA
+        env:
+          EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}
+        run: |
+          python - <<'PY'
+          import os, re, subprocess
+          expected = str(os.environ.get("EXPECTED_DEPLOY_SHA") or "").strip().lower()
+          if not re.fullmatch(r"[0-9a-f]{40}", expected):
+              raise SystemExit("expected_deploy_sha must be the exact 40-character head HM and RK passed")
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip().lower()
+          dispatched = str(os.environ.get("GITHUB_SHA") or "").strip().lower()
+          if head != expected or dispatched != expected:
+              raise SystemExit("refusing to deploy a head that is not the exact reviewed SHA")
+          subprocess.check_call(["git", "fetch", "--no-tags", "origin", "master"])
+          if subprocess.call(["git", "merge-base", "--is-ancestor", expected, "origin/master"]) != 0:
+              raise SystemExit("refusing to deploy a head that is not reachable from master")
+          print("deploy pinned to the exact reviewed SHA on master")
+          PY
+
       - name: Deploy reviewed startup-crash repair without API dependency
         working-directory: services/btc-conservative-agent
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          GITHUB_SHA: ${{ inputs.expected_deploy_sha }}
         run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}"
 
       - name: Prove repaired revision is live, paused, paper-only, and flat
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
-          EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_REVISION: ${{ inputs.expected_deploy_sha }}
         run: |
           python - <<'PY'
           import json, os, time, urllib.error, urllib.request
