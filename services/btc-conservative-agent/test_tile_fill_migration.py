@@ -203,7 +203,8 @@ def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
     return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_r0_stop_fill_reason", "_paper_exit_missing_book_seconds",
                     "_paper_unpriced_marks", "_paper_exit_model_times", "_exit_book_age_ms", "_finite_nonneg", "_tp1_pending_action",
-                    "_paper_lane_entry_result", "_paper_lane_entry_core", "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
+                    "_paper_lane_entry_result", "_paper_lane_entry_core", "_entry_quote_age_fresh", "_entry_quote_latch_skips",
+                    "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "ENTRY_NO_BOOK_RETRY_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close", "_rest_queue_stamp",
                     "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", "_paper_entry_pool_key", "_paper_own_s2s_entry", "_paper_own_s2s_exit", *extra_names],
@@ -1133,3 +1134,50 @@ def test_rk2_paper_bot_sent_exit_own_s2s_is_trigger_to_send_code_point(monkeypat
         assert seen[-1][1]["own_signal_to_send_s"] is None
     finally:
         ns["_PAPER_EXIT_TLS"].no_wait = False
+
+
+def test_retry_prices_the_send_plus_delay_book_not_the_signal_quote(monkeypatch):
+    """A REJECT_NO_BOOK retry walks the book at signal+delay. The signal touch is not the price.
+    Mutation: price the retry with entry_fill (signal cap) and this price assert fails."""
+    state = {"fill": None}
+
+    def book_at(t):
+        if float(t) < 1001.0:
+            return {"s": 999, "a": [[100.0, 5.0]], "b": [[99.0, 5.0]]}
+        return state["fill"]
+
+    monkeypatch.setattr(pf, "book10l_at", book_at)
+    ns = _lane_ns(_Clock(1001.5))
+    order = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "signal_dir": "BUY", "qty": 0.5,
+             "signal_created_ts": 1000.0, "entry_expires_ts": 1030.0}
+    assert ns["_paper_lane_entry_result"](order, 1001.5) is None
+    assert order.get("_entry_no_book_retry") is True
+    state["fill"] = {"s": 1001, "a": [[110.0, 5.0]], "b": [[109.0, 5.0]]}
+    res = ns["_paper_lane_entry_result"](order, 1002.0)
+    res = res or order.get("paper_fill_result")
+    assert res["status"] == "FILLED"
+    assert res["price"] == pytest.approx(110.0)
+    assert res["filled_qty"] == pytest.approx(0.5)
+    assert res["entry_no_book_retried"] is True
+    assert res["priced_at"] == "SEND_PLUS_DELAY"
+    assert res["signal_quote_used"] is False
+    assert res["elapsed_delay_s"] == pytest.approx(res["fill_ts"] - 1000.0)
+    assert res["price_age_s"] is not None
+    assert res.get("integrity_entry_ok") is not True
+
+
+def test_quote_latch_cannot_admit_a_stale_signal_quote(monkeypatch):
+    """A stored latch is ignored when the signal-time book is still there and stale.
+    Mutation: skip the gate whenever entry_quote_gate_ok is True and this assert fails."""
+    monkeypatch.setattr(
+        pf, "book10l_at",
+        lambda t: {"s": int(float(t)) - 10, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]},
+    )
+    ns = _lane_ns(_Clock(1001.5))
+    order = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "signal_dir": "BUY", "qty": 0.5,
+             "signal_created_ts": 1000.0, "entry_expires_ts": 1030.0,
+             "entry_quote_gate_ok": True, "entry_quote_selected_age_s": 0.4, "entry_quote_stale": False}
+    res = ns["_paper_lane_entry_result"](order, 1001.5)
+    assert res["status"] == "QUOTE_STALE"
+    assert order.get("entry_quote_gate_ok") is not True
+    assert not res.get("price")

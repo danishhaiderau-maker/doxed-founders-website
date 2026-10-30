@@ -81,9 +81,8 @@ def test_receipt_is_red_when_a_required_study_errors():
 
 
 def test_retired_r17_required_study_is_amber_non_gating_for_complete():
-    """tipMatch blocker: evidence coverage raises CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17 while
-    conservative-results stays LIMIT_FILL_1S-retired.  Declared retirement must not keep
-    complete=false forever after integrity is VALID (#917 cleared v3_read_authority).
+    """#918 soft-gate reverted. A retired-source generation_error still fails the receipt.
+    The producer writes an honest report instead of raising; an error that still arrives is RED.
     """
     receipt = build_generation_receipt(
         _manifest(**{
@@ -99,14 +98,13 @@ def test_retired_r17_required_study_is_amber_non_gating_for_complete():
         integrity={"report_status": "VALID", "checks": [{"check": "base", "passed": True}]},
         **OK,
     )
-    assert receipt["complete"] is True
+    assert receipt["complete"] is False
     assert receipt["integrity_status"] == "VALID"
-    assert receipt["failed_required_studies"] == []
-    assert receipt["retired_required_studies"] == ["evidence_coverage_triage_report.json"]
-    assert receipt["level"] == "AMBER"
+    assert receipt["failed_required_studies"] == ["evidence_coverage_triage_report.json"]
+    assert receipt["retired_required_studies"] == []
+    assert receipt["level"] == "RED"
     study = next(s for s in receipt["studies"] if s["name"] == "evidence_coverage_triage_report.json")
-    assert study["status"] == "RETIRED" and study["level"] == "AMBER"
-    assert any("retired (R17, non-gating)" in reason for reason in receipt["reasons"])
+    assert study["status"] == "ERROR" and study["level"] == "RED"
 
 
 def test_retired_r17_marker_mutation_still_gates_unknown_errors():

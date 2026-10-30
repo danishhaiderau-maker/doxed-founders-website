@@ -32,28 +32,13 @@ def _worst(*levels: str) -> str:
     return max((lvl for lvl in levels if lvl in _RANK), key=_RANK.get, default=GREEN)
 
 
-# Declared R17 retirements that still appear in required_report_status must not
-# permanently gate tipMatch complete=true.  They stay visible as AMBER RETIRED debt
-# until the producer is rebuilt (e.g. evidence coverage awaits book_limit_entry).
-RETIRED_REQUIRED_STUDY_MARKERS = (
-    "CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17",
-)
-
-
-def _is_retired_required_study_error(error_text: str) -> bool:
-    return any(marker in error_text for marker in RETIRED_REQUIRED_STUDY_MARKERS)
-
-
 def _study_from_required(name: str, status: Any) -> dict[str, Any]:
     status = status if isinstance(status, Mapping) else {}
     error = status.get("generation_error")
     available = status.get("available_in_generation") is True
     invalid = status.get("current_generation_valid") is False
     error_text = str(error or "")
-    if error and _is_retired_required_study_error(error_text):
-        state = "RETIRED"
-        level = AMBER
-    elif error:
+    if error:
         state = "ERROR"
         level = RED
     elif not available:

@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 
+import pytest
+
 import bot
 import retired_streams
 from research_v3_store import V3EvidenceStore
@@ -40,20 +42,19 @@ def test_route_dry_run_works_with_stale_retired_pointer(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.get_json()["dry_run"] is True
 
 
-def test_boot_recover_survives_contaminated_retired_stream(tmp_path, monkeypatch):
-    """Fingerprint contamination soft-excludes market_segment; boot recover must not go RED (BTC-165)."""
+def test_boot_recover_contaminated_retired_stream_is_red(tmp_path, monkeypatch):
+    """A grown retired file is an identity conflict (#917 soft-exclude reverted). Boot recover stays RED."""
     _, path = _setup(tmp_path, monkeypatch)
     (tmp_path / "v3" / ".ledger_delete_rollback").mkdir(parents=True, exist_ok=True)
     with open(path, "ab") as fh:
-        fh.write(b'{"record_id":"late"}\n')  # retired stream grew -> soft exclude, not store-wide conflict
+        fh.write(b'{"record_id":"late"}\n')
     bot._ledger_delete_boot_recover()
     check = bot._ledger_delete_boot_recover_check()
-    assert check["status"] == "GREEN"
-    store = V3EvidenceStore.open_read_only(tmp_path)
-    assert store._retired_contaminated.get("market_segment") == "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT"
-    assert any(c["id"] == "fly.ledger_delete_boot_recover" and c["status"] == "GREEN"
+    assert check["status"] == "RED" and "identity conflict" in check["observed"]
+    with pytest.raises(ValueError, match="identity conflict"):
+        V3EvidenceStore.open_read_only(tmp_path)
+    assert any(c["id"] == "fly.ledger_delete_boot_recover" and c["status"] == "RED"
                for c in bot._system_health_fly_self_checks())
-    path.write_bytes(path.read_bytes()[:-len(b'{"record_id":"late"}\n')])
 
 
 def test_boot_recover_hard_identity_conflict_still_red(tmp_path, monkeypatch):

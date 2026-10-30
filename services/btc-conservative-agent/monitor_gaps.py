@@ -52,9 +52,9 @@ WORKER_EXPECTATIONS: dict[str, tuple] = {
     "tick_execution_engine": (0.25, 30.0),
     "ws_watchdog": (3.0, 60.0),
     "analytics_loop": (60.0, 0.0),
-    # R17: all_opportunity_future_path_evidence_loop is retired — not started in
-    # main() (disabled state only). Keep it out of expectations so the workers
-    # monitor does not RED on NOT_STARTED.
+    # Started from main(). The inner worker still writes nothing (R17). The loop
+    # itself must be visible; hiding it (#916) was a false GREEN.
+    "all_opportunity_future_path_evidence_loop": (300.0, 900.0),
     "position_manager": (1.0, 60.0),
     "ttl_monitor": (30.0, 300.0),
     "periodic_pipeline_loop": (30.0, 300.0),

@@ -93,9 +93,20 @@ Last status refresh: 2026-10-26 05:02 AEDT. Boss = Cursor Project.
 | `#911` fly.revision serving-deploy fields | **OPEN** — quiet-bundle next | [#911](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/911) |
 | `#884` Fly deploy step allowlist | **OPEN** head `ebb63738` — quiet-bundle after `#911` | [#884](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/884) |
 | `#908` tracker remaster | **OPEN** this PR — remastered onto `c7b3d1690`; **HOLD** squash until after `#884` | [#908](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/908) |
+| `#941` analyzer integrity (fail-closed + summary/genome) | **OPEN** — FREEZE for HM exact-head; no merge/deploy/arm | [#941](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/941) |
 | Simplified dashboard PR | **BLOCKED** need Boss PR#/branch | HANDOFF |
 | Memory-leak 3h verdict | **QUEUED** | store `internal/btc-memory-leak-9c12c3bb.md` |
 | GS-01 arm @ $0.25 | **BLOCKED** — all gates + Danish OK | — |
+
+## `#941` analyzer collapse — R1 root cause (30 Oct 2026)
+
+**Sources:** HM audit + retro (`internal/HM-AUDIT.md`, `internal/hm-retro-20261030.md`); Fly `GET /api/analyzer/summary` 503 `no valid bundle` @ 10:40:30Z; `GET /api/analyzer/genome` `ok=false` / no mirror; system-health `ledger.reconciliation` RED (`RANDOM_CONTROL_TAKER_90` fly **294** / analyzer **0**, `GS01` fly **454** / analyzer **0**); genome grid **147.5 h** stale; soft-excludes `#917`/`#918`/`#922`/`#929`; `#916` hid `all_opportunity_future_path_evidence_loop`. Earliest ts used: **1792263671**.
+
+**Root cause:** `open_read_only` soft-excluded retired-stream fingerprint / `tile_config_signature` drift so tipMatch stayed GREEN while V3 reads returned `[]` → empty cohort treated as empty book; `:9001` soft-dropped R17 retired required reports; Fly summary 503 when mirror absent; genome kept serving a cached report; future_path removed from worker expectations instead of started/retired.
+
+**Fix (this PR):** empty `SOFT_RETIRED_EXEMPTION_REFUSALS` (exact `#924` GS-06 signature pair only); honest coverage report / fail-closed `required_reports_ok`; `analyzer_cohort_unreadable` RED; summary 503 stamps `cohort_readable=false` + `data_source`/`earliest_ts`; genome refuses cache when cohort unreadable; pin **31+2** ids (`r17/integrity_ids_20261030.json`); hard epoch floor; book-only + live-ack n≥10 countability unchanged; start future_path loop (R17 still writes nothing; full R22 retire follows).
+
+**Success metric:** summary honest (200+data or RED 503 with source/min ts); recon not silent-GREEN at 0 vs Fly 294+; CI green; FREEZE head for HM. No edge claim. Not deployed. Not armed.
 
 ## Priority queue (working order while unblocked)
 

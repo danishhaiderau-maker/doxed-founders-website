@@ -43,11 +43,15 @@ def test_allowlist_is_exactly_market_segment():
     assert retired_streams.RETIRED_STREAM_ALLOWLIST == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
     assert retired_streams.RETIREMENT_FINGERPRINTS["market_segment"] == {
         "rows": 18322, "mtime": 1792830018, "size": 37969967}
-    assert "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT" in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
-    # Roster tile_config drift on a frozen retired pointer is soft (BTC-479 / post-#924 GS-06).
-    assert "RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS" in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
-    # Epoch mismatch stays hard — tipMatch must not soften a wrong-epoch retired pointer.
+    assert retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS == frozenset()
+    # Fingerprint writes and a generic tile-config drift are not soft (#917/#929 reverted).
+    assert "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT" not in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
+    assert "RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS" not in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
     assert "RETIRED_IDENTITY_EPOCH_ID_DIFFERS" not in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
+    pre, post = next(iter(retired_streams.GS06_RETIRE_TILE_SIGNATURE_PAIRS))
+    assert retired_streams.gs06_retire_signature_pair(pre, post) is True
+    assert retired_streams.gs06_retire_signature_pair(pre, "0" * 64) is False
+    assert retired_streams.gs06_retire_signature_pair("0" * 64, post) is False
 
 
 def test_stale_retired_pointer_passes_and_is_unreadable_retired(tmp_path, monkeypatch):
@@ -90,9 +94,9 @@ def test_stale_active_pointer_conflicts_even_with_retired_stale(tmp_path, monkey
         V3EvidenceStore.open_read_only(tmp_path)
 
 
-@pytest.mark.parametrize("how", ["append", "touch", "truncate_same_mtime", "rotation", "missing"])
-def test_retired_stream_with_new_writes_excludes_without_poisoning_active(tmp_path, monkeypatch, how):
-    """Fingerprint-family contamination soft-excludes market_segment; active ledgers stay readable (BTC-165)."""
+@pytest.mark.parametrize("how", ["append", "truncate_same_mtime", "rotation", "missing"])
+def test_retired_stream_with_new_writes_hard_fails(tmp_path, monkeypatch, how):
+    """A real write on a retired stream is an identity conflict. It does not soft-exclude (#917 reverted)."""
     _store(tmp_path)
     path = _pin(monkeypatch, tmp_path)
     _stale(tmp_path, "market_segment")
@@ -101,8 +105,6 @@ def test_retired_stream_with_new_writes_excludes_without_poisoning_active(tmp_pa
         with open(path, "ab") as fh:
             fh.write(b'{"record_id":"late"}\n')
         os.utime(path, (st.st_atime, st.st_mtime))
-    elif how == "touch":
-        os.utime(path, (st.st_atime, st.st_mtime + 5))
     elif how == "truncate_same_mtime":
         data = path.read_bytes()
         path.write_bytes(data.replace(b"\n", b" ", 1))  # same size, one row fewer
@@ -111,22 +113,20 @@ def test_retired_stream_with_new_writes_excludes_without_poisoning_active(tmp_pa
         (path.parent / "market_segment.jsonl.1").write_bytes(b"")
     else:
         path.unlink()
-    ro = V3EvidenceStore.open_read_only(tmp_path)
-    assert "market_segment" in ro._retired_excluded
-    assert ro._retired_contaminated["market_segment"] in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
-    by_id = {}
-    for _ref, generation_path in ro.ledger_generation_paths("decision"):
-        for line in generation_path.read_text("utf-8").splitlines():
-            if line.strip():
-                row = json.loads(line)
-                by_id[row["record_id"]] = row
-    assert len(by_id) == 4
-    with pytest.raises(RetiredStreamUnreadable):
-        ro.ledger_path("market_segment")
-    v = ro.verify()
-    assert v["ledger_status"]["market_segment"] == "RETIRED_CONTAMINATED"
-    assert v["ledger_status"]["decision"] == "GREEN"
-    assert v["retired_streams"]["market_segment"]["contamination"] in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
+    with pytest.raises(ValueError, match="identity conflict"):
+        V3EvidenceStore.open_read_only(tmp_path)
+
+
+def test_mtime_change_still_hard_fails_ledger_signature(tmp_path, monkeypatch):
+    """Fingerprint no longer treats mtime as a write. The completeness signature still
+    hard-fails a different mtime. That is fail-closed, not a soft-exclude."""
+    _store(tmp_path)
+    path = _pin(monkeypatch, tmp_path)
+    _stale(tmp_path, "market_segment")
+    st = os.stat(path)
+    os.utime(path, (st.st_atime, st.st_mtime + 5))
+    with pytest.raises(ValueError, match="identity conflict"):
+        V3EvidenceStore.open_read_only(tmp_path)
 
 
 def test_retired_stale_pointer_with_other_epoch_conflicts(tmp_path, monkeypatch):
@@ -217,21 +217,29 @@ def _ready(tmp_path, monkeypatch):
     return s, path
 
 
-def test_tile_config_differs_soft_excludes_without_poisoning_active(tmp_path, monkeypatch):
-    """Active roster edits move tile_config_signature; frozen retired pointer must soft-exclude.
+def _pre_for_adopted(adopted: str) -> str:
+    for retired_sig, adopted_sig in retired_streams.GS06_RETIRE_TILE_SIGNATURE_PAIRS:
+        if adopted_sig == adopted:
+            return retired_sig
+    raise AssertionError("store signature is not a pinned post-#924 signature")
 
-    BTC-479 / #924: GS-06 Rule 22 retire changed the active signature while market_segment's
-    stale identity stayed pinned → previously hard-raised and emptied analyzer cohort
-    (ledger.reconciliation analyzer 0 + studies integrity INVALID via v3_read_authority).
+
+def test_exact_gs06_signature_pair_keeps_active_ledgers(tmp_path, monkeypatch):
+    """Only the exact pre/post #924 signature pair may differ. Active rows stay readable.
+
+    That is the analyzer-cohort collapse: a hard raise on this pair emptied decision
+    reads (reconciliation 0, integrity INVALID). Any other signature still hard-fails.
     """
     _store(tmp_path)
     _pin(monkeypatch, tmp_path)
-    _stale(tmp_path, "market_segment", tile_config_signature="f" * 64, deployed_revision=STALE)
+    adopted = json.loads((tmp_path / "v3" / "receipts" / "emergency_record_idempotency_v1"
+                          / "decision" / "complete.json").read_text())["identity"]["tile_config_signature"]
+    _stale(tmp_path, "market_segment", tile_config_signature=_pre_for_adopted(adopted),
+           deployed_revision=STALE)
     ro = V3EvidenceStore.open_read_only(tmp_path)
-    assert ro._retired_contaminated["market_segment"] == "RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS"
+    assert ro._retired_contaminated == {}
     assert "market_segment" in ro._retired_excluded
     assert ro.verify()["ledger_status"]["decision"] == "GREEN"
-    assert ro.verify()["ledger_status"]["market_segment"] == "RETIRED_CONTAMINATED"
     by_id = {}
     for _ref, generation_path in ro.ledger_generation_paths("decision"):
         for line in generation_path.read_text("utf-8").splitlines():
@@ -239,6 +247,15 @@ def test_tile_config_differs_soft_excludes_without_poisoning_active(tmp_path, mo
                 row = json.loads(line)
                 by_id[row["record_id"]] = row
     assert len(by_id) == 4
+
+
+def test_other_tile_config_signature_still_hard_fails(tmp_path, monkeypatch):
+    """Mutation: treating every signature diff as the GS-06 pair would let this open."""
+    _store(tmp_path)
+    _pin(monkeypatch, tmp_path)
+    _stale(tmp_path, "market_segment", tile_config_signature="ab" * 32, deployed_revision=STALE)
+    with pytest.raises(ValueError, match="TILE_CONFIG_SIGNATURE_DIFFERS"):
+        V3EvidenceStore.open_read_only(tmp_path)
 
 
 def test_signature_mismatch_subsecond_mtime_soft_excludes(tmp_path, monkeypatch):
@@ -328,11 +345,9 @@ def test_analyzer_path_reads_active_and_not_retired(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "V3_READ_AUTHORITY_FAILURES", {})
     assert len(eng._v3_ledger_rows("decision")) == 4
     assert eng._v3_ledger_rows("market_segment") == []
-    with open(path, "ab") as fh:  # grown retired file -> soft-exclude; active ledgers stay readable (BTC-165)
+    with open(path, "ab") as fh:  # a real write hard-fails the store; the empty read is recorded, not silent
         fh.write(b'{"record_id":"late"}\n')
     monkeypatch.setattr(eng, "V3_READ_AUTHORITY_FAILURES", {})
-    assert len(eng._v3_ledger_rows("decision")) == 4
-    assert eng.V3_READ_AUTHORITY_FAILURES == {}
-    # market_segment remains unreadable (excluded) without poisoning decision authority
-    assert eng._v3_ledger_rows("market_segment") == []
-    assert "market_segment" in eng.V3_READ_AUTHORITY_FAILURES  # RetiredStreamUnreadable is recorded
+    assert eng._v3_ledger_rows("decision") == []
+    assert "decision" in eng.V3_READ_AUTHORITY_FAILURES
+    assert "identity conflict" in eng.V3_READ_AUTHORITY_FAILURES["decision"]

@@ -416,6 +416,7 @@ SEGMENT_PRUNED_R5 = "PRUNED_R5"
 from retired_streams import (  # noqa: E402
     RETIRED_STREAM_ALLOWLIST,
     SOFT_RETIRED_EXEMPTION_REFUSALS,
+    gs06_retire_signature_pair,
     retired_stream_unchanged,
 )
 
@@ -511,14 +512,10 @@ class V3EvidenceStore:
                 continue  # not stale: ordinary handling, identity check applies as before
             why = instance._retired_exemption_refusal(stream, identity)
             if why and why not in SOFT_RETIRED_EXEMPTION_REFUSALS:
-                # Hard: epoch/field mismatch, gen pointer, WAL, ledger signature/tail — real conflict.
-                # tile_config_signature drift is soft (roster edits); see SOFT_RETIRED_EXEMPTION_REFUSALS.
+                # Fail closed. SOFT_RETIRED_EXEMPTION_REFUSALS is empty. The only non-refusal
+                # is a clean stale revision on an unchanged retired file, or the exact #924
+                # GS-06 signature pair (handled inside _retired_exemption_refusal).
                 raise ValueError(f"V3 read authority identity conflict ({stream}: {why})")
-            # Soft fingerprint-family or roster tile_config drift (or clean exemption): exclude
-            # retired stream only. Do not poison decision/execution/opportunity — market_segment is
-            # R3-dropped input; Fly-pinned fingerprint cannot validate a laptop copy (BTC-165);
-            # active tile_config_signature moves on Rule 22 retire without rewriting the frozen
-            # retired pointer (BTC-479 / #924 GS-06).
             instance._retired_excluded[stream] = RETIRED_STREAM_ALLOWLIST[stream]
             if why:
                 instance._retired_contaminated[stream] = why
@@ -660,11 +657,20 @@ class V3EvidenceStore:
             return "RETIRED_STREAM_NOT_ALLOWLISTED"
         if set(identity) != set(adopted):
             return "RETIRED_IDENTITY_KEYS_DIFFER"
+        signature_pair_ok = False
         for key in ("epoch_id", "tile_config_signature"):
             if identity.get(key) != adopted.get(key):
+                if key == "tile_config_signature" and gs06_retire_signature_pair(
+                    identity.get(key), adopted.get(key),
+                ):
+                    # Exact post-#924 GS-06 pair only. Any other signature hard-fails.
+                    signature_pair_ok = True
+                    continue
                 return "RETIRED_IDENTITY_" + key.upper() + "_DIFFERS"
-        if any(identity.get(k) != adopted.get(k) for k in identity
-               if k not in ("source_revision", "deployed_revision")):
+        ignored = {"source_revision", "deployed_revision"}
+        if signature_pair_ok:
+            ignored.add("tile_config_signature")
+        if any(identity.get(k) != adopted.get(k) for k in identity if k not in ignored):
             return "RETIRED_IDENTITY_FIELD_DIFFERS"
         if (self.receipt_dir / "ledger_generations_v1" / stream / "ACTIVE.json").exists():
             return "RETIRED_STREAM_HAS_GENERATION_POINTER"

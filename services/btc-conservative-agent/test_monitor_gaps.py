@@ -34,11 +34,11 @@ def test_every_main_worker_has_an_expectation():
     assert "xvl_evaluator_thread" in mg.WORKER_EXPECTATIONS
 
 
-def test_r17_future_path_loop_is_not_expected():
-    """R17 retired the worker; expecting it caused false RED (NOT_STARTED)."""
+def test_future_path_loop_is_started_and_expected():
+    """#916 hid the loop. main() starts it and the workers monitor expects it.
+    The R17 no-write flag stays; this test does not allow segment writes."""
     name = "all_opportunity_future_path_evidence_loop"
-    assert name not in mg.WORKER_EXPECTATIONS
-    # Function remains for historical/tests; main must not start a Thread on it.
+    assert name in mg.WORKER_EXPECTATIONS
     tree = ast.parse((ROOT / "bot.py").read_text(encoding="utf-8"))
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
     started = set()
@@ -49,10 +49,8 @@ def test_r17_future_path_loop_is_not_expected():
                 target = target.args[0]
             if isinstance(target, ast.Name):
                 started.add(target.id)
-    assert name not in started
-    assert any(
-        isinstance(n, ast.FunctionDef) and n.name == name for n in tree.body
-    ), "loop function must remain for historical/tests"
+    assert name in started
+    assert "FUTURE_PATH_WORKER_RETIRED_R17 = True" in (ROOT / "bot.py").read_text(encoding="utf-8")
 
 
 def test_worker_rows_flag_stale_dead_restart_unmonitored_and_failed_oneshot():

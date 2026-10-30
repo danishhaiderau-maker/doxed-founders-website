@@ -5,15 +5,16 @@ identity pointer (it is never republished) WITHOUT failing the read-only store, 
 while its real ledger file still matches the fingerprint recorded at retirement. Any write
 after retirement, or a file that can't be read, is a conflict (RED on the retired stream).
 
-Fingerprint mismatch must NOT poison active ledgers (decision/execution/opportunity): the
-pinned fingerprint is Fly-volume-specific, while the laptop analyzer reads a different host
-copy. open_read_only soft-excludes the retired stream on fingerprint-family refusals and
-keeps hard-raising on epoch / field / WAL / pointer mismatches.
+A copied file can have a different mtime from the Fly pin and still be the same bytes.
+``retired_stream_unchanged`` therefore judges content (size and row count), not mtime.
+A real write, a rotation, a missing file, or a missing fingerprint is a conflict: the
+read-only store hard-raises. There is no soft-exclude set.
 
-``tile_config_signature`` on a retired stream's frozen pointer also drifts whenever the
-active tile roster changes (e.g. Rule 22 retire of GS-06 in #924). That drift is expected
-and must soft-exclude the retired stream only — never poison decision/execution/opportunity
-or flip analyzer integrity to INVALID / empty cohort (BTC-479).
+The one identity exception is the exact #924 GS-06 retire pair
+(``GS06_RETIRE_TILE_SIGNATURE_PAIRS``): the frozen retired pointer may still carry the
+pre-retire registry signature while the active authority carries the post-retire
+signature. Any other ``tile_config_signature`` mismatch hard-fails. This does not
+weaken ``research_freeze`` roster signature checks.
 
 Adding or changing an entry here REQUIRES an RK ruling. Do not edit without one.
 """
@@ -32,18 +33,29 @@ RETIREMENT_FINGERPRINTS: dict[str, dict[str, int]] = {
     "market_segment": {"rows": 18322, "mtime": 1792830018, "size": 37969967},
 }
 
-# open_read_only: exclude the retired stream (serve no rows) instead of raising a store-wide
-# identity conflict. Active authorities stay readable; tipMatch / v3_read_authority must not
-# go INVALID solely because a Fly-pinned fingerprint disagrees with a laptop copy, or because
-# an intentional mid-epoch roster change moved active tile_config_signature away from the
-# frozen retired pointer (BTC-479 / post-#924 GS-06 retire).
-SOFT_RETIRED_EXEMPTION_REFUSALS: frozenset[str] = frozenset({
-    "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT",
-    "RETIRED_STREAM_HAS_ROTATIONS",
-    "RETIRED_STREAM_UNREADABLE",
-    "RETIRED_STREAM_FINGERPRINT_MISSING",
-    "RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS",
+# Fail closed. #917/#929 put fingerprint and tile-config refusals here so a mismatch
+# became GREEN. That set is empty: every refusal hard-raises. The GS-06 pair below is
+# not a member of this set; it is an exact signature match checked before a refusal.
+SOFT_RETIRED_EXEMPTION_REFUSALS: frozenset[str] = frozenset()
+
+# research_freeze.MID_EPOCH_REGISTRY_SIGNATURES immediately before and after #924
+# (GS-06 retire + GS-FADE3-LOOSE add). score_led then hypothesis.
+# Retired pointer signature, adopted (active) signature.
+GS06_RETIRE_TILE_SIGNATURE_PAIRS: frozenset[tuple[str, str]] = frozenset({
+    (
+        "b7da543be509a0b4b51ee5481ab06023c2cf560b23ee3ccc30242fe858d13cc3",
+        "f241b3d0f7eb3cb4d1364c4f22cf3de804aaa2dabaadb4b3f3f23146e236c01c",
+    ),
+    (
+        "563c0a6f3567a446d734f6f633ccc40c0fcc61a082e9f0c8f2553ebf95a4dc69",
+        "45535a186adf7185e9e215fde1154a7248e86016c435585b3d6a0ec008cbe748",
+    ),
 })
+
+
+def gs06_retire_signature_pair(retired_sig, adopted_sig) -> bool:
+    """True only for the exact pre/post #924 registry signature pair."""
+    return (str(retired_sig or ""), str(adopted_sig or "")) in GS06_RETIRE_TILE_SIGNATURE_PAIRS
 
 
 def retired_stream_unchanged(ledger_dir: str | Path, stream: str) -> tuple[bool, str]:
@@ -59,7 +71,9 @@ def retired_stream_unchanged(ledger_dir: str | Path, stream: str) -> tuple[bool,
         if any(ledger_dir.glob(f"{stream}.jsonl.*")):
             return False, "RETIRED_STREAM_HAS_ROTATIONS"
         st = os.stat(path)
-        if st.st_size != fp["size"] or int(st.st_mtime) != fp["mtime"]:
+        # Content identity only. mtime differs on a byte-identical laptop copy of the
+        # Fly file and is not evidence of a write (the #917 false contamination).
+        if st.st_size != fp["size"]:
             return False, "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT"
         rows = 0
         with open(path, "rb") as fh:

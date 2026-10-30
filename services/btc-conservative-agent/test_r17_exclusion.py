@@ -436,6 +436,24 @@ def test_845_fail_closed_rule_alone_already_rejects_1s_priced_entries(which, mon
     assert r17.non_countable_reason(row).startswith("R17_UNPROVEN:")
 
 
+def test_integrity_window_and_no_book_retry_are_non_countable():
+    """Trades from 30 Oct 2026 19:59 Sydney without this fix's stamp, and retry fills, do not count.
+    Mutation: drop the window append in non_countable_reason and the first assert fails."""
+    window = {**PROOF, "trade_id": "window-row", "ts": r17.INTEGRITY_WINDOW_FROM_TS + 5}
+    reason = r17.non_countable_reason(window, ids=frozenset(), load_errors=())
+    assert r17.REASON_INTEGRITY_WINDOW in (reason or "")
+    exempt = {**window, "integrity_entry_ok": True}
+    exempt_reason = r17.non_countable_reason(exempt, ids=frozenset(), load_errors=())
+    assert r17.REASON_INTEGRITY_WINDOW not in (exempt_reason or "")
+    before = {**PROOF, "trade_id": "before-row", "ts": r17.INTEGRITY_WINDOW_FROM_TS - 5}
+    before_reason = r17.non_countable_reason(before, ids=frozenset(), load_errors=())
+    assert r17.REASON_INTEGRITY_WINDOW not in (before_reason or "")
+    retry = {**PROOF, "trade_id": "retry-row", "ts": 1_700_000_000,
+             "entry_no_book_retried": True, "integrity_entry_ok": True}
+    retry_reason = r17.non_countable_reason(retry, ids=frozenset(), load_errors=())
+    assert r17.REASON_NO_BOOK_RETRY in (retry_reason or "")
+
+
 def test_entry_proof_failures_is_the_entry_subset_of_proof_failures():
     """HM #848 C3: research entry receipts gate on the same entry rule the row check uses (one module)."""
     assert r17.entry_proof_failures(good_row()) == []
