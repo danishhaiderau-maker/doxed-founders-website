@@ -1,6 +1,7 @@
 ## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
 
 - **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`
+- **Head sha:** `a276caa6bcf4dd73b6ef3e3c5353400aede57e22`
 - **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (frozen HM fix)
 - **Base:** `origin/master` after #940+#938 (`cbe56608a`) via #943
 - **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams (`fill_markouts`/`xvp_shadow_signals`/`ai_shadow_challengers` + #943 taker/shadow_exit/disloc); resurrection RED; watcher `scripts/self_aware/monitor_stream_status_expected.json`; B3 EMPTY_BECAUSE readers (`stream_studies`, `signal_research_table`, `analyzer_research_engine_v62`, `adaptive_entry_funnel`, `strategy_lab/streams`) + mutation tests; GS-01 signal path kept (`SHADOW_FILE=None` only); thread_health/monitor_gaps unchanged (B4)
