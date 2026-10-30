@@ -19,8 +19,9 @@ change or cancel an order. Writes three lean append-only JSONL streams in the ru
   UTC-minute row {"m": minute_ts, "lighter": [[bid, ask] | null x60], "paradex": [...]}.
 
 Each file rotates at ROTATE_BYTES to ``<file>.N`` (rename only). Rotated segments are never
-unlinked here (R25/R34): deletion is R21-only. Disk growth is monitored; size pressure must
-stop writing + alarm, never prune.
+unlinked here (R25/R34): deletion is R21-only. When the total bytes of a stream (active file +
+all ``.N`` parts) would exceed ``MAX_TOTAL_BYTES``, further writes are refused and an immediate
+``ALARM STREAM_SIZE_CAP`` is logged — size pressure stops writing + alarms, never prunes.
 
 No look-ahead (RK, 24 Oct): second ``s`` is closed ~1.3-1.5 s after it starts. Every 1 s row describes the state as
 of the END of second ``s`` (receive time <= s+1): the book is frozen at the second boundary before later deltas are
@@ -91,6 +92,8 @@ def parse_deriv_status(body) -> Optional[dict]:
     return out if out["mark"] or out["fund_cur"] is not None else None
 LEVELS = 10
 ROTATE_BYTES = int(os.getenv("STRATEGIST_STREAM_ROTATE_BYTES", str(32 * 1024 * 1024)))
+# Hard stop per stream family (active + .N parts). Override via env; never used to delete.
+MAX_TOTAL_BYTES = int(os.getenv("STRATEGIST_STREAM_MAX_TOTAL_BYTES", str(8 * 1024 * 1024 * 1024)))
 SILENT_RECONNECT_SEC = 30.0
 MAX_QUOTE_AGE_SEC = 2.0
 # A quiet book sends no delta; Bitfinex guarantees a heartbeat at least every 15 s on a live connection. While ANY message
@@ -114,16 +117,46 @@ def _f(v) -> Optional[float]:
 class Sink:
     """Append-only JSONL with size-based rename rotation (never unlinks)."""
 
-    def __init__(self, path: str, rotate_bytes: int = ROTATE_BYTES) -> None:
-        self.path, self.rotate_bytes = path, rotate_bytes
+    def __init__(
+        self,
+        path: str,
+        rotate_bytes: int = ROTATE_BYTES,
+        max_total_bytes: int = MAX_TOTAL_BYTES,
+    ) -> None:
+        self.path, self.rotate_bytes, self.max_total_bytes = path, rotate_bytes, max_total_bytes
         self.rows = self.failures = 0
+        self.size_cap_hits = 0
         self._lock = threading.Lock()
+
+    def _total_bytes(self) -> int:
+        total = 0
+        try:
+            if os.path.exists(self.path):
+                total += os.path.getsize(self.path)
+        except OSError:
+            pass
+        for p in glob.glob(self.path + ".*"):
+            if not p.rsplit(".", 1)[-1].isdigit():
+                continue
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+        return total
+
+    def _alarm_size_cap(self, total: int, need: int) -> None:
+        """Immediate size-cap alarm; never deletes. Logged every refused write (HM: immediate)."""
+        self.size_cap_hits += 1
+        _log(
+            f"ALARM STREAM_SIZE_CAP stop_writing path={self.path} "
+            f"total_bytes={total} need={need} cap={self.max_total_bytes}"
+        )
 
     def _rotate(self) -> None:
         """Rename the active file to ``<path>.N`` when it exceeds rotate_bytes.
 
-        Never unlinks any segment (R25). A keep-count / prune path is forbidden; disk
-        pressure must fail closed via write failure + log (stop writing + alarm), not delete.
+        Never unlinks any segment (R25). Keep-count / prune is forbidden. Total-size pressure
+        is handled in ``write`` (stop writing + ``ALARM STREAM_SIZE_CAP``), not here.
         """
         try:
             if os.path.getsize(self.path) <= self.rotate_bytes:
@@ -135,8 +168,14 @@ class Sink:
 
     def write(self, row: dict) -> None:
         line = json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n"
+        need = len(line.encode("utf-8"))
         with self._lock:
             try:
+                total = self._total_bytes()
+                if total + need > self.max_total_bytes:
+                    self._alarm_size_cap(total, need)
+                    self.failures += 1
+                    return
                 self._rotate()
                 with open(self.path, "a", encoding="utf-8") as fh:
                     fh.write(line)

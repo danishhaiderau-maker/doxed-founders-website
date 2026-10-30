@@ -120,7 +120,7 @@ def test_rotation_never_unlinks(tmp_path):
     file count to grow with every rotate (here 40 writes → many ``x.jsonl.*``).
     """
     path = tmp_path / "x.jsonl"
-    s = ssc.Sink(str(path), rotate_bytes=50)
+    s = ssc.Sink(str(path), rotate_bytes=50, max_total_bytes=10 * 1024 * 1024)
     fingerprints = {}
     for i in range(40):
         s.write({"i": i, "pad": "x" * 30})
@@ -140,6 +140,35 @@ def test_rotation_never_unlinks(tmp_path):
     assert "KEEP_ROTATIONS" not in src and "STRATEGIST_STREAM_KEEP_ROTATIONS" not in src
     assert not hasattr(ssc, "KEEP_ROTATIONS")
     assert len(list(tmp_path.glob("x.jsonl*"))) == len(rotated) + (1 if path.exists() else 0)
+
+
+def test_size_cap_stops_writing_and_alarms_immediately(tmp_path, monkeypatch):
+    """R25: when total stream bytes would exceed max_total_bytes, refuse write + ALARM; never delete.
+
+    Mutation proof: deleting the ``total + need > self.max_total_bytes`` guard (or the
+    ``_alarm_size_cap`` call) lets ``rows`` keep growing past the cap / leaves
+    ``size_cap_hits == 0`` and no ``ALARM STREAM_SIZE_CAP`` log — this test fails.
+    """
+    alarms = []
+    monkeypatch.setattr(ssc, "_log", lambda msg: alarms.append(msg))
+    path = tmp_path / "cap.jsonl"
+    cap = 200
+    s = ssc.Sink(str(path), rotate_bytes=80, max_total_bytes=cap)
+    for i in range(30):
+        s.write({"i": i, "pad": "yyyyyyyy"})
+    assert s.size_cap_hits >= 1 and s.failures >= 1
+    assert any(a.startswith("ALARM STREAM_SIZE_CAP") and "stop_writing" in a for a in alarms), alarms
+    assert s._total_bytes() <= cap
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("cap.jsonl*")}
+    rows_at_cap = s.rows
+    for i in range(30, 60):
+        s.write({"i": i, "pad": "yyyyyyyy"})
+    assert s.rows == rows_at_cap
+    assert s.size_cap_hits >= 2
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("cap.jsonl*")} == before
+    sink_src = (Path(__file__).parent / "strategist_streams_collector.py").read_text()
+    sink_src = sink_src[sink_src.index("class Sink:"): sink_src.index("\nclass BfxBook")]
+    assert "os.remove(" not in sink_src and "total + need > self.max_total_bytes" in sink_src
 
 
 def test_entrypoint_and_stream_catalog_wired():
