@@ -96,8 +96,9 @@ contains `[skip ci]`, so a PR whose commits carry it merges untested.
 
 - Never put `[skip ci]` in commits pushed to a PR branch.
 - Put `[skip ci]` only in the **squash-merge subject**. The resulting master
-  push then does not trigger `fly-bot-deploy.yml`, and the v2c laptop-only
-  follow path accepts it.
+  push then skips push-triggered CI where that marker applies, and the v2c
+  laptop-only follow path accepts it. Fly tip is never push-triggered (R8);
+  tip only via explicit `fly-bot-deploy.yml` `workflow_dispatch`.
 
 ## Checks and fixes
 

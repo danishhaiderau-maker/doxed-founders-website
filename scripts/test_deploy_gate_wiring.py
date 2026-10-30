@@ -22,7 +22,7 @@ def test_normal_deploy_cannot_skip_the_gate():
     blk = _step_block()
     cond = re.search(r"if: (.+)", blk).group(1).strip()
     assert cond == "github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'"
-    # push events (normal deploys) and mode=deploy evaluate true; only the recovery modes of this job skip it
+    # R8: tip is workflow_dispatch-only; mode=deploy evaluates true. Recovery modes of this job skip it.
     assert "recover" not in cond.replace("'recover-unready'", "")
     assert "continue-on-error" not in blk
 

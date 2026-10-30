@@ -110,8 +110,10 @@ generation from the pointer (legacy generation zero remains explicit).
 
 ## Safe deployment
 
-Changes to this directory trigger `.github/workflows/fly-bot-deploy.yml`.
-That workflow compiles the bot, runs the safety contracts, deploys the exact
+Master pushes do **not** tip Fly (R8 bundle gate). Deploy only with an
+explicit `workflow_dispatch` of `.github/workflows/fly-bot-deploy.yml`
+(`mode=deploy`), for an urgent single fix or a Boss-bundled tip. That
+workflow compiles the bot, runs the safety contracts, deploys the exact
 Git revision to Fly.io, and proves the deployed revision is disarmed.
 
 ## Signal probe (the signal-engine mirror is retired)

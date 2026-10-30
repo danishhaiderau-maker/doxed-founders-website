@@ -13,17 +13,22 @@ PREDEPLOY_ABORT_HELPER = (ROOT / "scripts/fly_resume_predeploy_abort.py").read_t
 TEST_PATH = "services/btc-conservative-agent/test*.py"
 
 
-def test_test_only_changes_are_excluded_from_deploy():
-    assert f'- "!{TEST_PATH}"' in DEPLOY
+def test_fly_tip_is_workflow_dispatch_only_no_push_auto_deploy():
+    """R8: master pushes must not tip Fly; only explicit dispatch deploys."""
+    on_block = DEPLOY.split("\non:\n", 1)[1].split("\njobs:\n", 1)[0]
+    assert "workflow_dispatch:" in on_block
+    assert "\n  push:" not in on_block and not on_block.lstrip().startswith("push:")
+    assert "branches: [master]" not in on_block
+    assert 'services/btc-conservative-agent/**' not in on_block
+    assert f'- "!{TEST_PATH}"' not in on_block
+    assert "scripts/check-relay-flat.mjs" not in on_block
 
 
-def test_runtime_and_deploy_contract_changes_remain_deploy_triggers():
-    for path in (
-        "services/btc-conservative-agent/**",
-        "scripts/check-relay-flat.mjs",
-        ".github/workflows/fly-bot-deploy.yml",
-    ):
-        assert path in DEPLOY
+def test_r8_bundle_gate_comment_names_explicit_dispatch():
+    header = DEPLOY.split("\non:\n", 1)[0]
+    assert "R8 bundle gate" in header
+    assert "workflow_dispatch" in header
+    assert "mode=deploy" in header
 
 
 def test_monitor_expects_latest_successful_deploy_on_master():

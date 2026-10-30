@@ -1,17 +1,10 @@
 name: Deploy Fly BTC bot
-# deploy-trigger: land #910+#913 tip fa4c4c6d5
+# R8 bundle gate: master pushes never tip Fly. Deploy only via explicit
+# workflow_dispatch (urgent single fix, or a Boss-bundled tip). Example:
+#   gh workflow run fly-bot-deploy.yml --ref master -f mode=deploy
+# Secret Scan and unit-tests keep their own push triggers; this file does not.
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "services/btc-conservative-agent/**"
-      # Tests validate an image but are not copied into or imported by the
-      # running Fly service. A test-only push must not claim a new deployed
-      # source revision.
-      - "!services/btc-conservative-agent/test*.py"
-      - "scripts/check-relay-flat.mjs"
-      - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
     inputs:
       mode:

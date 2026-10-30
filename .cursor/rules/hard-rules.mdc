@@ -43,7 +43,7 @@ Canonical contract: repo root `AGENTS.md`. Tile registry: `services/btc-conserva
 ## Deploy and DB
 
 - Never run `prisma db push --accept-data-loss` against prod. Normal git pushes only (no force).
-- A master push touching `services/btc-conservative-agent/**` (except `test*.py`) auto-deploys Fly. Otherwise deploy with `gh workflow run fly-bot-deploy.yml --ref master -f mode=deploy`.
+- Master pushes never tip Fly. Per R8, urgent fixes may dispatch one guarded deploy at once; everything else is a Boss-bundled tip via `gh workflow run fly-bot-deploy.yml --ref master -f mode=deploy` (or the Actions UI). Do not re-add a `push:` trigger on `fly-bot-deploy.yml`.
 
 ## Tests
 
