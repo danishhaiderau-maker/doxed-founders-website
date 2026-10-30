@@ -115,12 +115,9 @@ RANDOM_CONTROL_ADMISSION_POLICY_ID = "RANDOM_COIN_SIDE_ON_COMMITTED_CALL_TAKER_V
 # pre-registered rules PREREG-GS-20261004 (GS-01..04) and -B (B1..B3) as
 # visible paper tiles (regime_adaptive_binding.py).
 RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
-RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME = "FAMILY_GSB1_CVD_DIV_REGIME"
-RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER = "FAMILY_GSB2_REGIME_SWITCHER"
+# B1/B2 lane tokens + admission ids deleted R22 2026-10-30 (retired; see RETIRED_TILE_LANES).
 RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME = "FAMILY_GSB3_COMMITTED_FADE_REGIME"
 GS_PREMIUM_FOLLOW_ADMISSION_POLICY_ID = "GS01_CROSS_VENUE_PREMIUM_FOLLOW_NO_AI_V1"
-GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID = "GS_CVD_DIVERGENCE_3M_EVENT_NO_AI_V1"
-GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID = "GSB2_CVD_DIVERGENCE_OR_COMMITTED_FADE_BY_REGIME_V1"
 GSB3_COMMITTED_FADE_ADMISSION_POLICY_ID = "GSB3_INVERTED_COMMITTED_SCORE_LED_SIDE_REGIME_V1"
 # FREEZE21B mid-epoch GS-06 (owner 2026-10-05) was retired 2026-10-28 under Rule 22
 # (Danish yes; CODE_OVERRIDE in research_freeze). Lane token kept only in
@@ -144,14 +141,8 @@ CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
 # Tiles on this clock are triggered at a closed 3-minute Bitfinex bar by the
 # CVD-divergence evaluator (regime_bars_3m.py), never by the shared AI call.
 BAR_CLOSE_SIGNAL_CLOCK = "BAR_CLOSE_3M_CVD_EVALUATOR"
-# Tile 6 · GS-FADE3-TP30 (gf3) runs its own 1 s paper engine (tile_fade3.Fade3PaperEngine, bot._gf3_thread);
-# it is never routed through the shared AI call nor the XVL evaluator loop.
-RESEARCH_LANE_FAMILY_GS_FADE3_TP30 = "FAMILY_GS_FADE3_TP30"
-GF3_ADMISSION_POLICY_ID = "GS_FADE3_E8_FADE_ALL_W3_NO_AI_V1"
-RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25 = "FAMILY_GS_FADE3_LOOSE_TP25"
-GF3L_ADMISSION_POLICY_ID = "GS_FADE3_E8L_FADE_ALL_W3_LOOSE_NO_AI_V1"
-SELF_SIMULATED_SIGNAL_CLOCK = "GF3_SELF_SIMULATED_1S_ENGINE"
-EVALUATOR_SIGNAL_CLOCKS = frozenset({CROSS_VENUE_SIGNAL_CLOCK, BAR_CLOSE_SIGNAL_CLOCK, SELF_SIMULATED_SIGNAL_CLOCK})
+# GS-FADE3-TP30 / GS-FADE3-LOOSE retired 2026-10-30 (R22); self-sim clock removed with them.
+EVALUATOR_SIGNAL_CLOCKS = frozenset({CROSS_VENUE_SIGNAL_CLOCK, BAR_CLOSE_SIGNAL_CLOCK})
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
 PARTIAL_EXIT_RELAY_CAPABILITY = "BLOCKED_PARTIAL_REDUCTION_UNPROVEN"
 TILE_ARCHITECTURE_VERSION = 3
@@ -179,15 +170,10 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
 # Display order; every user-facing "Tile N" number is derived from it
 # (tile_number), never hard-coded.
-# Active roster after GS-06 R22 retire + FADE3-LOOSE mid-epoch add (2026-10-28):
-# CTRL, GS-01, B1, B2, FADE3, FADE3-LOOSE.
+# Active roster after R22 retire tiles 3–6 (2026-10-30): CTRL + GS-01 only.
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
     RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
-    RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
-    RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
-    RESEARCH_LANE_FAMILY_GS_FADE3_TP30,
-    RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1058,14 +1044,7 @@ _GS01_ENTRY = _gs_entry(
     min_submit_interval_sec=5, max_submissions_per_hour=60,
 )
 _GS01_ENTRY.update({"max_bbo_age_sec": 2.0, "max_spread_bps": 3.0})
-_CVD_TRIGGER = {"cvd_indicator": "CVD_DIVERGENCE_20", "cvd_lookback_bars": 20, "bar_sec": 180,
-                "trigger_event": "TRANSITION_INTO_LONG_OR_SHORT_AT_BAR_CLOSE"}
-_GSB1_ENTRY = _gs_entry(
-    mode="REGIME_ADAPTIVE", direction_source="CVD_DIVERGENCE_3M", ai_role="NONE", regime=GSB_REGIME,
-    regime_exec={"QUIET": "TOUCH", "TREND": None, "VIOLENT": "DEEP_0.75"},
-    signal_clock=BAR_CLOSE_SIGNAL_CLOCK, min_submit_interval_sec=5, max_submissions_per_hour=60,
-    flip_indicator={"QUIET": "CVD_DIVERGENCE_20", "VIOLENT": "CVD_DIVERGENCE_20"}, **_CVD_TRIGGER,
-)
+# B1/B2 entry helpers retired 2026-10-30 (R22); CVD trigger only lived on those tiles.
 _COMMITTED_FADE_KEYS = {
     "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE", "SCORE_DIRECTION_MISMATCH",
                   "BBO_STALE", "FADE_SPREAD_ABOVE_MAX", "FADE_SESSION_GATED"),
@@ -1073,14 +1052,6 @@ _COMMITTED_FADE_KEYS = {
     "fade_allowed_sessions": FREEZE21_SESSIONS_ASIA_EU, "fade_max_spread_bps": 3.0,
     "fade_definition": "H-A committed fade (frozen scorer: explicit side == score-led side, Asia+EU, spread <= 3 bp)",
 }
-_GSB2_ENTRY = _gs_entry(
-    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
-    regime=GSB_REGIME, regime_exec={"QUIET": "TOUCH", "TREND": "OFFSET", "VIOLENT": "DEEP_0.75"},
-    bar_clock_trigger="CVD_DIVERGENCE_20", min_submit_interval_sec=5, max_submissions_per_hour=60,
-    regime_trigger={"QUIET": "CVD_DIVERGENCE_3M", "TREND": "COMMITTED_FADE", "VIOLENT": "CVD_DIVERGENCE_3M"},
-    flip_indicator={"QUIET": "CVD_DIVERGENCE_20", "TREND": "CVD_TREND_20", "VIOLENT": "CVD_DIVERGENCE_20"},
-    **_CVD_TRIGGER, **_COMMITTED_FADE_KEYS,
-)
 _GSB3_ENTRY = _gs_entry(
     mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
     # PHASE02 (owner, 2026-10-07): committed fade loses in VIOLENT (H-A -3.63
@@ -1091,7 +1062,6 @@ _GSB3_ENTRY = _gs_entry(
     **_COMMITTED_FADE_KEYS,
 )
 _GS01_EXIT = _gs_simple_exit(tp_atr=2.5, be_atr=2.0)
-_GSB1_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": None, "VIOLENT": "MOM_VIOLENT"})
 
 
 def _with_cut_mfe_cap(exit_policy: dict, cap_bp: float = 2.0) -> dict:
@@ -1105,8 +1075,6 @@ def _with_cut_mfe_cap(exit_policy: dict, cap_bp: float = 2.0) -> dict:
 
 
 _GS01_EXIT = _with_cut_mfe_cap(_GS01_EXIT)
-_GSB1_EXIT = _with_cut_mfe_cap(_GSB1_EXIT)
-_GSB2_EXIT = _gsb_exit({"QUIET": "REV_QUIET", "TREND": "MOM_TREND", "VIOLENT": "REV_VIOLENT"})
 _GSB3_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": "MOM_TREND", "VIOLENT": None})
 GS_SHADOW_REASON = "pre-registered stack: its own thesis cut is live; the shared catalog is shadow-only comparison"
 
@@ -1144,43 +1112,7 @@ COMBO_LANE_SPECS.update({
         signal_summary=("H-C's cross-venue premium trigger (Binance/Bybit premium vs its 60-min mean "
                         ">=+1.75 / <=-1.88 bp); taker toward convergence; ATR-scaled maker take-profit"),
     ),
-    RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME: _gs_tile(
-        lane=RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
-        label="B1 CVD divergence, regime-managed · touch limit when quiet, stand aside in trend, deep 0.75 ATR limit when violent, momentum exit set",
-        raw_policy_id="GSB1_CVD_DIVERGENCE_3M_QUIET_TOUCH_TREND_ASIDE_VIOLENT_DEEP0.75ATR|DYN_MOM_QUIET_VIOLENT_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
-        id_prefix="gb1", module="paper_policy_family_gsb1_cvd_div_regime.py",
-        entry=_GSB1_ENTRY, exit_policy=_GSB1_EXIT, signal_clock=BAR_CLOSE_SIGNAL_CLOCK,
-        admission=GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID, entry_ttl_sec=1200,
-        relay=PARTIAL_EXIT_RELAY_CAPABILITY,
-        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-B1",
-                    "in_sample": "discovery only (see PREREG-GS-20261004-B.md)"},
-        pre=_gs_pre_registration(
-            "GS-20261004-B1", prereg_path=GSB_PREREG_PATH, registered_utc="2026-10-04T06:34:58Z", bonferroni_k=3,
-            honest_label=_GS_HONEST, giveback_arm_bp=10.0,
-            extra_kills={"be_armed_negative_share_above": 0.10, "worst_trade_below_bp": -45.0,
-                         "fill_rate_below": 0.60, "fill_rate_after_signals": 40, "latency_p50_above_sec": 5.0}),
-        subtitle="B1 — CVD divergence with regime-specific entry and exits — PAPER ONLY — RELAY INELIGIBLE",
-        signal_summary=("the GS-03 CVD divergence event; QUIET: passive touch limit with re-pegs and a guarded "
-                        "taker fallback; TREND: stand aside; VIOLENT: deep 0.75 ATR limit, 20-min TTL"),
-    ),
-    RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER: _gs_tile(
-        lane=RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
-        label="B2 Regime switcher · CVD divergence reversion in quiet/violent, committed-AI fade in trend, regime exits",
-        raw_policy_id="GSB2_QUIET_VIOLENT_CVD_DIVERGENCE_REV_TREND_COMMITTED_FADE_MOM_OFFSET0.25ATR|DYN_REV_QUIET_VIOLENT_MOM_TREND_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
-        id_prefix="gb2", module="paper_policy_family_gsb2_regime_switcher.py",
-        entry=_GSB2_ENTRY, exit_policy=_GSB2_EXIT, admission=GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID,
-        entry_ttl_sec=1200, relay=PARTIAL_EXIT_RELAY_CAPABILITY,
-        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-B2",
-                    "in_sample": "discovery only (see PREREG-GS-20261004-B.md)"},
-        pre=_gs_pre_registration(
-            "GS-20261004-B2", prereg_path=GSB_PREREG_PATH, registered_utc="2026-10-04T06:34:58Z", bonferroni_k=3,
-            honest_label=_GS_HONEST, giveback_arm_bp=10.0,
-            extra_kills={"be_armed_negative_share_above": 0.10, "worst_trade_below_bp": -45.0,
-                         "fill_rate_below": 0.60, "fill_rate_after_signals": 40, "latency_p50_above_sec": 5.0}),
-        subtitle="B2 — regime switcher (CVD reversion / committed fade) — PAPER ONLY — RELAY INELIGIBLE",
-        signal_summary=("QUIET and VIOLENT: the CVD divergence event (reversion exit set); TREND (ADX >= 25): fade "
-                        "the shared AI's committed call (H-A definition) with a 0.25 ATR offset limit"),
-    ),
+    # B1/B2 retired 2026-10-30 (R22): specs + policy modules deleted; tokens in RETIRED_TILE_LANES.
     RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME: _gs_tile(
         lane=RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
         label="B3 Committed fade, regime-managed · H-A's committed-AI fade with touch / 0.25 ATR offset entries in quiet / trend and a momentum exit set (stand aside in violent)",
@@ -1474,102 +1406,6 @@ COMBO_LANE_SPECS.update({
 
 
 
-# Tile 6 · GS-FADE3-TP30 (key gf3, cid 8; RK PASS 25 Oct 06:24 AEDT). Sim E8 FADE / ALL regimes / W=3: SHORT when
-# z3 >= 2.5, mom5 >= 2*ATR30, imb5 <= -0.2, BZ > -2 (LONG mirrored), spread <= 2 bp. Marketable limit capped at
-# touch +-5 bp, remainder priced by the shared A5 rest helper; TP +30 bp, hard stop -25 bp, exchange stop -35 bp,
-# 20 min time exit, 60 s cooldown, one open, $25 notional. Self-simulated by tile_fade3 (bot._gf3_thread); PAPER
-# ONLY and refused on every live arm path (live_tile_gate.PAPER_ONLY_TILE_KEYS).
-_GF3_ENTRY = {
-    "mode": "MARKETABLE_LIMIT_CAP_5BP_THEN_A5_REST_SELF_SIMULATED", "offset_pct": 0.0, "chase_windows": (),
-    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
-    "direction_source": "E8_FADE_Z3_MOMENTUM_IMBALANCE",
-    "max_spread_bps": 2.0, "entry_cap_bps": 5.0, "cooldown_sec": 60, "notional_usd": 25.0,
-    "e8": {"z_entry": 2.5, "mom_atr_mult": 2.0, "imb_min": 0.2, "bz_limit": 2.0, "flow_window_min": 3},
-    "ai_decision_role": "NONE",
-    "fill_model": "TILE_FILL_IOC_CAP_THEN_A5_REST",
-}
-_GF3_EXIT = _composite_exit(max_duration_sec=1200, max_open_positions=1,
-                            volatility_scaling="NONE - fixed bp TP / stops and a 20 min time exit")
-_GF3_EXIT.update({"hard_stop_bps": 25.0, "hard_stop_margin_pct": 25.0, "take_profit_bps": 30.0,
-                  "exchange_stop_bps": 35.0})
-_GF3_EXIT["exit_order"] = registry_live_exit_order(_GF3_EXIT)
-COMBO_LANE_SPECS.update({
-    RESEARCH_LANE_FAMILY_GS_FADE3_TP30: _tile(
-        lane=RESEARCH_LANE_FAMILY_GS_FADE3_TP30,
-        label="GS-FADE3-TP30 · fade 3-min z-score spikes, cap 5 bp then A5 rest, TP 30 bp, stop 25 bp, 20 min exit",
-        raw_policy_id="GS_FADE3_E8_FADE_ALL_W3_Z2P5_MOM2ATR_IMB0P2_BZ2|TP30_HARD25_XSTOP35_TIME1200_CAP1",
-        id_prefix="gf3",
-        module="tile_fade3.py",
-        test_module="test_tile_fade3.py",
-        entry=_GF3_ENTRY, exit_policy=_GF3_EXIT,
-        hypothesis_result={"status": "SIM_E8_RK_PASS_20261025", "hypothesis_id": "GS-20261025-FADE3-TP30"},
-        pre_registration=_phase3_pre(
-            "GS-20261025-FADE3-TP30",
-            spec_source="sim E8 (fixtures/fade3_sim feat.py / family.py, sha-pinned) + RK PASS 25 Oct 06:24 AEDT",
-            decisions=("E8 FADE ALL W=3; cap touch +-5 bp then A5 rest; TP 30 / hard 25 / exchange 35 bp; "
-                       "20 min time exit; 60 s cooldown; one open; $25 notional",),
-        ),
-        admission_treatment=GF3_ADMISSION_POLICY_ID,
-        max_active_signals=1, entry_ttl_sec=1, default_enabled=True,
-        signal_clock=SELF_SIMULATED_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
-        subtitle="GS-FADE3-TP30 — 3-min spike fade — PAPER ONLY — LIVE REFUSED",
-        signal_summary=("price spikes 2.5 sd on the 3-minute z-score with momentum >= 2 ATR and the book leaning "
-                        "the other way: fade it with a capped marketable limit"),
-        live_exit_order=registry_live_exit_order(_GF3_EXIT),
-        shadow_exits=(),
-        early_cut_shadow_reason="GS-FADE3-TP30 spec: TP, stops and time exit only",
-    ),
-})
-COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_GS_FADE3_TP30]["self_simulated_paper"] = True
-
-# Tile 6 · GS-FADE3-LOOSE (key gf3l, cid 9; Danish yes 2026-10-27). Same FADE3 family / shared fill path
-# as gf3 with looser entry gates (z 1.75, mom 1.25 ATR, imb 0.10, spread 3 bp), TP 25 bp, 30 s cooldown.
-# Sample-density experiment only (R14: not an edge claim). PAPER ONLY / live refused.
-_GF3L_ENTRY = {
-    "mode": "MARKETABLE_LIMIT_CAP_5BP_THEN_A5_REST_SELF_SIMULATED", "offset_pct": 0.0, "chase_windows": (),
-    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
-    "direction_source": "E8L_FADE_Z3_MOMENTUM_IMBALANCE",
-    "max_spread_bps": 3.0, "entry_cap_bps": 5.0, "cooldown_sec": 30, "notional_usd": 25.0,
-    "e8l": {"z_entry": 1.75, "mom_atr_mult": 1.25, "imb_min": 0.10, "bz_limit": 2.0, "flow_window_min": 3},
-    "ai_decision_role": "NONE",
-    "fill_model": "TILE_FILL_IOC_CAP_THEN_A5_REST",
-}
-_GF3L_EXIT = _composite_exit(max_duration_sec=1200, max_open_positions=1,
-                             volatility_scaling="NONE - fixed bp TP / stops and a 20 min time exit")
-_GF3L_EXIT.update({"hard_stop_bps": 25.0, "hard_stop_margin_pct": 25.0, "take_profit_bps": 25.0,
-                   "exchange_stop_bps": 35.0})
-_GF3L_EXIT["exit_order"] = registry_live_exit_order(_GF3L_EXIT)
-COMBO_LANE_SPECS.update({
-    RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25: _tile(
-        lane=RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25,
-        label=("GS-FADE3-LOOSE · looser 3-min z-fade, cap 5 bp then A5 rest, TP 25 bp, stop 25 bp, 20 min exit"),
-        raw_policy_id=("GS_FADE3_E8L_FADE_ALL_W3_Z1P75_MOM1P25ATR_IMB0P1_BZ2|"
-                       "TP25_HARD25_XSTOP35_TIME1200_CAP1"),
-        id_prefix="gf3l",
-        module="tile_fade3_loose.py",
-        test_module="test_tile_fade3_loose.py",
-        entry=_GF3L_ENTRY, exit_policy=_GF3L_EXIT,
-        hypothesis_result={"status": "MID_EPOCH_SAMPLE_DENSITY_20261027", "hypothesis_id": "GS-20261027-FADE3-LOOSE"},
-        pre_registration=_phase3_pre(
-            "GS-20261027-FADE3-LOOSE",
-            spec_source=("docs/tile-retire-and-fade3-variant.md §3 + Danish yes 2026-10-27 "
-                         "(sample density of FADE3 family; not an edge claim)"),
-            decisions=("E8L FADE ALL W=3; z>=1.75, mom>=1.25 ATR, imb>=0.10, spread<=3 bp; "
-                       "cap touch +-5 bp then A5 rest; TP 25 / hard 25 / exchange 35 bp; "
-                       "20 min time exit; 30 s cooldown; one open; $25 notional; paper only",),
-        ),
-        admission_treatment=GF3L_ADMISSION_POLICY_ID,
-        max_active_signals=1, entry_ttl_sec=1, default_enabled=True,
-        signal_clock=SELF_SIMULATED_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
-        subtitle="GS-FADE3-LOOSE — looser 3-min spike fade — PAPER ONLY — LIVE REFUSED",
-        signal_summary=("price moves ~1.75 sd on the 3-minute z-score with momentum >= 1.25 ATR and a mild book "
-                        "lean against the spike; fade with a capped marketable limit (touch ±5 bp, A5 rest)"),
-        live_exit_order=registry_live_exit_order(_GF3L_EXIT),
-        shadow_exits=(),
-        early_cut_shadow_reason="GS-FADE3-LOOSE spec: TP, stops and time exit only",
-    ),
-})
-COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25]["self_simulated_paper"] = True
 
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
@@ -1685,6 +1521,11 @@ RETIRED_TILE_LANES = frozenset({
     # fade patient-exit mid-epoch tile. Policy module + dedicated tests DELETED;
     # evidence stays on disk (R5). Active tiles renumber 1..5: CTRL, GS-01, B1, B2, FADE3.
     "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
+    # Retired 2026-10-30 (owner Danish Plan B R22; RK plan PASS): tiles 3–6
+    # B1, B2, GS-FADE3-TP30, GS-FADE3-LOOSE. Policy modules + self-sim engines + dedicated
+    # tests DELETED; evidence stays on disk (R5). Active roster: CTRL + GS-01 only.
+    "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
+    "FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25",
 })
 # Retired 2026-10-11 tiles whose policy modules stay in-tree (not spawned,
 # not numbered): H-C's evaluator is still the fixture for generic cross-venue

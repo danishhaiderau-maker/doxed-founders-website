@@ -29,13 +29,9 @@ import live_exit_fill as _lef
 TILE_KEY_CODES: dict = {
     "rnd": 1,   # FAMILY_RANDOM_CONTROL_TAKER_90
     "gs1": 2,   # FAMILY_GS01_XV_PREMIUM_ATR_TP (GS-01)
-    "gb1": 3,   # FAMILY_GSB1_CVD_DIV_REGIME
-    "gb2": 4,   # FAMILY_GSB2_REGIME_SWITCHER
-    "gf3": 8,   # FAMILY_GS_FADE3_TP30 (paper only)
-    "gf3l": 9,  # FAMILY_GS_FADE3_LOOSE_TP25 (paper only)
 }
 # Retired tiles keep their codes reserved forever (never reissued): gs6=5, dsl=6, dsf=7.
-RESERVED_TILE_KEY_CODES = {"gs6": 5, "dsl": 6, "dsf": 7}
+RESERVED_TILE_KEY_CODES = {"gs6": 5, "dsl": 6, "dsf": 7, "gb1": 3, "gb2": 4, "gf3": 8, "gf3l": 9}
 
 # cid layout (positive int32): bits 28-30 = 0b101 marker, bits 21-27 = tile code, bits 0-20 = hash.
 CID_MARKER = 0b101
@@ -102,17 +98,16 @@ CAP_RESPONSE_DISARM_FLATTEN = "DISARM_FLATTEN_RED_AND_ENTRY_BLOCK"
 SKIP_DAILY_CAP = "LIVE_SKIPPED_DAILY_CAP"          # E1(L12) stamp on the blocked (paper-only) signal
 STOP_FAILURE_FLATTEN = "STOP_FAILURE_FLATTEN"      # E2(L15) / E2'(L23) event + guardian code
 AMBER_BOOK_STALE = "BOOK_STALE_ENTRY_BLOCK"         # E7(L30)
-# ---- prereg AMEND5 rev 4 FINAL (on AMEND4 7073ed25): backstop margin, in-trade liq check, G4 outcomes, FADE3 arm gate ----------
-# grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND5-20261024.md, sha256 AMEND5_SHA256. Binding: F1, F2, F4, G1, G2, G3,
-# G4(a), G4(b), G4(c'), G5, G6. VOID (no code): F3 (L8-12), rev-2 G4(c) (L25), rev-3 F3'/G3' (L28-34, 7d1302b7).
-# ONE place for every AMEND5 constant; test_live_protection.test_amend5_constants_pinned re-hashes the file and re-reads every
-# cited line. Switchable only here (G4_ACTIONS maps each G4 outcome to its action); no env override.
+# ---- prereg AMEND5 rev 4 FINAL (on AMEND4 7073ed25): backstop margin, in-trade liq check, G4 outcomes ----------
+# Binding source file keeps historical FADE3 naming; G6 FADE3 arm gate deleted R22 2026-10-30.
+# Binding: F1, F2, F4, G1, G2, G3, G4(a), G4(b), G4(c'), G5. VOID (no code): F3, rev-2 G4(c), rev-3 F3'/G3', G6.
+# ONE place for every AMEND5 constant; test_live_protection.test_amend5_constants_pinned re-hashes the file.
 AMEND5_FILE = "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND5-20261024.md"
 AMEND5_SHA256 = "4407d5a2bd86b349c64d59aaeaf180c237b5872315eae4e1f3be92e99382c850"
 AMEND5_LINES = {"F1": 6, "F2": 7, "F4": 13, "G1": 16, "G2": 17, "G3": 18, "G4": 19, "G4(a)": 20, "G4(b)": (21, 24),
-                "G5": 26, "REV4": (36, 37), "G4(c')": (38, 42), "G6": 43}
-AMEND5_VOID_LINES = {"F3": (8, 12), "G4(c)": 25, "REV3": (28, 34)}
-AMEND5_BINDING = ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5", "G6")
+                "G5": 26, "REV4": (36, 37), "G4(c')": (38, 42)}
+AMEND5_VOID_LINES = {"F3": (8, 12), "G4(c)": 25, "REV3": (28, 34), "G6": 43}
+AMEND5_BINDING = ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5")
 # F1 (L6): 18 bp past the exchange-stop level. G1 (L16) deletes "only widen": after the receive-stamp PR (#851, F4 L13) has
 # landed and >= 20 REAL exchange-stop fills exist, E10 re-sets it EITHER way. G2 (L17): the STOPLOSS-DIST basis is an INTERIM
 # ESTIMATE used only for this safety margin, never realism/edge evidence.
@@ -127,19 +122,15 @@ LIQ_SOURCE = "BITFINEX_POSITION_LIQ_PRICE"   # G5 (L26): L only ever read from B
 LIQ_CHECK_FLATTEN = "LIQ_CHECK_FLATTEN"      # G3: non-countable, counted; disarm ALL
 LIQ_CLAMP_FLATTEN = "LIQ_CLAMP_FLATTEN"      # G4(b): THIS position only, no disarm; non-countable, counted
 LIQ_CLAMP_RATE = "LIQ_CLAMP_RATE_GT_5PCT"    # G4(b): disarm ALL
-STOP_REEVAL = "STOP_REEVAL"                  # G4(c'): GS-01 + FADE3 stay disarmed; Strategist re-evaluates the stop
+STOP_REEVAL = "STOP_REEVAL"                  # G4(c'): GS-01 stays disarmed; Strategist re-evaluates the stop
 G4_A, G4_B, G4_C = "G4(a)", "G4(b)", "G4(c')"
 G4_ACTIONS = {G4_A: "NORMAL", G4_B: "ARMED_LIQ_CLAMP_POSITION_ONLY", G4_C: "DISARMED_STOP_REEVAL"}
 G4_FIRST_TILE = "gs1"        # G4 / E8: the real L on GS-01's FIRST live position decides the outcome
-G6_GATED_TILE = "gf3"        # G6 (L43): FADE3 (its own tile key gf3, NOT GS-06's gs6) arms only after G4 (a)/(b) AND HM's gate
-G4C_DISARMED_TILES = ("gs1", "gf3")   # G4(c'): GS-01 stays disarmed, and so does FADE3 (gf3; never gs6)
+G4C_DISARMED_TILES = ("gs1",)   # G4(c'): GS-01 stays disarmed
 DENY_G4_STOP_REEVAL = "LIVE_G4C_STOP_REEVAL"
-DENY_G6_NO_FIRST_L = "LIVE_G6_GS01_FIRST_L_PENDING"
-DENY_G6_HM_GATE = "LIVE_G6_HM_GATE_NOT_PASSED"
-# GS-FADE3-TP30 PAPER tile PR (RK PASS 25 Oct 06:24 AEDT): gf3 ships PAPER ONLY. Every arm path refuses it, whatever
-# LIVE_HM_GATE_FADE3 says, until a later reviewed PR removes it from this set (the env stays unset in this PR).
-PAPER_ONLY_TILE_KEYS = frozenset({"gf3", "gf3l"})
-PAPER_ONLY_LANES = frozenset({"FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25"})
+# Paper-only lane set emptied R22 2026-10-30 (FADE3/LOOSE retired); helper retained for fail-closed arm paths.
+PAPER_ONLY_TILE_KEYS = frozenset()
+PAPER_ONLY_LANES = frozenset()
 DENY_PAPER_ONLY_TILE = "LIVE_TILE_PAPER_ONLY"
 # RK ruling (24 Oct) L27: no pre-entry liq ESTIMATE path (G5 bans estimates). Instead the arm gate refuses while the latest
 # RECORDED real L (Bitfinex, persisted across restarts) is <= 15 bp past the stop, until a NEW stop amendment has passed
@@ -190,11 +181,9 @@ def tile_key_for_lane(lane: str | None, registry: Mapping[str, Mapping] | None =
     return prefix if prefix in TILE_KEY_CODES else None
 
 
-# RK 25 Oct 06:29 (2a): ONLY GS-01 (gs1) and FADE3 (gf3, GS-FADE3-TP30) may EVER be operator-eligible. gf3 additionally
-# needs its own LIVE_HM_GATE_FADE3=PASS:<ref> (it stays unset => refused). Every other tile is refused in code whatever the
-# admin action (eligibility route, tile-switch one-click, persisted sidecar). Changing this set needs an RK-ruled code PR.
-OPERATOR_ELIGIBLE_TILE_KEYS = frozenset({"gs1", "gf3"})
-FADE3_HM_GATE_ENV = "LIVE_HM_GATE_FADE3"
+# RK 25 Oct 06:29 (2a) / R22 2026-10-30: ONLY GS-01 (gs1) may ever be operator-eligible.
+# Every other tile is refused in code whatever the admin action.
+OPERATOR_ELIGIBLE_TILE_KEYS = frozenset({"gs1"})
 
 
 def operator_eligibility_refusal(lane: str | None, registry: Mapping[str, Mapping] | None = None,
@@ -208,8 +197,6 @@ def operator_eligibility_refusal(lane: str | None, registry: Mapping[str, Mappin
         return "OPERATOR_ELIGIBILITY_UNREADABLE"
     if key not in OPERATOR_ELIGIBLE_TILE_KEYS:
         return "TILE_NEVER_OPERATOR_ELIGIBLE"
-    if key == "gf3" and not hm_gate_passed((os.environ if env is None else env).get(FADE3_HM_GATE_ENV)):
-        return "FADE3_HM_GATE_NOT_PASSED"
     return None
 
 
@@ -362,7 +349,7 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         info: dict = {"tile_key": key, "day_basis": DAY_BASIS}
         po = paper_only_arm_block(lane, key) or paper_only_arm_block(None, tile_key_for_trade_id(trade_id))
         if po:
-            return False, [po], info   # gf3 PAPER ONLY: refused before any other check
+            return False, [po], info   # paper-only lane: refused before any other check
         if key is None or tile_key_for_trade_id(trade_id) != key:
             return False, [DENY_TILE_KEY_UNKNOWN], info
         reasons: list = []
@@ -376,7 +363,7 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         info["exposures"] = others[:5]
         if others:
             reasons.append(SKIP_MUTEX)
-        # 2. AMEND5 G4(c') / G6: GS-01 + FADE3 disarmed after a (c') first L; FADE3 only after (a)/(b) AND HM's gate
+        # 2. AMEND5 G4(c'): GS-01 disarmed after a (c') first L (FADE3 G6 arm gate retired R22)
         g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment, amendment_pass)
         info["g4_first_l_outcome"] = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
         if g:
@@ -612,8 +599,7 @@ def g4_outcome(stop_liq_bp: float | None) -> str | None:
 
 
 def paper_only_arm_block(lane: str | None = None, tile_key: str | None = None) -> str | None:
-    """Fail-closed live refusal for a paper-only tile (gf3), by lane name OR tile key: refused before any other arm gate,
-    so LIVE_HM_GATE_FADE3 or a first L can never arm it."""
+    """Fail-closed live refusal for a paper-only tile by lane name OR tile key."""
     if str(lane or "").upper() in PAPER_ONLY_LANES or str(tile_key or "").lower() in PAPER_ONLY_TILE_KEYS:
         return DENY_PAPER_ONLY_TILE
     return None
@@ -622,20 +608,16 @@ def paper_only_arm_block(lane: str | None = None, tile_key: str | None = None) -
 def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, hm_gate: str | None = None,
                    latest_l: Mapping[str, Any] | None = None, stop_amendment: str | None = None,
                    amendment_pass: Mapping[str, Any] | None = None) -> str | None:
-    """AMEND5 G4(c') + G6 arm/entry gate (pure, shared). GS-01 arms first (its first L is unknown until it trades); after a
-    G4(c') reading GS-01 and FADE3 stay disarmed (STOP_REEVAL). FADE3 needs a first L in (a)/(b) AND HM's live gate pass.
+    """AMEND5 G4(c') arm/entry gate (pure, shared). GS-01 arms first; after a G4(c') reading it stays disarmed.
+    ``hm_gate`` kept for call-site compat (FADE3 G6 path deleted R22 2026-10-30).
     RK L27: every tile is refused while the latest recorded real L is too close and no new stop amendment has passed."""
+    del hm_gate  # FADE3 G6 HM gate removed
     l27 = l27_arm_block(latest_l, stop_amendment, amendment_pass)
     if l27:
         return l27
     out = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
     if out == G4_C and tile_key in G4C_DISARMED_TILES:
         return DENY_G4_STOP_REEVAL
-    if tile_key == G6_GATED_TILE:
-        if out not in (G4_A, G4_B):
-            return DENY_G6_NO_FIRST_L
-        if not hm_gate_passed(hm_gate):
-            return DENY_G6_HM_GATE
     return None
 
 

@@ -789,10 +789,6 @@ TILE_FILL_SITES = {
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GS01_XV_PREMIUM_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
-    "FAMILY_GSB1_CVD_DIV_REGIME": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
-    "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
 }
 # R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
 # (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five
@@ -802,15 +798,9 @@ TILE_FILL_SITES = {
 # baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
 # non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
 # Step B (HM 13:16): DISLOC and DISLOC-FOI migrated (both removed 23 Oct 2026).
+# R22 2026-10-30: B1/B2/FADE3/LOOSE fill-site rows deleted with those tiles (map shrinks only).
 PENDING_MIGRATION = frozenset()  # 16 Oct 2026: tiles 1-5 migrated (tile_fill.py); must stay empty
-PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this
-# GS-FADE3-TP30 (gf3, paper only; RK PASS 25 Oct 06:24 AEDT): a NEW tile on paper_fill from day one (registered after
-# the 13 Oct baseline is frozen, so the baseline is unchanged): same four sites; its resting remainder is priced by the
-# shared A5 helper via REST_FILL_SITES (tile_fill.price_entry_rest).
-TILE_FILL_SITES["FAMILY_GS_FADE3_TP30"] = (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced"))
-# GS-FADE3-LOOSE (gf3l, paper only; Danish yes 2026-10-27): same four shared sites as gf3 (R4).
-TILE_FILL_SITES["FAMILY_GS_FADE3_LOOSE_TP25"] = TILE_FILL_SITES["FAMILY_GS_FADE3_TP30"]
+PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this (may shrink)
 ALLOWED_FILL_MODELS = frozenset({FILL_MODEL})
 LEGACY_TAG = "LEGACY_PRICING_INVALID"
 FORBIDDEN_NAMES = ("book_tape_1s", "market_microstructure_1s", "ticker")
@@ -1225,10 +1215,8 @@ def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, 
 
 
 # lane -> the registered rest sites (each must be a single `return paper_fill.rest_fill(...)` over trades_between)
-REST_FILL_SITES = {
-    "FAMILY_GS_FADE3_TP30": (("tile_fill.py", "price_entry_rest"),),
-    "FAMILY_GS_FADE3_LOOSE_TP25": (("tile_fill.py", "price_entry_rest"),),
-}
+# R22 2026-10-30: FADE3/LOOSE rest sites removed with those tiles; no active tile uses rest_fill today.
+REST_FILL_SITES = {}
 
 
 def rest_site_violations(source: str, func_name: str) -> list:

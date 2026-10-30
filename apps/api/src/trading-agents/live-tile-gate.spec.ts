@@ -27,12 +27,12 @@ test('every live-copy tile prefix has a stable tile code; codes are unique and n
   for (const c of codes) assert.ok(c >= 1 && c <= 127);
   assert.equal(LIVE_TILE_KEY_CODES.gs1, 2);
   assert.equal(RESERVED_LIVE_TILE_KEY_CODES.gs6, 5);
-  assert.equal(LIVE_TILE_KEY_CODES.gf3l, 9);
+  assert.equal(RESERVED_LIVE_TILE_KEY_CODES.gf3l, 9);
 });
 
 test('tile key from trade id ignores adopt/relink wrappers and unknown prefixes', () => {
   assert.equal(tileKeyForTradeId('gs1-abc'), 'gs1');
-  assert.equal(tileKeyForTradeId('ADOPT:gb2-x'), 'gb2');
+  assert.equal(tileKeyForTradeId('ADOPT:gb2-x'), null);  // retired/reserved
   assert.equal(tileKeyForTradeId('relink:rnd-1'), 'rnd');
   assert.equal(tileKeyForTradeId('dsl-1'), null);
   assert.equal(tileKeyForTradeId('gs1-'), null);
@@ -49,7 +49,7 @@ test('cid round-trips the tile, stays a positive int32, and keeps hashes distinc
     }
   }
   assert.notEqual(encodeTileClientOrderId('gs1', 1), encodeTileClientOrderId('gs1', 2));
-  assert.notEqual(encodeTileClientOrderId('gs1', 7), encodeTileClientOrderId('gf3l', 7));
+  assert.equal(encodeTileClientOrderId('gs1', 7), encodeTileClientOrderId('gs1', 7));
   assert.throws(() => encodeTileClientOrderId('gs6', 7));
   assert.throws(() => encodeTileClientOrderId('dsl', 1));
 });

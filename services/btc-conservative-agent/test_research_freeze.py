@@ -58,7 +58,15 @@ def test_fly_toml_declares_the_one_freeze_epoch():
 
 def test_every_frozen_tile_is_pre_registered_with_target_kill_and_day21():
     roles, gs = [], []
+    # B1/B2 left FREEZE_ROSTER historically but were R22-deleted 2026-10-30 (CODE_OVERRIDE);
+    # their SPECS/modules are gone — only remaining freeze-roster SPECS are checked here.
+    deleted_freeze_roster = {"FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"}
+    for lane in deleted_freeze_roster:
+        assert lane in rf.FREEZE_ROSTER and lane in cfg.RETIRED_TILE_LANES
+        assert lane not in cfg.COMBO_LANE_SPECS
     for lane in rf.FREEZE_ROSTER:
+        if lane in deleted_freeze_roster:
+            continue
         pre = cfg.COMBO_LANE_SPECS[lane]["pre_registration"]
         assert pre["freeze_id"] == rf.FREEZE_ID
         if pre["schema"] == "tile_pre_registration_gs20261004_v1":
@@ -79,8 +87,8 @@ def test_every_frozen_tile_is_pre_registered_with_target_kill_and_day21():
         assert cfg.COMBO_LANE_SPECS[lane]["paper_only"] is True
         assert cfg.COMBO_LANE_SPECS[lane]["platform_relay_eligible"] is False
         roles.append(pre["role"])
-    assert roles.count("HYPOTHESIS") == 6 and roles.count("CONTROL") == 1
-    assert len(rf.FREEZE_ROSTER) == 7 and len(gs) == 4
+    assert roles.count("HYPOTHESIS") == 4 and roles.count("CONTROL") == 1
+    assert len(rf.FREEZE_ROSTER) == 7 and len(gs) == 2  # GS-01 + B3 kept-spec; B1/B2 deleted
 
 
 def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_ones():
@@ -89,12 +97,10 @@ def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_on
         "FAMILY_DANISH_REGIME_ROUTER",
         "FAMILY_FADE_POOL",
         "FAMILY_GS07_V07_PREMIUM_FADE_60M",
-        "FAMILY_GS_FADE3_TP30",
-        "FAMILY_GS_FADE3_LOOSE_TP25",
     )
     assert not set(rf.MID_EPOCH_ADDITION_ROSTER).intersection(rf.FREEZE_ROSTER)
-    # PHASE03 additions ship default OFF; FADE3 + FADE3-LOOSE default ON.
-    # GS-06 removed from mid-epoch roster on 2026-10-28 R22 retire.
+    # PHASE03 additions ship default OFF.
+    # GS-06 removed 2026-10-28; FADE3/LOOSE removed 2026-10-30 (R22).
     default_off = {"FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL",
                    "FAMILY_GS07_V07_PREMIUM_FADE_60M"}
     for item in rf.MID_EPOCH_ADDITIONS:
@@ -210,7 +216,9 @@ def test_status_payload_is_json_serialisable():
 
 def test_status_lists_the_current_roster_next_to_the_pinned_original():
     cur = rf.freeze_status(MANIFEST, START + 600)["current_roster"]
-    assert len(cur["on_by_default"]) == 6 and cur["count"] == 6 and "default_off_tiles_6_7" not in cur
+    assert len(cur["on_by_default"]) == 2 and cur["count"] == 2 and "default_off_tiles_6_7" not in cur
+    assert cur["on_by_default"] == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
     # Tiles 6/7 (DISLOC / DISLOC-FOI) removed 23 Oct 2026: retired, never on the live roster.
     assert {"FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"}.isdisjoint(cur["on_by_default"])
-    assert {"FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_PREMIUM_REVERSION_60M"} <= set(cur["retired_not_listed"])
+    assert {"FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_PREMIUM_REVERSION_60M",
+            "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"} <= set(cur["retired_not_listed"])
