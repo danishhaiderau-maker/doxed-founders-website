@@ -226,6 +226,8 @@ PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
     # REALISM_V2 SHARED A5 REST FILL (FADE3 PR, RK PASS 25 Oct 06:24 AEDT): new names only; pricers above unchanged
     "REST_TTL_S", "REST_RULE_A5", "NO_FILL_REST_TTL", "REST_SOURCE", "rest_fill", "REST_FILL_SITES",
     "rest_site_violations",
+    # FREEZE rem (1) R0/R4 FADE3 queue from book (#931): fail-closed missing-book status + queue basis stamp
+    "NO_FILL_QUEUE_BOOK_MISSING", "REST_QUEUE_BASIS",
     # RK PASS 24 Oct (CPU fix): incremental BookTail + memo key accessors + refresh telemetry (rule unchanged)
     "BookTail", "book_tail_stats", "_ensure_book_tail", "_book10l_newest_key", "_book10l_newest_eligible",
     # REALISM_V2 PR2: exchange-resident stop leg (delay 0) + forced first-row leg (RK 17:18 (2)/(4))
