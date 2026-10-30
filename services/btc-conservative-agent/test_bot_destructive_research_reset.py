@@ -331,10 +331,11 @@ def test_unknown_recovery_file_blocks_before_deletion(runtime):
 
 
 def test_pending_volume_cleanup_blocks_before_any_payload_deletion(runtime):
-    folder = runtime["root"].parent / "raw_generation_cleanup_transactions/tx"
+    # R22 BOT-36: raw_generation_cleanup removed; pending lifecycle purge still blocks reset.
+    folder = runtime["root"] / "v3/lifecycle_purge_transactions/tx"
     folder.mkdir(parents=True)
-    (folder / "PREPARED.json").write_text(json.dumps({"schema": "raw_generation_cleanup_transaction_v1",
-                                                   "state": "PREPARED", "generation_id": "tx"}))
+    (folder / "PREPARED.json").write_text(json.dumps({"schema": "lifecycle_cleanup_purge_v1",
+                                                   "state": "PREPARED", "bundle_id": "tx"}))
     result = run(runtime)
     assert result["error"] == "RESET_AUXILIARY_RECOVERY_NOT_PROVEN_CLEAR"
     assert runtime["payload"].exists()

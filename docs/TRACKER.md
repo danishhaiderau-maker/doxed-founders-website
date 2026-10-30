@@ -1,3 +1,21 @@
+## 30 Oct 2026 — Quarantine plan steps 1–2 + corrupt_evidence R21 (BOT-36)
+
+- **PR:** [#948](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/948) branch `cursor/quarantine-r21-r22-2758`
+- **Base:** [#947](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/947) (stacked; rebase onto post-HM #944 tip before freeze push)
+- **RK merge order (do not merge):** #945 → #943 → #944 → #946 → #947 → #948; #943+#944 same bundled deploy
+- **Step 1 R22:** deleted `raw_generation_cleanup.py` + `_owner.py` + recovery audit/tests; kept fresh-reset lease gate
+- **Step 2 R22:** narrowed `rotation_cap` (no blanket `*quarantine*`); named `relay_outbox_quarantine.jsonl` CAP_EXEMPT; documented never-scanned tombstone (`deleted_trade_ids.json.corrupt.*`) + `corrupt_evidence_quarantine/`
+- **Step 4:** `corrupt_evidence_r21.py` dry-run sha-list + confirm_delete (per-file sha re-check, before/after counts, read-back, remaining-dir sha invariant, symlink refuse); admin route `POST /api/admin/corrupt-evidence-r21` (dry_run default True)
+- **max_age_sec:** `2 * 86400` (short until RK verifies expiry — open R5)
+- **Open R5 items (owner: RK/HM follow-up):**
+  1. Deferred step 3 — retention/archive R21 convert
+  2. Deferred step 5 — r3_quarantine producer deletion (long-term)
+  3. Deferred step 6 — kept safety quarantines hold ids/pointers only + alert each
+  4. Raise `DEFAULT_MAX_AGE_SEC` only after verification of the 2-day window
+- **FREEZE** — no merge / deploy / arm; never touch gs-export temp / `.puller-backup-*`
+
+---
+
 ## 30 Oct 2026 — thread_health / monitor_gaps fail-closed (BOT-29)
 
 - **PR:** [#947](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/947) branch `cursor/thread-health-failclosed-2758`

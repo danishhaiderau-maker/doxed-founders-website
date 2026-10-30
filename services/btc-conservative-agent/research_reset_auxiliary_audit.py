@@ -22,11 +22,10 @@ def audit_auxiliary_cleanup(volume_root, *, max_entries=10000, max_bytes=1677721
     blockers, receipts = [], []
     count = consumed = 0
     complete = True
+    # R22 BOT-36: raw_generation_cleanup_transactions removed with dead owner.
     specs = (
         ("v3/lifecycle_cleanup_transactions", (("PREPARED", "COMMITTED", "bundle_id"),)),
         ("v3/lifecycle_purge_transactions", (("PREPARED", "PURGED", "bundle_id"),)),
-        ("raw_generation_cleanup_transactions", (("PREPARED", "QUARANTINED", "generation_id"),
-                                                  ("PURGE_PREPARED", "PURGED", "generation_id"))),
     )
     def entries(path):
         nonlocal count
@@ -69,10 +68,7 @@ def audit_auxiliary_cleanup(volume_root, *, max_entries=10000, max_bytes=1677721
                              and isinstance(a.get("schema"), str) and isinstance(b.get("schema"), str))
                     schemas = ({"PREPARED": "lifecycle_cleanup_transaction_v2", "COMMITTED": "lifecycle_cleanup_transaction_v2"}
                         if relative == "v3/lifecycle_cleanup_transactions" else
-                        {"PREPARED": "lifecycle_cleanup_purge_v1", "PURGED": "lifecycle_cleanup_purge_v1"}
-                        if relative == "v3/lifecycle_purge_transactions" else
-                        {"PREPARED": "raw_generation_cleanup_transaction_v1", "QUARANTINED": "raw_generation_cleanup_transaction_v1",
-                         "PURGE_PREPARED": "raw_generation_cleanup_transaction_v1", "PURGED": "raw_generation_purge_receipt_v1"})
+                        {"PREPARED": "lifecycle_cleanup_purge_v1", "PURGED": "lifecycle_cleanup_purge_v1"})
                     valid = valid and a["schema"] == schemas[start] and b["schema"] == schemas[end]
                     if not valid:
                         blockers.append({"path": tx.relative_to(root).as_posix(),

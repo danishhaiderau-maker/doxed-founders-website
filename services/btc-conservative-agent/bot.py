@@ -67,7 +67,7 @@ from lifecycle_cleanup_transaction import (
     verify_bundle as verify_lifecycle_cleanup_bundle,
 )
 from research_v3_store import set_collection_config_signature_provider
-from raw_generation_cleanup_owner import RawGenerationCleanupOwner
+# R22 BOT-36: raw_generation_cleanup_owner deleted (dead quarantine path).
 from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
@@ -52392,6 +52392,52 @@ def api_admin_ledgers_delete_by_sha():
     return jsonify({"ok": True, **out})
 
 
+@app.route('/api/admin/corrupt-evidence-r21', methods=['POST'])
+def api_admin_corrupt_evidence_r21():
+    """R21 expiry for corrupt_evidence_quarantine/ — admin-only, dry_run default True.
+
+    Body: {"dry_run": true (default), "plan_sha256": "<required when dry_run=false>",
+    "max_age_sec": <optional>, "actor", "reason"}. Never auto-deletes; confirm_delete only
+    when dry_run is explicitly false and plan_sha256 matches. Never echoes a token.
+    """
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    import corrupt_evidence_r21 as _ce
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    dry_run = body.get("dry_run", True) is not False
+    try:
+        max_age = float(body["max_age_sec"]) if body.get("max_age_sec") is not None else _ce.DEFAULT_MAX_AGE_SEC
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_age_sec must be a number"}), 400
+    data_dir = _data_sync_runtime_root()
+    if dry_run:
+        out = _ce.plan_expired(data_dir, max_age_sec=max_age)
+        logger.warning(
+            f"[CORRUPT-EVIDENCE-R21] actor={actor} reason={reason[:120]!r} dry_run=True "
+            f"count={out.get('count')} plan_sha={out.get('plan_sha256')} [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": True, **out})
+    plan_sha = str(body.get("plan_sha256") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", plan_sha):
+        return jsonify({"error": "plan_sha256 required (64 hex) when dry_run=false"}), 400
+    out = _ce.confirm_delete(data_dir, plan_sha256=plan_sha, max_age_sec=max_age)
+    if not out.get("ok"):
+        logger.warning(
+            f"[CORRUPT-EVIDENCE-R21] actor={actor} refused={out.get('error')} "
+            f"deleted={out.get('deleted')} [PIPELINE ENFORCEMENT]")
+        return jsonify(out), 409
+    logger.warning(
+        f"[CORRUPT-EVIDENCE-R21] actor={actor} reason={reason[:120]!r} dry_run=False "
+        f"before={out.get('before_count')} after={out.get('after_count')} "
+        f"deleted={out.get('deleted')} plan_sha={plan_sha} [PIPELINE ENFORCEMENT]")
+    return jsonify(out)
+
+
 @app.route('/api/admin/ledgers/delete-rollback-snapshot', methods=['POST'])
 def api_admin_ledgers_delete_rollback_snapshot():
     """Delete the temporary rollback snapshot from ledgers/delete-by-sha and read back that it is gone."""
@@ -55043,27 +55089,6 @@ def _audit_lifecycle_purge_recovery() -> list:
 _RAW_GENERATION_GATE_LOCAL = threading.local()
 
 
-def _raw_generation_cleanup_identity() -> dict:
-    current = _data_sync_lifecycle_cleanup_current_identity()
-    return {
-        "source_revision": current["source_git_rev"],
-        "deployed_revision": current["deployed_git_rev"],
-        "collection_epoch_id": current["collection_epoch_id"],
-        "tile_registry_signature": current["tile_registry_signature"],
-        "config_signature": current["config_signature"],
-    }
-
-
-def _raw_generation_cleanup_leases(_generation_id: str) -> dict:
-    """Conservatively translate all known owners into generation leases."""
-    active = _data_sync_lifecycle_cleanup_active_references()
-    return {
-        "reader": list(active.get("runtime") or []) + list(active.get("lifecycle_worker") or []),
-        "sync": list(active.get("sync") or []),
-        "analyzer": [] if getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None) else list(active.get("analyzer") or []),
-    }
-
-
 def _raw_generation_cleanup_gate_acquire() -> bool:
     runtime = _LIFECYCLE_PIPELINE_RUNTIME
     if runtime is not None and not runtime.acquire_cleanup_lease(timeout=0.0):
@@ -55088,27 +55113,8 @@ def _raw_generation_cleanup_gate_release() -> None:
         if hasattr(_RAW_GENERATION_GATE_LOCAL, name): delattr(_RAW_GENERATION_GATE_LOCAL, name)
 
 
-def _raw_generation_cleanup_owner(*, purge: bool = False) -> RawGenerationCleanupOwner:
-    enabled = os.getenv("RAW_GENERATION_CLEANUP_ENABLED", "false").lower() == "true"
-    if purge:
-        enabled = enabled and os.getenv("RAW_GENERATION_PURGE_ENABLED", "false").lower() == "true"
-    return RawGenerationCleanupOwner(
-        _data_sync_volume_root(), enabled=enabled,
-        identity=_raw_generation_cleanup_identity,
-        leases=_raw_generation_cleanup_leases,
-        gate_acquire=_raw_generation_cleanup_gate_acquire,
-        gate_release=_raw_generation_cleanup_gate_release,
-    )
-
-
-def _audit_raw_generation_cleanup_recovery() -> list:
-    """Startup visibility only: never move or delete interrupted generations."""
-    try:
-        rows = _raw_generation_cleanup_owner().audit_recovery()
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        rows = [{"status": "RAW_GENERATION_RECOVERY_AUDIT_FAILED", "reason": str(exc)[:240]}]
-    if rows: logger.warning("raw generation cleanup requires explicit replay states=%s", rows)
-    return rows
+# R22 BOT-36: RawGenerationCleanupOwner + recovery audit deleted (mutation path was unreachable).
+# Gate acquire/release above stay as fresh-reset mutual exclusion (MirrorGenerationLease).
 
 
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
@@ -61372,7 +61378,7 @@ def main():
     _prime_data_sync_identity_epoch_cache()
     _reconcile_lifecycle_cleanup_transactions()
     _audit_lifecycle_purge_recovery()
-    _audit_raw_generation_cleanup_recovery()
+    # R22 BOT-36: raw_generation_cleanup recovery audit removed with dead owner.
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()

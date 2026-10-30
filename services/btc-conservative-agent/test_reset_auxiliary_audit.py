@@ -16,13 +16,14 @@ def test_prepared_without_terminal_blocks(tmp_path):
     assert not audit_auxiliary_cleanup(tmp_path)["safe"]
 
 def test_budget_never_reports_clean(tmp_path):
+    # R22 BOT-36: raw_generation_cleanup_transactions removed; budget uses lifecycle txs.
     for name in ("a", "b"):
-        (tmp_path / "raw_generation_cleanup_transactions" / name).mkdir(parents=True)
+        (tmp_path / "v3/lifecycle_cleanup_transactions" / name).mkdir(parents=True)
     result = audit_auxiliary_cleanup(tmp_path, max_entries=1)
     assert not result["complete"] and not result["safe"]
 
 def test_corrupt_receipt_blocks_without_mutation(tmp_path):
-    tx = tmp_path / "raw_generation_cleanup_transactions/a"
+    tx = tmp_path / "v3/lifecycle_cleanup_transactions/a"
     tx.mkdir(parents=True)
     path = tx / "PREPARED.json"
     path.write_text("bad")

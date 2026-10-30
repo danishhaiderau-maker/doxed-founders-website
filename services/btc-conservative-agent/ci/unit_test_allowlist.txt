@@ -398,8 +398,6 @@ test_qualification_gate_dashboard_v2.py
 test_qualification_horizon_index.py
 test_qualified_chase_policy_report.py
 test_quantity_execution.py
-test_raw_generation_cleanup.py
-test_raw_generation_cleanup_owner.py
 test_receipt_temporary_path_length.py
 test_recover_archived_future_paths.py
 test_regime_tag.py
@@ -697,3 +695,5 @@ test_tile_fade3_deriv_rotation.py
 ../../scripts/test_fly_resume_predeploy_abort.py
 ../../scripts/test_live_flat_verify.py
 test_tile_fade3_loose.py
+test_corrupt_evidence_r21.py
+test_corrupt_evidence_r21_route.py
