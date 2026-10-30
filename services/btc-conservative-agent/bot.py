@@ -16943,25 +16943,19 @@ _R5_PROCESS_BOOT_TS = time.time()
 _r5_retention_status: dict = {"alive": False}
 
 
-def _r5_v22_drain_probe(started_ts: float):
-    """Pending marker for the bounded v22 drain (reads the reconcile loop's status only)."""
-    def drain():
-        status = _collector_v3_reconcile_status
-        finished = float(status.get("last_finished_ts") or 0.0)
-        if finished >= started_ts and status.get("last_passed"):
-            return []
-        detail = str(status.get("last_error") or "RECONCILE_NOT_CAUGHT_UP")[:200]
-        return [f"RECONCILE_PENDING:{detail}"]
-    return drain
-
-
 def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
-    """One R5 retention pass; each step is independent and never raises."""
+    """One R5 retention pass; each step is independent and never raises.
+
+    PR4: lifecycle / transfer / v22 never delete (stop-write + 70/85).
+    ``cap_market_segments`` is PR2 never-delete (do not reintroduce unlinks).
+    ``wipe_stale_locks`` remains the only unlink path reachable from this once.
+    """
     import r5_keep
     import r5_retention
+    import retention_stop_write
     now = time.time() if now is None else float(now)
     runtime_root = _data_sync_runtime_root()
-    out: dict = {"ts": now}
+    out: dict = {"ts": now, "stop_write": retention_stop_write.latch_state()}
     # HM C7 (RK: keep only for open lifecycles or prereg tests): one read-only keep set.
     try:
         keep_info = r5_keep.open_lifecycles(runtime_root)
@@ -16977,14 +16971,13 @@ def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
         ("retired_transfer_bundles", lambda: r5_retention.purge_retired_transfer_bundles(runtime_root, now=now)),
     ]
     if v22:
-        steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(
-            os.getcwd(), drain=_r5_v22_drain_probe(time.time()),
-            sleep=lambda sec: shutdown_event.wait(sec))))
+        steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(os.getcwd())))
     for name, step in steps:
         try:
             out[name] = step()
         except Exception as exc:
             out[name] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    out["stop_write"] = retention_stop_write.latch_state()
     return out
 
 
