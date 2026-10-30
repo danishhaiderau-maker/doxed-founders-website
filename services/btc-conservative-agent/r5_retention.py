@@ -7,17 +7,16 @@ raised and one small receipt line is written; the deletion itself never waits.
 * ``cap_market_segments`` - PR2 never-delete: at/over the 5 GiB byte cap,
   stop local writes + 70/85 alarms; never unlink (R25/R34). Real deletes are
   R21-only. PR4 must not reintroduce deletes here.
-* ``cap_lifecycle_bundles`` - byte/age cap on ``v3/lifecycle_bundles``
-  regardless of the laptop cleanup ack. (PR4 scope for never-delete.)
-* ``purge_retired_transfer_bundles`` - R22: removes the retired
-  ``v3/lifecycle_transfer_bundles`` tree (no producer and no reader remain).
-  (PR4 scope.)
+* ``cap_lifecycle_bundles`` - PR4 never-delete: measure vs byte/age policy;
+  stop-write + 70/85; never rmtree.
+* ``purge_retired_transfer_bundles`` - PR4 never-delete: if retired transfer
+  tree reappears → RED + stop-write; never rmtree.
 * ``wipe_stale_locks`` - removes ``v3/.locks/*.lock`` only when older than the
-  current process boot AND older than one hour (a held lock is never removed).
+  current process boot AND older than one hour (lock files only; out of PR4
+  never-delete scope).
 * ``count_market_segments`` - reset post-condition (must be 0 after a reset).
-* ``seal_drain_discard_v22`` - seal the active research_events_v22 generation,
-  let the Fly-local v3 reconcile drain for a bounded time, then delete the
-  sealed generation unconditionally; ``index.sqlite3`` is kept. (PR4 scope.)
+* ``seal_drain_discard_v22`` - PR4 never-delete: at size threshold refuse
+  seal/discard rotate; 70/85 + stop-write; keep sealed/active until R21.
 
 PRIME RULE: neutral. None of these files feed paper_fill, exits or tile
 decisions (fills read bfx_book_10l_1s.jsonl only, which is never touched here).
@@ -28,7 +27,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -49,6 +47,9 @@ V22_RECEIPT_MAX_BYTES = 64 * 1024
 V22_RECEIPT_FILE = "v22_discard_receipts.jsonl"
 _SEGMENT_RE = re.compile(r"^[0-9a-f]{64}\.json$")
 MARKET_SEGMENTS_FAMILY = "market_segments"
+FAMILY_LIFECYCLE_BUNDLES = "lifecycle_bundles"
+FAMILY_TRANSFER_BUNDLES = "lifecycle_transfer_bundles"
+FAMILY_V22 = "research_events_v22"
 
 
 def _receipt(root: Path, row: Mapping[str, Any]) -> bool:
@@ -184,110 +185,132 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
                           max_removals: int = MAX_BUNDLE_REMOVALS_PER_CALL,
                           fresh_floor_sec: float = BUNDLE_FRESH_FLOOR_SEC,
                           now: float | None = None) -> dict[str, Any]:
-    """Cap completion bundles; never gated on the laptop ack (R5, RK 18:10).
+    """PR4 never-delete: measure lifecycle bundles; stop-write + 70/85; never rmtree.
 
-    * Cap pass FIRST (HM C8), with its own ``max_removals`` budget: at the cap,
-      oldest first regardless of ship state or ``keep`` until the store is
-      under the cap. Bundles younger than ``fresh_floor_sec`` (10 min) are
-      never capped (HM C7: they may still be materialising). Every dropped id
-      is logged in the capped receipt and RED is raised.
-    * Age pass second, with its own budget: below the cap, an aged bundle is
-      removed. Fresh bundles stay.
-    * The ack key is the bundle's own name: ``lifecycle-<sha>`` bundles are
-      acked by ``lifecycle_cleanup_acks/lifecycle-<sha>.json``, the exact name
-      the ack route accepts. Removing an unacked bundle raises RED (R5).
+    ``max_removals`` retained for call-site compatibility only. Ack/age counts are
+    telemetry. At/over byte cap (or free-disk RED) latches stop-write for
+    materialisation.
     """
+    del max_removals  # never-delete
     root = Path(root)
     now = time.time() if now is None else now
     acks = Path(ack_root) if ack_root is not None else root / "v3" / "lifecycle_cleanup_acks"
     rows = sorted(_bundle_dirs(root), key=lambda r: (r[0], str(r[2])))
     total = sum(r[1] for r in rows)
-    freed, unacked = 0, []
-    cap_dropped: list[str] = []
-    age_dropped: list[str] = []
-
-    def _remove(path: Path) -> bool:
-        shutil.rmtree(path, ignore_errors=True)
-        return not path.exists()
-
-    def _acked(suffix: str) -> bool:
-        return (acks / f"lifecycle-{suffix}.json").exists()
-
-    survivors = []
-    # Pass 1 (cap): oldest first regardless of ship state or keep; own budget.
-    for mtime, size, path, suffix in rows:
-        if (total <= max_bytes or len(cap_dropped) >= max_removals
-                or now - mtime < fresh_floor_sec or not _remove(path)):
-            survivors.append((mtime, size, path, suffix))
+    aged = [path.name for mtime, _size, path, _suffix in rows if now - mtime > max_age_sec]
+    fresh = [path.name for mtime, _size, path, _suffix in rows if now - mtime < fresh_floor_sec]
+    unacked = [
+        path.name for _mtime, _size, path, suffix in rows
+        if not (acks / f"lifecycle-{suffix}.json").exists()
+    ]
+    would_cap = []
+    probe = total
+    for mtime, size, path, _suffix in rows:
+        if probe <= max_bytes or now - mtime < fresh_floor_sec:
             continue
-        freed += size
-        total -= size
-        cap_dropped.append(path.name)
-        if not _acked(suffix):
-            unacked.append(path.name)
-    # Pass 2 (age): aged bundles; own budget.
-    for mtime, size, path, suffix in survivors:
-        if now - mtime <= max_age_sec:
-            continue
-        acked = _acked(suffix)
-        if len(age_dropped) >= max_removals:
-            continue
-        if not _remove(path):
-            continue
-        freed += size
-        total -= size
-        age_dropped.append(path.name)
-        if not acked:
-            unacked.append(path.name)
-    removed = len(cap_dropped) + len(age_dropped)
-    result = {"removed": removed, "freed_bytes": freed, "remaining_bytes": total,
-              "unacked_removed": len(unacked),
-              "cap_removed": len(cap_dropped), "age_removed": len(age_dropped),
-              "over_cap": total > max_bytes,
-              "cap_bytes": int(max_bytes), "max_age_sec": max_age_sec, "fresh_floor_sec": fresh_floor_sec}
-    if removed:
-        _receipt(root, {"ts": round(now, 3), "kind": "LIFECYCLE_BUNDLE_CAP_R5", **result,
-                        "cap_dropped_ids": cap_dropped[:BUNDLE_RECEIPT_MAX_IDS],
-                        "age_dropped_ids": age_dropped[:BUNDLE_RECEIPT_MAX_IDS],
-                        "unacked_names": unacked[:20]})
-    if cap_dropped:
-        disk_alert.raise_red("BUNDLE_CAP_REACHED", {"count": len(cap_dropped)}, now=now)
-    if unacked:
-        disk_alert.raise_red("BUNDLE_CAP_REMOVED_UNACKED", {"count": len(unacked)}, now=now)
+        would_cap.append(path.name)
+        probe -= size
+    over_cap = total > max_bytes
+    decision = retention_stop_write.evaluate_and_latch(
+        FAMILY_LIFECYCLE_BUNDLES,
+        used=total,
+        cap=int(max_bytes),
+        reason="LIFECYCLE_BUNDLE_CAP_STOP_WRITE" if over_cap else "LIFECYCLE_BUNDLE_CAP_PRESSURE",
+        receipt_dir=root,
+        detail={
+            "would_have_cap_dropped": would_cap[:BUNDLE_RECEIPT_MAX_IDS],
+            "aged_ids": aged[:BUNDLE_RECEIPT_MAX_IDS],
+            "unacked_names": unacked[:20],
+            "rule": "R25_NEVER_DELETE",
+            "kind": "LIFECYCLE_BUNDLE_CAP_PRESSURE_R5",
+        },
+        now=now,
+    )
+    if over_cap:
+        decision["stop_write"] = True
+        if decision.get("alarm_level") != "RED":
+            decision["alarm_level"] = "RED"
+            retention_stop_write.latch(
+                FAMILY_LIFECYCLE_BUNDLES, reason="LIFECYCLE_BUNDLE_CAP_STOP_WRITE",
+                used=total, cap=int(max_bytes), now=now,
+                detail={"would_have_cap_dropped": would_cap[:BUNDLE_RECEIPT_MAX_IDS]},
+            )
+    result = {
+        "removed": 0, "freed_bytes": 0, "remaining_bytes": total, "used_bytes": total,
+        "unacked_removed": 0, "cap_removed": 0, "age_removed": 0,
+        "over_cap": over_cap, "cap_bytes": int(max_bytes),
+        "max_age_sec": max_age_sec, "fresh_floor_sec": fresh_floor_sec,
+        "aged_count": len(aged), "fresh_count": len(fresh), "unacked_count": len(unacked),
+        "would_have_cap_dropped": would_cap,
+        "stop_write": bool(decision.get("stop_write")),
+        "alarm_level": decision.get("alarm_level") or "GREEN",
+        "used_ratio": decision.get("used_ratio"),
+        "amber_at": retention_stop_write.AMBER_RATIO,
+        "red_at": retention_stop_write.RED_RATIO,
+        "reason": decision.get("reason") or (
+            "LIFECYCLE_BUNDLE_CAP_STOP_WRITE" if over_cap else "LIFECYCLE_BUNDLE_CAP_PRESSURE"
+        ),
+    }
+    if result["stop_write"] or result["alarm_level"] != "GREEN":
+        _receipt(root, {"ts": round(now, 3), "kind": "LIFECYCLE_BUNDLE_CAP_PRESSURE_R5",
+                        "rule": "R25_NEVER_DELETE", **result})
     return result
+
+
+def lifecycle_bundles_stop_write_latched() -> bool:
+    """True when local lifecycle bundle materialisation must stop (PR4)."""
+    return retention_stop_write.is_stopped(FAMILY_LIFECYCLE_BUNDLES)
 
 
 RETIRED_TRANSFER_BUNDLE_DIR = "lifecycle_transfer_bundles"
 
 
 def purge_retired_transfer_bundles(root: str | os.PathLike, *, now: float | None = None) -> dict[str, Any]:
-    """R22: delete the retired ``v3/lifecycle_transfer_bundles`` tree.
+    """PR4 never-delete: inspect retired transfer tree; never rmtree.
 
-    Transfer bundles are no longer produced. Nothing read them: the segment
-    shipper excluded the directory (so the laptop never received one), the
-    laptop cleanup ack route only accepts ``lifecycle-<sha>``, and the only
-    other readers were manifest counters, all removed with the producer. They
-    are retired data, not unacked evidence, so removal writes one receipt and
-    raises no RED; the RED for unacked ``lifecycle-`` bundles is unchanged.
+    If the tree reappears, latch stop-write + RED. Bytes stay for a later R21.
     """
     root = Path(root)
     now = time.time() if now is None else now
     tree = root / "v3" / RETIRED_TRANSFER_BUNDLE_DIR
     if not tree.exists() or tree.is_symlink():
-        return {"removed": False, "present": False}
+        retention_stop_write.clear_latches(FAMILY_TRANSFER_BUNDLES)
+        return {"removed": False, "present": False, "entries": 0, "freed_bytes": 0,
+                "stop_write": False, "alarm_level": "GREEN",
+                "reason": "RETIRED_TRANSFER_BUNDLES_ABSENT"}
     entries = sum(1 for bucket in tree.iterdir() if bucket.is_dir() for _ in bucket.iterdir())
     size = _dir_bytes(tree)
-    shutil.rmtree(tree, ignore_errors=True)
-    gone = not tree.exists()
-    result = {"removed": gone, "present": not gone, "entries": entries, "freed_bytes": size if gone else 0}
-    _receipt(root, {"ts": round(now, 3), "kind": "RETIRED_TRANSFER_BUNDLES_PURGED_R22", **result})
+    decision = retention_stop_write.evaluate_and_latch(
+        FAMILY_TRANSFER_BUNDLES,
+        used=max(size, 1),
+        cap=1,  # any present bytes → hard over
+        reason="RETIRED_TRANSFER_BUNDLES_PRESENT",
+        receipt_dir=root,
+        detail={"present": True, "entries": entries, "rule": "R25_NEVER_DELETE",
+                "kind": "RETIRED_TRANSFER_BUNDLES_PRESENT_R5"},
+        now=now,
+    )
+    result = {
+        "removed": False, "present": True, "entries": entries, "freed_bytes": 0,
+        "used_bytes": size,
+        "stop_write": True,
+        "alarm_level": decision.get("alarm_level") or "RED",
+        "reason": "RETIRED_TRANSFER_BUNDLES_PRESENT",
+        "used_ratio": decision.get("used_ratio"),
+    }
+    _receipt(root, {"ts": round(now, 3), "kind": "RETIRED_TRANSFER_BUNDLES_PRESENT_R5",
+                    "rule": "R25_NEVER_DELETE", **result})
     return result
 
 
 def wipe_stale_locks(root: str | os.PathLike, *, boot_ts: float, now: float | None = None,
                      min_age_sec: float = LOCK_MIN_AGE_SEC,
                      max_unlinks: int = MAX_LOCK_UNLINKS_PER_CALL) -> dict[str, Any]:
-    """Unlink v3/.locks/*.lock older than this boot AND older than ``min_age_sec``."""
+    """Unlink v3/.locks/*.lock older than this boot AND older than ``min_age_sec``.
+
+    Pin (PR4): only ``*.lock`` under ``v3/.locks``; never touches market_segments,
+    lifecycle_bundles, transfer trees, v22, or book10.
+    """
     now = time.time() if now is None else now
     cutoff = min(float(boot_ts), now - float(min_age_sec))
     lock_dir = Path(root) / "v3" / ".locks"
@@ -313,7 +336,8 @@ def wipe_stale_locks(root: str | os.PathLike, *, boot_ts: float, now: float | No
                     pass
                 except OSError:
                     continue
-    return {"deleted": deleted, "kept_recent": kept_recent, "cutoff": cutoff}
+    return {"deleted": deleted, "kept_recent": kept_recent, "cutoff": cutoff,
+            "min_age_sec": float(min_age_sec), "lock_dir": str(lock_dir)}
 
 
 def _write_v22_receipt(root: Path, row: dict[str, Any]) -> bool:
@@ -337,60 +361,57 @@ def _write_v22_receipt(root: Path, row: dict[str, Any]) -> bool:
         return False
 
 
-def seal_drain_discard_v22(root: str | os.PathLike, *, drain: Callable[[], Iterable[str]],
-                           max_drain_sec: float = V22_DRAIN_MAX_SEC, min_bytes: int = V22_SEAL_MIN_BYTES,
-                           poll_sec: float = 30.0, sleep: Callable[[float], None] = time.sleep,
+def seal_drain_discard_v22(root: str | os.PathLike, *, drain: Callable[[], Iterable[str]] | None = None,
+                           max_drain_sec: float | None = None, min_bytes: int = V22_SEAL_MIN_BYTES,
+                           poll_sec: float | None = None, sleep: Callable[[float], None] | None = None,
                            clock: Callable[[], float] = time.time) -> dict[str, Any]:
-    """Seal the active v22 head, drain for at most ``max_drain_sec``, delete it unconditionally.
+    """PR4 never-delete: at threshold latch stop-write + 70/85; never rotate/unlink.
 
-    ``drain()`` runs one Fly-local v3 reconcile pass and returns the event ids
-    still pending. Pending rows never block the delete (R5): they are listed
-    in a <=64 KB receipt and RED is raised. ``index.sqlite3`` is kept; the
-    orphan seal receipt is quarantined so collector reads stay valid.
+    ``drain`` / ``max_drain_sec`` / ``poll_sec`` / ``sleep`` accepted for call-site
+    compatibility only and ignored. Active generation kept until a later R21.
     """
+    del drain, max_drain_sec, poll_sec, sleep
     import collector_v22
 
     root = Path(root)
+    now = float(clock())
     active = root / collector_v22.RESEARCH_EVENTS_FILE
-    if not active.is_file() or active.stat().st_size < int(min_bytes):
-        return {"status": "BELOW_THRESHOLD",
-                "active_bytes": active.stat().st_size if active.is_file() else 0}
-    seal = collector_v22.rotate_research_events(data_dir=str(root))
-    sealed_rel = str(seal.get("relative_path") or "")
-    sealed = root / sealed_rel
-    if not sealed_rel or not sealed.is_file():
-        return {"status": "SEAL_MISSING", "seal": seal}
-    started = clock()
-    pending: list[str] = []
-    while True:
-        try:
-            pending = sorted({str(x) for x in (drain() or [])})
-        except Exception as exc:  # a broken drain never blocks the discard (R5)
-            pending = [f"DRAIN_ERROR:{type(exc).__name__}"]
-        if not pending or clock() - started >= max_drain_sec:
-            break
-        sleep(poll_sec)
-    size = sealed.stat().st_size
-    sha = str(seal.get("sha256") or "")
-    sealed.unlink()
-    quarantine = None
-    try:
-        plan = collector_v22.plan_orphan_event_seals(str(root))
-        quarantine = collector_v22.quarantine_orphan_event_seals(
-            str(root), expected_plan_sha256=plan["plan_sha256"]).get("status")
-    except Exception as exc:
-        quarantine = f"FAILED:{type(exc).__name__}"
-    now = clock()
-    row = {"ts": round(now, 3), "kind": "V22_SEALED_GENERATION_DISCARDED_R5",
-           "generation": seal.get("generation"), "relative_path": sealed_rel, "bytes": size,
-           "sha256": sha, "row_count": seal.get("row_count"), "pending_count": len(pending),
-           "pending_event_ids": pending, "drain_sec": round(now - started, 1),
-           "seal_quarantine": quarantine}
+    active_bytes = active.stat().st_size if active.is_file() else 0
+    cap = max(int(min_bytes), 1)
+    if active_bytes < int(min_bytes):
+        decision = retention_stop_write.evaluate_and_latch(
+            FAMILY_V22, used=active_bytes, cap=cap,
+            reason="V22_BELOW_SEAL_THRESHOLD", receipt_dir=None,
+            detail={"active_bytes": active_bytes}, now=now,
+        )
+        return {"status": "BELOW_THRESHOLD", "active_bytes": active_bytes,
+                "stop_write": False, "alarm_level": decision.get("alarm_level") or "GREEN",
+                "used_ratio": decision.get("used_ratio"), "cap_bytes": cap}
+    decision = retention_stop_write.evaluate_and_latch(
+        FAMILY_V22, used=active_bytes, cap=cap,
+        reason="V22_SEAL_DISCARD_STOP_WRITE", receipt_dir=root,
+        detail={"active_bytes": active_bytes, "rule": "R25_NEVER_DELETE",
+                "kind": "V22_SEAL_DISCARD_STOP_WRITE_R5"},
+        now=now,
+    )
+    row = {
+        "ts": round(now, 3), "kind": "V22_SEAL_DISCARD_STOP_WRITE_R5",
+        "status": "STOP_WRITE_RETAINED", "active_bytes": active_bytes,
+        "cap_bytes": cap, "used_ratio": decision.get("used_ratio"),
+        "alarm_level": decision.get("alarm_level") or "RED",
+        "stop_write": True, "reason": "V22_SEAL_DISCARD_STOP_WRITE",
+        "pending_event_ids": [], "pending_count": 0,
+        "rule": "R25_NEVER_DELETE",
+    }
     receipt_ok = _write_v22_receipt(root, dict(row))
-    if pending:
-        disk_alert.raise_red("V22_DISCARDED_WITH_PENDING", {"count": len(pending), "sha256": sha}, now=now)
-    return {"status": "DISCARDED", **{k: v for k, v in row.items() if k != "pending_event_ids"},
+    return {**{k: v for k, v in row.items() if k != "pending_event_ids"},
             "receipt_written": receipt_ok}
+
+
+def v22_stop_write_latched() -> bool:
+    """True when research_events_v22 appends must stop (PR4)."""
+    return retention_stop_write.is_stopped(FAMILY_V22)
+
 
 
 def file_sha256(path: str | os.PathLike) -> str:

@@ -1722,6 +1722,12 @@ def write_research_event_once(
     events_file: str = RESEARCH_EVENTS_FILE,
 ) -> tuple[bool, str]:
     """Append exactly once per event_id. Returns (written, reason)."""
+    try:
+        import r5_retention
+        if r5_retention.v22_stop_write_latched():
+            return False, "V22_SEAL_DISCARD_STOP_WRITE"
+    except Exception:
+        pass
     root = data_dir or os.getcwd()
     event_id = str(record.get("event_id") or record.get("trade_id") or "")
     if not event_id:
