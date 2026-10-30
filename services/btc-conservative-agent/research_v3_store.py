@@ -413,11 +413,7 @@ def _posix_lock_and_unlink(path: Path):
 # R5/R17: a segment ref whose object was pruned verifies as PRUNED_R5.
 SEGMENT_PRUNED_R5 = "PRUNED_R5"
 
-from retired_streams import (  # noqa: E402
-    RETIRED_STREAM_ALLOWLIST,
-    SOFT_RETIRED_EXEMPTION_REFUSALS,
-    retired_stream_unchanged,
-)
+from retired_streams import RETIRED_STREAM_ALLOWLIST, retired_stream_unchanged  # noqa: E402
 
 
 class RetiredStreamUnreadable(ValueError):
@@ -480,7 +476,6 @@ class V3EvidenceStore:
         if marker.exists() or marker.is_symlink():
             candidates.append(marker)
         instance._retired_excluded = {}
-        instance._retired_contaminated = {}
         retired_pending: list[tuple[str, dict]] = []
         for pointer in candidates:
             try:
@@ -510,28 +505,13 @@ class V3EvidenceStore:
             if identity == adopted:
                 continue  # not stale: ordinary handling, identity check applies as before
             why = instance._retired_exemption_refusal(stream, identity)
-            if why and why not in SOFT_RETIRED_EXEMPTION_REFUSALS:
-                # Hard: epoch/field mismatch, gen pointer, WAL, ledger signature/tail — real conflict.
-                # tile_config_signature drift is soft (roster edits); see SOFT_RETIRED_EXEMPTION_REFUSALS.
-                raise ValueError(f"V3 read authority identity conflict ({stream}: {why})")
-            # Soft fingerprint-family or roster tile_config drift (or clean exemption): exclude
-            # retired stream only. Do not poison decision/execution/opportunity — market_segment is
-            # R3-dropped input; Fly-pinned fingerprint cannot validate a laptop copy (BTC-165);
-            # active tile_config_signature moves on Rule 22 retire without rewriting the frozen
-            # retired pointer (BTC-479 / #924 GS-06).
-            instance._retired_excluded[stream] = RETIRED_STREAM_ALLOWLIST[stream]
             if why:
-                instance._retired_contaminated[stream] = why
-                logging.getLogger(__name__).error(
-                    "[V3-RETIRED-STREAM-CONTAMINATED] ledger=%s ruling=%s reason=%s "
-                    "stale_identity=%s adopted_identity=%s (excluded; active authorities kept)",
-                    stream, RETIRED_STREAM_ALLOWLIST[stream], why,
-                    json.dumps(identity, sort_keys=True), json.dumps(adopted, sort_keys=True))
-            else:
-                logging.getLogger(__name__).warning(
-                    "[V3-RETIRED-STREAM-EXEMPT] ledger=%s ruling=%s stale_identity=%s adopted_identity=%s",
-                    stream, RETIRED_STREAM_ALLOWLIST[stream], json.dumps(identity, sort_keys=True),
-                    json.dumps(adopted, sort_keys=True))
+                raise ValueError(f"V3 read authority identity conflict ({stream}: {why})")
+            instance._retired_excluded[stream] = RETIRED_STREAM_ALLOWLIST[stream]
+            logging.getLogger(__name__).warning(
+                "[V3-RETIRED-STREAM-EXEMPT] ledger=%s ruling=%s stale_identity=%s adopted_identity=%s",
+                stream, RETIRED_STREAM_ALLOWLIST[stream], json.dumps(identity, sort_keys=True),
+                json.dumps(adopted, sort_keys=True))
         if instance._read_identity_override is None and expected_identity is not None:
             instance._read_identity_override = dict(expected_identity)
             instance.epoch_id = str(expected_identity.get("epoch_id") or "")
@@ -2817,7 +2797,6 @@ class V3EvidenceStore:
         counts: dict[str, int] = {}
         defects: list[dict[str, str]] = []
         retired = getattr(self, "_retired_excluded", None) or {}
-        contaminated = getattr(self, "_retired_contaminated", None) or {}
         for ledger in LEDGER_NAMES:  # R3-NON-INPUT: store verify counts record ids only, never evidence
             if ledger in retired:
                 counts[ledger] = 0
@@ -2843,13 +2822,6 @@ class V3EvidenceStore:
                 continue  # pruned (R5) between glob and read
             except OSError as exc:
                 defects.append({"segment": path.as_posix(), "reason": str(exc)})
-        retired_report = {}
-        for name, ruling in retired.items():
-            entry = {"status": "RETIRED", "reason": ruling}
-            if name in contaminated:
-                entry["status"] = "RETIRED_CONTAMINATED"
-                entry["contamination"] = contaminated[name]
-            retired_report[name] = entry
         return {
             "schema": "v3_store_verification_v1",
             "epoch_id": self.epoch_id,
@@ -2857,16 +2829,13 @@ class V3EvidenceStore:
             "market_segment_count": segment_count,
             "defects": defects,
             "passed": not defects,
-            # RETIRED streams are reported as RETIRED / RETIRED_CONTAMINATED, never GREEN (RK PASS 25 Oct).
+            # RETIRED streams are reported as RETIRED, never GREEN (RK PASS 25 Oct).
             "ledger_status": {
-                ledger: (
-                    ("RETIRED_CONTAMINATED" if ledger in contaminated else "RETIRED")
-                    if ledger in retired
-                    else ("RED" if any(d.get("ledger") == ledger for d in defects) else "GREEN")
-                )
+                ledger: ("RETIRED" if ledger in retired else ("RED" if any(
+                    d.get("ledger") == ledger for d in defects) else "GREEN"))
                 for ledger in LEDGER_NAMES  # R3-NON-INPUT: status labels from counts/defects only, no ledger read
             },
-            "retired_streams": retired_report,
+            "retired_streams": {k: {"status": "RETIRED", "reason": v} for k, v in retired.items()},
         }
 
     def verify_write_set(

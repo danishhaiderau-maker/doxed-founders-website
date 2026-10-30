@@ -40,30 +40,11 @@ def test_route_dry_run_works_with_stale_retired_pointer(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.get_json()["dry_run"] is True
 
 
-def test_boot_recover_survives_contaminated_retired_stream(tmp_path, monkeypatch):
-    """Fingerprint contamination soft-excludes market_segment; boot recover must not go RED (BTC-165)."""
+def test_boot_recover_failure_surfaces_in_health_and_alerts(tmp_path, monkeypatch):
     _, path = _setup(tmp_path, monkeypatch)
     (tmp_path / "v3" / ".ledger_delete_rollback").mkdir(parents=True, exist_ok=True)
     with open(path, "ab") as fh:
-        fh.write(b'{"record_id":"late"}\n')  # retired stream grew -> soft exclude, not store-wide conflict
-    bot._ledger_delete_boot_recover()
-    check = bot._ledger_delete_boot_recover_check()
-    assert check["status"] == "GREEN"
-    store = V3EvidenceStore.open_read_only(tmp_path)
-    assert store._retired_contaminated.get("market_segment") == "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT"
-    assert any(c["id"] == "fly.ledger_delete_boot_recover" and c["status"] == "GREEN"
-               for c in bot._system_health_fly_self_checks())
-    path.write_bytes(path.read_bytes()[:-len(b'{"record_id":"late"}\n')])
-
-
-def test_boot_recover_hard_identity_conflict_still_red(tmp_path, monkeypatch):
-    """Non-soft identity conflicts (e.g. epoch mismatch on retired pointer) still fail boot recover."""
-    _setup(tmp_path, monkeypatch)
-    (tmp_path / "v3" / ".ledger_delete_rollback").mkdir(parents=True, exist_ok=True)
-    p = tmp_path / "v3" / "receipts" / "emergency_record_idempotency_v1" / "market_segment" / "complete.json"
-    row = json.loads(p.read_text())
-    row["identity"]["epoch_id"] = "epoch-other"
-    p.write_text(json.dumps(row))
+        fh.write(b'{"record_id":"late"}\n')  # retired stream grew -> identity conflict at boot
     bot._ledger_delete_boot_recover()
     check = bot._ledger_delete_boot_recover_check()
     assert check["status"] == "RED" and "identity conflict" in check["observed"]
@@ -72,6 +53,7 @@ def test_boot_recover_hard_identity_conflict_still_red(tmp_path, monkeypatch):
     for hist in (bot._system_health_alert_history_full(),):
         assert hist["ledger_delete_boot_recover"]["status"] == "RED"
         assert any(a["id"] == "fly.ledger_delete_boot_recover" for a in hist["fly_alerts"])
+    path.write_bytes(path.read_bytes()[:-len(b'{"record_id":"late"}\n')])
 
 
 def test_boot_recover_ok_is_green(tmp_path, monkeypatch):

@@ -192,31 +192,6 @@ def test_integrity_receipt_is_bound_to_final_manifest_generation(monkeypatch, tm
     assert reports[0]["modified_at"] != "old"
 
 
-
-
-def _status_client_with_required_reports(monkeypatch, required_report_status):
-    manifest = {
-        **GENERATION,
-        "analyzer_sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
-        "required_report_status": required_report_status,
-    }
-    monkeypatch.setattr(
-        dashboard,
-        "_read_json",
-        lambda name, default=None: manifest
-        if str(name).endswith("report_manifest.json")
-        else {},
-    )
-    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
-    monkeypatch.setattr(dashboard, "_manifest_reports", lambda: [])
-    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "rev-current")
-    monkeypatch.setattr(
-        dashboard,
-        "_analyzer_run_state",
-        lambda: {"in_progress": False, "last_completed_at": GENERATION["generated_at"]},
-    )
-    return dashboard.app.test_client()
-
 def test_status_fails_closed_when_a_required_core_report_is_missing(monkeypatch):
     manifest = {
         **GENERATION,
@@ -254,63 +229,3 @@ def test_status_fails_closed_when_a_required_core_report_is_missing(monkeypatch)
     assert payload["ok"] is False
     assert payload["required_reports_ok"] is False
     assert payload["required_report_failures"] == ["best_policy_research_report.json"]
-
-
-def test_status_soft_excludes_r17_retired_required_report(monkeypatch):
-    """FALSE_RED parity with #918: CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17 must not
-    hard-fail :9001 required_reports_ok / analyzer.reports while studies already mark RETIRED.
-    """
-    client = _status_client_with_required_reports(
-        monkeypatch,
-        {
-            "evidence_coverage_triage_report.json": {
-                "available_in_generation": False,
-                "generation_error": (
-                    "ValueError: CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17: "
-                    "evidence coverage awaits the book_limit_entry rebuild"
-                ),
-            },
-            "exit_reports_validation.json": {
-                "available_in_generation": True,
-                "current_generation_valid": True,
-            },
-        },
-    )
-    payload = client.get("/api/status").get_json()
-
-    assert payload["required_reports_ok"] is True
-    assert payload["required_report_failures"] == []
-    assert payload["required_report_retired"] == ["evidence_coverage_triage_report.json"]
-
-
-def test_status_r17_soft_exclude_keeps_real_required_errors_hard_fail(monkeypatch):
-    """Mutation / hard-fail proof: non-R17 generation_error still fails required_reports_ok.
-    Dropping the soft-exclude would also fail the R17-only case above.
-    """
-    client = _status_client_with_required_reports(
-        monkeypatch,
-        {
-            "evidence_coverage_triage_report.json": {
-                "available_in_generation": False,
-                "generation_error": (
-                    "ValueError: CONSERVATIVE_RESULTS_SOURCE_RETIRED_R17: "
-                    "evidence coverage awaits the book_limit_entry rebuild"
-                ),
-            },
-            "best_policy_research_report.json": {
-                "available_in_generation": False,
-                "generation_error": "ValueError: EVIDENCE_COVERAGE_GENERATION_MISMATCH",
-            },
-            "exit_reports_validation.json": {
-                "available_in_generation": True,
-                "current_generation_valid": True,
-            },
-        },
-    )
-    payload = client.get("/api/status").get_json()
-
-    assert payload["required_reports_ok"] is False
-    assert payload["required_report_failures"] == ["best_policy_research_report.json"]
-    assert payload["required_report_retired"] == ["evidence_coverage_triage_report.json"]
-    assert "evidence_coverage_triage_report.json" not in payload["required_report_failures"]
-
