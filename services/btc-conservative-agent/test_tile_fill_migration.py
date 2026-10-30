@@ -204,7 +204,7 @@ def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None
     return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_r0_stop_fill_reason", "_paper_exit_missing_book_seconds",
                     "_paper_unpriced_marks", "_paper_exit_model_times", "_exit_book_age_ms", "_finite_nonneg", "_tp1_pending_action",
                     "_paper_lane_entry_result", "_paper_lane_entry_core", "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
-                    "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
+                    "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "ENTRY_NO_BOOK_RETRY_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close", "_rest_queue_stamp",
                     "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", "_paper_entry_pool_key", "_paper_own_s2s_entry", "_paper_own_s2s_exit", *extra_names],
                    trades_map={}, time=t, logger=_Log(), _paper_delay=lambda lane, leg, **kw: delay,
@@ -1048,6 +1048,62 @@ def test_realism_v2_maker_rest_queue_reset_on_reprice_and_drop(monkeypatch):
     assert res["entry_rest_book_age_s"] is not None and res["entry_rest_price_age_s"] == pytest.approx(1026.0 - 1010.0)
     empty = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "_entry_rest": {"fills": []}}
     assert ns["_paper_entry_rest_drop"](empty, "X") is False  # nothing filled -> the caller cancels (NO_FILL)
+
+
+def test_btc476_entry_reject_no_book_retries_until_grace_then_caches(monkeypatch):
+    """BTC-476 CTRL/GS IOC: fill-second book miss must not cache REJECT_NO_BOOK on first touch (late 1s row race).
+    Mutation: restore immediate `order["paper_fill_result"] = walk` on REJECT_NO_BOOK -> first assert fails (None expected)."""
+    books = {"fill": None}
+    monkeypatch.setattr(
+        pf, "book10l_at",
+        lambda t: ({"s": 999, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]} if t < 1001.0 else books["fill"]),
+    )
+    clk = _Clock(1001.5)
+    ns = _lane_ns(clk)
+    order = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "signal_dir": "BUY", "qty": 0.5,
+             "signal_created_ts": 1000.0, "entry_expires_ts": 1000.0 + 30.0}
+    assert ns["_paper_lane_entry_result"](order, 1001.5) is None  # miss, still in grace
+    assert "paper_fill_result" not in order and order.get("entry_quote_gate_ok") is True
+    books["fill"] = {"s": 1001, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]}
+    res = ns["_paper_lane_entry_result"](order, 1002.0)
+    # walk may rest (WALK_THEN_REST) after a fill; either FILLED now or None while resting is success vs REJECT
+    assert res is None or res.get("status") in ("FILLED", "PARTIAL")
+    assert order.get("paper_fill_result", res or {}).get("status") != "REJECT_NO_BOOK"
+    # permanent miss past grace -> cached REJECT_NO_BOOK
+    order2 = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "signal_dir": "BUY", "qty": 0.5,
+              "signal_created_ts": 1000.0, "entry_expires_ts": 1000.0 + 30.0}
+    books["fill"] = None
+    assert ns["_paper_lane_entry_result"](order2, 1001.5) is None
+    rejected = ns["_paper_lane_entry_result"](order2, 1001.5 + ns["ENTRY_NO_BOOK_RETRY_S"])
+    assert rejected["status"] == "REJECT_NO_BOOK" and order2["paper_fill_result"] is rejected
+
+
+def test_btc476_maker_rest_latches_quote_gate_across_booktail_drop(monkeypatch):
+    """BTC-476 B1/B2: F2 quote gate latches after first pass so BookTail.keep=600 eviction != QUOTE_STALE.
+    Mutation: remove `entry_quote_gate_ok` latch -> second call after books["row"]=None returns QUOTE_STALE."""
+    import quote_trigger as qt
+    books = {"row": {"s": 998, "a": [[100.1, 1.0]], "b": [[100.0, 2.0]]}}
+    monkeypatch.setattr(pf, "book10l_at", lambda t: books["row"])
+    monkeypatch.setattr(qt, "trades_between", lambda a, b: [])
+    clk = _Clock(1000.0)
+    tm = {"t1": {"signal_ref": {"adaptive_entry_decision": {"action": "MAKER", "exec": {
+        "kind": "PASSIVE", "ttl_sec": 900, "reprice_sec": 60}}}}}
+    ns = _lane_ns(clk)
+    ns["trades_map"] = tm
+    order = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "signal_dir": "BUY", "qty": 1.0,
+             "signal_created_ts": 999.0, "limit_price": 100.0}
+    assert ns["_paper_lane_entry_result"](order, 1001.0) is None
+    assert order.get("entry_quote_gate_ok") is True
+    books["row"] = None  # signal-second row dropped from BookTail
+    assert ns["_paper_lane_entry_result"](order, 1600.0) is None
+    assert order.get("paper_fill_result") is None
+    # true initial stale (age > 2 s at signal) still fails closed
+    order_stale = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t2", "signal_dir": "BUY", "qty": 1.0,
+                   "signal_created_ts": 999.0, "limit_price": 100.0}
+    monkeypatch.setattr(pf, "book10l_at",
+                        lambda t: {"s": int(t) - 5, "a": [[100.1, 1.0]], "b": [[100.0, 2.0]]})
+    stale = ns["_paper_lane_entry_result"](order_stale, 1001.0)
+    assert stale["status"] == "QUOTE_STALE" and order_stale.get("entry_quote_gate_ok") is not True
 
 
 def test_rk2_paper_bot_sent_exit_own_s2s_is_trigger_to_send_code_point(monkeypatch):
