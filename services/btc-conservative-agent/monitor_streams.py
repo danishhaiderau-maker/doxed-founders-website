@@ -349,10 +349,22 @@ def _file_mtimes(data_dir, now: float) -> dict:
     return out
 
 
+def _strategist_size_cap(data_dir) -> dict:
+    """Collector-written STREAM_SIZE_CAP status (70% AMBER / 85%+ RED)."""
+    try:
+        import disk_alert
+        return disk_alert.stream_size_cap_status(data_dir)
+    except Exception:  # noqa: BLE001
+        return {"level": "UNKNOWN", "red": [], "exists": False}
+
+
 def health(data_dir, now: float, sample_rows: int = 200) -> dict:
     """Per stream: first/last ts across parts, age, approx rows, key-field null rate, archive."""
     import json
     out = {}
+    size_cap = _strategist_size_cap(data_dir)
+    strategist_names = {"bfx_book_10l", "bfx_trades", "venue_bbo_lighter_paradex",
+                        "bfx_deriv_status_1s", "bfx_ws_events"}
     for name, rel in STREAMS.items():
         try:
             plist = parts(data_dir, name)
@@ -387,7 +399,9 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
         limit_age = STALE_AFTER_SEC.get(name)
         status = "OK" if age is not None and (limit_age is None or age <= limit_age) else (
             "STALE" if age is not None else "NO_TS")
-        out[name] = {
+        if name in strategist_names and size_cap.get("level") == "RED":
+            status = "RED"
+        entry = {
             "file": rel, "exists": True, "status": status, "stale_after_sec": limit_age, "first_ts": first.get("first_ts"), "last_ts": last_ts,
             "age_sec": age, "bytes": total_bytes, "parts": len(plist),
             "rows_estimate": int(total_bytes / avg) if avg else None,
@@ -397,5 +411,13 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
                         **({"tape_7d": ARCHIVE_NOTE["tape_7d"]} if name == "book_tape_1s" else {}),
                         "segment_store": ARCHIVE_NOTE["segment_store"]},
         }
+        if name in strategist_names and size_cap.get("exists"):
+            entry["size_cap"] = {
+                "level": size_cap.get("level"),
+                "reason": "STREAM_SIZE_CAP",
+                "card": (size_cap.get("status") or {}).get("card"),
+            }
+        out[name] = entry
     return {"schema": "monitor_stream_health_v1", "streams": out, "archive_locations": ARCHIVE_NOTE,
-            "log_files": file_mtimes(data_dir, now), "server_ts": now}
+            "log_files": file_mtimes(data_dir, now), "server_ts": now,
+            "stream_size_cap": size_cap}

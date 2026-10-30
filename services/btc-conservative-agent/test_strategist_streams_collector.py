@@ -112,11 +112,174 @@ def test_fresh_second_is_not_flagged_carried(tmp_path):
     assert "carried" not in _rows(tmp_path / ssc.BOOK_FILE)[0]
 
 
-def test_rotation_is_bounded(tmp_path):
-    s = ssc.Sink(str(tmp_path / "x.jsonl"), rotate_bytes=50, keep=2)
+def test_rotation_never_unlinks(tmp_path):
+    """R25/R34: size rotate may rename to .N but must never remove a prior segment.
+
+    Mutation proof: restoring the old ``os.remove`` keep-N loop (or any unlink in
+    ``Sink._rotate``) makes ``len(rotated)`` stall at N while this assert requires
+    file count to grow with every rotate (here 40 writes → many ``x.jsonl.*``).
+    """
+    path = tmp_path / "x.jsonl"
+    s = ssc.Sink(str(path), rotate_bytes=50, max_total_bytes=10 * 1024 * 1024)
+    fingerprints = {}
     for i in range(40):
         s.write({"i": i, "pad": "x" * 30})
-    assert len(list(tmp_path.glob("x.jsonl.*"))) == 2
+        for p in tmp_path.glob("x.jsonl.*"):
+            if p.name not in fingerprints:
+                fingerprints[p.name] = p.read_bytes()
+    rotated = sorted(tmp_path.glob("x.jsonl.*"), key=lambda p: int(p.name.rsplit(".", 1)[-1]))
+    assert len(rotated) >= 8, f"expected many kept rotations, got {len(rotated)}"
+    for name, blob in fingerprints.items():
+        p = tmp_path / name
+        assert p.exists(), name
+        assert p.read_bytes() == blob, name
+    src = (Path(__file__).parent / "strategist_streams_collector.py").read_text()
+    sink_src = src[src.index("class Sink:"): src.index("\nclass BfxBook")]
+    # call-site guard (docstrings may say "never unlinks")
+    assert "os.remove(" not in sink_src and "os.unlink(" not in sink_src and "Path.unlink" not in sink_src
+    assert "KEEP_ROTATIONS" not in src and "STRATEGIST_STREAM_KEEP_ROTATIONS" not in src
+    assert not hasattr(ssc, "KEEP_ROTATIONS")
+    assert len(list(tmp_path.glob("x.jsonl*"))) == len(rotated) + (1 if path.exists() else 0)
+
+
+def test_size_cap_stops_writing_and_alarms_immediately(tmp_path, monkeypatch):
+    """R25: when running total would exceed max_total_bytes, refuse write + ALARM; never delete.
+
+    Mutation proof: removing the ``_apply_pressure`` stop / ``self._bytes += need`` path
+    lets ``rows`` keep growing past the cap / leaves ``size_cap_hits == 0``.
+    """
+    alarms = []
+    monkeypatch.setattr(ssc, "_log", lambda msg: alarms.append(msg))
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    path = tmp_path / "cap.jsonl"
+    cap = 200
+    s = ssc.Sink(str(path), rotate_bytes=80, max_total_bytes=cap)
+    for i in range(30):
+        s.write({"i": i, "pad": "yyyyyyyy"})
+    assert s.size_cap_hits >= 1 and s.failures >= 1
+    assert any("STREAM_SIZE_CAP" in a and "stop_writing=True" in a for a in alarms), alarms
+    assert s._bytes <= cap
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("cap.jsonl*")}
+    rows_at_cap = s.rows
+    for i in range(30, 60):
+        s.write({"i": i, "pad": "yyyyyyyy"})
+    assert s.rows == rows_at_cap
+    assert s.size_cap_hits >= 2
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("cap.jsonl*")} == before
+    status = json.loads((tmp_path / ssc.SIZE_CAP_STATUS_FILE).read_text())
+    assert status["level"] == "RED" and status["reason"] == "STREAM_SIZE_CAP"
+    assert status["card"]["total_all_streams_cap_gib"] == 40.0
+    sink_src = (Path(__file__).parent / "strategist_streams_collector.py").read_text()
+    sink_src = sink_src[sink_src.index("class Sink:"): sink_src.index("\nclass BfxBook")]
+    assert "os.remove(" not in sink_src and "_apply_pressure" in sink_src
+
+
+def test_write_uses_running_total_no_glob_per_row(tmp_path, monkeypatch):
+    """R43/R0c: write hot path must not glob/stat every .N; seed once, add need, rename unchanged."""
+    calls = {"glob": 0}
+    real_glob = ssc.glob.glob
+
+    def counting_glob(*args, **kwargs):
+        calls["glob"] += 1
+        return real_glob(*args, **kwargs)
+
+    monkeypatch.setattr(ssc.glob, "glob", counting_glob)
+    path = tmp_path / "run.jsonl"
+    s = ssc.Sink(str(path), rotate_bytes=10 ** 9, max_total_bytes=10 ** 9)  # no rotate
+    seeded = calls["glob"]
+    for i in range(25):
+        s.write({"i": i, "pad": "x" * 20})
+    assert calls["glob"] == seeded, f"write hot path globbed {calls['glob'] - seeded} times"
+    assert s._bytes == sum(len(json.dumps({"i": i, "pad": "x" * 20}, separators=(",", ":")).encode() + b"\n")
+                            for i in range(25))
+
+
+def test_mutation_per_write_glob_fails_no_glob_assert(tmp_path, monkeypatch):
+    """Mutation proof: reintroducing ``_measure_total_bytes`` (glob) on every write MUST
+    break the no-glob invariant (``calls['glob'] == seeded``)."""
+    calls = {"glob": 0}
+    real_glob = ssc.glob.glob
+
+    def counting_glob(*args, **kwargs):
+        calls["glob"] += 1
+        return real_glob(*args, **kwargs)
+
+    monkeypatch.setattr(ssc.glob, "glob", counting_glob)
+    path = tmp_path / "mut.jsonl"
+    s = ssc.Sink(str(path), rotate_bytes=10 ** 9, max_total_bytes=10 ** 9)
+    seeded = calls["glob"]
+    real_write = ssc.Sink.write
+
+    def mutant_write(self, row):
+        _ = ssc._measure_total_bytes(self.path)  # MUTANT: per-write glob/stat
+        return real_write(self, row)
+
+    monkeypatch.setattr(ssc.Sink, "write", mutant_write)
+    for i in range(10):
+        s.write({"i": i, "pad": "x" * 20})
+    # The no-glob assert from test_write_uses_running_total_no_glob_per_row would fail:
+    assert calls["glob"] > seeded, "mutant did not reintroduce per-write glob"
+    try:
+        assert calls["glob"] == seeded
+        raised = False
+    except AssertionError:
+        raised = True
+    assert raised, "no-glob assert must fail under per-write glob mutant"
+
+
+def test_oserror_reseeds_running_byte_total(tmp_path, monkeypatch):
+    """On OSError during write, running total is re-seeded from disk (not left stale)."""
+    path = tmp_path / "reseed.jsonl"
+    s = ssc.Sink(str(path), rotate_bytes=10 ** 9, max_total_bytes=10 ** 9)
+    s.write({"ok": 1})
+    before = s._bytes
+    assert before > 0
+    real_open = open
+
+    def boom(file, mode="r", *args, **kwargs):
+        if mode == "a" and str(file) == str(path):
+            raise OSError("disk full")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", boom)
+    s.write({"fail": 1})
+    assert s.failures >= 1
+    # Re-seed measured the on-disk file (only the successful first row), not a drifted counter.
+    assert s._bytes == ssc._measure_total_bytes(str(path)) == before
+
+
+def test_size_cap_amber_then_red_before_hard_stop(tmp_path, monkeypatch):
+    """70% AMBER log + status; 85% RED STREAM_SIZE_CAP in status (monitor/disk_alert)."""
+    import disk_alert
+    for row in disk_alert.red_conditions():
+        disk_alert.clear_red(row["reason"])
+    alarms = []
+    monkeypatch.setattr(ssc, "_log", lambda msg: alarms.append(msg))
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    path = tmp_path / "press.jsonl"
+    cap = 1000
+    s = ssc.Sink(str(path), rotate_bytes=10 ** 9, max_total_bytes=cap)
+    # Fill to ~75% -> AMBER
+    while s._bytes < int(0.75 * cap):
+        s.write({"pad": "y" * 40})
+    assert s._alarm_level == "AMBER"
+    assert any("level=AMBER" in a for a in alarms)
+    status = json.loads((tmp_path / ssc.SIZE_CAP_STATUS_FILE).read_text())
+    assert status["level"] == "AMBER"
+    # Fill to ~90% -> RED (not yet hard-stopped)
+    while s._bytes < int(0.90 * cap) and s.size_cap_hits == 0:
+        s.write({"pad": "y" * 40})
+    assert s._alarm_level == "RED"
+    status = json.loads((tmp_path / ssc.SIZE_CAP_STATUS_FILE).read_text())
+    assert status["level"] == "RED" and status["reason"] == "STREAM_SIZE_CAP"
+    folded = disk_alert.stream_size_cap_status(tmp_path)
+    assert folded["level"] == "RED" and folded["red"][0]["reason"] == "STREAM_SIZE_CAP"
+    alert = disk_alert.compute_disk_alert({"total_bytes": 100, "used_bytes": 1, "data_dir": str(tmp_path)})
+    assert alert["level"] == "RED"
+    assert any(r.get("reason") == "STREAM_SIZE_CAP" for r in alert["retention_red"])
+    card = ssc.size_cap_card()
+    assert card["stream_sink_count"] == 5 and card["total_all_streams_cap_gib"] == 40.0
+    assert card["title"] == "URGENT partial 1 of 5"
 
 
 def test_entrypoint_and_stream_catalog_wired():
