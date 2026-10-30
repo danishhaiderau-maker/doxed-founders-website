@@ -8,12 +8,7 @@ after retirement, or a file that can't be read, is a conflict (RED on the retire
 Fingerprint mismatch must NOT poison active ledgers (decision/execution/opportunity): the
 pinned fingerprint is Fly-volume-specific, while the laptop analyzer reads a different host
 copy. open_read_only soft-excludes the retired stream on fingerprint-family refusals and
-keeps hard-raising on epoch / field / WAL / pointer mismatches.
-
-``tile_config_signature`` on a retired stream's frozen pointer also drifts whenever the
-active tile roster changes (e.g. Rule 22 retire of GS-06 in #924). That drift is expected
-and must soft-exclude the retired stream only — never poison decision/execution/opportunity
-or flip analyzer integrity to INVALID / empty cohort (BTC-479).
+keeps hard-raising only on identity (epoch/tile/field) mismatches.
 
 Adding or changing an entry here REQUIRES an RK ruling. Do not edit without one.
 """
@@ -34,15 +29,12 @@ RETIREMENT_FINGERPRINTS: dict[str, dict[str, int]] = {
 
 # open_read_only: exclude the retired stream (serve no rows) instead of raising a store-wide
 # identity conflict. Active authorities stay readable; tipMatch / v3_read_authority must not
-# go INVALID solely because a Fly-pinned fingerprint disagrees with a laptop copy, or because
-# an intentional mid-epoch roster change moved active tile_config_signature away from the
-# frozen retired pointer (BTC-479 / post-#924 GS-06 retire).
+# go INVALID solely because a Fly-pinned fingerprint disagrees with a laptop copy.
 SOFT_RETIRED_EXEMPTION_REFUSALS: frozenset[str] = frozenset({
     "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT",
     "RETIRED_STREAM_HAS_ROTATIONS",
     "RETIRED_STREAM_UNREADABLE",
     "RETIRED_STREAM_FINGERPRINT_MISSING",
-    "RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS",
 })
 
 

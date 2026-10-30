@@ -1,3 +1,6 @@
+## 30 Oct 2026 — R8 pure revert #929+#930 (open, do not merge)
+- See `docs/TRACKER.md`. PR [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) `cursor/revert-929-930-12bb`. Trades since 19:59 AEDT non-countable; R21 dry-run package prepared only (no delete).
+
 
 ## 25 Oct 2026 ~07:25 UTC — sticky DEPLOY_MAINTENANCE after clear resume
 - See `docs/TRACKER.md`. Preserve re-asserted pause after mid-bootstrap `/api/resume`; Guaranteed resume blocked on bootstrap stall. #900 merged (`f99681380`) without preserve-skip. Fast-follow `cursor/sticky-deploy-maintenance-lease-86dd` + once-clear flag. Live stays disarmed.

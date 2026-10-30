@@ -7486,11 +7486,6 @@ def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
     return _paper_stamp_pool(res, str(order.get("research_lane") or "").upper(), "entry")
 
 
-# BTC-476: entry IOC fill-second book often lands 1-2 s late (same race exit retries). Cap retries so a true
-# missing book still terminates as PAPER_IOC_REJECT_NO_BOOK before / at the entry TTL.
-ENTRY_NO_BOOK_RETRY_S = 3.0
-
-
 def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
     """IOC entry at signal_ts + measured delay from the 10-level book; cached on the order.
     Returns None while the fill time has not arrived (unless force)."""
@@ -7506,14 +7501,7 @@ def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
         return None
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     order.setdefault("requested_qty", order.get("qty"))
-    # F2 quote gate is a one-shot signal-time check. Latch a pass so long MAKER_REST (B1/B2, 600-1200 s)
-    # does not re-fail when BookTail.keep=600 drops the signal-second row (~599 s rest -> false QUOTE_STALE).
-    if order.get("entry_quote_gate_ok"):
-        stale = None
-    else:
-        stale = _paper_entry_quote_gate(order, lane, direction, signal_ts)
-        if not stale:
-            order["entry_quote_gate_ok"] = True
+    stale = _paper_entry_quote_gate(order, lane, direction, signal_ts)
     if stale:
         # REALISM_V2 F2: the tile's trigger source was older than 2 s at the signal -> the entry is skipped (never
         # priced, never a trade); the no-fill path records the shadow row and cancels the order.
@@ -7534,13 +7522,6 @@ def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
         if walk.get("status") == "REJECT_NO_BOOK":
             if force:
                 return walk  # a forced (immediate) look is not cached: the gate path may still price it later
-            # Do not cache on first miss: fill-second 1s book often lands after delay (CTRL/GS IOC race).
-            # Keep pending until grace / entry TTL, then cache REJECT_NO_BOOK (PAPER_IOC_REJECT_NO_BOOK).
-            fill_ts = signal_ts + float(delay_s)
-            grace_until = fill_ts + float(ENTRY_NO_BOOK_RETRY_S)
-            entry_deadline = float(order.get("entry_expires_ts") or grace_until)
-            if now < min(grace_until, entry_deadline):
-                return None
             order["paper_fill_result"] = walk
             return walk
         order["_entry_walk_result"] = walk
