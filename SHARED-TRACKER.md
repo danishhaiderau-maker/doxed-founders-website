@@ -1,3 +1,6 @@
+## URGENT PR2 remaining deleters (31 Oct 2026) — PARTIAL until #949
+- Stop rotation_cap (no env gate; next deletes ~09:00–14:30 AEDT) + market_segments + analyzer keep-3 + runtime-log/doRollover/_trim/maintain_fresh_collection_files + R22-delete reset_all_csv; #949 = partial 1/5 (ruling 44556caf8f25) — may deploy before #949 but PARTIAL until merge; sweeper already 111 files / 2,407,788,012 B (24 Oct 19:26–31 Oct 02:32); laptop 102 OBSERVED / 9 INFERRED lost (cd6960e96f23). Order PR2→PR4→PR3. Success: R31 ≥2 full rotation_cap sweeper cycles; no new rotation_cap delete receipts; .N retained; 70/85 on GET; greps/mutations green; live OFF; DONE only after #949.
+
 ## 30 Oct 2026 — R8 pure revert #929+#930 (open, do not merge)
 - See `docs/TRACKER.md`. PR [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) `cursor/revert-929-930-12bb`. Trades since 19:59 AEDT non-countable; R21 dry-run package prepared only (no delete).
 
