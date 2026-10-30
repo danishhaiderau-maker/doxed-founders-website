@@ -15,6 +15,7 @@ import rotation_cap
 
 @pytest.fixture(autouse=True)
 def _clear_red_and_latches():
+    disk_alert.configure(None)
     retention_stop_write.clear_latches()
     retention_stop_write.set_volume_used_ratio(None)
     for row in disk_alert.red_conditions():
@@ -24,6 +25,37 @@ def _clear_red_and_latches():
     retention_stop_write.set_volume_used_ratio(None)
     for row in disk_alert.red_conditions():
         disk_alert.clear_red(row["reason"])
+    disk_alert.configure(None)
+
+
+def _green_size_cap_dir(tmp_path):
+    """Plant GREEN size-cap so H1 missing-file RED cannot mask lifecycle A7a."""
+    import json
+
+    (tmp_path / "strategist_stream_size_cap.json").write_text(json.dumps({
+        "schema": "strategist_stream_size_cap_v1",
+        "reason": "STREAM_SIZE_CAP",
+        "level": "GREEN",
+        "stop_writing": False,
+        "sinks": {
+            name: {"level": "GREEN", "stop_writing": False}
+            for name in (
+                "bfx_book_10l_1s.jsonl",
+                "bfx_trades.jsonl",
+                "venue_bbo_1m.jsonl",
+                "bfx_deriv_status_1s.jsonl",
+                "bfx_ws_events.jsonl",
+            )
+        },
+    }), encoding="utf-8")
+    return str(tmp_path)
+
+
+def _bind_retention_state(tmp_path):
+    """Persist disk_alert RED state under tmp_path/retention — never the working folder."""
+    state = tmp_path / "retention" / "disk_alert_red.json"
+    disk_alert.configure(state)
+    return state
 
 
 def _seg(root, i, size, mtime):
@@ -154,14 +186,16 @@ def test_lifecycle_alarm_ladder_70_85(tmp_path):
 
 def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path, monkeypatch):
     """A7a/F3: UNKNOWN decision → lifecycle receipt alarm_level is RED (never GREEN/UNKNOWN)
-    and alarm/health surfaces treat it as RED (plan F2 half A / ~line 214).
+    and REAL alarm/health surfaces (disk_alert.compute_disk_alert /health fold) are RED.
 
     Fixture: GREEN cap ratio + volume_ratio=None → level_for_ratios UNKNOWN.
     Mutation proof (REAL code): monkeypatch ``retention_stop_write.receipt_alarm_level``
-    to soft-GREEN / passthrough UNKNOWN → ``res["alarm_level"] == "RED"`` fails (R23).
+    to soft-GREEN / passthrough UNKNOWN → receipt RED + compute_disk_alert RED fail (R23).
     """
     import json
 
+    _bind_retention_state(tmp_path)
+    data_dir = _green_size_cap_dir(tmp_path)
     retention_stop_write.set_volume_used_ratio(None)
     now = time.time()
     _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "u1", 100, now - 60)
@@ -186,27 +220,27 @@ def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path, monkeypatch):
     rows = [json.loads(line) for path in receipts for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     life = [row for row in rows if row.get("kind") == "LIFECYCLE_BUNDLE_CAP_PRESSURE_R5"]
     assert life and all(row.get("alarm_level") == "RED" for row in life), life
-    # Alarm/health surface (plan A7a ~214 / ruling 2851ff0650e1): must be RED.
-    # Lifecycle UNKNOWN is escalated for display via receipt_alarm_level; the
-    # operator-visible health card and receipt both publish that RED (never GREEN /
-    # never ambiguous UNKNOWN). Stop-write stays false (F1 / A7b).
-    health_surface = {
-        "alarm_level": res["alarm_level"],
-        "receipt_alarm_level": retention_stop_write.receipt_alarm_level(
-            retention_stop_write.level_for_ratios(0.1, None)
-        ),
-        "receipt_rows_alarm_levels": [row.get("alarm_level") for row in life],
-        "stop_write": res["stop_write"],
-    }
-    assert health_surface["alarm_level"] == "RED"
-    assert health_surface["receipt_alarm_level"] == "RED"
-    assert health_surface["receipt_rows_alarm_levels"]
-    assert all(level == "RED" for level in health_surface["receipt_rows_alarm_levels"])
-    assert health_surface["alarm_level"] != "GREEN"
-    assert health_surface["alarm_level"] != "UNKNOWN"
-    assert health_surface["stop_write"] is False
+    # REAL alarm/health surface (plan A7a / H3): /health reads compute_disk_alert — not a
+    # test-built dict. GREEN size-cap plant ensures H1 missing-file cannot fake this RED.
+    health_out = disk_alert.compute_disk_alert({
+        "total_bytes": 100, "used_bytes": 10, "data_dir": data_dir,
+    })
+    assert health_out["level"] == "RED", health_out
+    assert health_out["level"] != "GREEN"
+    assert health_out["level"] != "UNKNOWN"
+    assert any(
+        str(row.get("reason") or "") == "LIFECYCLE_BUNDLE_CAP_PRESSURE"
+        for row in (health_out.get("retention_red") or [])
+    ), health_out.get("retention_red")
+    assert health_out.get("stream_size_cap", {}).get("level") == "GREEN"
+    # retention/ state must live under tmp_path — never a cwd-relative working folder.
+    state_file = tmp_path / "retention" / "disk_alert_red.json"
+    assert state_file.is_file(), state_file
+    assert "LIFECYCLE_BUNDLE_CAP_PRESSURE" in state_file.read_text(encoding="utf-8")
     # Mutation against the REAL helper cap_lifecycle_bundles calls (not a local stand-in).
     retention_stop_write.clear_latches()
+    for row in disk_alert.red_conditions():
+        disk_alert.clear_red(row["reason"])
 
     def soft_green_or_passthru(level):
         # MUTANT: restore ``or "GREEN"`` / leave UNKNOWN ambiguous (pre-F3).
@@ -215,14 +249,18 @@ def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path, monkeypatch):
 
     monkeypatch.setattr(retention_stop_write, "receipt_alarm_level", soft_green_or_passthru)
     mut_root = tmp_path / "mut_a7a"
+    _bind_retention_state(mut_root)
+    mut_data_dir = _green_size_cap_dir(mut_root)
     _bundle(mut_root, "lifecycle_bundles", "lifecycle-", "m1", 100, now - 60)
     mut = r5.cap_lifecycle_bundles(mut_root, max_bytes=1000, now=now)
-    mut_health = {"alarm_level": mut["alarm_level"]}
+    mut_health = disk_alert.compute_disk_alert({
+        "total_bytes": 100, "used_bytes": 10, "data_dir": mut_data_dir,
+    })
     with pytest.raises(AssertionError):
         assert mut["alarm_level"] == "RED"
     with pytest.raises(AssertionError):
-        # Alarm/health surface must also fail on the soft-GREEN / UNKNOWN mutant.
-        assert mut_health["alarm_level"] == "RED"
+        # Real alarm/health surface must also fail on the soft-GREEN / UNKNOWN mutant.
+        assert mut_health["level"] == "RED"
 
 
 def test_a7b_lifecycle_unknown_alone_does_not_stop_write(tmp_path, monkeypatch):
@@ -232,6 +270,7 @@ def test_a7b_lifecycle_unknown_alone_does_not_stop_write(tmp_path, monkeypatch):
     Mutation proof (REAL code): monkeypatch ``should_stop_write`` so UNKNOWN stops →
     ``stop_write is False`` fails (R23).
     """
+    _bind_retention_state(tmp_path)
     retention_stop_write.set_volume_used_ratio(None)
     now = time.time()
     _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "u2", 100, now - 60)
