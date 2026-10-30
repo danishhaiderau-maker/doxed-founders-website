@@ -842,11 +842,11 @@ def _conservative_child_receipt(
 ) -> dict[str, Any]:
     """CONSERVATIVE entry decided and priced on the 10-level book (RK R3/R4).
 
-    ``book_limit_entry`` composes quote_trigger (book-row trigger at the limit) and paper_fill (capped IOC walk);
-    the 1 s ``market_microstructure_1s`` rows / evaluate_limit_fill are no longer read.  ``book_at`` is the event's
-    BookWalkWindow; without it the entry is UNSUPPORTED (``BOOK_WALK_UNAVAILABLE``).  ``window`` (the same
-    BookWalkWindow) supplies the real trade prints the resting remainder fills on (paper_fill.maker_rest_fills) and
-    the shared C2 gap detector for book touches while resting (HM #848 C1).
+    Research receipt composer ``book_limit_entry`` (not a fill model) composes quote_trigger + shared
+    ``paper_fill`` walk / ``maker_rest_fills``. The 1 s ``market_microstructure_1s`` / evaluate_limit_fill path
+    is not read. ``book_at`` is the event's BookWalkWindow; without it the entry is UNSUPPORTED
+    (``BOOK_WALK_UNAVAILABLE``). ``window`` supplies real trade prints for the resting remainder and the shared
+    C2 gap detector for book touches while resting (HM #848 C1).
     """
     schedule = _conservative_child_schedule(
         child, event_id=str(source.get("event_id") or "event"),

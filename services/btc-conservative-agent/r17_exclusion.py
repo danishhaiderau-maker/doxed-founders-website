@@ -197,7 +197,7 @@ def book_receive_failures(row) -> list:
 
 def entry_proof_failures(row) -> list:
     """The ENTRY-leg subset of ``proof_failures`` (trigger source, measured delay, COMPLETE evidence, book age, never
-    the 1 s tape). One rule, one module (R4): research entry receipts (book_limit_entry) gate on this, and the full
+    the 1 s tape). One rule, one module (R4): research place-then-rest entry receipts gate on this, and the full
     row check below re-uses it, so the entry rule cannot drift from the row rule (HM #848 C3)."""
     out = []
     tps = row.get("trigger_price_source")

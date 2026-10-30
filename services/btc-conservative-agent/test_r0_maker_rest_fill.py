@@ -138,15 +138,22 @@ def test_b1_b2_maker_rest_fills_only_through_the_shared_paper_fill_helper():
     assert not hasattr(om, "maker_rest_full_size")  # the all-or-nothing rule (RK: R0 violation) is gone
 
 
+def _empty_queue_book(lim=100.0):
+    return {"s": 1, "b": [[lim - 1.0, 1.0]], "a": [[lim + 1.0, 1.0]]}
+
+
 def test_a5_rest_fill_is_the_shared_maker_fill_with_partials():
     """R4: paper_fill.rest_fill (FADE3 A5) delegates to maker_rest_fill; partial fills, cap, window, print dedup."""
+    book = _empty_queue_book()
     rows = [_p(1.0, 99.0, -0.3, 1), _p(1.5, 99.0, -0.3, 1),  # same print id twice: counted once
             _p(2.0, 100.0, -9.0, 2),                          # at the limit: never fills
             _p(5.0, 99.0, -9.0, 3)]                           # outside (t0, t0 + ttl]: never fills
-    r = pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0)
+    r = pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0, book=book)
     assert r["status"] == "PARTIAL" and r["filled_qty"] == pytest.approx(0.3) and r["price"] == 100.0
     assert r["fill_ts"] == 1.0 and r["evidence_status"] == "INCOMPLETE" and r["fill_stamps"][0]["qty"] == pytest.approx(0.3)
-    full = pf.rest_fill("SHORT", 0.2, 100.0, 0.0, [_p(1.0, 100.5, 0.15, 7), _p(2.0, 100.4, 0.5, 8)], ttl_s=3.0)
+    assert r["queue_ahead"] == 0.0
+    full = pf.rest_fill("SHORT", 0.2, 100.0, 0.0, [_p(1.0, 100.5, 0.15, 7), _p(2.0, 100.4, 0.5, 8)],
+                        ttl_s=3.0, book=book)
     assert full["status"] == "FILLED" and full["filled_qty"] == pytest.approx(0.2) and full["fill_ts"] == 2.0
     src = ast.parse((ROOT / "paper_fill.py").read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(src) if isinstance(n, ast.FunctionDef) and n.name == "rest_fill")
@@ -155,6 +162,7 @@ def test_a5_rest_fill_is_the_shared_maker_fill_with_partials():
 
 def test_a5_rest_fill_mutation_proof(monkeypatch):
     """Each new assert above fails on a mutant: all-or-nothing, no dedup, no window."""
+    book = _empty_queue_book()
     rows = [_p(1.0, 99.0, -0.3, 1), _p(1.5, 99.0, -0.3, 1), _p(5.0, 99.0, -9.0, 3)]
     real = pf.maker_rest_fill
 
@@ -162,11 +170,54 @@ def test_a5_rest_fill_mutation_proof(monkeypatch):
         r = real(d, lim, rem, q0, seen_vol, trades, **kw)
         return r if r["remaining"] <= 1e-12 else {**r, "fills": [], "filled_qty": 0.0, "remaining": rem}
     monkeypatch.setattr(pf, "maker_rest_fill", all_or_nothing)
-    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0)["status"] != "PARTIAL"
+    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0, book=book)["status"] != "PARTIAL"
 
     def no_dedup(d, lim, rem, q0, seen_vol, trades, **kw):
         return real(d, lim, rem, q0, seen_vol, [{**t, "id": i} for i, t in enumerate(trades)], **kw)
     monkeypatch.setattr(pf, "maker_rest_fill", no_dedup)
-    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0)["filled_qty"] != pytest.approx(0.3)
+    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=3.0, book=book)["filled_qty"] != pytest.approx(0.3)
     monkeypatch.setattr(pf, "maker_rest_fill", real)
-    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=10.0)["status"] == "FILLED"  # window widened -> differs
+    assert pf.rest_fill("LONG", 1.0, 100.0, 0.5, rows, ttl_s=10.0, book=book)["status"] == "FILLED"
+
+
+def test_fade3_rest_no_fabricated_queue_ahead_zero_without_book(monkeypatch):
+    """R0 FREEZE item (1): FADE3 must not silently fill with fabricated queue_ahead=0 when book is absent."""
+    rows = [_p(1.0, 99.0, -1.0, 1)]
+    miss = pf.rest_fill("LONG", 0.5, 100.0, 0.0, rows, ttl_s=3.0, book=None)
+    assert miss["status"] == pf.NO_FILL_QUEUE_BOOK_MISSING and miss["filled_qty"] == 0.0
+    assert miss["queue_ahead"] is None
+    # Book with queue ahead 0.6: 0.4 through is not enough — no first-in-queue advantage.
+    queued = {"s": 1, "b": [[100.0, 0.6]], "a": [[100.1, 1.0]]}
+    through = [_p(1.0, 99.0, -0.4, 2)]
+    blocked = pf.rest_fill("LONG", 0.5, 100.0, 0.0, through, ttl_s=3.0, book=queued)
+    assert blocked["status"] == pf.NO_FILL_REST_TTL and blocked["queue_ahead"] == pytest.approx(0.6)
+    assert blocked["filled_qty"] == 0.0
+    # Mutation proof: forcing queue_ahead=0 into maker_rest_fill fills 0.4 — would break filled_qty==0 above.
+    real = pf.maker_rest_fill
+
+    def force_q0(d, lim, rem, q0, seen_vol, trades, **kw):
+        return real(d, lim, rem, 0.0, seen_vol, trades, **kw)
+    monkeypatch.setattr(pf, "maker_rest_fill", force_q0)
+    assert pf.rest_fill("LONG", 0.5, 100.0, 0.0, through, ttl_s=3.0, book=queued)["filled_qty"] != 0.0
+
+
+def test_paper_fill_path_has_no_book_limit_entry_fill_model():
+    """R4: paper fill / FADE3 path must not treat book_limit_entry as a distinct fill model."""
+    for name in ("paper_fill.py", "tile_fill.py", "tile_fade3.py", "tile_fade3_loose.py"):
+        src = (ROOT / name).read_text(encoding="utf-8")
+        assert "import book_limit_entry" not in src and "from book_limit_entry" not in src
+        # Executable identifiers only (comments may mention the retired distinct-model name while documenting removal).
+        tree = ast.parse(src)
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert "book_limit_entry" not in names | attrs, name
+    assert "book_limit_entry" not in pf.ALLOWED_FILL_MODELS
+    assert pf.ALLOWED_FILL_MODELS == frozenset({pf.FILL_MODEL})
+    # rest_fill must not hardcode maker_rest_fill(..., 0.0, ...) as queue_ahead (literal first-arg after lim/q).
+    fn = next(n for n in ast.walk(ast.parse((ROOT / "paper_fill.py").read_text(encoding="utf-8")))
+              if isinstance(n, ast.FunctionDef) and n.name == "rest_fill")
+    for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "maker_rest_fill"):
+        # args: side, lim, q, queue_ahead, through_seen, window
+        assert len(call.args) >= 4
+        q_arg = call.args[3]
+        assert not (isinstance(q_arg, ast.Constant) and q_arg.value == 0.0), "fabricated queue_ahead=0"

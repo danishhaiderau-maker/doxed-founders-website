@@ -9,8 +9,8 @@ Signal = sim E8 (FADE, ALL regimes, W=3), ported verbatim from the sim's feat.py
 (test_tile_fade3 pins their sha256 and checks parity on a seeded fixture):
   SHORT: z3 >= 2.5 and mom5 >= 2*ATR30 and imb5 <= -0.2 and BZ > -2;  LONG mirrored;  spread <= 2 bp.
 Entry: marketable limit capped at touch +-5 bp (tile_fill.entry_fill, the shared IOC walk); any remainder rests at
-the cap and is priced ONLY by the shared AMEND1 A5 helper (tile_fill.price_entry_rest -> paper_fill.rest_fill, one
-TTL = paper_fill.REST_TTL_S).
+the cap and is priced ONLY by the shared AMEND1 A5 helper (tile_fill.price_entry_rest -> paper_fill.rest_fill with
+book-derived queue_ahead via order_model.queue_ahead_at; one TTL = paper_fill.REST_TTL_S; missing book fail-closed).
 Exits (real fills only, the book rule = first book row at/after the trigger, via paper_fill):
   TP +30 bp and bot hard stop -25 bp on the executable book side (quote_trigger.first_level_trigger KIND_TARGET);
   exchange stop -35 bp: first trade print at/through it, fill = first book row at/after it, delay 0

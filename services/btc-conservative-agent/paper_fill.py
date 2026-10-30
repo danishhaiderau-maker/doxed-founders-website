@@ -1184,37 +1184,48 @@ def _post_fill_overrides(tree, module: str, fill_sites) -> list:
 # ---------------------------------------------------------------- REALISM_V2 SHARED A5 REST FILL (AMEND1 A5)
 # ONE shared helper for the resting remainder of a marketable GTC entry (R4). Reached only through the registered
 # tile_fill.price_entry_rest site (REST_FILL_SITES / rest_site_violations). Existing lanes are untouched.
+# R0/R4 (FREEZE remediation 30 Oct): queue ahead comes from the real 10-level book at rest start via
+# order_model.queue_ahead_at — the same maker_rest_fill rule B1 / B2 / WALK_THEN_REST use. Never fabricate
+# queue_ahead=0 when the book is absent (that silently fills as first-in-queue). No separate fill model.
 REST_TTL_S = 3.0  # the ONE rest TTL; pinned equal to order_model.DEFAULT_TAKER_TTL_S (the live GTC cancel TTL)
 REST_RULE_A5 = "A5_TRADE_THROUGH"
 NO_FILL_REST_TTL = "NO_FILL_REST_TTL"
+NO_FILL_QUEUE_BOOK_MISSING = "NO_FILL_QUEUE_BOOK_MISSING"
 REST_SOURCE = "BFX_TRADES"  # the receive-stamped trades feed of the exchange-stop trigger; never the ticker/tape
+REST_QUEUE_BASIS = "BFX_BOOK10L_QUEUE_AT_REST_START"
 
 
-def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, trades, ttl_s: float = REST_TTL_S) -> dict:
-    """AMEND1 A5: a resting entry fills ONLY from real trade prints with ts in (t_start, t_start + ttl_s] at prices
-    STRICTLY beyond the limit (buy: px < limit; sell: px > limit). qty = min(remaining, sum |amount| of those prints),
-    price = the limit. Touch / at-limit / book-cross never fill. Otherwise NO_FILL_REST_TTL.
+def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, trades, ttl_s: float = REST_TTL_S,
+              *, book: Optional[Mapping[str, Any]] = None) -> dict:
+    """AMEND1 A5: resting entry fills ONLY via shared maker_rest_fill over real prints in (t_start, t_start+ttl_s]
+    strictly beyond the limit. Queue ahead is the visible same-side size at the limit on ``book`` at rest start
+    (order_model.queue_ahead_at). Missing/invalid book -> NO_FILL_QUEUE_BOOK_MISSING (fail closed; never invent
+    queue_ahead=0). Touch / at-limit / book-cross never fill. Otherwise NO_FILL_REST_TTL when no through volume
+    clears the queue.
 
     ``trades`` is a list of {"ts", "px", "amt"} prints (quote_trigger.trades_between over (t_start, t_start+ttl_s])."""
+    import order_model as _om
     q = _f(qty_remaining) or 0.0
     lim = _f(limit_px)
     t0 = float(t_start)
     t1 = t0 + float(ttl_s)
-    buy = str(side).upper() in ("LONG", "BUY")
     base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "leg": "entry_rest",
             "rest_rule": REST_RULE_A5, "rest_ttl_s": float(ttl_s), "rest_t_start": t0, "rest_t_end": t1,
-            "side": str(side).upper(), "qty": q, "limit_px": lim, "price_source": None}
-    # R4 (RK 25 Oct, #883 item 5): the fill itself comes from THE shared maker fill (maker_rest_fill), the same
-    # queue-ahead / trade-through / partial rule B1 / B2 / WALK_THEN_REST / book_limit_entry / research_v3 use. A5
-    # rests join behind no visible queue (the remainder of a marketable order sits at the touch it just cleared), so
-    # queue_ahead = 0; only prints inside (t_start, t_start + ttl_s] are offered.
+            "side": str(side).upper(), "qty": q, "limit_px": lim, "price_source": None,
+            "queue_basis": REST_QUEUE_BASIS, "queue_ahead": None}
+    if lim is None or not isinstance(book, Mapping):
+        # R0: without a book row the queue position is unknowable — refuse rather than assume first-in-queue.
+        return {**base, "status": NO_FILL_QUEUE_BOOK_MISSING, "price": None, "filled_qty": 0.0, "fill_ts": None,
+                "evidence_status": "NO_FILL", "trades_n": 0, "trade_vol_beyond": 0.0}
+    queue_ahead = float(_om.queue_ahead_at(side, lim, book))
+    base["queue_ahead"] = queue_ahead
     window = [p for p in trades or () if isinstance(p, Mapping) and _f(p.get("ts")) is not None
               and t0 < float(_f(p.get("ts"))) <= t1]
-    step = maker_rest_fill(side, lim, q, 0.0, 0.0, window, placement_ts=t0) if lim is not None else None
-    vol = float(step["through_seen"]) if step else 0.0
-    base.update(trades_n=(len(step["seen"]) - int(step["unsized_prints"])) if step else 0,
+    step = maker_rest_fill(side, lim, q, queue_ahead, 0.0, window, placement_ts=t0)
+    vol = float(step["through_seen"])
+    base.update(trades_n=(len(step["seen"]) - int(step["unsized_prints"])),
                 trade_vol_beyond=round(vol, 8))
-    filled = float(step["filled_qty"]) if step else 0.0
+    filled = float(step["filled_qty"])
     if q <= 0 or filled <= 1e-12:
         return {**base, "status": NO_FILL_REST_TTL, "price": None, "filled_qty": 0.0, "fill_ts": None,
                 "evidence_status": "NO_FILL"}
@@ -1233,7 +1244,7 @@ REST_FILL_SITES = {
 
 def rest_site_violations(source: str, func_name: str) -> list:
     """AST check of a rest site: single `return paper_fill.rest_fill(...)`; trades from quote_trigger.trades_between;
-    no ticker / tape / state / dynamic lookups."""
+    book from paper_fill.book10l_at (R0 queue); no ticker / tape / state / dynamic lookups."""
     import ast
     tree = ast.parse(source)
     fn = next((n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -1241,8 +1252,13 @@ def rest_site_violations(source: str, func_name: str) -> list:
     if fn is None:
         return [f"{func_name}: not found"]
     out = []
+    # Allow a single assignment of t0 = float(o["t_start"]) then return rest_fill(...).
     body = [b for b in fn.body if not (isinstance(b, ast.Expr) and isinstance(getattr(b, "value", None), ast.Constant))]
-    call = body[0].value if len(body) == 1 and isinstance(body[0], ast.Return) else None
+    call = None
+    if len(body) == 1 and isinstance(body[0], ast.Return):
+        call = body[0].value
+    elif (len(body) == 2 and isinstance(body[0], ast.Assign) and isinstance(body[1], ast.Return)):
+        call = body[1].value
     if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "rest_fill"
             and getattr(call.func.value, "id", "") == "paper_fill"):
         out.append(f"{func_name}: must be a single `return paper_fill.rest_fill(...)`")
@@ -1262,6 +1278,10 @@ def rest_site_violations(source: str, func_name: str) -> list:
         if not (isinstance(tr, ast.Call) and isinstance(tr.func, ast.Attribute) and tr.func.attr == "trades_between"
                 and getattr(tr.func.value, "id", "") in ("quote_trigger", "_qt")):
             out.append(f"{func_name}: trades must be quote_trigger.trades_between(...)")
+        book_kw = next((k.value for k in call.keywords if k.arg == "book"), None)
+        if not (isinstance(book_kw, ast.Call) and isinstance(book_kw.func, ast.Attribute)
+                and book_kw.func.attr == "book10l_at" and getattr(book_kw.func.value, "id", "") == "paper_fill"):
+            out.append(f"{func_name}: book must be paper_fill.book10l_at(...)")
     return sorted(set(out))
 
 
@@ -1330,9 +1350,9 @@ def maker_rest_fill(direction: str, limit_px: float, qty_remaining: float, queue
 
 
 def maker_rest_fills(direction, limit_px, qty_remaining, queue_ahead, trades, *, placement_ts=None) -> dict:
-    """HM 25 Oct (#883 FAIL): the ONE maker fill entry point for every non-stateful caller (bot WALK_THEN_REST
-    remainder, book_limit_entry, research_v3). Same rule as maker_rest_fill, over a single placement; returns the
-    combine_entry view (fills as (ts, px, qty)) plus the R17 stamps."""
+    """HM 25 Oct (#883): the ONE maker fill entry point for every non-stateful caller (bot WALK_THEN_REST
+    remainder; research place-then-rest composers). Same rule as maker_rest_fill, over a single placement; returns
+    the combine_entry view (fills as (ts, px, qty)) plus the R17 stamps. Not a second fill model."""
     r = maker_rest_fill(direction, limit_px, qty_remaining, queue_ahead, 0.0, trades, placement_ts=placement_ts)
     q0 = max(0.0, float(queue_ahead or 0.0))
     return {"fills": [(f["print_ts"], f["px"], f["qty"]) for f in r["fills"]], "remaining": r["remaining"],

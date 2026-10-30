@@ -143,18 +143,28 @@ def test_a5_one_ttl_shared_with_order_model():
     assert paper_fill.REST_RULE_A5 == "A5_TRADE_THROUGH"
 
 
+def _empty_queue_book(lim, *, buy=True):
+    """Book with no same-side size at the limit — queue_ahead_at returns 0 (book supports that claim)."""
+    if buy:
+        return {"s": 100, "b": [[lim - 1.0, 1.0]], "a": [[lim + 1.0, 1.0]]}
+    return {"s": 100, "b": [[lim - 1.0, 1.0]], "a": [[lim + 1.0, 1.0]]}
+
+
 def test_a5_strictly_beyond_window_and_limit_price():
     t0, lim = 100.0, 65000.0
+    book = _empty_queue_book(lim)
     trades = [_tr(100.0, 64990), _tr(100.5, 65000.0), _tr(101.0, 64999.0, 0.004), _tr(102.0, 64998.0, 0.01),
               _tr(103.5, 64000.0)]
-    r = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades)
+    r = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades, book=book)
     assert r["status"] == "FILLED" and r["price"] == lim and abs(r["filled_qty"] - 0.01) < 1e-12
     assert r["fill_ts"] == 102.0 and r["rest_rule"] == "A5_TRADE_THROUGH" and r["rest_ttl_s"] == 3.0
-    p = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades[:3])
+    assert r["queue_ahead"] == 0.0
+    p = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades[:3], book=book)
     assert p["status"] == "PARTIAL" and abs(p["filled_qty"] - 0.004) < 1e-12
-    n = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(100.0, 1.0), _tr(101.0, 65000.0), _tr(103.01, 1.0)])
+    n = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(100.0, 1.0), _tr(101.0, 65000.0), _tr(103.01, 1.0)],
+                             book=book)
     assert n["status"] == paper_fill.NO_FILL_REST_TTL and n["price"] is None and n["filled_qty"] == 0
-    s = paper_fill.rest_fill("SHORT", 0.01, lim, t0, [_tr(101.0, 65001.0, -0.02)])
+    s = paper_fill.rest_fill("SHORT", 0.01, lim, t0, [_tr(101.0, 65001.0, -0.02)], book=_empty_queue_book(lim, buy=False))
     assert s["status"] == "FILLED" and s["price"] == lim
 
 
@@ -163,7 +173,26 @@ def test_a5_rest_site_is_the_one_shared_helper():
     assert paper_fill.rest_site_violations((HERE / "tile_fill.py").read_text(), "price_entry_rest") == []
     bad = "def price_entry_rest(o):\n    return paper_fill.rest_fill(o['side'], 1, 2, 3, quote_trigger.ticker_between(0, 1))\n"
     assert paper_fill.rest_site_violations(bad, "price_entry_rest")
+    no_book = ("def price_entry_rest(o):\n"
+               "    return paper_fill.rest_fill(o['side'], 1, 2, 3, quote_trigger.trades_between(0, 1))\n")
+    assert any("book must be" in v for v in paper_fill.rest_site_violations(no_book, "price_entry_rest"))
     assert tf.LANE in paper_fill.TILE_FILL_SITES
+
+
+def test_a5_missing_book_fail_closed_no_fabricated_queue_zero():
+    """R0: without a book, FADE3 must not fill as if queue_ahead=0 (first in queue)."""
+    t0, lim = 100.0, 65000.0
+    miss = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(101.0, 64990.0, 1.0)], book=None)
+    assert miss["status"] == paper_fill.NO_FILL_QUEUE_BOOK_MISSING and miss["filled_qty"] == 0
+    assert miss["price"] is None and miss["queue_ahead"] is None
+    queued = {"s": 100, "b": [[lim, 0.5]], "a": [[lim + 1.0, 1.0]]}
+    # 0.4 through < 0.5 queue: must NOT fill (would fill if queue fabricated as 0).
+    blocked = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(101.0, 64990.0, 0.4)], book=queued)
+    assert blocked["status"] == paper_fill.NO_FILL_REST_TTL and blocked["queue_ahead"] == 0.5
+    assert blocked["filled_qty"] == 0
+    cleared = paper_fill.rest_fill("LONG", 0.01, lim, t0,
+                                  [_tr(101.0, 64990.0, 0.5), _tr(101.5, 64989.0, 0.01)], book=queued)
+    assert cleared["status"] == "FILLED" and cleared["queue_ahead"] == 0.5
 
 
 # ------------------------------------------------------------------ live gate: paper only

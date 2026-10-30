@@ -1,8 +1,8 @@
-"""Research conservative limit entry on the 10-level book (RK R3/R4; replaces evaluate_limit_fill's 1 s pricing).
+"""Research place-then-rest ENTRY RECEIPT composer (not a fill model).
 
-The CONSERVATIVE protection-replay entry used to be decided and priced by
-``research.conservative_limit_fill.evaluate_limit_fill`` on ``market_microstructure_1s`` rows, which R3 forbids.
-This module composes only shared helpers - no pricing, trigger or queue logic of its own (R4):
+R4: this module is NOT a separate fill model. Paper / FADE3 / bot MAKER_REST price only through
+``paper_fill`` (``paper_fill`` walk + ``maker_rest_fills`` / ``maker_rest_fill``). This file only builds the
+auditable CONSERVATIVE chase receipt for research/analyzer, composing those shared helpers.
 
 * marketable at placement (HM #848 C1): each chase interval is a LIMIT order sent at its start (the signal) that
   reaches the exchange after the delay.  ``paper_fill(direction, qty, signal_ts, delay_s, book_at, leg="entry",
@@ -11,11 +11,12 @@ This module composes only shared helpers - no pricing, trigger or queue logic of
   that would arrive after the interval ends never reads a later row (``ARRIVAL_AFTER_INTERVAL_END``).
 * resting remainder (HM #848 C1): whatever is not filled at arrival RESTS at L until the interval ends and fills
   only through ``paper_fill.maker_rest_fills`` - the same R0 queue model the bot's paper MAKER_REST uses - over REAL
-  trade prints (``trades_between``): a print through L fills us, a print AT L on the aggressor side first depletes
-  the queue ahead (``order_model.queue_ahead_at`` on the arrival row), then fills us.  Resting fills are AT L (no
-  price improvement).  A book row touching L with no print never fills.  When the order rested through a book touch
-  of L that sits in a print gap the shared C2 detector flags (``gap_clause_at``), a print that would have filled us
-  may be missing: the entry is R17_UNPROVEN_ENTRY (``REST_TOUCH_IN_TRADE_GAP``).
+  trade prints (``trades_between``): a print through L depletes queue ahead then fills us
+  (``order_model.queue_ahead_at`` on the arrival row). At-limit prints never fill. Missing arrival book for the
+  resting remainder is UNSUPPORTED (``ENTRY_REST_QUEUE_BOOK_MISSING``) — never fabricate queue_ahead=0.
+  Resting fills are AT L (no price improvement). A book row touching L with no print never fills. When the order
+  rested through a book touch of L that sits in a print gap the shared C2 detector flags (``gap_clause_at``), a
+  print that would have filled us may be missing: the entry is R17_UNPROVEN_ENTRY (``REST_TOUCH_IN_TRADE_GAP``).
 * the first interval with any fill ends the chase (the remainder is cancelled; PARTIAL_FILL).
 
 Countability (HM #848 C2/C3): the receipt stamps the R17 contract's entry fields at the top level
@@ -193,7 +194,11 @@ def book_limit_entry(direction: str, requested_qty: Any, chase_schedule: Sequenc
         rest = {"fills": [], "remaining": remaining, "queue_ahead": 0.0}
         queue0 = 0.0
         if remaining > _EPS:
-            queue0 = _om.queue_ahead_at(side, limit, book(arrival))
+            book_row = book(arrival)
+            if not isinstance(book_row, Mapping):
+                # R0: unknowable queue — never fabricate queue_ahead=0 as first-in-queue.
+                return _unsupported(receipt, "ENTRY_REST_QUEUE_BOOK_MISSING")
+            queue0 = _om.queue_ahead_at(side, limit, book_row)
             rest = _pf.maker_rest_fills(side, limit, remaining, queue0, trades_between(arrival, t1),
                                         placement_ts=arrival)
             touches = _touch_ts(side, limit, arrival, t1, window["rows"])
