@@ -90,6 +90,16 @@ Last status refresh: 2026-10-26 05:02 AEDT. Boss = Cursor Project.
 | `#914` disk_alert red-ack | **DONE** merged `c5a0d6dba` (quiet stack landed) | [#914](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/914) |
 | `#893` RK verdicts tracker | **DONE** squash-merged `c7b3d1690` (= master tip; RK archive below) | [#893](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/893) |
 | `#896` hard-rules handoff | **DONE** squash-merged `0ce26fbd4` | [#896](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/896) |
+| `#916` drop R17 future-path false RED | **MERGED** `6bf593330` (2026-10-26); RK/HM exact-head **PENDING** under FREEZE | [#916](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/916) |
+| `#917` soft-exclude contaminated retired streams tipMatch | **MERGED** `90ac2a922` (2026-10-26); RK/HM exact-head **PENDING** under FREEZE | [#917](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/917) |
+| `#918` soft-gate R17 evidence_coverage tipMatch | **MERGED** `bd37e516e` (2026-10-26); RK/HM exact-head **PENDING** under FREEZE | [#918](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/918) |
+| `#919` guard V3 ledger opens tipMatch straddle | **MERGED** `d3ab0e7de` (2026-10-26); RK/HM exact-head **PENDING** under FREEZE | [#919](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/919) |
+| `#920` guard book/trades opens tipMatch | **MERGED** `022b4eb10` (2026-10-27); RK/HM exact-head **PENDING** under FREEZE | [#920](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/920) |
+| `#921` lean Fly/analyzer dashboard UI | **MERGED** `6d220b9df` (2026-10-27); RK/HM exact-head **PENDING** under FREEZE | [#921](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/921) |
+| `#922` soft-exclude R17 from :9001 required_reports_ok | **MERGED** `22878a98c` (2026-10-27); RK/HM exact-head **PENDING** under FREEZE | [#922](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/922) |
+| `#923` damp exit_queues flap false RED | **MERGED** `292e2ea96` (2026-10-27); RK/HM exact-head **PENDING** under FREEZE | [#923](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/923) |
+| `#924` Retire GS-06 + GS-FADE3-LOOSE | **MERGED** `04f021408` (2026-10-27); RK/HM exact-head **PENDING** under FREEZE | [#924](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/924) |
+| `#925` GS-FADE3 private ledger closes on public lanes | **MERGED** `f4e9466b9` (2026-10-29); RK/HM exact-head **PENDING** under FREEZE | [#925](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/925) |
 | `#911` fly.revision serving-deploy fields | **OPEN** — quiet-bundle next | [#911](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/911) |
 | `#884` Fly deploy step allowlist | **OPEN** head `ebb63738` — quiet-bundle after `#911` | [#884](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/884) |
 | `#908` tracker remaster | **OPEN** this PR — remastered onto `c7b3d1690`; **HOLD** squash until after `#884` | [#908](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/908) |
@@ -112,13 +122,15 @@ Last status refresh: 2026-10-26 05:02 AEDT. Boss = Cursor Project.
 - `#900` / `#904` / `#882` / `#905` / `#901` / `#888`: **merged**
 - `#903` / `#897` / `#906` / `#907` / `#909` / `#910` / `#913` / `#915` / `#912` / `#914` / `#896`: **merged**
 - `#893` → **merged** `c7b3d1690` (= master tip); RK archive preserved below
+- `#916`–`#925`: **merged** (open-list SHAs); RK/HM exact-head **PENDING/MISSING** under FREEZE — no invented PASS
 - `#911` / `#884` / `#908`: open; `#908` HOLD after `#884`
 
 ## Recent ops notes (compressed; open-list above is source of truth)
 
 - **Master tip:** `c7b3d1690` (`#893` after `#896`/`#914`). Fly paper `c5a0d6dba6a9` (`#914`). Docs remasters — no Soft B / Force / wipe / tip / arm.
 - **Quiet bundle:** `#910` **DONE** → `#911` → `#884` → `#908` (HOLD merge of this PR until `#884` lands).
-- **Still NO-GO:** tombstone apply until R21; dashboard blocked (Boss PR#); GS-01 arm last after Danish OK.
+- **Backfill 2026-10-30:** open-list rows for `#916`–`#925` added (merge date + squash SHA from GitHub); RK/HM exact-head left **PENDING** under FREEZE — do not treat as gate PASS.
+- **Still NO-GO:** tombstone apply until R21; dashboard blocked (Boss PR#); GS-01 arm last after Danish OK. Soft B NO; no merge/tip/arm from this docs PR.
 
 ---
 
