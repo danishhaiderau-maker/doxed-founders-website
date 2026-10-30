@@ -233,11 +233,13 @@ def _load_jsonl_writer(tmp_path):
         def __init__(self):
             self.messages = []
 
-        def error(self, message):
-            self.messages.append(str(message))
+        def error(self, message, *args):
+            self.messages.append(str(message) % args if args else str(message))
 
         def warning(self, message, *args):
             self.messages.append(str(message) % args if args else str(message))
+
+    import retention_stop_write
 
     namespace = {
         "os": os,
@@ -266,6 +268,8 @@ def _load_jsonl_writer(tmp_path):
         },
         "utc_iso": lambda: datetime.now(timezone.utc).isoformat(),
         "logger": _Logger(),
+        # R0c latch gate in _safe_append_jsonl (isolated exec needs the module).
+        "retention_stop_write": retention_stop_write,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace

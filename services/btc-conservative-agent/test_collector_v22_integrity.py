@@ -416,17 +416,22 @@ class CollectorIntegrityTests(unittest.TestCase):
             bot._order_multiverse_ready_sweep_started_ts = saved_started
 
     def test_slow_shadow_append_does_not_hold_compressed_ownership_lock(self):
+        """Post-lock work must not hold _compressed_shadow_lock (R22: no grid append).
+
+        Pre-R22 this patched slow _safe_append_jsonl; chase grid writers are gone, so
+        the same lock invariant is proven against slow _note_shadow_chase_bucket_records
+        (still outside the lock). Asserts: work starts, lock acquireable, poll finishes.
+        """
         saved_book = dict(bot._compressed_shadow_chase_book)
         saved_seen = set(bot._compressed_shadow_seen_call_ids)
         saved_attempted = bot._compressed_shadow_recovery_attempted
-        append_started = threading.Event()
-        release_append = threading.Event()
+        post_lock_started = threading.Event()
+        release_post_lock = threading.Event()
         finished = threading.Event()
 
-        def slow_append(*args, **kwargs):
-            append_started.set()
-            release_append.wait(2.0)
-            return True
+        def slow_note(*args, **kwargs):
+            post_lock_started.set()
+            release_post_lock.wait(2.0)
 
         bot._compressed_shadow_chase_book.clear()
         bot._compressed_shadow_chase_book["shadow"] = {"terminal_emitted": False}
@@ -439,20 +444,20 @@ class CollectorIntegrityTests(unittest.TestCase):
         try:
             with mock.patch.object(bot, "_shadow_stage_direction_revalidation", return_value=("VALID", "TEST")), \
                  mock.patch.object(bot, "poll_compressed_shadow_chase", return_value=[{"event": "TEST"}]), \
-                 mock.patch.object(bot, "_safe_append_jsonl", side_effect=slow_append), \
+                 mock.patch.object(bot, "_note_shadow_chase_bucket_records", side_effect=slow_note), \
                  mock.patch.object(bot, "_maybe_complete_pending_order_multiverse"):
                 worker = threading.Thread(target=poll_shadow)
                 worker.start()
-                self.assertTrue(append_started.wait(1.0))
+                self.assertTrue(post_lock_started.wait(1.0))
                 acquired = bot._compressed_shadow_lock.acquire(timeout=1.0)
                 self.assertTrue(acquired)
                 if acquired:
                     bot._compressed_shadow_lock.release()
-                release_append.set()
+                release_post_lock.set()
                 self.assertTrue(finished.wait(1.0))
                 worker.join(2.0)
         finally:
-            release_append.set()
+            release_post_lock.set()
             bot._compressed_shadow_chase_book.clear()
             bot._compressed_shadow_chase_book.update(saved_book)
             bot._compressed_shadow_seen_call_ids.clear()
