@@ -8,7 +8,7 @@ HM C4 (23 Oct): the custody-gated prune below is RETIRED (``CUSTODY_PRUNE_RETIRE
 the shipper no longer calls ``plan_prune``/``execute``, ``read_mode`` always
 answers ``("off", "CUSTODY_PRUNE_RETIRED_R5")`` and the server refuses a mode
 change with 409. A custody stall is an alert only
-(``monitor_gaps.custody_stall``: laptop ACK not advancing while shipped_seq is
+(``monitor_gaps.custody_stall``: custody_through_seq not advancing while shipped_seq is
 ahead). The plan/execute code is kept, uncalled, for audit of the old ledger
 format. Historical description of the retired path:
 

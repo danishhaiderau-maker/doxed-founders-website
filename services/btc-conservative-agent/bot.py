@@ -50164,9 +50164,9 @@ def monitor_shipper_snapshot() -> dict:
     out = _CUSTODY_LAG.observe(transfer)
     out["transfer"] = {k: transfer.get(k) for k in ("enabled", "last_error", "unshipped_bytes", "updated_at")
                        if isinstance(transfer, dict)}
-    out["custody_note"] = ("R5 (HM C4/C5): the store is pruned by cap/age with no custody gate, so a laptop ACK that "
-                           "has not advanced for 2 h while shipped_seq is ahead is RED LAPTOP_ACK_NOT_ADVANCING "
-                           "(alert only, never a gate).")
+    out["custody_note"] = ("R5 (HM C4/C5, BTC-480): store pruned by cap/age with no custody gate; shipper RED is "
+                           "SHIPPED_MINUS_CUSTODY_LAG when custody_through_seq has not advanced for 2 h while "
+                           "shipped_seq is ahead (stall clock = seq advancing; alert only, never a gate).")
     return out
 
 
