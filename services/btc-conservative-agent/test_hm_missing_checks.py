@@ -48,6 +48,53 @@ def test_exit_truth_flags_stale_trigger_booking():
     assert mc.exit_truth(rows, [99.5], [{"bid": 100.0, "ask": 100.01}], since=0)["status"] == "GREEN"
 
 
+def test_exit_truth_vwap_multi_leg_uses_final_leg_not_blend_vs_final_touch():
+    """BTC-477 / both-legs realism: gb2-899a1661f1ff booked VWAP 78301 vs final bid 78249 (+6.65 bp)
+    while GS_LADDER_TP1 @ 78353 and GS_MFE_GIVEBACK @ 78249 each matched their fill-time touch.
+
+    Comparing the VWAP blend to the final book top is a false RED; the book-top statistic must use
+    the final leg's fill. Per-leg honesty stays on fill_book. A final leg booked better than the
+    final touch still REDs.
+    """
+    snap_tp1 = {"b": [[78353.0, 0.04], [78340.0, 1.0]], "a": [[78362.0, 0.04]], "s": 1793333826}
+    snap_gb = {"b": [[78249.0, 0.46], [78240.0, 1.0]], "a": [[78277.0, 0.1]], "s": 1793333846}
+    legs = [
+        {"price": 78353.0, "qty": 0.00016, "reason": "GS_LADDER_TP1", "trigger_price": 78353.0},
+        {"price": 78249.0, "qty": 0.00016, "reason": "GS_MFE_GIVEBACK", "trigger_price": 78249.0},
+    ]
+    row = {
+        "trade_id": "gb2-899a1661f1ff", "side": "LONG", "status": "CLOSED",
+        "lane": "FAMILY_GSB2_REGIME_SWITCHER",
+        "exit": {
+            "close_ts": 1793333847.510706, "exit_price": 78301.0, "exit_price_basis": "VWAP_ALL_LEGS",
+            "exit_reason": "GS_MFE_GIVEBACK", "exit_book_top_bid": 78249.0, "exit_book_top_ask": 78277.0,
+            "exit_book_top_s": 1793333846.0, "legs": legs,
+        },
+        "pricing": {"exit_depth_snapshot_legs": [
+            {"price": 78353.0, "qty": 0.00016, "fill": snap_tp1},
+            {"price": 78249.0, "qty": 0.00016, "fill": snap_gb},
+        ]},
+    }
+    # Naive VWAP-vs-final-touch would be +6.65 bp RED; both-legs compare uses final leg 78249 → GREEN.
+    vwap_better = (78301.0 / 78249.0 - 1) * 1e4
+    assert vwap_better > mc.EXIT_TRUTH_RED_BP
+    out = mc.exit_truth([row], [], [], since=0)
+    assert out["status"] == "GREEN" and not out["violations"] and not out["fill_book"]["violations"]
+    assert out["checked"] == 1 and out["fill_book"]["max_better_bp"] == 0.0
+    # Final leg booked better than the final touch → still RED on the book-top statistic.
+    bad = {**row, "exit": {**row["exit"], "legs": [legs[0], {**legs[1], "price": 78301.0}]}}
+    bad["pricing"] = {"exit_depth_snapshot_legs": [
+        {"price": 78353.0, "qty": 0.00016, "fill": snap_tp1},
+        {"price": 78301.0, "qty": 0.00016, "fill": snap_gb},
+    ]}
+    red = mc.exit_truth([bad], [], [], since=0)
+    assert red["status"] == "RED"
+    assert red["violations"][0]["trade_id"] == "gb2-899a1661f1ff"
+    assert red["violations"][0]["booked"] == 78301.0
+    assert red["violations"][0]["booked_better_than_touch_bp"] > mc.EXIT_TRUTH_RED_BP
+    assert red["fill_book"]["violations"]  # final leg also better than its fill-time bid
+
+
 def test_exit_truth_fill_book_statistic_sits_beside_trigger_check():
     """HM 19 Oct: the trigger-time comparison stays; a second stat compares the booked leg with the fill-time book."""
     snap = {"b": [[100.0, 1.0], [99.0, 1.0]], "a": [[100.5, 1.0]], "s": 1}
