@@ -452,7 +452,7 @@ class SegmentServer:
             if prune.CUSTODY_PRUNE_RETIRED:  # HM C4: custody-gated prune retired under R5
                 return self._respond(start_response, "409 Conflict", {
                     "error": prune.CUSTODY_PRUNE_RETIRED_REASON, "mode": "off",
-                    "retention": "R5: cap/age, no custody gate (r5_segment_pass + rotation_cap)"})
+                    "retention": "R5a eligibility never-delete (r5_segment_pass + rotation_cap)"})
             try:
                 requested = json.loads(raw).get("mode")
                 prune.write_mode(self.state_dir, requested, clock=self.clock)

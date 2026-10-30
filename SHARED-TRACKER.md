@@ -1,3 +1,6 @@
+## URGENT PR3 r5_segment_pass never-delete (HM-mapped)
+- Remove auto-unlink (`shipper` r5_segment_pass / `execute_r5_segment_prune` R22-deleted) + hard-coded prune arm; fail-closed on missing status; R5a eligibility via `validate_custody`+`analyzer_consumed_seq`+parity GREEN+2 ACK cycles+min(custody,ack,analyzer); tripwires (−500 seq / 2 h ACK); stop-write RED; PR4 for lifecycle/v22 deleters; R44+R31 before `RESEARCH_SEGMENTS_ENABLED=1`. **Success:** zero auto-unlinks; greps clean; two-cycle R31 read-back; live OFF. Plan `90f0a5491850`; rules `10f0b8daa510`; base #951 `f269ce852`.
+
 ## URGENT PR2 remaining deleters (31 Oct 2026) — PARTIAL until #949
 - Stop rotation_cap (no env gate; next deletes ~09:00–14:30 AEDT) + market_segments + analyzer keep-3 + runtime-log/doRollover/_trim/maintain_fresh_collection_files + R22-delete reset_all_csv; #949 = partial 1/5 (ruling 44556caf8f25) — may deploy before #949 but PARTIAL until merge; sweeper already 111 files / 2,407,788,012 B (24 Oct 19:26–31 Oct 02:32); laptop 102 OBSERVED / 9 INFERRED lost (cd6960e96f23). Order PR2→PR4→PR3. Success: R31 ≥2 full rotation_cap sweeper cycles; no new rotation_cap delete receipts; .N retained; 70/85 on GET; greps/mutations green; live OFF; DONE only after #949.
 
