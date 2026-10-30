@@ -1,6 +1,6 @@
 """Fix A — /api/analyzer-mirror/status no-bundle → non-404 RED NO_VALIDATED_ANALYZER_BUNDLE.
 
-Plan: docs/plan-shipping-analyzer-fix-20261031.md sha db42b1666d89
+Plan: docs/plan-shipping-analyzer-fix-20261031.md sha 364dfbf53cc2
 Governing RC: internal/rootcause-shipping-analyzer-20261031.md sha 6361e65285b1
 (E1–E3 receipts 3c6baee9dd58). Keep /api/analyzer/summary and /analysis/* at 503.
 Unreadable status.json stays HTTP 404 (plan covers only `active is None`).
