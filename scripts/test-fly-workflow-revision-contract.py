@@ -43,28 +43,49 @@ def test_deploy_triggers_only_on_workflow_dispatch():
 
 
 def test_deploy_is_pinned_to_expected_deploy_sha():
-    """mode=deploy must ship the input SHA, and only when it is the dispatched HEAD."""
+    """Deploy and recover modes ship the input SHA only when it is the dispatched HEAD on master."""
     assert "\n      expected_deploy_sha:\n" in DEPLOY
     description = DEPLOY.split("\n      expected_deploy_sha:\n", 1)[1].split("\n      keep_maintenance_pause:\n", 1)[0]
     assert "HM and RK have passed" in description
     assert "full R16 check" in description
     assert "R9 checks are required before anything is armed" in description
     assert "does not arm Bitfinex" in description
+    assert "recover-unready" in description
+    assert "recover-stalled-runtime" in description
+    assert "reachable from (or equal to) master" in description
     pin_at = DEPLOY.index("- name: Refuse deploy unless the dispatched head is the exact reviewed SHA")
     deploy_at = DEPLOY.index("- name: Deploy the exact source revision")
     assert pin_at < deploy_at
     pin_block = DEPLOY[pin_at:deploy_at]
-    assert "if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'" in pin_block
+    assert (
+        "if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || "
+        "inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'"
+    ) in pin_block
     assert "EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}" in pin_block
     assert 're.fullmatch(r"[0-9a-f]{40}", expected)' in pin_block
     assert '["git", "rev-parse", "HEAD"]' in pin_block
     assert 'str(os.environ.get("GITHUB_SHA") or "").strip().lower()' in pin_block
     assert "refusing to deploy a head that is not the exact reviewed SHA" in pin_block
+    assert '["git", "fetch", "--no-tags", "origin", "master"]' in pin_block
+    assert '["git", "merge-base", "--is-ancestor", expected, "origin/master"]' in pin_block
+    assert "refusing to deploy a head that is not reachable from master" in pin_block
     deploy_block = DEPLOY[deploy_at:].split("\n      - name:", 1)[0]
     assert (
         "GITHUB_SHA: ${{ github.event_name == 'workflow_dispatch' && "
-        "inputs.mode == 'deploy' && inputs.expected_deploy_sha || github.sha }}"
+        "(inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || "
+        "inputs.mode == 'recover-stalled-runtime') && inputs.expected_deploy_sha || github.sha }}"
     ) in deploy_block
+
+
+def test_deploy_checkout_pins_reviewed_sha_not_github_sha():
+    """test-and-deploy must checkout expected_deploy_sha; a ref: github.sha mutant fails."""
+    job_at = DEPLOY.index("  test-and-deploy:")
+    setup_at = DEPLOY.index("      - uses: actions/setup-python@v5", job_at)
+    checkout_block = DEPLOY[job_at:setup_at]
+    assert "uses: actions/checkout@v4" in checkout_block
+    assert "ref: ${{ inputs.expected_deploy_sha }}" in checkout_block
+    assert "fetch-depth: 0" in checkout_block
+    assert "ref: ${{ github.sha }}" not in checkout_block
 
 
 def test_monitor_expects_latest_successful_deploy_on_master():
