@@ -744,5 +744,5 @@ class CustodyLag:
         alerts = [SHIPPED_MINUS_CUSTODY_LAG] if stall["custody_stall_red"] else []
         return {"schema": SHIPPER_SCHEMA, **stall, "shipped_seq": shipped, "laptop_acked_seq": acked,
                 "ack_lag_segments": ack_lag, "custody_through_seq": transfer.get("custody_through_seq"),
-                "prune_mode": "off", "retention": "R5_AGE_CAP_NO_CUSTODY_GATE",
+                "prune_mode": "off", "retention": "R5A_ELIGIBILITY_NEVER_DELETE",
                 "alerts": alerts, "level": RED if alerts else GREEN}
