@@ -21,6 +21,8 @@ import threading
 from collections import deque
 from typing import Any, Callable, Mapping, Optional
 
+import order_model as _om
+
 FILL_MODEL = "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"
 FILL_MODEL_VERSION = 1
 FILL_BASIS_TAKER_WALK = "BOOK10L_TAKER_WALK"
@@ -1190,7 +1192,8 @@ NO_FILL_REST_TTL = "NO_FILL_REST_TTL"
 REST_SOURCE = "BFX_TRADES"  # the receive-stamped trades feed of the exchange-stop trigger; never the ticker/tape
 
 
-def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, trades, ttl_s: float = REST_TTL_S) -> dict:
+def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, trades, ttl_s: float = REST_TTL_S,
+              *, book: Optional[Mapping[str, Any]] = None) -> dict:
     """AMEND1 A5: a resting entry fills ONLY from real trade prints with ts in (t_start, t_start + ttl_s] at prices
     STRICTLY beyond the limit (buy: px < limit; sell: px > limit). qty = min(remaining, sum |amount| of those prints),
     price = the limit. Touch / at-limit / book-cross never fill. Otherwise NO_FILL_REST_TTL.
@@ -1204,13 +1207,19 @@ def rest_fill(side: str, qty_remaining: float, limit_px: float, t_start: float, 
     base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "leg": "entry_rest",
             "rest_rule": REST_RULE_A5, "rest_ttl_s": float(ttl_s), "rest_t_start": t0, "rest_t_end": t1,
             "side": str(side).upper(), "qty": q, "limit_px": lim, "price_source": None}
-    # R4 (RK 25 Oct, #883 item 5): the fill itself comes from THE shared maker fill (maker_rest_fill), the same
-    # queue-ahead / trade-through / partial rule B1 / B2 / WALK_THEN_REST / book_limit_entry / research_v3 use. A5
-    # rests join behind no visible queue (the remainder of a marketable order sits at the touch it just cleared), so
-    # queue_ahead = 0; only prints inside (t_start, t_start + ttl_s] are offered.
+    # R4/R0 (RK 30 Oct audit #67): the fill comes from THE shared maker fill (maker_rest_fill), with the visible
+    # queue at our limit on the 10-level book row at placement (order_model.queue_ahead_at) ahead of us - the same
+    # rule B1 / B2 use. No placement book -> no fill (fail closed, NO_BOOK_AT_PLACEMENT); queue_ahead is never 0 by
+    # assumption. Only prints inside (t_start, t_start + ttl_s] are offered.
     window = [p for p in trades or () if isinstance(p, Mapping) and _f(p.get("ts")) is not None
               and t0 < float(_f(p.get("ts"))) <= t1]
-    step = maker_rest_fill(side, lim, q, 0.0, 0.0, window, placement_ts=t0) if lim is not None else None
+    if not isinstance(book, Mapping):
+        return {**base, "status": NO_FILL_REST_TTL, "price": None, "filled_qty": 0.0, "fill_ts": None,
+                "trades_n": 0, "trade_vol_beyond": 0.0, "queue_ahead": None,
+                "evidence_status": "NO_BOOK_AT_PLACEMENT"}
+    queue0 = _om.queue_ahead_at(side, lim, book) if lim is not None else 0.0
+    base["queue_ahead"] = queue0
+    step = maker_rest_fill(side, lim, q, queue0, 0.0, window, placement_ts=t0) if lim is not None else None
     vol = float(step["through_seen"]) if step else 0.0
     base.update(trades_n=(len(step["seen"]) - int(step["unsized_prints"])) if step else 0,
                 trade_vol_beyond=round(vol, 8))

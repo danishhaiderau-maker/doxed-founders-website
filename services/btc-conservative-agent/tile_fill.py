@@ -51,9 +51,10 @@ def price_exit_forced(p, ex):
 
 def price_entry_rest(o):
     """AMEND1 A5: the resting remainder of a marketable GTC entry, ONE shared helper (paper_fill.rest_fill) over the
-    receive-stamped trades feed in (t_start, t_start + REST_TTL_S]."""
+    receive-stamped trades feed in (t_start, t_start + REST_TTL_S], behind the visible queue on the placement book row."""
     return paper_fill.rest_fill(o["side"], o["qty_remaining"], o["limit_px"], o["t_start"],
-                                quote_trigger.trades_between(o["t_start"], o["t_start"] + paper_fill.REST_TTL_S))
+                                quote_trigger.trades_between(o["t_start"], o["t_start"] + paper_fill.REST_TTL_S),
+                                book=paper_fill.book10l_at(o["t_start"]))
 
 
 def signal_cap_px(direction: str, signal_ts: float):

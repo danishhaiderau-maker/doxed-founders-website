@@ -143,18 +143,39 @@ def test_a5_one_ttl_shared_with_order_model():
     assert paper_fill.REST_RULE_A5 == "A5_TRADE_THROUGH"
 
 
+_EMPTY = {"b": [], "a": []}
+
+
+def test_a5_rest_waits_behind_visible_queue_at_placement():
+    # RK audit #67: 0.005 already rests at our bid; a 0.01 print through the limit fills that queue first.
+    t0, lim = 100.0, 65000.0
+    book = {"b": [[65000.0, 0.005], [64999.0, 9.0]], "a": [[65001.0, 1.0]]}
+    r = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(101.0, 64999.0, 0.01)], book=book)
+    assert r["queue_ahead"] == 0.005
+    assert r["status"] == "PARTIAL" and abs(r["filled_qty"] - 0.005) < 1e-12
+    big = {"b": [[65000.0, 5.0]], "a": []}
+    n = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(101.0, 64999.0, 0.01)], book=big)
+    assert n["status"] == paper_fill.NO_FILL_REST_TTL and n["filled_qty"] == 0
+
+
+def test_a5_rest_no_placement_book_fails_closed():
+    r = paper_fill.rest_fill("LONG", 0.01, 65000.0, 100.0, [_tr(101.0, 64990.0, 1.0)])
+    assert r["status"] == paper_fill.NO_FILL_REST_TTL and r["evidence_status"] == "NO_BOOK_AT_PLACEMENT"
+    assert r["filled_qty"] == 0.0 and r["price"] is None
+
+
 def test_a5_strictly_beyond_window_and_limit_price():
     t0, lim = 100.0, 65000.0
     trades = [_tr(100.0, 64990), _tr(100.5, 65000.0), _tr(101.0, 64999.0, 0.004), _tr(102.0, 64998.0, 0.01),
               _tr(103.5, 64000.0)]
-    r = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades)
+    r = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades, book=_EMPTY)
     assert r["status"] == "FILLED" and r["price"] == lim and abs(r["filled_qty"] - 0.01) < 1e-12
     assert r["fill_ts"] == 102.0 and r["rest_rule"] == "A5_TRADE_THROUGH" and r["rest_ttl_s"] == 3.0
-    p = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades[:3])
+    p = paper_fill.rest_fill("LONG", 0.01, lim, t0, trades[:3], book=_EMPTY)
     assert p["status"] == "PARTIAL" and abs(p["filled_qty"] - 0.004) < 1e-12
-    n = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(100.0, 1.0), _tr(101.0, 65000.0), _tr(103.01, 1.0)])
+    n = paper_fill.rest_fill("LONG", 0.01, lim, t0, [_tr(100.0, 1.0), _tr(101.0, 65000.0), _tr(103.01, 1.0)], book=_EMPTY)
     assert n["status"] == paper_fill.NO_FILL_REST_TTL and n["price"] is None and n["filled_qty"] == 0
-    s = paper_fill.rest_fill("SHORT", 0.01, lim, t0, [_tr(101.0, 65001.0, -0.02)])
+    s = paper_fill.rest_fill("SHORT", 0.01, lim, t0, [_tr(101.0, 65001.0, -0.02)], book=_EMPTY)
     assert s["status"] == "FILLED" and s["price"] == lim
 
 
