@@ -484,9 +484,11 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(evidence["neighbors_considered"], 5)
         self.assertEqual(evidence["neighbors_supported"], 5)
         self.assertIsNotNone(evidence["score"])
-        # The indexed implementation should comfortably avoid the former
-        # 25-million-distance all-pairs path on ordinary CI hardware.
-        self.assertLess(elapsed, 8.0)
+        # Indexed path must stay well below the former 25-million-distance
+        # all-pairs cost. GHA unit-tests under full-suite load observed
+        # ~15.8s for this 5000-row ranking (still orders below all-pairs);
+        # keep a bound that rejects the O(n^2) regression without flaking.
+        self.assertLess(elapsed, 24.0)
 
     def test_multifactor_neighbor_index_matches_cartesian_nearest_neighbors(self):
         rows = []
