@@ -62400,7 +62400,7 @@ def _live_tile_admission(lane, trade_id, now):
     ok, reasons, info = _ltg.admit_entry(
         lane=lane, trade_id=trade_id, now=now, chains=chains, mirror=mirror,
         decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD,
-        book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"), hm_gate=None,
+        book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"),
         latest_l=_LIVE_GUARDIAN_STATE.get("liq_latest_l"), stop_amendment=os.environ.get(_ltg.STOP_AMENDMENT_ENV),
         amendment_pass=_LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))
     _amber = _LIVE_GUARDIAN_STATE.get("amber") or {}
@@ -62987,7 +62987,7 @@ def _live_guardian_tile_arm_block(lane: str) -> str | None:
     if paper_only:
         return paper_only
     return _ltg.arm_gate_block(_ltg.tile_key_for_lane(lane), _LIVE_GUARDIAN_STATE.get("g4_first_l"),
-                               None, _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
+                               _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
                                os.environ.get(_ltg.STOP_AMENDMENT_ENV), _LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))
 
 

@@ -437,7 +437,7 @@ LIVE_EXIT_RULES = frozenset({
     # GS-20261004 regime stacks (gs_regime_exit_stack.py).
     "THESIS_CUT", "VOL_SHOCK", "MFE_GIVEBACK", "INDICATOR_FLIP", "ATR_TAKE_PROFIT", "LADDER_TP1",
     "LADDER_LOCK", "TIME_BACKSTOP",
-    # Tile 6 · GS-FADE3-TP30 (tile_fade3): fixed bp take-profit and the exchange-resident stop.
+    # Generic fixed-bp take-profit / exchange-resident stop rule ids (shared card vocabulary).
     "TAKE_PROFIT", "EXCHANGE_STOP",
 })
 RISK_EXIT_RULES = frozenset({"HARD_STOP", "EARLY_CUT", "EARLY_FAIL", "STOP_LOSS", "THESIS_FAST_CUT", "THESIS_CUT"})
@@ -1519,11 +1519,11 @@ RETIRED_TILE_LANES = frozenset({
     "FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M",
     # Retired 2026-10-28 (owner Danish APPROVED Rule 22; RK A=PASS): GS-06 committed
     # fade patient-exit mid-epoch tile. Policy module + dedicated tests DELETED;
-    # evidence stays on disk (R5). Active tiles renumber 1..5: CTRL, GS-01, B1, B2, FADE3.
+    # evidence stays on disk (R5). (Roster then still had CTRL/GS-01/B1/B2/FADE3 before #942.)
     "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
     # Retired 2026-10-30 (owner Danish Plan B R22; RK plan PASS): tiles 3–6
     # B1, B2, GS-FADE3-TP30, GS-FADE3-LOOSE. Policy modules + self-sim engines + dedicated
-    # tests DELETED; evidence stays on disk (R5). Active roster: CTRL + GS-01 only.
+    # tests DELETED; evidence stays on disk (R5). Active roster now: CTRL + GS-01 only.
     "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
     "FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25",
 })
