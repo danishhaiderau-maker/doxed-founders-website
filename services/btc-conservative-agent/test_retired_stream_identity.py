@@ -44,7 +44,9 @@ def test_allowlist_is_exactly_market_segment():
     assert retired_streams.RETIREMENT_FINGERPRINTS["market_segment"] == {
         "rows": 18322, "mtime": 1792830018, "size": 37969967}
     assert "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT" in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
-    # Hard refusals (epoch/tile/…) must NOT be soft — tipMatch softens fingerprint family only.
+    # Roster tile_config drift on a frozen retired pointer is soft (BTC-479 / post-#924 GS-06).
+    assert "RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS" in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
+    # Epoch mismatch stays hard — tipMatch must not soften a wrong-epoch retired pointer.
     assert "RETIRED_IDENTITY_EPOCH_ID_DIFFERS" not in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
 
 
@@ -215,12 +217,28 @@ def _ready(tmp_path, monkeypatch):
     return s, path
 
 
-def test_tile_config_differs_conflicts(tmp_path, monkeypatch):
+def test_tile_config_differs_soft_excludes_without_poisoning_active(tmp_path, monkeypatch):
+    """Active roster edits move tile_config_signature; frozen retired pointer must soft-exclude.
+
+    BTC-479 / #924: GS-06 Rule 22 retire changed the active signature while market_segment's
+    stale identity stayed pinned → previously hard-raised and emptied analyzer cohort
+    (ledger.reconciliation analyzer 0 + studies integrity INVALID via v3_read_authority).
+    """
     _store(tmp_path)
     _pin(monkeypatch, tmp_path)
     _stale(tmp_path, "market_segment", tile_config_signature="f" * 64, deployed_revision=STALE)
-    with pytest.raises(ValueError, match="TILE_CONFIG"):
-        V3EvidenceStore.open_read_only(tmp_path)
+    ro = V3EvidenceStore.open_read_only(tmp_path)
+    assert ro._retired_contaminated["market_segment"] == "RETIRED_IDENTITY_TILE_CONFIG_SIGNATURE_DIFFERS"
+    assert "market_segment" in ro._retired_excluded
+    assert ro.verify()["ledger_status"]["decision"] == "GREEN"
+    assert ro.verify()["ledger_status"]["market_segment"] == "RETIRED_CONTAMINATED"
+    by_id = {}
+    for _ref, generation_path in ro.ledger_generation_paths("decision"):
+        for line in generation_path.read_text("utf-8").splitlines():
+            if line.strip():
+                row = json.loads(line)
+                by_id[row["record_id"]] = row
+    assert len(by_id) == 4
 
 
 def test_signature_mismatch_subsecond_mtime_soft_excludes(tmp_path, monkeypatch):

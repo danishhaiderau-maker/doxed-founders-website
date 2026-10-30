@@ -511,11 +511,14 @@ class V3EvidenceStore:
                 continue  # not stale: ordinary handling, identity check applies as before
             why = instance._retired_exemption_refusal(stream, identity)
             if why and why not in SOFT_RETIRED_EXEMPTION_REFUSALS:
-                # Hard: epoch/tile/field mismatch, gen pointer, WAL, signature — real identity conflict.
+                # Hard: epoch/field mismatch, gen pointer, WAL, ledger signature/tail — real conflict.
+                # tile_config_signature drift is soft (roster edits); see SOFT_RETIRED_EXEMPTION_REFUSALS.
                 raise ValueError(f"V3 read authority identity conflict ({stream}: {why})")
-            # Soft fingerprint-family refusal (or clean exemption): exclude retired stream only.
-            # Do not poison decision/execution/opportunity — market_segment is R3-dropped input,
-            # and the Fly-pinned fingerprint cannot validate a laptop analyzer copy (BTC-165).
+            # Soft fingerprint-family or roster tile_config drift (or clean exemption): exclude
+            # retired stream only. Do not poison decision/execution/opportunity — market_segment is
+            # R3-dropped input; Fly-pinned fingerprint cannot validate a laptop copy (BTC-165);
+            # active tile_config_signature moves on Rule 22 retire without rewriting the frozen
+            # retired pointer (BTC-479 / #924 GS-06).
             instance._retired_excluded[stream] = RETIRED_STREAM_ALLOWLIST[stream]
             if why:
                 instance._retired_contaminated[stream] = why
