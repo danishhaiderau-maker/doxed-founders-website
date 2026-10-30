@@ -4683,12 +4683,31 @@ def api_summary():
     approves = int(re.get("approve_attempts") or 0)
     executed = int(re.get("executed") or p.get("trades") or 0)
     fill_pct = round(100.0 * executed / approves, 1) if approves else None
+    # R15/R17: every analyzer output states its source and earliest admissible ts.
+    epoch_floor_ts = 1792263671.0
+    recon = _read_json("ledger_reconciliation.json") or {}
+    cohort_unreadable = bool(recon.get("analyzer_cohort_unreadable"))
+    if cohort_unreadable or str(recon.get("level") or "").upper() == "RED":
+        # Do not publish a 0-row cohort as a successful empty book.
+        p = dict(p)
+        p["trades"] = 0
+        p["qualification_blocked"] = True
+        p["block_reason"] = "LEDGER_RECONCILIATION_RED"
     return jsonify({
         "scope": compact.get("session_scope"),
         # Same bounded latest-attempt reader as /api/status. Do not infer an
         # active/successful run from saved report presence or freshness alone.
         "analysis_run": _analyzer_run_state(),
         "data_scope": compact.get("data_scope"),
+        "data_source": (
+            "CURRENT_ATOMIC_MANIFEST"
+            if isinstance(manifest_performance, dict)
+            else "CURRENT_COMPACT_SUMMARY"
+        ),
+        "earliest_ts": epoch_floor_ts,
+        "epoch_floor_ts": epoch_floor_ts,
+        "ledger_reconciliation_level": recon.get("level"),
+        "analyzer_cohort_unreadable": cohort_unreadable,
         "generated_at": manifest.get("generated_at") or compact.get("generated_at"),
         "performance": p,
         "performance_source": (
@@ -5008,6 +5027,27 @@ def _genome_search_space_disclosure(report: dict) -> dict:
 def _genome_payload():
     # V3.1 Safe Policy Genome is the canonical current collector/analyzer
     # surface. The older research.db DNA engine is a legacy fallback only.
+    epoch_floor_ts = 1792263671.0
+    recon = _read_json("ledger_reconciliation.json") or {}
+    if bool(recon.get("analyzer_cohort_unreadable")):
+        # Do not serve a stale/cached genome (e.g. 149h old) over an unreadable cohort.
+        return {
+            "schema": "genome_dashboard_v3_1_compat_v1",
+            "available": False,
+            "ok": False,
+            "status": "RED",
+            "reason": "ANALYZER_COHORT_UNREADABLE",
+            "data_source": "ledger_reconciliation.json",
+            "earliest_ts": epoch_floor_ts,
+            "epoch_floor_ts": epoch_floor_ts,
+            "ledger_reconciliation_level": recon.get("level"),
+            "qualification": "BLOCKED_UNTIL_IDS_MATCH_FLY",
+            "live_policy_change_allowed": False,
+            "warning": (
+                "Genome recompute is blocked until closed-row ids match Fly and "
+                "the analyzer cohort is readable (no soft-exclude empty book)."
+            ),
+        }
     safe_v31 = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
     if safe_v31.get("schema"):
         # The dashboard overview needs a bounded summary, not the complete
@@ -5039,6 +5079,9 @@ def _genome_payload():
             "available": True,
             "collector_generation": "V3.1",
             "evidence_source": SAFE_POLICY_GENOME_V3_REPORT_FILE,
+            "data_source": SAFE_POLICY_GENOME_V3_REPORT_FILE,
+            "earliest_ts": epoch_floor_ts,
+            "epoch_floor_ts": epoch_floor_ts,
             "status": safe_v31.get("status") or "COLLECTING",
             "qualification": safe_v31.get("qualification") or "NO_SAFE_QUALIFIED_POLICY",
             "generated_at": safe_v31.get("generated_at"),

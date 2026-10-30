@@ -1,4 +1,11 @@
 
+## 30 Oct 2026 — #941 analyzer integrity (Plan A) FREEZE
+- Root: soft-exclude #917/#918/#922/#929 emptied analyzer cohort while GREEN; Fly `/api/analyzer/summary` 503 `no valid bundle`; ledger RED fly 294+/analyzer 0; genome ~149h cache; #916 hid future_path.
+- Evidence: HM retro 10:40Z summary 503; system-health ledger.reconciliation; HM-AUDIT genome 147.5h; earliest_ts 1792263671.
+- Change: fail-closed V3 + exact GS-06 pair; 31+2 integrity ids pinned; source+min_ts on summary/genome; genome refuse when `analyzer_cohort_unreadable`; future_path started (no segment writes).
+- Metric: honest summary RED/200; CI green; HM exact-head on FREEZE sha. No merge/deploy/arm from this row.
+
+
 ## 25 Oct 2026 ~07:25 UTC — sticky DEPLOY_MAINTENANCE after clear resume
 - See `docs/TRACKER.md`. Preserve re-asserted pause after mid-bootstrap `/api/resume`; Guaranteed resume blocked on bootstrap stall. #900 merged (`f99681380`) without preserve-skip. Fast-follow `cursor/sticky-deploy-maintenance-lease-86dd` + once-clear flag. Live stays disarmed.
 

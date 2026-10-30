@@ -29,6 +29,7 @@ test_analyzer_epoch_guard_wiring.py
 test_analyzer_epoch_purity_streams.py
 test_analyzer_evidence_coverage_publication.py
 test_analyzer_execution_evidence_ui.py
+test_analyzer_fresh_sample_integrity.py
 test_analyzer_generation_fail_closed.py
 test_analyzer_integrity_reconciliation.py
 test_analyzer_loopback_url_contract.py

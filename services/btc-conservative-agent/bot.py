@@ -45780,6 +45780,9 @@ def _external_analyzer_status_payload(endpoint: str) -> dict:
         "endpoint": endpoint,
         "mode": "external_desktop_analyzer",
         "source": "Fly trading owner + uploaded desktop analyzer mirror",
+        "data_source": "fly:uploaded_analyzer_mirror",
+        "earliest_ts": 1792263671.0,
+        "epoch_floor_ts": 1792263671.0,
         "live_analyzer_process": False,
         "mirror_available": (mirror_dir / "analysis_dashboard.html").is_file(),
         "mirror_status": mirror_status,
@@ -45805,11 +45808,16 @@ def api_analyzer_summary():
         if _active_analyzer_mirror_dir() is None:
             # Fail closed: no validated bundle is not a successful empty summary.
             # cohort_readable is false so a 0-row mirror is not treated as the book.
+            # R15/R17: every analyzer output states source + earliest ts.
             resp = jsonify({
                 "ok": False,
                 "error": _ANALYZER_BUNDLE_NO_VALID,
                 "analyzer_mirror": "ABSENT",
                 "cohort_readable": False,
+                "data_source": "fly:/api/analyzer/summary (no validated mirror bundle)",
+                "earliest_ts": 1792263671.0,
+                "epoch_floor_ts": 1792263671.0,
+                "status": "RED",
             })
             resp.headers["Cache-Control"] = "no-store"
             return resp, 503

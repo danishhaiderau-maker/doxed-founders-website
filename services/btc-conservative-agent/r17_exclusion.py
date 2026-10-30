@@ -44,7 +44,36 @@ REASON_PRECOUNT = "R17_PRECOUNT"
 # that were not priced by this fix are non-countable. Rows are not deleted.
 REASON_INTEGRITY_WINDOW = "INTEGRITY_GATE_WINDOW_20261030"
 REASON_NO_BOOK_RETRY = "ENTRY_NO_BOOK_RETRY_UNPROVEN"
+REASON_INTEGRITY_IDS = "INTEGRITY_GATE_IDS_20261030"
 INTEGRITY_WINDOW_FROM_TS = 1793350740.0
+# Hard epoch floor (R5 / genesis): rows before this ts are never fresh.
+EPOCH_FLOOR_TS = 1792263671.0
+# 31 closed + 2 open paper ids from Fly GET tiles/trades since 1793350740
+# (R21 dry-run package 30 Oct 2026; list_sha256 of compact JSON body below).
+INTEGRITY_ID_LIST = "integrity_ids_20261030.json"
+INTEGRITY_ID_LIST_SHA = (
+    "34aafd88d36f14bcea02d738ed866bb0a85b9c45aa0af1b242d4d05173ba6a53"
+)
+
+
+def _load_integrity_ids(list_dir: Path = LIST_DIR) -> tuple:
+    """(ids, errors). Fail closed: any pin error means every row is non-countable."""
+    path = Path(list_dir) / INTEGRITY_ID_LIST
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return frozenset(), (f"{INTEGRITY_ID_LIST}: missing ({type(exc).__name__})",)
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != INTEGRITY_ID_LIST_SHA:
+        return frozenset(), (f"{INTEGRITY_ID_LIST}: sha256 {digest} != pinned {INTEGRITY_ID_LIST_SHA}",)
+    try:
+        payload = json.loads(raw)
+        ids = _ids_from(payload if not isinstance(payload, list) else payload)
+    except ValueError as exc:
+        return frozenset(), (f"{INTEGRITY_ID_LIST}: unreadable ({exc})",)
+    if len(ids) != 33:
+        return frozenset(), (f"{INTEGRITY_ID_LIST}: expected 33 ids, got {len(ids)}",)
+    return frozenset(ids), ()
 
 
 def _row_times(row) -> list:
@@ -102,6 +131,8 @@ def load_lists(list_dir: Path = LIST_DIR, pins: dict = PINNED_LISTS) -> tuple:
 
 
 R17_IDS, LOAD_ERRORS = load_lists()
+INTEGRITY_DISCARD_IDS, INTEGRITY_ID_LOAD_ERRORS = _load_integrity_ids()
+LOAD_ERRORS = tuple(list(LOAD_ERRORS) + list(INTEGRITY_ID_LOAD_ERRORS))
 
 
 def _base_trade_id(trade_id) -> str:
@@ -303,6 +334,8 @@ def non_countable_reason(row, *, ids=None, load_errors=None):
     tid = str(row.get("trade_id") or "").strip()
     if tid and (tid in ids or _base_trade_id(tid) in ids):
         return REASON_ID_LIST
+    if tid and (tid in INTEGRITY_DISCARD_IDS or _base_trade_id(tid) in INTEGRITY_DISCARD_IDS):
+        return REASON_INTEGRITY_IDS
     # RK (24 Oct): no early return. proof_failures ALWAYS runs and every reason is recorded, so a stamped row is
     # never a bare R17_STAMPED. Countability is unchanged: the row is non-countable iff any part below is present.
     parts = []
@@ -325,6 +358,8 @@ def non_countable_reason(row, *, ids=None, load_errors=None):
     if _flag(row, "entry_no_book_retried"):
         parts.append(REASON_NO_BOOK_RETRY)
     times = _row_times(row)
+    if times and min(times) < EPOCH_FLOOR_TS:
+        parts.append("PRE_EPOCH_FLOOR")
     if times and min(times) >= INTEGRITY_WINDOW_FROM_TS and not _flag(row, "integrity_entry_ok"):
         parts.append(REASON_INTEGRITY_WINDOW)
     out = []
@@ -350,5 +385,8 @@ def stamp_on_write(row: dict) -> dict:
 
 def status() -> dict:
     return {"schema": "r17_exclusion_v2", "ids": len(R17_IDS), "lists": dict(PINNED_LISTS),
+            "integrity_discard_ids": len(INTEGRITY_DISCARD_IDS),
+            "integrity_id_list": INTEGRITY_ID_LIST,
+            "epoch_floor_ts": EPOCH_FLOOR_TS,
             "load_errors": list(LOAD_ERRORS), "rule": "countable_only_with_proof",
             "fail_closed": bool(LOAD_ERRORS)}
