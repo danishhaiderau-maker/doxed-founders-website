@@ -67,7 +67,7 @@ def test_cap_mutation_proof_without_the_cap_the_fill_exceeds_the_remaining_size(
     assert r["filled_qty"] > 0.3 + 1e-9  # the test above would fail on this code
 
 
-# gb1-d365a7a17cb2 (24 Oct 2026, ~09:03 AEDT): SHORT 0.000310508862 resting at 80513 then 80485; real prints from
+# Historical overfill regression gb1-d365a7a17cb2 (24 Oct 2026); replayed on active GS-01 fixture lane: SHORT 0.000310508862 resting at 80513 then 80485; real prints from
 # /app/data/runtime/bfx_trades.jsonl (ids 1999206912 / 1999206917 each appear ONCE in the feed).
 GB1_REQ = 0.000310508862
 GB1_PRINTS = [{"ts": 1792879395.724, "px": 80524.0, "amt": 0.0001, "id": 1999206912, "recv_s": 1792879395},
@@ -79,11 +79,11 @@ def _gb1_ns(monkeypatch):
     import quote_trigger as qt
     monkeypatch.setattr(pf, "book10l_at", lambda t: {"s": int(t) - 1, "a": [[80530.0, 1.0]], "b": [[80500.0, 1.0]]})
     monkeypatch.setattr(qt, "trades_between", lambda a, b: [r for r in GB1_PRINTS if a < r["ts"] <= b])
-    tm = {"gb1": {"signal_ref": {"adaptive_entry_decision": {"action": "MAKER", "exec": {
+    tm = {"gs1-r0-overfill-fixture": {"signal_ref": {"adaptive_entry_decision": {"action": "MAKER", "exec": {
         "kind": "TOUCH", "ttl_sec": 600, "reprice_sec": 60}}}}}
     ns = _lane_ns(_Clock(1792879381.0))
     ns["trades_map"] = tm
-    order = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "gb1", "signal_dir": "SHORT",
+    order = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "trade_id": "gs1-r0-overfill-fixture", "signal_dir": "SHORT",
              "qty": GB1_REQ, "signal_created_ts": 1792879381.3403363, "limit_price": 80513.0}
     return ns, order
 

@@ -230,10 +230,8 @@ test_genome_reset_mode_bridge.py
 test_genome_search_space_disclosure.py
 test_genome_source_preflight.py
 test_gs_regime_engine.py
-test_hm_r4_b1_exit_fill.py
 test_hm_r5_fill_provenance.py
 test_hm_r6_report_contract.py
-test_hm_r7_a1_fade3_key.py
 test_hm_audit_20261010.py
 test_hm_missing_checks.py
 test_horizon_source_truth.py
@@ -316,7 +314,6 @@ test_monitor_gaps.py
 test_monitor_integrity.py
 test_monitor_ladder_legs_and_route_floor.py
 test_monitor_lanes_funnel_epoch_scope.py
-test_monitor_lanes_self_sim_closes.py
 test_monitor_streams.py
 test_monitor_tiles_api.py
 test_multiverse_maturation_starvation.py
@@ -347,8 +344,6 @@ test_paper_policy_family_fade_pool.py
 test_paper_policy_family_gs01_xv_premium_atr_tp.py
 test_paper_policy_family_gs07_fast_premium_fade.py
 test_paper_policy_family_gs07_v07_premium_fade_60m.py
-test_paper_policy_family_gsb1_cvd_div_regime.py
-test_paper_policy_family_gsb2_regime_switcher.py
 test_paper_policy_family_gsb3_committed_fade_regime.py
 test_paper_policy_family_premium_reversion_60m.py
 test_paper_policy_family_random_control_taker_90.py
@@ -538,7 +533,6 @@ test_three_tier_strategy_leaders.py
 test_tile_ai_attribution.py
 test_tile_card_epoch_truth.py
 test_tile_evidence_points.py
-test_tile_fade3.py
 test_tile_fill_migration.py
 test_tile_live_single_button.py
 test_tile_no_fill_lifecycle_terminal.py
@@ -636,7 +630,6 @@ test_r17_gap_detector.py
 test_shadow_exit_backfill_r3_blocked.py
 test_integration_848_resolution.py
 test_r17_retired_sources.py
-test_hm_r4_b2_guardian.py
 test_live_fences_health.py
 test_epoch_unplaced_rows_excluded.py
 test_generation_artifacts_r17.py
@@ -677,7 +670,6 @@ test_trade_count_id_diff.py
 test_trade_tombstone_external_delete.py
 test_r20_live_loss_limit.py
 test_r20_open_mark_limit_boundary.py
-test_tile_fade3_incremental_feed.py
 test_order_intent_ts_stamps.py
 test_relay_guard_cutoff.py
 test_analyzer_r1_rk_ruling.py
@@ -685,7 +677,6 @@ test_baseline_schema_fail_closed.py
 test_rk5_all_data_mode_deleted.py
 test_analyzer_floor_epoch.py
 test_fill_book_stamp_r3.py
-test_tile_fade3_deriv_rotation.py
 # Fly deploy-job pytest tests (fly-bot-deploy.yml, all steps before flyctl deploy), added 2026-10-25 after deploy
 # run 40147646292 failed on a scripts/ test PR CI never ran. Paths are relative to this service dir (runner cwd).
 ../../scripts/r2_backup/test_r2_backup.py
@@ -701,4 +692,3 @@ test_tile_fade3_deriv_rotation.py
 ../../scripts/test_fly_resume_bootstrap.py
 ../../scripts/test_fly_resume_predeploy_abort.py
 ../../scripts/test_live_flat_verify.py
-test_tile_fade3_loose.py

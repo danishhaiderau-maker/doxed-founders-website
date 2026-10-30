@@ -305,7 +305,7 @@ def test_paper_fill_output_byte_identical_with_measurement_stamped():
 
 
 def test_policy_outputs_identical_with_measurement_stamped():
-    import paper_policy_family_gsb2_regime_switcher as policy
+    import paper_policy_family_gs01_xv_premium_atr_tp as policy
     from gs_tile_contract_support import asia_ts, bar, decide
     d = decide(policy, direction="LONG", engine_bar=bar(atr_pct=50.0, adx=30.0, atr_bp=4.0), ts=asia_ts())
     stamped = copy.deepcopy(d)
