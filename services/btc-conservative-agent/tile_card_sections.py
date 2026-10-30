@@ -173,7 +173,7 @@ def _regime_profile_text(name: str, prof: dict) -> str:
     if prof.get("be_atr"):
         bits.append(f"break-even at max({_num(prof['be_floor'])} bp, {_num(prof['be_atr'])} ATR) → stop "
                     f"{_bp(prof['lock_bp'])}")
-    elif prof.get("be_atr") == 0:  # fixed bp break-even (GS-06 patient fade)
+    elif prof.get("be_atr") == 0:  # fixed bp break-even (kept retired ROUTER/FADE-POOL profiles)
         bits.append(f"break-even at {_bp(prof['be_floor'])} → stop {_bp(prof['lock_bp'])}")
     if prof.get("trail_atr"):
         bits.append(f"ATR trail max({_num(prof['trail_floor'])} bp, {_num(prof['trail_atr'])} ATR) armed at "

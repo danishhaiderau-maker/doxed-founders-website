@@ -106,6 +106,7 @@ MID_EPOCH_ADDITIONS = (
     # TILE_ON, so a retired lane is now refused during the freeze; git history keeps the record (R5).
     # Tile 5 · GS-FADE3-TP30 (gf3; owner 25 Oct; RK PASS 06:24 AEDT; paper only, live refused, self-simulated).
     # Display slot renumbered 6→5 when GS-06 was retired (2026-10-28); key/cid unchanged.
+    # tile_number below is the historical mid-epoch registration stamp (not live display index).
     {"lane": "FAMILY_GS_FADE3_TP30", "tile_number": 6, "hypothesis_id": "GS-20261025-FADE3-TP30",
      "approved_by": "Danish (owner), 2026-10-25: build GS-FADE3-TP30 as the slot-6 PAPER tile (PR #877)",
      "spec": "sim E8 FADE ALL W=3 (tile_fade3 fixtures/fade3_sim) + RK PASS 25 Oct 06:24 AEDT",

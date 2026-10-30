@@ -45,7 +45,7 @@ def test_every_registry_lane_has_one_signature_whatever_ttl_a_source_carries():
         assert _sig(lane, 1800.0)["paper_policy_spec"]["declared_entry_ttl_sec"] == registry_ttl
 
 
-def test_research_resolution_deadline_follows_the_canonical_ttl_for_gs01_gs06_and_regime_lanes():
+def test_research_resolution_deadline_follows_the_canonical_ttl_for_gs01_fade3_and_regime_lanes():
     """resolution_deadline_ts = signal_ts + declared_entry_ttl_sec + allowance, so it now reads the registry TTL."""
     expected = {"FAMILY_GS01_XV_PREMIUM_ATR_TP": 3.0, "FAMILY_GS_FADE3_TP30": 1.0,
                 "FAMILY_GSB1_CVD_DIV_REGIME": 1200.0, "FAMILY_GSB2_REGIME_SWITCHER": 1200.0}

@@ -46,7 +46,11 @@ def test_fixture_rows_have_every_field_the_filter_reads_except_the_two_731_field
             if k not in ("exit_pricing_basis", "exit_repriced_lag_s"):
                 assert k in r["pricing"], k
         assert isinstance(r["pnl"].get("bp"), float) and r["pnl"].get("bp_basis") == "net_pnl_bp"
-    assert all(ms.hypothesis_of(r) for r in OLD + NEW if r.get("lane"))     # every live lane is in the explicit table
+    # every fixture lane resolves (live map + opaque retired archive labels); GS-06 is opaque-only
+    assert all(ms.hypothesis_of(r) for r in OLD + NEW if r.get("lane"))
+    assert "FAMILY_GS06_COMMITTED_FADE_ATR_TP" in ms.OPAQUE_RETIRED_HYPOTHESIS_BY_LANE
+    assert "FAMILY_GS06_COMMITTED_FADE_ATR_TP" not in ms.LIVE_HYPOTHESIS_BY_LANE
+    assert {"FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25"} <= set(ms.LIVE_HYPOTHESIS_BY_LANE)
 
 
 def test_until_731_fields_reach_the_route_every_live_row_is_invalid_for_a_missing_field():
@@ -114,6 +118,7 @@ def test_validity_definition_on_real_row():
     assert mut(["pricing", "fresh_eligible"], False) == "NOT_FRESH_ELIGIBLE"
     assert mut(["entry_ts"], None) == "UNSTAMPED_OR_STRADDLE_TS" and mut(["exit_ts"], None) == "UNSTAMPED_OR_STRADDLE_TS"
     assert mut(["lane"], "FAMILY_UNKNOWN") == "UNKNOWN_LANE"                       # explicit table, fail closed
+    assert mut(["lane"], "FAMILY_GS06_COMMITTED_FADE_ATR_TP") == "RETIRED_LANE_OPAQUE"  # R22 archive-only
     assert mut(["pricing", "fill_valid"], False) == "NOT_BOOK_PRICED"
     assert mut(["fill", "evidence_status"], "PARTIAL") == "FILL_EVIDENCE_INCOMPLETE"
     r = copy.deepcopy(base); r["pricing"].update(exit_pricing_basis="REPRICED_CURRENT_TIME", exit_repriced_lag_s=4.0)

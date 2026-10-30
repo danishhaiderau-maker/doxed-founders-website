@@ -58,16 +58,23 @@ def _num(v: Any) -> float | None:
 
 
 # Explicit lane -> hypothesis table (fail closed: an unknown lane is INVALID). H1-H8 are OFFLINE replays on the fresh-epoch
-# streams, no live tile by design (Strategist 19 Oct): tiles 1-5 map to no H-id, so each live tile row maps to its own tile
-# label ("TILE:..."), which only keys the one-per-entry / non-overlap rule. If an H is ever promoted to a tile, Strategist
-# registers the lane -> H-id entry here first.
-HYPOTHESIS_BY_LANE: dict[str, str] = {
+# streams, no live tile by design (Strategist 19 Oct): each live tile row maps to its own tile label ("TILE:..."), which
+# only keys the one-per-entry / non-overlap rule. If an H is ever promoted to a tile, Strategist registers the lane here first.
+# R22 (2026-10-28): GS-06 retired — kept only in OPAQUE_RETIRED (19 Oct fixture rows stay parseable, never current-cohort
+# countable). FADE3 / FADE3-LOOSE joined the live map after the GS-06 replace-one.
+LIVE_HYPOTHESIS_BY_LANE: dict[str, str] = {
     "FAMILY_GS01_XV_PREMIUM_ATR_TP": "TILE:GS-01",
-    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": "TILE:GS-06",
     "FAMILY_GSB1_CVD_DIV_REGIME": "TILE:B1",
     "FAMILY_GSB2_REGIME_SWITCHER": "TILE:B2",
     "FAMILY_RANDOM_CONTROL_TAKER_90": "TILE:CTRL",
+    "FAMILY_GS_FADE3_TP30": "TILE:GS-FADE3",
+    "FAMILY_GS_FADE3_LOOSE_TP25": "TILE:GS-FADE3-LOOSE",
 }
+# Opaque archive labels only (TILE_LIFECYCLE §retire step 6). Parsed for fixtures; invalid_reason rejects as RETIRED_LANE_OPAQUE.
+OPAQUE_RETIRED_HYPOTHESIS_BY_LANE: dict[str, str] = {
+    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": "TILE:GS-06",
+}
+HYPOTHESIS_BY_LANE: dict[str, str] = {**LIVE_HYPOTHESIS_BY_LANE, **OPAQUE_RETIRED_HYPOTHESIS_BY_LANE}
 # fill.fill_basis is NOT_INDEXED_SINCE_BOOT on most live rows (the fill-evidence index is empty after a boot; 38 of 41 closed rows on the
 # 19 Oct newest page): the book pricing is then proven by fill_model + pricing.* facts + fill.evidence_status == COMPLETE.
 BOOK_FILL_BASES = ("BOOK10L_TAKER_WALK", "NOT_INDEXED_SINCE_BOOT")
@@ -108,6 +115,8 @@ def invalid_reason(row: dict) -> str | None:
             return f"MISSING_FIELD:{name}.{miss[0]}"
     if hypothesis_of(row) is None:
         return "UNKNOWN_LANE"
+    if str(row.get("lane") or "") in OPAQUE_RETIRED_HYPOTHESIS_BY_LANE:
+        return "RETIRED_LANE_OPAQUE"  # R22: retired tile evidence is archive-only, never countable
     if row["identity_quarantined"] is not False:
         return "IDENTITY_QUARANTINED"
     if ex["deploy_flatten"] is not False or str(ex.get("close_origin") or "") == "DEPLOY_MAINTENANCE":
