@@ -1,6 +1,7 @@
 ## 30 Oct 2026 — positions/close HTTP 500 (deploy 41050904036) — FREEZE pending HM/RK
 
-- **Branch:** `cursor/positions-close-500-harden-e96c`
+- **PR:** [#945](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/945) branch `cursor/positions-close-500-harden-e96c`
+- **Head:** `631b6a100c131079f3c95b112b77b6ce88e62f14`
 - **Root cause (HM Fly bot.log):** `_paper_lane_exit` `time.sleep(min(model_fill - time.time(), 3.0))` → ValueError negative sleep (two clock samples). `rnd-5e22404b5d77` raised before save (still open).
 - **Fix:** clamp sleep `max(0.0, min(...))`; workflow logs trade_id/status/body + `DEPLOY_FORCE_FLAT`; handler try/except → JSON 500 with `exception_type`.
 - **Regression:** `test_paper_lane_exit_wait_clamps_negative_sleep_when_clock_crosses_model_fill`
