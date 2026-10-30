@@ -1,9 +1,9 @@
 ## 30 Oct 2026 — URGENT R8 pure revert #929 + #930 (do not merge yet)
 
-- **PR:** (fill after open) branch `cursor/revert-929-930-12bb`
+- **PR:** [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) branch `cursor/revert-929-930-12bb`
 - **Base:** `origin/master` `93aa39a4caccb3673ed415587af0130367607233`
-- **Revert commits:** `a423ac1764c2bd820530482d0487ee6ed83abcc5` (undo #930 `93aa39a4`) then `dec6800c94838a57cd1e35765e167883b6679897` (undo #929 `da4f7475`); tree equals pre-#929 tip `c7c51f4b` (`#927`/`#928` stay)
-- **Head sha:** (fill after push)
+- **Revert commits:** `a423ac1764c2bd820530482d0487ee6ed83abcc5` (undo #930 `93aa39a4`) then `dec6800c94838a57cd1e35765e167883b6679897` (undo #929 `da4f7475`); revert-tree equals pre-#929 tip `c7c51f4b` (`#927`/`#928` stay); tracker commit follows
+- **Head sha:** `10df108416530526da0131374ad43a1c408cd7fa`
 - **Why:** restores fail-closed after #929 VIOLATION (soft-exclude retired tile_config); makes #930 retry path non-applicable until a later fixed PR
 - **Trades since 19:59 AEDT 30 Oct 2026:** **non-countable** (31 CLOSED fingerprinted in store R21 dry-run package; OPEN since cutoff also non-countable). No stamp code in this PR. **No delete executed** — R21 package only at store `internal/r21-dryrun-trades-1959aedt.md`
 - **Do not merge / deploy / arm from this entry alone**
