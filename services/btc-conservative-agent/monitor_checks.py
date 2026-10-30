@@ -44,12 +44,32 @@ def is_stop_type(reason: Any) -> bool:
 
 
 # ----------------------------------------------------------------------------- exit truth
+def _book_top_compare_px(ex: Mapping[str, Any], exit_price: float | None) -> float | None:
+    """Price compared to the final ``exit_book_top_*`` stamp (both-legs realism).
+
+    Paper-book lanes store ``exit_price`` as ``VWAP_ALL_LEGS``. Comparing that blend to the FINAL
+    leg's book top falsely REDs honest TP1 + remainder closes (BTC-477 gb2-899a1661f1ff: VWAP 78301
+    vs final bid 78249 while each leg matched its own fill touch). Use the final leg's fill for the
+    stamp check; per-leg honesty remains the fill_book statistic.
+    """
+    legs = ex.get("legs") or []
+    multi = len(legs) > 1 or str(ex.get("exit_price_basis") or "") == "VWAP_ALL_LEGS"
+    if multi and legs:
+        final = _f((legs[-1] or {}).get("price"))
+        if final is not None:
+            return final
+    return exit_price
+
+
 def exit_truth(rows: Iterable[Mapping[str, Any]], tape_ts: list, tape_rows: list, *, since: float) -> dict:
     """Booked exit price vs the executable touch on the 1 s tape at close.
 
     LONG closes sell at the bid, SHORT closes buy at the ask. A stop-type exit booked better than the
     touch by more than 5 bp is RED (the stale-trigger booking bug of 8-10 Oct). Rows with their own
     exit_bid/exit_ask stamps use those instead of the tape.
+
+    Both-legs realism: when ``exit_price`` is a multi-leg VWAP, the book-top statistic uses the final
+    leg's fill (not the blend) against the final touch; each leg is still checked vs its fill snapshot.
     """
     checked, bad, no_tape = 0, [], 0
     fb_n, fb_missing, fb_all, fb_bad = 0, 0, [], []
@@ -85,12 +105,17 @@ def exit_truth(rows: Iterable[Mapping[str, Any]], tape_ts: list, tape_rows: list
         if not touch:
             no_tape += 1
             continue
+        compare_px = _book_top_compare_px(ex, px)
+        if compare_px is None:
+            no_tape += 1
+            continue
         checked += 1
-        better_bp = (px / touch - 1) * 1e4 * (1 if side == "LONG" else -1)
+        better_bp = (compare_px / touch - 1) * 1e4 * (1 if side == "LONG" else -1)
         if better_bp > EXIT_TRUTH_RED_BP:
             bad.append({"trade_id": r.get("trade_id"), "lane": r.get("lane") or r.get("research_lane"),
-                        "exit_reason": ex.get("exit_reason"), "close_ts": ct, "booked": px, "touch": touch,
-                        "booked_better_than_touch_bp": round(better_bp, 2)})
+                        "exit_reason": ex.get("exit_reason"), "close_ts": ct, "booked": compare_px, "touch": touch,
+                        "booked_better_than_touch_bp": round(better_bp, 2),
+                        "exit_price_vwap": px if compare_px != px else None})
     reasons = [f"{len(bad)} stop-type exits booked >{EXIT_TRUTH_RED_BP:g} bp better than the touch"] if bad else []
     if fb_bad:
         reasons.append(f"{len(fb_bad)} stop-type exits booked >{EXIT_TRUTH_RED_BP:g} bp better than the fill-time book touch")
