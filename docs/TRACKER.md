@@ -128,6 +128,7 @@ Last status refresh: 2026-10-26 05:02 AEDT. Boss = Cursor Project.
 
 ## Recent ops notes (compressed; open-list above is source of truth)
 
+- **Countability HANDOFF closed** (Danish 30 Oct 21:46): live-ack-only, n≥10 Bitfinex acks; no paper-measured delay — see `HANDOFF-QUESTIONS.md` Closed.
 - **Master tip:** `c7b3d1690` (`#893` after `#896`/`#914`). Fly paper `c5a0d6dba6a9` (`#914`). Docs remasters — no Soft B / Force / wipe / tip / arm.
 - **Quiet bundle:** `#910` **DONE** → `#911` → `#884` → `#908` (HOLD merge of this PR until `#884` lands).
 - **Still NO-GO:** tombstone apply until R21; dashboard blocked (Boss PR#); GS-01 arm last after Danish OK.
