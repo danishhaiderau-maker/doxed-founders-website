@@ -42,18 +42,6 @@ STREAMS = {
     "xvp_shadow_signals": "xvp_shadow_signals.jsonl",      # cross-venue premium shadow triggers/outcomes
 }
 
-# R22 PR-B: mark dead-writer streams RETIRED (R5 custody). Stay in STREAMS.
-# Health fail-closed / resurrection RED for these + fill_markouts/xvp/ai_shadow is #944 (PR-A).
-# Value = unix ts after which a new row would be resurrection once #944 lands.
-RETIRED_STREAMS: dict[str, float] = {
-    "taker_counterfactuals": 1792830060.0,
-    "shadow_exit_paths": 1792830060.0,
-    "disloc_trades": 1792830060.0,
-    "disloc_foi_trades": 1792830060.0,
-    "disloc_paused_skips": 1792830060.0,
-    "disloc_paused_skips_rot1": 1792830060.0,
-}
-
 # Row timestamp keys tried in order (seconds, epoch UTC) for since/until filtering.
 TS_KEYS = ("ts", "bucket_ts", "minute_ts", "s", "m", "evaluated_ts", "exit_ts", "signal_ts",
            "anchor_bucket_ts", "fill_ts", "order_ts", "decision_ts", "created_ts",
@@ -73,17 +61,92 @@ KEY_FIELDS = {
     "runtime_telemetry": ("ts",),
     "dyn_regime_minutes": ("minute_ts", "rv15_bp", "drift15_bp"),
 }
-# Continuous streams only; event streams (xvp, liquidations, ledgers) may be quiet legitimately.
-STALE_AFTER_SEC = {"market_context": 300, "book_tape_1s": 30, "cross_venue_tape": 300, "bfx_book_10l": 30,
-                   "bfx_trades": 600, "venue_bbo_lighter_paradex": 300, "bfx_deriv_status_1s": 30,
-                   "bfx_ws_events": 60,  # Bitfinex heartbeats every <=15 s per channel
-                   "runtime_telemetry": 300, "dyn_regime_minutes": 300}
+# Live freshness limits (seconds). Master values restored (HM FAIL B1 — do not raise).
+# Missing from this table AND not in RETIRED_STREAMS → UNKNOWN_THRESHOLD (RED).
+# ADD only: liquidations 3600 (sparse event prints).
+STALE_AFTER_SEC = {
+    "market_context": 300,
+    "book_tape_1s": 30,
+    "cross_venue_tape": 300,
+    "bfx_book_10l": 30,
+    "bfx_trades": 600,
+    "venue_bbo_lighter_paradex": 300,
+    "bfx_deriv_status_1s": 30,
+    "bfx_ws_events": 60,  # Bitfinex heartbeats every <=15 s per channel
+    "runtime_telemetry": 300,
+    "dyn_regime_minutes": 300,
+    "liquidations": 3600,
+}
+
+# R17 / HM / R22: ticker/L1-priced or dead writers. No STALE_AFTER_SEC entry.
+# Value = unix ts after which a new row is resurrection (RED). Quiet retired → RETIRED.
+RETIRED_STREAMS: dict[str, float] = {
+    # HM/RK 30 Oct: ticker/L1-priced — status RETIRED (writers may still exist; resurrection RED).
+    "fill_markouts": 1793359800.0,
+    "xvp_shadow_signals": 1793359800.0,
+    "ai_shadow_challengers": 1793359800.0,
+    # R22 PR-B / R17-stopped writers (custody keys stay in STREAMS).
+    "taker_counterfactuals": 1792830060.0,
+    "shadow_exit_paths": 1792830060.0,
+    # DISLOC / DISLOC-FOI ledgers (tiles removed 23 Oct).
+    "disloc_trades": 1792830060.0,
+    "disloc_foi_trades": 1792830060.0,
+    "disloc_paused_skips": 1792830060.0,
+    "disloc_paused_skips_rot1": 1792830060.0,
+}
+
+# Watcher / expected.json severity for health status tokens (UNKNOWN_THRESHOLD → RED).
+STATUS_SEVERITY = {
+    "OK": "GREEN",
+    "STALE": "RED",
+    "NO_TS": "RED",
+    "UNKNOWN_THRESHOLD": "RED",
+    "MISSING": "RED",
+    "RETIRED": "GREEN",
+    "RETIRED_RESURRECTED": "RED",
+}
+
 ARCHIVE_NOTE = {
     "local_rotations": "<data>/runtime/<file>.N (N ascending = newer), served by ?part=N and ?since=",
     "tape_7d": "<data>/tape_1s/YYYYMMDDHH.jsonl.gz (book_tape_1s fields, 8-day retention)",
     "segment_store": "<data>/segment-store/v3 (research segment shipper; laptop mirror; laptop job backs up to R2,"
                      " receipt at /api/monitor/archive)",
 }
+
+
+def classify_stream_status(name: str, age, last_ts) -> tuple[str, float | None]:
+    """Status precedence: RETIRED_* → NO_TS → UNKNOWN_THRESHOLD → OK/STALE.
+
+    Missing threshold is never OK. ``age`` may be None when there is no last_ts.
+    """
+    if name in RETIRED_STREAMS:
+        retired_since = RETIRED_STREAMS[name]
+        if last_ts is not None and float(last_ts) > float(retired_since):
+            return "RETIRED_RESURRECTED", None
+        return "RETIRED", None
+    if age is None:
+        return "NO_TS", STALE_AFTER_SEC.get(name)
+    limit_age = STALE_AFTER_SEC.get(name)
+    if limit_age is None:
+        return "UNKNOWN_THRESHOLD", None
+    if age <= limit_age:
+        return "OK", limit_age
+    return "STALE", limit_age
+
+
+def assert_stream_threshold_coverage() -> None:
+    """Every STREAMS name must have a threshold or be RETIRED (set-equality)."""
+    live = set(STALE_AFTER_SEC)
+    retired = set(RETIRED_STREAMS)
+    names = set(STREAMS)
+    if live & retired:
+        raise AssertionError(f"stream in both STALE_AFTER_SEC and RETIRED_STREAMS: {sorted(live & retired)}")
+    missing = names - live - retired
+    if missing:
+        raise AssertionError(f"stream lacks threshold and RETIRED entry: {sorted(missing)}")
+    extra = (live | retired) - names
+    if extra:
+        raise AssertionError(f"threshold/RETIRED entry for unknown stream: {sorted(extra)}")
 
 
 class BadRequest(ValueError):
@@ -371,7 +434,17 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
         except BadRequest:
             plist = []
         if not plist:
-            out[name] = {"file": rel, "exists": False, "status": "MISSING"}
+            if name in RETIRED_STREAMS:
+                out[name] = {"file": rel, "exists": False, "status": "RETIRED",
+                             "severity": STATUS_SEVERITY["RETIRED"],
+                             "stale_after_sec": None,
+                             "retired_since_ts": RETIRED_STREAMS[name]}
+            else:
+                limit = STALE_AFTER_SEC.get(name)
+                status = "MISSING" if limit is not None else "UNKNOWN_THRESHOLD"
+                out[name] = {"file": rel, "exists": False, "status": status,
+                             "severity": STATUS_SEVERITY.get(status, "RED"),
+                             "stale_after_sec": limit}
             continue
         first = part_bounds(data_dir, name, plist[0])
         cur = part_bounds(data_dir, name, plist[-1])
@@ -396,18 +469,21 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
                 nulls[key] = round(missing / len(tail), 4)
         last_ts = cur.get("last_ts")
         age = round(now - last_ts, 1) if last_ts else None
-        limit_age = STALE_AFTER_SEC.get(name)
-        status = "OK" if age is not None and (limit_age is None or age <= limit_age) else (
-            "STALE" if age is not None else "NO_TS")
+        status, limit_age = classify_stream_status(name, age, last_ts)
+        retired_since = RETIRED_STREAMS.get(name)
         out[name] = {
-            "file": rel, "exists": True, "status": status, "stale_after_sec": limit_age, "first_ts": first.get("first_ts"), "last_ts": last_ts,
+            "file": rel, "exists": True, "status": status, "stale_after_sec": limit_age,
+            "severity": STATUS_SEVERITY.get(status, "RED"),
+            "first_ts": first.get("first_ts"), "last_ts": last_ts,
             "age_sec": age, "bytes": total_bytes, "parts": len(plist),
             "rows_estimate": int(total_bytes / avg) if avg else None,
             "rows_estimate_basis": "bytes / mean tail row size",
             "key_field_null_rate": nulls, "null_rate_sample_rows": len(tail),
+            **({"retired_since_ts": retired_since} if retired_since is not None else {}),
             "archive": {"local_parts": [p["file"] for p in plist],
                         **({"tape_7d": ARCHIVE_NOTE["tape_7d"]} if name == "book_tape_1s" else {}),
                         "segment_store": ARCHIVE_NOTE["segment_store"]},
         }
     return {"schema": "monitor_stream_health_v1", "streams": out, "archive_locations": ARCHIVE_NOTE,
+            "status_severity": dict(STATUS_SEVERITY),
             "log_files": file_mtimes(data_dir, now), "server_ts": now}

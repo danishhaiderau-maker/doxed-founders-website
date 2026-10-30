@@ -25,6 +25,15 @@ HEALTH_ONLY = "HEALTH_ONLY"        # counted for collection health, not analysed
 DASHBOARD_ONLY = "DASHBOARD_ONLY"
 IGNORED = "IGNORED"
 
+# HM/RK 30 Oct + prior R17: ticker/L1 or dead — inventory status RETIRED (never OK/STALE).
+RETIRED_ANALYZER_STREAMS = frozenset({
+    "ai_shadow_challengers.jsonl",
+    "fill_markouts.jsonl",
+    "taker_signal_counterfactuals.jsonl",
+    "shadow_exit_paths.jsonl",
+    "xvp_shadow_signals.jsonl",
+})
+
 ANALYZER_USAGE = {
     "market_microstructure_1s.jsonl": {
         "usage": STRATEGY_LAB, "continuous": True,
@@ -37,7 +46,9 @@ ANALYZER_USAGE = {
         "usage": FULL, "continuous": True, "consumers": ["load_data ai_log", "strategy_lab AI-call hypotheses"]},
     "ai_input_log.jsonl": {
         "usage": FULL, "continuous": True, "consumers": ["fill_time_guard_counterfactual", "strategy_lab funding"]},
-    "ai_shadow_challengers.jsonl": {"usage": FULL, "continuous": True, "consumers": ["ai_challenger_report"]},
+    "ai_shadow_challengers.jsonl": {"usage": HEALTH_ONLY, "continuous": False, "retired": True,
+                                    "consumers": ["RETIRED R17/HM ticker-L1"],
+                                    "note": "EMPTY_BECAUSE:R17_RETIRED"},
     "ai_shadow_compact_prompt.jsonl": {"usage": FULL, "continuous": False, "consumers": ["ai_challenger_report"]},
     "ai_shadow_regime_prompt.jsonl": {"usage": FULL, "continuous": False, "consumers": ["decision_model_report H8"]},
     "decision_feature_snapshots.jsonl": {
@@ -83,10 +94,19 @@ ANALYZER_USAGE = {
                                        "consumers": ["lane_opportunity_capture_report"]},
     "signal_snapshot.jsonl": {"usage": FULL, "continuous": False, "consumers": ["entry gate sweeps"]},
     "execution_funnel.jsonl": {"usage": FULL, "continuous": False, "consumers": ["chase attribution"]},
-    "taker_signal_counterfactuals.jsonl": {"usage": STRATEGY_LAB, "continuous": False,
-                                           "consumers": ["stream_studies taker counterfactual EV"]},
-    "fill_markouts.jsonl": {"usage": STRATEGY_LAB, "continuous": False,
-                            "consumers": ["stream_studies post-fill markout curves"]},
+    "taker_signal_counterfactuals.jsonl": {"usage": HEALTH_ONLY, "continuous": False, "retired": True,
+                                           "consumers": ["RETIRED R17"],
+                                           "note": "EMPTY_BECAUSE:R17_RETIRED"},
+    "fill_markouts.jsonl": {"usage": HEALTH_ONLY, "continuous": False, "retired": True,
+                            "consumers": ["RETIRED HM ticker-L1"],
+                            "note": "EMPTY_BECAUSE:R17_RETIRED"},
+    "shadow_exit_paths.jsonl": {"usage": HEALTH_ONLY, "continuous": False, "retired": True,
+                                "consumers": ["RETIRED R17"],
+                                "schemas": ["shadow_exit_path_v1"],
+                                "note": "EMPTY_BECAUSE:R17_RETIRED"},
+    "xvp_shadow_signals.jsonl": {"usage": HEALTH_ONLY, "continuous": False, "retired": True,
+                                 "consumers": ["RETIRED HM ticker-L1; GS-01 signal path intact"],
+                                 "note": "EMPTY_BECAUSE:R17_RETIRED"},
     "indicator_bars_v1.jsonl": {
         "usage": FULL, "continuous": True,
         "consumers": ["indicator_forward_scorer (all rotations)", "Indicator Edge dashboard section"],
@@ -112,7 +132,9 @@ def stream_inventory(data_dir: str, now: Optional[float] = None, stale_after_sec
         except OSError:
             age = None
         old = age is None or age > stale_after_sec
-        if not gens:
+        if name in RETIRED_ANALYZER_STREAMS or meta.get("retired"):
+            status = "RETIRED"
+        elif not gens:
             status = "MISSING"
         elif old:
             status = "STALE" if meta.get("continuous") else "IDLE"

@@ -19,8 +19,16 @@ def test_registry_owns_a_paper_only_non_ai_premium_tile():
 def test_own_evaluator_reuses_the_premium_rule_without_a_shadow_file():
     evaluator = policy.make_evaluator()
     assert isinstance(evaluator, GsPremiumEvaluator) and isinstance(evaluator, PremiumEvaluator)
-    assert evaluator.SHADOW_FILE == "xvp_shadow_signals.jsonl" and evaluator.ID_PREFIX == "gsxvp"
+    # HM 30 Oct: xvp stream RETIRED — SHADOW_FILE None stops recording; signal path intact.
+    assert evaluator.SHADOW_FILE is None and evaluator.ID_PREFIX == "gsxvp"
     assert evaluator.policy_id == policy.POLICY_ID
+
+
+def test_gs01_still_triggers_without_xvp_shadow_file():
+    """Retiring the xvp stream must not disable GS-01 paper triggers."""
+    d = decide(policy, engine_bar=bar(), ai_feature={"gsxvp_trigger_id": "gsxvp-alive"})
+    assert d["action"] == "TAKER" and d["trigger_kind"] == "CROSS_VENUE_PREMIUM"
+    assert policy.make_evaluator().SHADOW_FILE is None
 
 
 def test_premium_trigger_is_a_taker_in_every_regime():

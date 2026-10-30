@@ -1,7 +1,18 @@
+## 30 Oct 2026 — PR-A stream health fail-closed (do not merge yet)
+
+- **PR:** [#944](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/944) branch `cursor/stream-health-failclosed-c75d`
+- **Stacked on:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) tip `6e6248436f0d97e075820a02c74c4d495ca14ad0` (frozen HM fix)
+- **Base:** `origin/master` after #940+#938 (`cbe56608a`) via #943
+- **Change:** fail-closed `UNKNOWN_THRESHOLD` RED; restore master `STALE_AFTER_SEC` + ADD `liquidations` 3600 only; RETIRED streams (`fill_markouts`/`xvp_shadow_signals`/`ai_shadow_challengers` + #943 taker/shadow_exit/disloc); resurrection RED; watcher `scripts/self_aware/monitor_stream_status_expected.json`; B3 EMPTY_BECAUSE readers (`stream_studies`, `signal_research_table`, `analyzer_research_engine_v62`, `adaptive_entry_funnel`, `strategy_lab/streams`) + mutation tests; GS-01 signal path kept (`SHADOW_FILE=None` only); thread_health/monitor_gaps unchanged (B4)
+- **Merge order:** **#944 must merge before or same deploy as #943**
+- **Tests:** `test_monitor_stream_health_failclosed.py` (+ allowlist) with mutation proofs
+- **Do not merge / deploy / arm from this entry alone**
+
+---
 ## 30 Oct 2026 — R22 PR-B dead writers (taker CF + shadow_exit + disloc streams)
 
 - **PR:** [#943](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/943) branch `cursor/r22-dead-writers-018b`
-- **Head sha:** `3f39ef9ff2ddec8cddd2611933e03d8a8d9bf08c`
+- **Head sha:** `6e6248436f0d97e075820a02c74c4d495ca14ad0`
 - **Base:** `origin/master` after #940 (`cbe56608a78d8280d2849c7b12e80f40c49d340f`; #938 also on tip)
 - **Root cause:** R17-retired writers/flags/routes left as dead code; STREAMS keys must stay for R5 custody (HM FAIL B2).
 - **Change:** delete dead writers/flags/`_r17_retired_view` routes; restore `taker_counterfactuals` / `shadow_exit_paths` / 4 disloc in `STREAMS` as `RETIRED_STREAMS` (R5); keep wipe basenames; keep live `SHADOW_EXIT_SET` / `tile_shadow_exit_set` (tile cards + registry).
@@ -11,15 +22,12 @@
 - **Freeze:** one push after HM FAIL fixes; no merge/deploy/arm.
 
 ---
-## 30 Oct 2026 — URGENT R8 pure revert #929 + #930 (do not merge yet)
+## 30 Oct 2026 — URGENT R8 pure revert #929 + #930 (MERGED #940)
 
-- **PR:** [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) branch `cursor/revert-929-930-12bb`
-- **Base:** `origin/master` `93aa39a4caccb3673ed415587af0130367607233`
-- **Revert commits:** `a423ac1764c2bd820530482d0487ee6ed83abcc5` (undo #930 `93aa39a4`) then `dec6800c94838a57cd1e35765e167883b6679897` (undo #929 `da4f7475`); revert-tree equals pre-#929 tip `c7c51f4b` (`#927`/`#928` stay); tracker commit follows
-- **Head sha:** `3c743708eda4684d90e46af59abe0ffaf031a489`
+- **PR:** [#940](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/940) merge `b4b6b11d4`
+- **Base was:** `origin/master` `93aa39a4caccb3673ed415587af0130367607233`
 - **Why:** restores fail-closed after #929 VIOLATION (soft-exclude retired tile_config); makes #930 retry path non-applicable until a later fixed PR
-- **Trades since 19:59 AEDT 30 Oct 2026:** **non-countable** (31 CLOSED fingerprinted in store R21 dry-run package; OPEN since cutoff also non-countable). No stamp code in this PR. **No delete executed** — R21 package only at store `internal/r21-dryrun-trades-1959aedt.md`
-- **Do not merge / deploy / arm from this entry alone**
+- **Trades since 19:59 AEDT 30 Oct 2026:** **non-countable**. No delete executed — R21 package only at store `internal/r21-dryrun-trades-1959aedt.md`
 
 ---
 

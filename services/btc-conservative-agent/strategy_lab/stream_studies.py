@@ -380,46 +380,13 @@ def _flat_markouts(r: dict, field: str) -> dict:
 
 def taker_counterfactuals(files: list, cache: Cache, trades: pd.DataFrame, epoch_start: float,
                           frozen=frozenset(), extra_rows: Iterable = ()) -> tuple:
-    def keep(r):
-        if r.get("schema") != "taker_signal_counterfactual_v1":
-            return None
-        return {"ts": _num(r.get("signal_ts")), "call": r.get("shared_ai_call_id"), "dir": r.get("direction"),
-                "lat": _num(r.get("latency_sec")), "ai": r.get("raw_ai_decision"),
-                "spread_bps": _spread_bps(r), "exit_touch": _flat_markouts(r, "markout_exit_touch_bps"),
-                "mid": _flat_markouts(r, "markout_mid_bps")}
-
-    rows = _markout_rows(files, cache, "taker_cf", epoch_start, keep, frozen, extra_rows,
-                         key=lambda p: (p["ts"], p["call"], p["dir"], p["lat"]))
-    tile_by_call = {}
-    if trades is not None and not trades.empty and "shared_ai_call_id" in trades.columns:
-        t = trades.drop_duplicates(subset=["trade_id"], keep="last")
-        dcol = "direction" if "direction" in t.columns else ("final_direction" if "final_direction" in t.columns else None)
-        for _, row in t.iterrows():
-            key = (str(row.get("shared_ai_call_id") or ""), str(row.get(dcol) or "").upper() if dcol else "")
-            tile_by_call.setdefault(key, set()).add(str(row.get("research_lane") or "").upper())
-    out = []
-    groups: dict = {}
-    for r in rows:
-        tiles = tile_by_call.get((str(r["call"] or ""), str(r["dir"] or "").upper()), set())
-        for g in [("ALL", "ALL"), ("AI_DECISION", str(r["ai"] or "UNKNOWN"))] + [("TILE", t) for t in sorted(tiles)]:
-            groups.setdefault(g + (r["lat"],), []).append(r)
-    for (kind, value, lat), sub in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or 0)):
-        for h in MARKOUT_HORIZONS:
-            vals = [s["exit_touch"].get(h) for s in sub]
-            ts = [s["ts"] for s in sub]
-            c = _ci([v if v is not None else np.nan for v in vals], ts)
-            mids = [s["mid"].get(h) for s in sub if s["mid"].get(h) is not None]
-            out.append({"group": kind, "value": value, "latency_sec": lat, "horizon": h, "n": c["n"],
-                        "ev_exit_touch_bps": _r(c["mean"], 4), "ci_lo_bps": _r(c["lo"], 4), "ci_hi_bps": _r(c["hi"], 4),
-                        "p_cluster": _r(c["p"]), "mean_mid_markout_bps": _r(np.mean(mids), 4) if mids else None,
-                        "mean_spread_bps": _r(np.nanmean([s["spread_bps"] for s in sub if s["spread_bps"] is not None]), 4)
-                        if any(s["spread_bps"] is not None for s in sub) else None})
-    meta = {"rows": len(rows), "signals": len({(r["call"], r["dir"]) for r in rows}),
-            "ai_decisions": _counts(r["ai"] for r in rows),
-            "last_signal_at": _iso(max((r["ts"] or 0) for r in rows)) if rows else None,
-            "last_reject_signal_at": _iso(max(((r["ts"] or 0) for r in rows if str(r["ai"]).upper() == "REJECT"),
-                                              default=0)) if rows else None}
-    return pd.DataFrame(out), meta
+    # R17: taker_signal_counterfactuals is retired (ticker/L1). Return empty with
+    # EMPTY_BECAUSE even when current-epoch rows exist on disk — never analyse them.
+    _ = (files, cache, trades, epoch_start, frozen, extra_rows)
+    meta = {"rows": 0, "rows_read": 0, "signals": 0, "ai_decisions": {},
+            "last_signal_at": None, "last_reject_signal_at": None,
+            "EMPTY_BECAUSE": "R17_RETIRED"}
+    return pd.DataFrame(), meta
 
 
 def _spread_bps(r: dict) -> Optional[float]:
