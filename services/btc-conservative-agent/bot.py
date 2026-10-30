@@ -56222,10 +56222,8 @@ def api_analyzer_mirror_status():
         resp.headers['Cache-Control'] = 'no-store'
         return resp
     except (OSError, ValueError, TypeError):
-        # Same honesty contract: never 404-as-missing when the route itself is fine.
-        resp = jsonify(_analyzer_mirror_no_validated_bundle_payload(legacy_preserved=True))
-        resp.headers['Cache-Control'] = 'no-store'
-        return resp, 200
+        # Plan Fix A covers only `active is None` (R38). Unreadable status.json stays 404.
+        return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
 
 
 @app.route('/analysis')
