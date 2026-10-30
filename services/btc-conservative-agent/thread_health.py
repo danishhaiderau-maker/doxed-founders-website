@@ -157,9 +157,14 @@ class ThreadHealthRegistry:
             tick_age = _age(now, row["last_tick_ts"])
             reference_age = tick_age if tick_age is not None else _age(now, row["started_ts"])
             stale_after = row["stale_after_sec"]
+            # Fail-closed: a started loop with no threshold is UNKNOWN_THRESHOLD, never "not stale"/OK.
+            unknown_threshold = bool(started and stale_after is None)
             stale = bool(
-                stale_after is not None and started
-                and (alive is False or (reference_age is not None and reference_age > stale_after))
+                unknown_threshold
+                or (
+                    stale_after is not None and started
+                    and (alive is False or (reference_age is not None and reference_age > stale_after))
+                )
             )
             out[name] = {
                 "monitored": stale_after is not None,
@@ -169,6 +174,7 @@ class ThreadHealthRegistry:
                 "last_tick_age_sec": tick_age,
                 "interval_sec": row["interval_sec"],
                 "stale_after_sec": stale_after,
+                "unknown_threshold": unknown_threshold,
                 "iterations": int(row["iterations"]),
                 "restarts": int(row["restarts"]),
                 "last_restart_age_sec": _age(now, row["last_restart_ts"]),

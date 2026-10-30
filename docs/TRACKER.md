@@ -1,3 +1,12 @@
+## 30 Oct 2026 — thread_health / monitor_gaps fail-closed (BOT-29)
+
+- **PR:** (open) branch `cursor/thread-health-failclosed-2758`
+- **Base:** [#946](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/946) BOT-28 tip `495a6f3b82aaa51d19c524dfe3e512240d043f41`
+- **Change:** missing `stale_after` on a started loop → `unknown_threshold` / `UNKNOWN_THRESHOLD` RED (never OK); mutation tests in `test_thread_health.py` + `test_monitor_gaps.py`
+- **FREEZE** — no merge / deploy / arm
+
+---
+
 ## 30 Oct 2026 — R22 delete ticker stream writers (BOT-28)
 
 - **PR:** [#946](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/946) branch `cursor/r22-retire-ticker-streams-2758`

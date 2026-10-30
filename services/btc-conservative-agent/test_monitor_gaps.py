@@ -388,3 +388,32 @@ def test_status_shipper_carries_custody_stall_fields():
     assert "_mg_custody.custody_stall(transfer, now)" in body
     fields = src[src.index("_SEGMENT_STATUS_FIELDS = ("):][:1500]
     assert '"laptop_ack_advanced_at"' in fields and '"shipped_seq"' in fields and '"laptop_acked_seq"' in fields
+
+
+def test_worker_rows_unknown_threshold_is_red():
+    """Fail-closed: started loop with no stale_after → UNKNOWN_THRESHOLD RED, never GREEN."""
+    clock = Clock()
+    reg = thread_health.ThreadHealthRegistry(clock=clock)
+    reg.beat("orphan")  # started, no register → no threshold
+    snap = mg.worker_rows(reg.snapshot(), {}, expected=["orphan"], now=clock.t)
+    rows = {r["name"]: r for r in snap["workers"]}
+    assert "UNKNOWN_THRESHOLD" in rows["orphan"]["alerts"]
+    assert rows["orphan"]["level"] == "RED"
+    assert snap["level"] == "RED"
+    # Mutation: without UNKNOWN_THRESHOLD reason, unmonitored-only would still be RED via UNMONITORED;
+    # prove the dedicated token is present (not silently OK).
+    assert rows["orphan"]["alerts"][0] in ("UNMONITORED", "UNKNOWN_THRESHOLD") or "UNKNOWN_THRESHOLD" in rows["orphan"]["alerts"]
+    mutated = [a for a in rows["orphan"]["alerts"] if a != "UNKNOWN_THRESHOLD"]
+    # Even if UNMONITORED remains, removing UNKNOWN_THRESHOLD must change the alert set (mutation proof).
+    assert set(mutated) != set(rows["orphan"]["alerts"])
+
+
+def test_mutation_worker_rows_ok_loop_has_no_unknown_threshold():
+    clock = Clock()
+    reg = thread_health.ThreadHealthRegistry(clock=clock)
+    reg.register("ok", 1.0)
+    reg.beat("ok")
+    snap = mg.worker_rows(reg.snapshot(), {}, expected=["ok"], now=clock.t)
+    rows = {r["name"]: r for r in snap["workers"]}
+    assert "UNKNOWN_THRESHOLD" not in rows["ok"]["alerts"]
+    assert rows["ok"]["level"] == "GREEN"

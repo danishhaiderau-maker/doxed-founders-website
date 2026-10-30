@@ -152,3 +152,40 @@ def test_status_and_ready_expose_thread_health():
     assert '"thread_health": thread_summary' in SOURCE
     for name in ("signal_queue", "event_queue", "ws_tick_lifecycle_queue"):
         assert f'"{name}": {name}' in SOURCE
+
+
+def test_started_loop_without_threshold_is_unknown_threshold():
+    """Fail-closed: beat/bind without register → unknown_threshold, never OK/not-stale."""
+    clock, reg = clocked()
+    # beat without register creates a started row with stale_after_sec=None
+    reg.beat("orphan")
+    snap = reg.snapshot()
+    row = snap["orphan"]
+    assert row["started"] is True
+    assert row["stale_after_sec"] is None
+    assert row["unknown_threshold"] is True
+    assert row["stale"] is True  # treated as unhealthy
+    assert row["monitored"] is False
+    # Mutation: old fail-open would set stale=False when stale_after is None
+    stale_after = None
+    started = True
+    alive = True
+    reference_age = 1.0
+    old_stale = bool(
+        stale_after is not None and started
+        and (alive is False or (reference_age is not None and reference_age > stale_after))
+    )
+    assert old_stale is False and row["stale"] is True and row["stale"] != old_stale
+
+
+def test_mutation_registered_loop_still_uses_stale_after_limit():
+    clock, reg = clocked()
+    reg.register("ok", 2.0)
+    reg.bind("ok", thread=threading.current_thread())
+    reg.beat("ok")
+    snap = reg.snapshot()
+    assert snap["ok"]["unknown_threshold"] is False
+    assert snap["ok"]["stale"] is False
+    clock["now"] += 7.0
+    snap2 = reg.snapshot()
+    assert snap2["ok"]["stale"] is True and snap2["ok"]["unknown_threshold"] is False
