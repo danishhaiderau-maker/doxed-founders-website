@@ -193,7 +193,8 @@ def test_amend5_constants_pinned():
     assert at(8).startswith("- **F3 ") and at(25).strip().startswith("- (c) L 15 bp or less") and at(28).startswith("## Rev 3")
     assert ltg.STOP_BACKSTOP_PAST_STOP_BP == 18.0 and ltg.LIQ_CHECK_MAX_BP == 15.0 and ltg.LIQ_NORMAL_MIN_BP == 28.0
     assert ltg.LIQ_CLAMP_RATE_MAX == 0.05 and ltg.LIQ_CLAMP_MIN_N == 20
-    assert ltg.AMEND5_BINDING == ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5", "G6")
+    assert ltg.AMEND5_BINDING == ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5")
+    assert "G6" not in ltg.AMEND5_BINDING and "G6" in ltg.AMEND5_VOID_LINES
 
 
 def test_amend5_void_rules_have_no_code():
@@ -286,17 +287,15 @@ def test_g4b_clamp_rate_gt_5pct_at_n_ge_20_per_tile_disarms_all():
     assert d and d[0]["code"] == ltg.LIQ_CLAMP_RATE                         # disarm ALL
 
 
-def test_g4c_and_g6_arm_gate():
+def test_g4c_arm_gate_no_fade3_g6_path():
     c = {"outcome": ltg.G4_C}
     assert ltg.arm_gate_block("gs1", None) is None                          # GS-01 arms first (its L is unknown until it trades)
-    assert ltg.arm_gate_block("gs1", c) == ltg.DENY_G4_STOP_REEVAL and ltg.arm_gate_block("gf3", c, "PASS:x") == ltg.DENY_G4_STOP_REEVAL
-    assert ltg.arm_gate_block("gf3", None, "PASS:hm") == ltg.DENY_G6_NO_FIRST_L
+    assert ltg.arm_gate_block("gs1", c) == ltg.DENY_G4_STOP_REEVAL
+    assert not hasattr(ltg, "G6_GATED_TILE") and not hasattr(ltg, "DENY_G6_NO_FIRST_L")
     for o in (ltg.G4_A, ltg.G4_B):
-        assert ltg.arm_gate_block("gf3", {"outcome": o}, None) == ltg.DENY_G6_HM_GATE
-        assert ltg.arm_gate_block("gf3", {"outcome": o}, "FAIL") == ltg.DENY_G6_HM_GATE
-        assert ltg.arm_gate_block("gf3", {"outcome": o}, "PASS:hm-20261024") is None
         assert ltg.arm_gate_block("gs1", {"outcome": o}) is None
-    assert ltg.arm_gate_block("gb1", c) is None                             # (c') names GS-01 and FADE3 only
+        assert ltg.arm_gate_block("gf3", {"outcome": o}, "PASS:hm") is None  # reserved key; no G6 gate
+    assert ltg.arm_gate_block("gb1", c) is None                             # (c') names GS-01 only
 
 
 def _rec_ns(prot, state=None):

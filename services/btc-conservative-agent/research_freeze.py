@@ -104,18 +104,9 @@ MID_EPOCH_ADDITIONS = (
     # R22 PR-A (25 Oct 2026, RK ruling 1): the Tile 13 DISLOC / Tile 14 DISLOC-FOI historical registrations were
     # deleted (code removed 23 Oct 2026, no spec left). check() reads MID_EPOCH_ADDITION_ROSTER only to allow
     # TILE_ON, so a retired lane is now refused during the freeze; git history keeps the record (R5).
-    # Tile 5 · GS-FADE3-TP30 (gf3; owner 25 Oct; RK PASS 06:24 AEDT; paper only, live refused, self-simulated).
-    # Display slot renumbered 6→5 when GS-06 was retired (2026-10-28); key/cid unchanged.
-    {"lane": "FAMILY_GS_FADE3_TP30", "tile_number": 6, "hypothesis_id": "GS-20261025-FADE3-TP30",
-     "approved_by": "Danish (owner), 2026-10-25: build GS-FADE3-TP30 as the slot-6 PAPER tile (PR #877)",
-     "spec": "sim E8 FADE ALL W=3 (tile_fade3 fixtures/fade3_sim) + RK PASS 25 Oct 06:24 AEDT",
-     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
-    # Tile 6 · GS-FADE3-LOOSE (gf3l; Danish yes 2026-10-27; paper only, live refused, self-simulated).
-    # Sample-density sibling of gf3 — not an edge claim (R14).
-    {"lane": "FAMILY_GS_FADE3_LOOSE_TP25", "tile_number": 6, "hypothesis_id": "GS-20261027-FADE3-LOOSE",
-     "approved_by": "Danish (owner), 2026-10-27: approve GS-FADE3-LOOSE paper tile (same PR as GS-06 R22 retire)",
-     "spec": "docs/tile-retire-and-fade3-variant.md §3 (E8L gates; shared tile_fill / paper_fill)",
-     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # GS-FADE3-TP30 / GS-FADE3-LOOSE retired 2026-10-30 under Rule 22 (Danish Plan B;
+    # CODE_OVERRIDE below). Historical registration removed from this live mid-epoch roster;
+    # git history keeps the record (R5). Self-sim modules deleted.
 )
 MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # active_tile_registry_signature() of the full registry (frozen roster + additions).
@@ -128,9 +119,10 @@ MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # 2026-10-23 (owner): Tile 6 DISLOC and Tile 7 DISLOC-FOI retired (roster 1..5); score_led and hypothesis pins moved.
 # 2026-10-25 (owner, #877): gf3 GS-FADE3-TP30 PAPER tile joined the registry (slot 6); score_led and hypothesis pins moved.
 # 2026-10-28 (owner): GS-06 R22 retire + GS-FADE3-LOOSE mid-epoch add (remove one / add one); pins recomputed below.
+# 2026-10-30 (owner): R22 retire tiles 3-6 (B1/B2/TP30/LOOSE); pins recomputed below.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "f241b3d0f7eb3cb4d1364c4f22cf3de804aaa2dabaadb4b3f3f23146e236c01c",
-    "hypothesis": "45535a186adf7185e9e215fde1154a7248e86016c435585b3d6a0ec008cbe748",
+    "score_led": "82e8202a639413075762b8b8aec8f752a93876d7e3e613c3cea540d2337b16f4",
+    "hypothesis": "d079c1eecba39298e5a911c58609225afad272c97c1d208cb0ea751b1db6b21f",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
@@ -142,11 +134,11 @@ FREEZE_OPENING_SEC = 3600
 # Set to {"approved_by": ..., "approved_utc": ..., "reason": ...} only with the
 # owner's explicit approval to change the frozen registry or epoch in code.
 CODE_OVERRIDE: Optional[Mapping[str, str]] = {
-    "approved_by": "Danish (owner), 2026-10-28",
-    "approved_utc": "2026-10-28T00:00:00Z",
-    "reason": ("Retire GS-06 (FAMILY_GS06_COMMITTED_FADE_ATR_TP) under Rule 22 and add paper-only "
-               "mid-epoch GS-FADE3-LOOSE (FAMILY_GS_FADE3_LOOSE_TP25 / gf3l, relay-ineligible, live refused) "
-               "in one atomic registry transaction; CTRL/GS-01/B1/B2/FADE3 untouched; no arm/Soft B/wipe"),
+    "approved_by": "Danish (owner), 2026-10-30 Plan B R22",
+    "approved_utc": "2026-10-30T00:00:00Z",
+    "reason": ("Retire tiles 3–6 (FAMILY_GSB1_CVD_DIV_REGIME, FAMILY_GSB2_REGIME_SWITCHER, "
+               "FAMILY_GS_FADE3_TP30, FAMILY_GS_FADE3_LOOSE_TP25) under Rule 22 plus DISLOC/GS-06 "
+               "executable leftovers; keep CTRL + GS-01 only; no arm/Soft B/wipe/archive"),
 }
 
 ERROR = "RESEARCH_FREEZE_ACTIVE"

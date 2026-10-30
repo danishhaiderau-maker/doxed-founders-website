@@ -23,6 +23,8 @@ const RETIRED = [
   ['FAMILY_DISLOC_BFX_DISLOCATION_1M', 'dsl-1791785201-4'],
   ['FAMILY_DISLOC_FOI_LONG_1M', 'dsf-1791785201-2'],
   ['FAMILY_GS06_COMMITTED_FADE_ATR_TP', 'gs6-0123456789ab'],
+  ['FAMILY_GSB1_CVD_DIV_REGIME', 'gb1-0123456789ab'],
+  ['FAMILY_GSB2_REGIME_SWITCHER', 'gb2-0123456789ab'],
 ] as const;
 
 /** Two-tile gate: Fly signs the trade's tile key (mandatory for live entries). */
@@ -45,7 +47,7 @@ function signed(tradeId: string, lane: string, over: Record<string, unknown> = {
 }
 
 test('retired prefixes are not active tiles and are flagged retired', () => {
-  assert.deepEqual([...RETIRED_LIVE_COPY_TILE_PREFIXES].sort(), ['dsf', 'dsl', 'gs6']);
+  assert.deepEqual([...RETIRED_LIVE_COPY_TILE_PREFIXES].sort(), ['dsf', 'dsl', 'gb1', 'gb2', 'gs6']);
   for (const [lane, tid] of RETIRED) {
     assert.equal(LIVE_COPY_TILE_PREFIXES[lane], undefined, lane);
     assert.equal(isRetiredLiveCopyTileTradeId(tid), true, tid);

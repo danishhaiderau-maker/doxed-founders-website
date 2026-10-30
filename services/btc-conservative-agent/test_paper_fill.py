@@ -401,9 +401,10 @@ def test_disloc_removed_from_fill_sites_pure_deletion():
     tf = (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"), ("tile_fill.py", "price_exit_resident"),
           ("tile_fill.py", "price_exit_forced"))
     assert pf.TILE_FILL_SITES == {lane: tf for lane in (
-        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
-        "FAMILY_GSB2_REGIME_SWITCHER",
-        "FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25")}
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP")}
+    for lane in ("FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
+                 "FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25"):
+        assert lane not in pf.TILE_FILL_SITES and lane not in pf.REST_FILL_SITES
 
 
 def test_book_tail_no_look_ahead(tmp_path):

@@ -220,7 +220,7 @@ def test_b2_tp1_gate_never_sleeps_and_prices_after_due(monkeypatch):
     _use_book(monkeypatch)
     clk = _Clock(1000.0)
     ns = _lane_ns(clk)
-    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "qty": 1.0}
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "policy_original_qty": 1.0, "qty": 1.0}
     assert ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5) == ("WAIT", None)
     assert pos["_tp1_pending"]["due_ts"] == 1001.5
     clk.now = 1001.0  # the gate reads the wall clock; `now` is the trigger time
@@ -239,7 +239,7 @@ def test_realism_v2_tp1_late_book_row_retries_same_model_time_then_prices(monkey
     monkeypatch.setattr(pf, "book10l_at", lambda t: ({**BOOK, "s": int(t) - 1} if landed["ok"] else None))
     clk = _Clock(1000.0)
     ns = _lane_ns(clk)
-    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "trade_id": "x"}
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "policy_original_qty": 1.0, "trade_id": "x"}
     assert ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5) == ("WAIT", None)
     clk.now = 1001.6
     assert ns["_tp1_gate"](pos, "TP1", 1100.0, "LONG", 0.5) == ("WAIT", None)  # row not written yet: WAIT
@@ -257,7 +257,7 @@ def test_realism_v2_tp1_no_book_after_force_window_is_unpriced_not_level(monkeyp
     monkeypatch.setattr(pf, "book10l_at", lambda t: None)
     clk = _Clock(1000.0)
     ns = _lane_ns(clk)
-    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "trade_id": "x"}
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "policy_original_qty": 1.0, "trade_id": "x"}
     ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5)
     clk.now = 1001.5 + tf.EXIT_FORCE_AFTER_S - 0.1
     assert ns["_tp1_gate"](pos, "TP1", clk.now, "LONG", 0.5) == ("WAIT", None)
@@ -272,7 +272,7 @@ def test_realism_v2_tp1_committed_action_survives_policy_change(monkeypatch):
     ns = _lane_ns(_Clock(1000.0))
     act = types.SimpleNamespace(close_fraction=0.5, remaining_fraction=0.5, reason="GS_LADDER_TP1",
                                 partial_key="ladder_tp1", stop_price=None, peak_price=101.0, book_price=100.5)
-    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0}
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "policy_original_qty": 1.0}
     ns["_tp1_gate"](pos, "ladder_tp1", 1000.0, "LONG", 0.5, act)
     got = ns["_tp1_pending_action"](pos)
     assert got.reason == "GS_LADDER_TP1" and got.close_fraction == 0.5 and got.partial_key == "ladder_tp1"
@@ -392,12 +392,12 @@ def test_nit_exit_uses_exit_trigger_ts_and_waits_only_remaining_delay(monkeypatc
 def test_nit_entry_waits_for_signal_plus_delay_and_force_does_not_cache_no_book(monkeypatch):
     clk = _Clock(1000.0)
     ns = _lane_ns(clk)
-    order = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "signal_dir": "BUY", "qty": 0.5, "signal_created_ts": 999.0}
+    order = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "signal_dir": "BUY", "qty": 0.5, "signal_created_ts": 999.0}
     _use_book(monkeypatch)
     assert ns["_paper_lane_entry_result"](order, 1000.0) is None          # 999 + 1.5 > 1000
     res = ns["_paper_lane_entry_result"](order, 1000.6)
     assert res["status"] == "FILLED" and order["paper_fill_result"] is res
-    order2 = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "signal_dir": "BUY", "qty": 0.5, "signal_created_ts": 999.0}
+    order2 = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "signal_dir": "BUY", "qty": 0.5, "signal_created_ts": 999.0}
     _use_book(monkeypatch, book=None)
     # RK 17:18: book is the only entry quote source - no book at the signal fails the 2 s gate (reason NO_BOOK)
     forced = ns["_paper_lane_entry_result"](order2, 1000.0, force=True)
@@ -408,7 +408,7 @@ def test_nit_entry_waits_for_signal_plus_delay_and_force_does_not_cache_no_book(
 def test_b5_no_fill_shadow_row_fields(monkeypatch):
     _use_book(monkeypatch, book={"a": [[200.0, 1.0]], "b": [[199.0, 1.0]]})  # far above the signal-ask cap
     ns = _lane_ns(_Clock(1000.0))
-    order = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "signal_dir": "BUY", "qty": 0.5,
+    order = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "trade_id": "t1", "signal_dir": "BUY", "qty": 0.5,
              "signal_created_ts": 990.0}
     # signal book at 990 is also 200; make the fill-second book jump out of the cap with a stepping book
     seq = {"n": 0}
@@ -435,7 +435,7 @@ def test_b5_no_fill_shadow_row_fields(monkeypatch):
 
 
 def _closed_raw(**kw):
-    raw = {"trade_id": "t", "research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "dir": "LONG", "entry": 100.0, "exit": 101.0,
+    raw = {"trade_id": "t", "research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "dir": "LONG", "entry": 100.0, "exit": 101.0,
            "exit_reason": "TP", "qty": 0.5, "leverage": 100, "margin_usdt": 0.25, "ts": 2000.0,
            "outcome_duration_sec": 60, "fill_model": pf.FILL_MODEL, "fill_model_version": 1, "delay_s": 1.5,
            "delay_source": "default_until_n10", "ask_age_ms": 120, "exit_ask_age_ms": 90,
@@ -573,7 +573,7 @@ def test_realism_v2_tp1_never_restarts_or_prices_without_delay(monkeypatch):
     _use_book(monkeypatch, book=None)
     clk = _Clock(1000.0)
     ns = _lane_ns(clk)
-    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "trade_id": "x"}
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "policy_original_qty": 1.0, "trade_id": "x"}
     ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5)
     for k in range(1, 4):
         clk.now = 1000.0 + 2.0 * k
@@ -606,7 +606,7 @@ def test_resid_d_legacy_fallback_tag_stays_visible():
 
 
 # ---- BLOCKER 1 (HM, 17 Oct): closed rows read entry pricing from entry_fill_sim --------------------------
-def _entry_pos(monkeypatch, lane="FAMILY_GSB2_REGIME_SWITCHER", exit_status="PAPER_FILL"):
+def _entry_pos(monkeypatch, lane="FAMILY_RANDOM_CONTROL_TAKER_90", exit_status="PAPER_FILL"):
     _use_book(monkeypatch)
     ns = _bot_ns(["_paper_result_as_sim"])
     res = tf.entry_fill("LONG", 0.5, 99.0, 1.5, "default_until_n10")
@@ -649,11 +649,11 @@ def test_blocker1_fixed_row_is_consumed_by_fresh_and_tile_integrity_checks(monke
 
 def test_blocker1_old_pricer_or_missing_entry_is_never_fresh(monkeypatch):
     ns = _row_ns()
-    legacy = {"research_lane": "FAMILY_GSB2_REGIME_SWITCHER", "exit_status": "PAPER_FILL", "fill_model": "AI_DIRECT",
+    legacy = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "exit_status": "PAPER_FILL", "fill_model": "AI_DIRECT",
               "entry_fill_sim": {"fill_model": "PRE_REALISTIC_V1_BBO_CROSS"}}
     assert ns["_row_priced_by_paper_fill"](legacy) is False
     assert ns["_entry_pricing_fields"](legacy, {})["fill_model"] == "PRE_REALISTIC_V1_BBO_CROSS"
-    empty = {"research_lane": "FAMILY_GSB2_REGIME_SWITCHER", "exit_status": "PAPER_FILL", "fill_model": "AI_DIRECT"}
+    empty = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "exit_status": "PAPER_FILL", "fill_model": "AI_DIRECT"}
     assert ns["_row_priced_by_paper_fill"](empty) is False
     assert ns["_entry_pricing_fields"](empty, {"fill_model": "X"})["fill_model"] == "AI_DIRECT"  # legacy label kept
     other = {"research_lane": "FAMILY_X_NOT_MIGRATED", "entry_fill_sim": {}, "fill_model": "AI_DIRECT"}
@@ -880,7 +880,7 @@ def test_multi_leg_close_measures_each_leg_and_a_leg_without_a_snapshot_is_null(
 
 def test_legacy_non_paper_and_unpriced_exit_rows_are_all_null_not_zero(monkeypatch):
     ns = _slip_ns()
-    legacy = {"research_lane": "FAMILY_GSB2_REGIME_SWITCHER", "dir": "LONG",
+    legacy = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG",
               "entry_fill_sim": {"fill_model": "AI_DIRECT", "slippage_usd": 0.0}}
     assert all(v is None for v in ns["_slippage_row_fields"](legacy, None, 1.0).values())
     other = {**_entry_pos(monkeypatch), "research_lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M", "dir": "LONG"}
@@ -1017,7 +1017,7 @@ def test_realism_v2_maker_rest_queue_reset_on_reprice_and_drop(monkeypatch):
                                                                                          "ttl_sec": 900, "reprice_sec": 60}}}}}
     ns = _lane_ns(clk)
     ns["trades_map"] = tm
-    order = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "signal_dir": "BUY", "qty": 1.0,
+    order = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "trade_id": "t1", "signal_dir": "BUY", "qty": 1.0,
              "signal_created_ts": 999.0, "limit_price": 100.0}
     assert ns["_paper_lane_entry_result"](order, 1001.0) is None
     assert order["_entry_rest"]["queue_ahead"] == 2.0  # joined behind 2.0 at the bid
@@ -1046,7 +1046,7 @@ def test_realism_v2_maker_rest_queue_reset_on_reprice_and_drop(monkeypatch):
     assert [(f["print_ts"], f["queue_ahead"], f["qty"]) for f in res["entry_rest_fill_stamps"]] == \
         [(1006.0, 2.0, 0.5), (1025.0, 0.0, 0.3), (1026.0, 0.0, 0.2)]
     assert res["entry_rest_book_age_s"] is not None and res["entry_rest_price_age_s"] == pytest.approx(1026.0 - 1010.0)
-    empty = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "trade_id": "t1", "_entry_rest": {"fills": []}}
+    empty = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "trade_id": "t1", "_entry_rest": {"fills": []}}
     assert ns["_paper_entry_rest_drop"](empty, "X") is False  # nothing filled -> the caller cancels (NO_FILL)
 
 
@@ -1059,7 +1059,7 @@ def test_rk2_paper_bot_sent_exit_own_s2s_is_trigger_to_send_code_point(monkeypat
     clk = _Clock(1000.25)
     ns = _lane_ns(clk)
     ns["_paper_delay"] = lambda lane, leg, **kw: (seen.append((leg, kw)) or (0.5, "default_until_n10"))
-    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "qty": 1.0}
+    pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "policy_original_qty": 1.0, "qty": 1.0}
     ns["_tp1_gate"](pos, "TP1", 1000.0, "LONG", 0.5)
     assert seen[-1] == ("exit", {"pool_key": "EXIT_RO_MKT", "own_signal_to_send_s": 0.25})
     assert ns["_paper_own_s2s_exit"](1000.0, 1000.4) == pytest.approx(0.4)
@@ -1067,7 +1067,7 @@ def test_rk2_paper_bot_sent_exit_own_s2s_is_trigger_to_send_code_point(monkeypat
     assert ns["_paper_own_s2s_exit"](None, 1000.0) is None
     ns["_PAPER_EXIT_TLS"].no_wait = True
     try:
-        pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "dir": "LONG", "qty": 1.0, "entry": 100.0,
+        pos = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "dir": "LONG", "qty": 1.0, "entry": 100.0,
                "exit_trigger_ts": 1000.0, "exit_sent_ts": 1000.3}
         ns["_paper_lane_exit"](pos, "ATR_TP")
         assert seen[-1][1]["pool_key"] == "EXIT_RO_MKT" and seen[-1][1]["own_signal_to_send_s"] == pytest.approx(0.3)

@@ -34118,8 +34118,6 @@ def _paper_delay_pool_reset() -> None:
 
 
 import live_ack_pool as _live_ack_pool
-import tile_fade3 as _tile_fade3
-import tile_fade3_loose as _tile_fade3_loose
 
 _CROSS_LANE_POOL = None
 
@@ -34152,138 +34150,6 @@ def _paper_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_sen
     d, src, _meta = pool.total(pool_key, own_signal_to_send_s)
     return d, src
 
-
-# Tile 6 · GS-FADE3-TP30 (gf3): self-simulated 1 s PAPER engine (tile_fade3). Live is refused on every arm path
-# (live_tile_gate.PAPER_ONLY_TILE_KEYS); the AI router and the XVL evaluator loop skip the lane (signal clock).
-_GF3_POOL_KEYS = {"entry": _live_ack_pool.KEY_ENTRY_MKT, "exit": _live_ack_pool.KEY_EXIT_RO_MKT}
-_gf3_engine = None
-_gf3_engine_lock = threading.Lock()
-
-
-def _gf3_ledger_path() -> str:
-    return os.path.join(str(_data_sync_runtime_root()), _tile_fade3.LEDGER_FILE)
-
-
-def _gf3_get_engine():
-    global _gf3_engine
-    with _gf3_engine_lock:
-        if _gf3_engine is None:
-            lane = _tile_fade3.LANE
-            _gf3_engine = _tile_fade3.Fade3PaperEngine(
-                features_fn=_tile_fade3.LiveFeatureFeed(str(_data_sync_runtime_root())),
-                delay_fn=lambda leg: _paper_delay(lane, leg, pool_key=_GF3_POOL_KEYS.get(leg)),
-                write_fn=_tile_fade3.append_jsonl(_gf3_ledger_path()),
-                ledger_rows=_tile_fade3.read_ledger(_gf3_ledger_path()),
-            )
-        return _gf3_engine
-
-
-def gf3_paper_thread():
-    """Steps the gf3 paper engine once a second while its research toggle is on (an open position keeps being
-    managed after a toggle-off so it always closes on a real paper fill)."""
-    while True:
-        try:
-            engine = _gf3_get_engine()
-            if is_research_lane_enabled(_tile_fade3.LANE) or engine.pos is not None or engine.pending is not None:
-                t_cpu = time.thread_time()  # this thread only (process_time counts every thread)
-                engine.step(time.time())
-                cpu = time.thread_time() - t_cpu
-                if cpu > _tile_fade3.STEP_CPU_BUDGET_S:
-                    logger.warning(f"[GF3 PAPER] step CPU {cpu:.3f}s > budget {_tile_fade3.STEP_CPU_BUDGET_S}s")
-        except Exception as exc:  # noqa: BLE001 - one bad second never kills the tile
-            logger.warning(f"[GF3 PAPER] step failed: {type(exc).__name__}: {exc}")
-        _worker_beat("gf3_paper_thread")
-        time.sleep(1.0)
-
-
-# Tile 6 · GS-FADE3-LOOSE (gf3l): same self-sim 1 s PAPER engine family as gf3 with looser gates.
-_GF3L_POOL_KEYS = {"entry": _live_ack_pool.KEY_ENTRY_MKT, "exit": _live_ack_pool.KEY_EXIT_RO_MKT}
-_gf3l_engine = None
-_gf3l_engine_lock = threading.Lock()
-
-
-def _gf3l_ledger_path() -> str:
-    return os.path.join(str(_data_sync_runtime_root()), _tile_fade3_loose.LEDGER_FILE)
-
-
-def _self_sim_paper_trade_rows(session_start: float = 0.0) -> list:
-    """CLOSED rows from self-sim private ledgers (gf3 / gf3l), session-scoped.
-
-    These tiles never write to the shared ``trades`` book. Monitor lanes and
-    pathway session_stats must project them or cards stay at closes=0.
-    Read-only; does not take ``trade_lock`` (private files are independent).
-    Soft B / Force / wipe / arm / entry gates are untouched.
-    """
-    out = []
-    sources = (
-        (_gf3_ledger_path, _tile_fade3.close_row_as_shared_trade),
-        (_gf3l_ledger_path, _tile_fade3_loose.close_row_as_shared_trade),
-    )
-    for path_fn, as_trade in sources:
-        try:
-            rows = _tile_fade3.read_ledger(path_fn())
-        except Exception:  # noqa: BLE001 - missing/corrupt ledger = zero closes, never crash monitor
-            continue
-        for row in rows:
-            trade = as_trade(row)
-            if not trade:
-                continue
-            if session_start and not _trade_row_in_session(trade, session_start):
-                continue
-            out.append(trade)
-    return out
-
-
-def _overlay_self_sim_paper_closes(
-    session_start: float,
-    count: int,
-    realized: float,
-    ledger: dict,
-) -> tuple[int, float, dict]:
-    """Merge self-sim private closes into a session lane ledger (authoritative for those lanes)."""
-    extra = _self_sim_paper_trade_rows(session_start)
-    if not extra:
-        return count, realized, ledger
-    derived = _derive_lane_pnl_ledger_from_trades(extra)
-    merged = dict(ledger or {})
-    added_pnl = 0.0
-    for lane, bucket in derived.items():
-        # Self-sim tiles never appear in the shared trades book, so replace.
-        prev = merged.get(lane) or {}
-        added_pnl += float(bucket.get("net_pnl_usd") or 0.0) - float(prev.get("net_pnl_usd") or 0.0)
-        merged[lane] = bucket
-    return int(count) + len(extra), round(float(realized) + added_pnl, 2), merged
-
-
-def _gf3l_get_engine():
-    global _gf3l_engine
-    with _gf3l_engine_lock:
-        if _gf3l_engine is None:
-            lane = _tile_fade3_loose.LANE
-            _gf3l_engine = _tile_fade3_loose.Fade3PaperEngine(
-                features_fn=_tile_fade3_loose.LiveFeatureFeed(str(_data_sync_runtime_root())),
-                delay_fn=lambda leg: _paper_delay(lane, leg, pool_key=_GF3L_POOL_KEYS.get(leg)),
-                write_fn=_tile_fade3_loose.append_jsonl(_gf3l_ledger_path()),
-                ledger_rows=_tile_fade3_loose.read_ledger(_gf3l_ledger_path()),
-            )
-        return _gf3l_engine
-
-
-def gf3l_paper_thread():
-    """Steps the gf3l (FADE3-LOOSE) paper engine once a second while its research toggle is on."""
-    while True:
-        try:
-            engine = _gf3l_get_engine()
-            if is_research_lane_enabled(_tile_fade3_loose.LANE) or engine.pos is not None or engine.pending is not None:
-                t_cpu = time.thread_time()
-                engine.step(time.time())
-                cpu = time.thread_time() - t_cpu
-                if cpu > _tile_fade3_loose.STEP_CPU_BUDGET_S:
-                    logger.warning(f"[GF3L PAPER] step CPU {cpu:.3f}s > budget {_tile_fade3_loose.STEP_CPU_BUDGET_S}s")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[GF3L PAPER] step failed: {type(exc).__name__}: {exc}")
-        _worker_beat("gf3l_paper_thread")
-        time.sleep(1.0)
 
 
 def _iso_or_unix(v):
@@ -35262,7 +35128,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
     "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency", "/api/monitor/exit-lag",
-    "/api/monitor/tiles/field-completeness", "/api/monitor/tiles/gf3", "/api/monitor/tiles/gf3l",
+    "/api/monitor/tiles/field-completeness",
     # API-GAP-SWEEP-20261012
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
@@ -45861,8 +45727,8 @@ def _session_trade_accounting_locked(session_start: float, trades_src=None) -> t
     dashboard tiles and the session total cannot disagree.  Caller owns
     ``trade_lock``; rows are referenced, never copied.
 
-    Self-sim FADE3 private ledgers (gf3/gf3l) are overlaid after the shared
-    book so pathway cards and tile_route_counts.closed match real paper closes.
+    Self-sim private ledgers were retired with FADE3 tiles (R22 2026-10-30);
+    accounting is the shared paper book only.
     """
     rows = [
         row for row in (trades if trades_src is None else trades_src)
@@ -45882,7 +45748,7 @@ def _session_trade_accounting_locked(session_start: float, trades_src=None) -> t
             continue
         if not _normalize_lane_key(row.get("research_lane") or ""):
             realized += _trade_row_net_pnl_usd(row)
-    return _overlay_self_sim_paper_closes(session_start, len(rows), round(realized, 2), ledger)
+    return len(rows), round(realized, 2), ledger
 
 
 def _session_forced_close_pnl_usd_locked(session_start: float, trades_src=None) -> float:
@@ -48425,8 +48291,7 @@ def _monitor_lane_append_trade(bucket: list, row: dict) -> None:
 def _monitor_lane_rows(lanes) -> tuple[dict, float]:
     """Booked closes of the active lanes in the dashboard's trade session (same rows as lane_pnl_ledger).
 
-    Includes self-sim FADE3 private-ledger closes (gf3/gf3l) so public lanes/summary
-    cards match dedicated ``/api/monitor/tiles/gf3*`` closed_n.
+    Shared paper-book closes only (FADE3 self-sim private ledgers retired R22 2026-10-30).
     """
     session_start = _showcase_trade_session_start()
     rows = {lane: [] for lane in lanes}
@@ -48463,12 +48328,6 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
     finally:
         trade_lock.release()
     # Private self-sim ledgers are outside trade_lock / shared trades.
-    for row in _self_sim_paper_trade_rows(session_start):
-        lane_key = _normalize_lane_key(row.get("research_lane") or "")
-        bucket = rows.get(lane_key)
-        if bucket is None:
-            continue
-        _monitor_lane_append_trade(bucket, row)
     shaped = {}
     for lane, raw in rows.items():
         shaped[lane] = []
@@ -48519,8 +48378,8 @@ def _monitor_lanes_payload(now: float) -> dict:
             **_epoch_trade_scope_fields(),
             "include_forced": False,
             "closes": ("current-epoch strategy closes; forced closes excluded (same as tile_route_counts.closed); "
-                       "self-sim FADE3 (gf3/gf3l) private paper ledgers included"),
-            "self_sim_paper_ledgers": ["gf3_paper_ledger.jsonl", "gf3l_paper_ledger.jsonl"],
+                       "self-sim private ledgers retired with FADE3 tiles (R22 2026-10-30)"),
+            "self_sim_paper_ledgers": [],
             "wl": "W/L by price-based net bp (wl_basis PRICE_BP_NET_OF_FEES)",
             "pnl": "booked net_pnl_usd under the bot's conservative fill model; never recomputed",
             "drawdown": "peak-to-trough of cumulative booked net from 0, in close order",
@@ -48925,43 +48784,7 @@ def monitor_tiles_specs():
     return _monitor_tiles_guard(build, budget)
 
 
-@app.route('/api/monitor/tiles/gf3', methods=["GET"])
-def monitor_tiles_gf3():
-    """Tile 5 · GS-FADE3-TP30 paper engine status + its closed ledger rows re-evaluated for countability
-    (?limit=50, max 200). Read-only; PAPER ONLY."""
-    def build(now):
-        try:
-            limit = max(1, min(200, int(request.args.get("limit") or 50)))
-        except ValueError:
-            raise monitor_tiles.BadRequest("limit must be an integer")
-        engine = _gf3_get_engine()
-        rows = _tile_fade3.read_ledger(_gf3_ledger_path())
-        a5_now = _tile_fade3.a5_verified(_tile_fade3.rest_fill_count(rows))
-        closed = _tile_fade3.recount(rows, a5_verified_now=a5_now, latest_real_l_bp=None, clamp_hit=False)
-        return {"schema": "monitor_tile_gf3_v1", **_monitor_tiles_common(now),
-                "toggle_on": bool(is_research_lane_enabled(_tile_fade3.LANE)),
-                "status": engine.status(), "closed_n": len(closed), "closed": closed[-limit:]}
 
-    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_SPECS_BYTES)
-
-
-@app.route('/api/monitor/tiles/gf3l', methods=["GET"])
-def monitor_tiles_gf3l():
-    """Tile 6 · GS-FADE3-LOOSE paper engine status + closed ledger (?limit=50, max 200). PAPER ONLY."""
-    def build(now):
-        try:
-            limit = max(1, min(200, int(request.args.get("limit") or 50)))
-        except ValueError:
-            raise monitor_tiles.BadRequest("limit must be an integer")
-        engine = _gf3l_get_engine()
-        rows = _tile_fade3_loose.read_ledger(_gf3l_ledger_path())
-        a5_now = _tile_fade3_loose.a5_verified(_tile_fade3_loose.rest_fill_count(rows))
-        closed = _tile_fade3_loose.recount(rows, a5_verified_now=a5_now, latest_real_l_bp=None, clamp_hit=False)
-        return {"schema": "monitor_tile_gf3l_v1", **_monitor_tiles_common(now),
-                "toggle_on": bool(is_research_lane_enabled(_tile_fade3_loose.LANE)),
-                "status": engine.status(), "closed_n": len(closed), "closed": closed[-limit:]}
-
-    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_SPECS_BYTES)
 
 @app.route('/api/monitor/tiles/trades', methods=["GET"])
 def monitor_tiles_trades():
@@ -50903,8 +50726,7 @@ def monitor_live_guardian_route():
                        "liq_normal_min_bp": _ltg.LIQ_NORMAL_MIN_BP, "liq_clamp_rate_max": _ltg.LIQ_CLAMP_RATE_MAX,
                        "liq_clamp_min_n": _ltg.LIQ_CLAMP_MIN_N, "liq_source": _ltg.LIQ_SOURCE,
                        "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval"),
-                       "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
-                       "fade3_hm_gate": bool(str(os.environ.get("LIVE_HM_GATE_FADE3") or "").upper().startswith("PASS"))},
+                       "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l")},
             "today": _live_guardian_today_summary(),
             "active": bool(_get_live_copy_output().snapshot().get("enabled")),
             "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
@@ -62042,8 +61864,6 @@ def main():
     threading.Thread(target=regime_bars_boot_hydrate, name="regime-bars-hydrate", daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
     threading.Thread(target=xvl_evaluator_thread, name="xvl-evaluator", daemon=True).start()
-    threading.Thread(target=gf3_paper_thread, name="gf3-paper", daemon=True).start()
-    threading.Thread(target=gf3l_paper_thread, name="gf3l-paper", daemon=True).start()
     _start_collector_worker("collector-maturation")
     _start_collector_worker("collector-v3-reconcile")
     threading.Thread(target=safe_thread(ai_shadow_maturation_loop), daemon=True).start()
@@ -62580,7 +62400,7 @@ def _live_tile_admission(lane, trade_id, now):
     ok, reasons, info = _ltg.admit_entry(
         lane=lane, trade_id=trade_id, now=now, chains=chains, mirror=mirror,
         decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD,
-        book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"), hm_gate=os.environ.get("LIVE_HM_GATE_FADE3"),
+        book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"), hm_gate=None,
         latest_l=_LIVE_GUARDIAN_STATE.get("liq_latest_l"), stop_amendment=os.environ.get(_ltg.STOP_AMENDMENT_ENV),
         amendment_pass=_LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))
     _amber = _LIVE_GUARDIAN_STATE.get("amber") or {}
@@ -63161,14 +62981,13 @@ def _live_flatten_entry_fence(now, mirror=None) -> str | None:
 
 
 def _live_guardian_tile_arm_block(lane: str) -> str | None:
-    """AMEND5 G4(c') + G6 per-tile arm refusal (shared live_tile_gate.arm_gate_block): GS-01 + FADE3 stay disarmed after a
-    (c') first L; FADE3 arms only after GS-01's first real L is (a)/(b) AND HM's live gate passed (LIVE_HM_GATE_FADE3=PASS:<ref>)."""
+    """AMEND5 G4(c') per-tile arm refusal (shared live_tile_gate.arm_gate_block): GS-01 stays disarmed after a (c') first L."""
     import live_tile_gate as _ltg
     paper_only = _ltg.paper_only_arm_block(lane, _ltg.tile_key_for_lane(lane))
     if paper_only:
-        return paper_only  # gf3 (GS-FADE3-TP30) is PAPER ONLY: refused on every arm path, LIVE_HM_GATE_FADE3 irrelevant
+        return paper_only
     return _ltg.arm_gate_block(_ltg.tile_key_for_lane(lane), _LIVE_GUARDIAN_STATE.get("g4_first_l"),
-                               os.environ.get("LIVE_HM_GATE_FADE3"), _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
+                               None, _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
                                os.environ.get(_ltg.STOP_AMENDMENT_ENV), _LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))
 
 
@@ -64162,8 +63981,7 @@ def api_bitfinex_tile_live_orders(lane: str):
         return jsonify({"error": "'enabled' must be a JSON boolean",
                         "example": {"enabled": True}}), 400
     if enabled:
-        # RK 25 Oct 06:35 (3): ALLOWLIST, not a per-name retired denylist: every lane except GS01 and gf3 (gf3 only with
-        # its own LIVE_HM_GATE_FADE3=PASS:<ref>, unset) is refused - retired, unknown or any string.
+        # RK 25 Oct 06:35 (3) / R22 2026-10-30: ALLOWLIST (gs1 only); every other lane refused.
         import live_tile_gate as _ltg_allow
         _arm_refusal = _ltg_allow.operator_eligibility_refusal(lane)
         if _arm_refusal is not None:
