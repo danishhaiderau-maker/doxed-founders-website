@@ -78,6 +78,7 @@ import thread_health as _thread_health
 import monitor_gaps as _monitor_gaps
 import relay_delivery_guard as _relay_guard
 import ai_call_cost as _ai_call_cost
+import expired_orders_boot_rebuild as _expired_boot
 
 _THREAD_HEALTH = _thread_health.ThreadHealthRegistry()
 _FILL_SIM_COUNTERS = _monitor_gaps.FillSimCounters()
@@ -31637,6 +31638,7 @@ def _record_expired_order(source: dict, reason: str):
         _count_fill_revalidation_cancel(
             fill_revalidation_cancel_counts, row.get("research_lane"), reason
         )
+        _note_live_expired_toward_durable_total(row)
     _relay_mirror(
         "EXPIRED",
         {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
@@ -35115,6 +35117,18 @@ expired_orders: List[Dict] = []
 # expired_orders tail above is capped at MAX_EXPIRED_ORDERS, so it cannot
 # back a truthful count. Guarded by trade_lock.
 fill_revalidation_cancel_counts: Dict[str, Dict[str, int]] = {}
+# R34 boot-rebuild: CSV-backed durable in-scope total (display tail stays capped).
+# None + total_status UNKNOWN = missing/unreadable CSV (R36 — never silent 0).
+expired_orders_durable_total: Optional[int] = None
+expired_orders_rebuild_receipt: Dict[str, Any] = {
+    "schema": _expired_boot.SCHEMA,
+    "status": "UNKNOWN",
+    "total_status": "UNKNOWN",
+    "expired_orders_total": None,
+    "skipped_rows": 0,
+    "epoch_marker": _expired_boot.EPOCH_MARKER,
+    "strategy_evidence": "never",
+}
 open_positions: List[Dict] = []
 trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
@@ -45205,7 +45219,10 @@ def _build_relay_execution_state_snapshot() -> dict:
     ]
     snapshot["fidelity_trades"] = fidelity_trades
     snapshot["expired_orders"] = _dashboard_expired_order_rows(recent_expired)
-    snapshot["expired_orders_total"] = expired_orders_total
+    snapshot.update(_expired_orders_public_fields())
+    # Keep snapshot key when durable total is known; public helper already set it.
+    if expired_orders_total is not None and snapshot.get("expired_orders_total") is None:
+        snapshot["expired_orders_total"] = expired_orders_total
     snapshot["signal_info"] = {
         "active": bool(active_list),
         "count": len(active_list),
@@ -45860,10 +45877,10 @@ def _balance_reconcile_block(balance, session_pnl, forced_pnl) -> dict:
     }
 
 
-def _snapshot_expired_rows_locked(limit: int, expired_src=None) -> tuple[list, int]:
-    """Copy a bounded tail while returning the exact visible-row count."""
+def _snapshot_expired_rows_locked(limit: int, expired_src=None) -> tuple[list, int | None]:
+    """Copy a bounded display tail; total is CSV-backed durable count when rebuilt (R34)."""
     selected = []
-    total = 0
+    memory_total = 0
     bounded_limit = max(0, int(limit))
     for row in (expired_orders if expired_src is None else expired_src):
         if (
@@ -45871,12 +45888,112 @@ def _snapshot_expired_rows_locked(limit: int, expired_src=None) -> tuple[list, i
             or str(row.get("research_lane") or "").upper() == "AI_SCAN"
         ):
             continue
-        total += 1
+        memory_total += 1
         if bounded_limit:
             selected.append(row)
             if len(selected) > bounded_limit:
                 del selected[0]
+    # Durable total changes meaning under boot-rebuild (R40): unique in-scope CSV
+    # ids for the current epoch, not process-lifetime capped list length.
+    durable = expired_orders_durable_total
+    receipt = expired_orders_rebuild_receipt or {}
+    if receipt.get("total_status") == "UNKNOWN" or durable is None:
+        total: int | None = None
+    else:
+        total = int(durable)
     return copy.deepcopy(selected), total
+
+
+def _expired_orders_public_fields() -> dict:
+    """Shared GET fields for /api/state and /api/status (R34/R36/R40/R41)."""
+    receipt = dict(expired_orders_rebuild_receipt or {})
+    total = expired_orders_durable_total
+    total_status = receipt.get("total_status") or ("OK" if total is not None else "UNKNOWN")
+    return {
+        # Meaning (R40): unique in-scope CSV-backed durable total for the current
+        # epoch marker ``_current_epoch_boundary`` — not the capped memory tail.
+        "expired_orders_total": total,
+        "expired_orders_total_status": total_status,
+        # T7 / RK required: counted-skip count on a GET surface.
+        "expired_orders_rebuild_skipped_rows": int(receipt.get("skipped_rows") or 0),
+        "expired_orders_rebuild": receipt,
+    }
+
+
+def rebuild_expired_orders_from_csv(*, reason: str = "boot") -> dict:
+    """Rebuild in-memory expired tail + durable total from CSV (read-only, R25/R34)."""
+    global expired_orders_durable_total, expired_orders_rebuild_receipt
+    cutoff_ts, cutoff_source = _current_epoch_boundary(force=True)
+    # HM fold (a): named epoch marker matches the reset-facing boundary helper.
+    path = CSV_EXPIRED
+    try:
+        outcome = _expired_boot.apply_boot_rebuild(
+            csv_path=path,
+            epoch_cutoff_ts=float(cutoff_ts) if cutoff_ts else None,
+            display_cap=MAX_EXPIRED_ORDERS,
+        )
+    except Exception as exc:
+        logger.error(
+            f"[STARTUP] expired CSV boot-rebuild failed closed: {exc} [PIPELINE ENFORCEMENT]"
+        )
+        receipt = {
+            "schema": _expired_boot.SCHEMA,
+            "status": "RED",
+            "total_status": "UNKNOWN",
+            "expired_orders_total": None,
+            "skipped_rows": 0,
+            "epoch_marker": _expired_boot.EPOCH_MARKER,
+            "epoch_cutoff_ts": float(cutoff_ts) if cutoff_ts else None,
+            "epoch_cutoff_source": cutoff_source,
+            "error": f"EXPIRED_REBUILD_EXCEPTION:{type(exc).__name__}",
+            "strategy_evidence": "never",
+            "reason": reason,
+        }
+        with trade_lock:
+            expired_orders.clear()
+            fill_revalidation_cancel_counts.clear()
+            expired_orders_durable_total = None
+            expired_orders_rebuild_receipt = receipt
+        return receipt
+
+    receipt = dict(outcome["receipt"])
+    receipt["epoch_cutoff_source"] = cutoff_source
+    receipt["reason"] = reason
+    with trade_lock:
+        expired_orders.clear()
+        expired_orders.extend(outcome["display_tail"])
+        fill_revalidation_cancel_counts.clear()
+        fill_revalidation_cancel_counts.update(
+            outcome.get("fill_revalidation_cancel_counts") or {}
+        )
+        if receipt.get("total_status") == "UNKNOWN":
+            expired_orders_durable_total = None
+        else:
+            expired_orders_durable_total = int(receipt.get("expired_orders_total") or 0)
+        expired_orders_rebuild_receipt = receipt
+    logger.info(
+        f"[STARTUP] expired CSV boot-rebuild status={receipt.get('status')} "
+        f"total={receipt.get('expired_orders_total')} "
+        f"skipped={receipt.get('skipped_rows')} "
+        f"epoch_marker={receipt.get('epoch_marker')} "
+        f"cutoff_source={cutoff_source} reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+    return receipt
+
+
+def _note_live_expired_toward_durable_total(row: dict) -> None:
+    """Increment CSV-backed durable total for a newly recorded non-AI_SCAN expiry."""
+    global expired_orders_durable_total
+    if not isinstance(row, dict):
+        return
+    if str(row.get("research_lane") or "").upper() == "AI_SCAN":
+        return
+    if expired_orders_durable_total is None:
+        # Rebuild never completed truthfully — do not invent a silent 0 (R36).
+        return
+    expired_orders_durable_total = int(expired_orders_durable_total) + 1
+    if isinstance(expired_orders_rebuild_receipt, dict):
+        expired_orders_rebuild_receipt["expired_orders_total"] = expired_orders_durable_total
 
 
 def _count_fill_revalidation_cancel(counts: dict, lane, reason) -> None:
@@ -46802,7 +46919,9 @@ def _build_api_state_snapshot():
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total
         snapshot["tile_route_counts"] = tile_route_counts
-        snapshot["expired_orders_total"] = expired_orders_total
+        snapshot.update(_expired_orders_public_fields())
+        if expired_orders_total is not None and snapshot.get("expired_orders_total") is None:
+            snapshot["expired_orders_total"] = expired_orders_total
         snapshot["dashboard_history_limit"] = _DASHBOARD_HISTORY_MAX
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
         phase_timings["signal_history_projection"] = (time.perf_counter() - phase_started) * 1000
@@ -47327,11 +47446,10 @@ def _api_state_cache_refresher_loop():
                 snap["expired_orders"] = copy.deepcopy(
                     relay_expired[-_DASHBOARD_HISTORY_MAX:]
                 )
-                snap["expired_orders_total"] = int(
-                    relay.get("expired_orders_total")
-                    if relay.get("expired_orders_total") is not None
-                    else len(relay_expired)
-                )
+                # Prefer live durable rebuild fields (R34/R36); never coerce UNKNOWN→0.
+                snap.update(_expired_orders_public_fields())
+                if snap.get("expired_orders_total") is None and relay.get("expired_orders_total") is not None:
+                    snap["expired_orders_total"] = relay.get("expired_orders_total")
                 with state_lock:
                     ai_history_all = _session_ai_history(
                         list(state.get("ai_history") or []),
@@ -51384,6 +51502,9 @@ def status():
         **_runtime_blindspot_status_fields(now),
     }
     payload["collection_epoch_parity"] = _collection_epoch_parity(payload["lifecycle_pipeline"])
+    # HM fold (b): publish expired_orders_total on /api/status on purpose (R40) so
+    # T6 / post-deploy GET read-back can use status without relying only on /api/state.
+    payload.update(_expired_orders_public_fields())
     return jsonify(payload)
 
 
@@ -56800,12 +56921,28 @@ def reset_session_risk_state():
 def reset_runtime_state(*, preserve_execution_pause: bool = False):
     global bot_start_time, trades, pending_orders, expired_orders, open_positions, trades_map
     global _LANE_OPPORTUNITY_COUNTERS_SINCE_TS
+    global expired_orders_durable_total, expired_orders_rebuild_receipt
     logger.warning("[RESET] HARD RESET START - clearing all in-memory state for true clean slate")
     bot_start_time = time.time()
     _LANE_OPPORTUNITY_COUNTERS_SINCE_TS = bot_start_time
     trades.clear()
     pending_orders.clear()
     expired_orders.clear()
+    fill_revalidation_cancel_counts.clear()
+    # After reset the epoch marker advances via the same _current_epoch_boundary
+    # helper the boot rebuild filters on (HM fold a). Rebuild from CSV so the
+    # durable total matches the new in-scope set (usually empty right after reset).
+    expired_orders_durable_total = 0
+    expired_orders_rebuild_receipt = {
+        "schema": _expired_boot.SCHEMA,
+        "status": "GREEN",
+        "total_status": "OK",
+        "expired_orders_total": 0,
+        "skipped_rows": 0,
+        "epoch_marker": _expired_boot.EPOCH_MARKER,
+        "strategy_evidence": "never",
+        "reason": "reset_runtime_state_cleared",
+    }
     open_positions.clear()
     trades_map.clear()
     with state_lock:
@@ -59801,11 +59938,23 @@ def _persistent_config_keys():
 
 def enforce_clean_research_session():
     """Research sim always starts at STARTING_BALANCE with no carry-over trades."""
-    global bot_start_time
+    global bot_start_time, expired_orders_durable_total, expired_orders_rebuild_receipt
     with trade_lock:
         trades.clear()
         pending_orders.clear()
         expired_orders.clear()
+        fill_revalidation_cancel_counts.clear()
+        expired_orders_durable_total = 0
+        expired_orders_rebuild_receipt = {
+            "schema": _expired_boot.SCHEMA,
+            "status": "GREEN",
+            "total_status": "OK",
+            "expired_orders_total": 0,
+            "skipped_rows": 0,
+            "epoch_marker": _expired_boot.EPOCH_MARKER,
+            "strategy_evidence": "never",
+            "reason": "enforce_clean_research_session_cleared",
+        }
         open_positions.clear()
         trades_map.clear()
         recent_trades.clear()
@@ -61751,6 +61900,10 @@ def main():
     except Exception as exc:
         logger.error(f"[STARTUP] CSV fallback replay failed: {exc} [PIPELINE ENFORCEMENT]")
     load_session_trades_from_csv()
+    try:
+        rebuild_expired_orders_from_csv(reason="boot")
+    except Exception as exc:
+        logger.error(f"[STARTUP] expired CSV boot-rebuild outer fail: {exc} [PIPELINE ENFORCEMENT]")
     _recompute_research_balance_from_trades()
     try:
         _segregate_lane_pnl_ledger_for_epoch()

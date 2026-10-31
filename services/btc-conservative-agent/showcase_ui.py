@@ -95,6 +95,10 @@ def perform_showcase_fresh_start(bot_module) -> dict:
         bot_module.state["bot_start_time"] = bot_module.bot_start_time
     if hasattr(bot_module, "_write_research_session"):
         bot_module._write_research_session(bot_module.bot_start_time)
+    # Epoch marker stamped above; rebuild durable expired total from CSV filtered
+    # to `_current_epoch_boundary` (HM fold a — match the reset).
+    if hasattr(bot_module, "rebuild_expired_orders_from_csv"):
+        bot_module.rebuild_expired_orders_from_csv(reason="showcase_fresh_start")
     if hasattr(bot_module, "save_persistent_config"):
         bot_module.save_persistent_config()
     return {

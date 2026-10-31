@@ -212,11 +212,19 @@ def test_runtime_reset_never_transiently_unpauses_when_requested(preserve):
             observations.append(values["execution_paused"])
             super().update(values)
 
+    class _ExpiredBootStub:
+        SCHEMA = "expired_orders_boot_rebuild_v1"
+        EPOCH_MARKER = "_current_epoch_boundary"
+
     env = {"logger": Mock(), "time": Mock(), "state_lock": threading.RLock(),
            "state": ObservedState(execution_paused=True, execution_reason="ADMIN_MANUAL", _pause_priority=8),
            "STARTING_BALANCE": 500, "_fresh_debug_state": lambda: {},
            **{name: [] for name in ("trades", "pending_orders", "expired_orders", "open_positions")},
-           "trades_map": {}}
+           "trades_map": {},
+           "fill_revalidation_cancel_counts": {},
+           "expired_orders_durable_total": None,
+           "expired_orders_rebuild_receipt": {},
+           "_expired_boot": _ExpiredBootStub()}
     exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), env)
     env["reset_runtime_state"](preserve_execution_pause=preserve)
     assert observations == [preserve]
