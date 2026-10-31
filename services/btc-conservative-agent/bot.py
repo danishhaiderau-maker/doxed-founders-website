@@ -51412,7 +51412,11 @@ _volume_health_cached = (0.0, None)
 
 
 def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
-    """Segment-shipper progress from its small status file."""
+    """Segment-shipper progress from its small status file.
+
+    Lag/stall algebra re-keys ``custody_through_seq`` from **live**
+    ``latest_custody`` receipts (never frozen ``/head`` / status ``5093``).
+    """
     segments_enabled = (os.getenv("RESEARCH_SEGMENTS_ENABLED") or "0").strip() == "1"
     transfer = {
         "segments_enabled": segments_enabled,
@@ -51421,9 +51425,10 @@ def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
     status_dir = (os.getenv("RESEARCH_SEGMENTS_STATE_DIR") or "").strip()
     import research_segment_epoch as _rse
     _per_wipe = _rse.per_wipe_enabled(os.environ)
+    _epoch_id = _rse.fresh_start_epoch_id(volume_root)
     status_path = _rse.resolve_state_dir(
         Path(status_dir) if status_dir else volume_root / "segment-shipper",
-        _rse.fresh_start_epoch_id(volume_root) if _per_wipe else "", per_wipe=_per_wipe,
+        _epoch_id if _per_wipe else "", per_wipe=_per_wipe,
     ) / "status.json"
     try:
         if status_path.stat().st_size <= _SEGMENT_STATUS_MAX_BYTES:
@@ -51441,9 +51446,27 @@ def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
     if transfer.get("segment_status_present"):
         try:
             import monitor_gaps as _mg_custody
+            import research_segment_store as _rss
+            # Preserve status.json field as legacy display only — lag must not use it.
+            transfer["custody_through_seq_status"] = transfer.get("custody_through_seq")
+            prefix = _rse.resolve_prefix(
+                (os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v1").strip(),
+                _epoch_id, per_wipe=_per_wipe,
+            )
+            live = _mg_custody.resolve_live_custody_for_lag(_rss.volume_store_root(), prefix)
+            transfer = _mg_custody.apply_live_custody_to_transfer(transfer, live)
             transfer.update(_mg_custody.custody_stall(transfer, now))
         except Exception as exc:  # noqa: BLE001 - status must never fail on this
-            transfer["custody_stall_reason"] = f"CUSTODY_STALL_UNREADABLE: {type(exc).__name__}"
+            # Fail closed: never substitute status/head 5093 for lag.
+            transfer["custody_through_seq_status"] = transfer.get(
+                "custody_through_seq_status", transfer.get("custody_through_seq"))
+            transfer["custody_through_seq"] = None
+            transfer["custody_source"] = "unavailable"
+            transfer["custody_source_error"] = "CUSTODY_SOURCE_UNAVAILABLE"
+            transfer["custody_stall_reason"] = "CUSTODY_SOURCE_UNAVAILABLE"
+            transfer["custody_stall_red"] = True
+            transfer["laptop_ack_stall_red"] = True
+            transfer["custody_stall_exception"] = type(exc).__name__
     transfer.pop("prune_last_plan", None)   # only its deny reasons are surfaced (custody_last_error)
     return transfer
 
