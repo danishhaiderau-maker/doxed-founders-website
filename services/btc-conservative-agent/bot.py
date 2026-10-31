@@ -55591,6 +55591,9 @@ _ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
 # Fix A (plan sha e448f5f67f8a): mirror status must advertise an explicit RED label —
 # never HTTP 404 — when no validated analyzer_mirror_bundle_v2 is installed.
 _ANALYZER_BUNDLE_NO_VALIDATED_REASON = "NO_VALIDATED_ANALYZER_BUNDLE"
+# Seal ca14dba80fca B1: active dir selected but status.json unreadable/invalid →
+# HTTP 200 available=false RED (never 404-as-"route missing").
+_ANALYZER_STATUS_UNREADABLE_REASON = "ANALYZER_STATUS_UNREADABLE"
 
 
 def _analyzer_mirror_no_validated_bundle_payload(*, legacy_preserved: bool) -> dict:
@@ -55610,6 +55613,50 @@ def _analyzer_mirror_no_validated_bundle_payload(*, legacy_preserved: bool) -> d
             "detail": detail,
         }],
     }
+
+
+def _analyzer_mirror_unreadable_status_payload(*, legacy_preserved: bool) -> dict:
+    """Honest unreadable-status body (shared helper; never 404). Seal ca14dba80fca B1."""
+    detail = "active analyzer generation status.json is unreadable or invalid"
+    return {
+        "available": False,
+        "status": "RED",
+        "health": "RED",
+        "reason": _ANALYZER_STATUS_UNREADABLE_REASON,
+        "detail": detail,
+        "required_schema": _ANALYZER_BUNDLE_SCHEMA,
+        "legacy_data_preserved": bool(legacy_preserved),
+        "alarms": [{
+            "code": _ANALYZER_STATUS_UNREADABLE_REASON,
+            "severity": "critical",
+            "detail": detail,
+        }],
+    }
+
+
+def classify_analyzer_mirror_status_for_monitor(status_code: int, body) -> str:
+    """Monitor/integrity classifier for /api/analyzer-mirror/status (seal ca14dba80fca S6).
+
+    HTTP 200 + available=false is RED (not healthy, not route-missing).
+    HTTP 404 is mislabel RED under R36 when the route exists — never treat as
+    "route missing / ignore".
+    """
+    if not isinstance(body, dict):
+        body = {}
+    if status_code == 404:
+        return "RED_MISLABEL_404"
+    if status_code == 200 and body.get("available") is False:
+        return "RED"
+    if status_code == 200 and body.get("available") is True:
+        if str(body.get("status") or "").upper() == "RED" or str(body.get("health") or "").upper() == "RED":
+            return "RED"
+        schema = str(body.get("schema") or body.get("required_schema") or "")
+        if schema and schema != _ANALYZER_BUNDLE_SCHEMA:
+            return "RED"
+        return "GREEN"
+    if status_code == 401:
+        return "UNAUTHORIZED"
+    return "RED"
 
 
 def _analyzer_bundle_fresh_gate(report_manifest) -> None:
@@ -56068,12 +56115,22 @@ def api_analyzer_mirror_status():
         payload = json.loads(
             (active / "status.json").read_text(encoding="utf-8")
         )
+        if not isinstance(payload, dict):
+            raise ValueError("analyzer status.json is not an object")
+        if payload.get("schema") != _ANALYZER_BUNDLE_SCHEMA:
+            # Wrong/missing schema while a pointer is set: never soft-GREEN (S3).
+            raise ValueError("analyzer status.json schema is not analyzer_mirror_bundle_v2")
         resp = jsonify({"available": True, **payload})
         resp.headers['Cache-Control'] = 'no-store'
         return resp
-    except (OSError, ValueError, TypeError):
-        # Plan Fix A covers only `active is None` (R38). Unreadable status.json stays 404.
-        return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        # Seal ca14dba80fca B1: unreadable/invalid → 200 RED ANALYZER_STATUS_UNREADABLE (never 404).
+        legacy_preserved = _analyzer_mirror_dir().exists()
+        resp = jsonify(_analyzer_mirror_unreadable_status_payload(
+            legacy_preserved=legacy_preserved,
+        ))
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
 
 
 @app.route('/analysis')
