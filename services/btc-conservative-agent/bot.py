@@ -6623,11 +6623,8 @@ _TAPE_CONTINUITY = _monitor_integrity.TapeContinuityTracker() if _monitor_integr
 _AI_CALL_WINDOW = _monitor_integrity.AiCallWindow() if _monitor_integrity else None
 _FILL_MARKOUT_AGG = _monitor_integrity.FillMarkoutAggregator() if _monitor_integrity else None
 _fill_markout_book = execution_markouts.MarkoutBook()
-_taker_counterfactual_book = execution_markouts.MarkoutBook()
 _execution_markout_counters = {
-    "fill_rows_written": 0, "taker_rows_written": 0, "write_failures": 0,
-    "taker_signals_scheduled": 0, "taker_capture_failures": 0,
-    "taker_r17_skipped": 0,
+    "fill_rows_written": 0, "write_failures": 0,
 }
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
 _adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "by_lane": {}, "last": None}
@@ -22862,8 +22859,6 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         and not score_led_admission.get("accepted")
         else int(compute_directional_spread(final_direction, lane_ai))
     )
-    if str(lane_ai.get("decision") or "").upper() == "APPROVE":
-        _schedule_taker_signal_counterfactual(ctx, ai, final_direction)
     enriched = _enrich_combo_lane_features(features, ctx)
     for lane in COMBO_EXECUTION_LANES:
         # Shared-direction policy lanes are routed explicitly so their own
@@ -30073,9 +30068,6 @@ def microstructure_capture_loop():
 
 def _sample_execution_markouts(bid, ask, last, quote_ts) -> None:
     now = time.time()
-    # R17 (23 Oct): the taker-signal counterfactual book is no longer sampled
-    # or written (see TAKER_SIGNAL_COUNTERFACTUAL_ENABLED). Fill markouts are
-    # unchanged.
     for book, path, label, counter in (
         (_fill_markout_book, execution_markouts.FILL_FILE, "FILL_MARKOUT", "fill_rows_written"),
     ):
@@ -30126,108 +30118,9 @@ def _register_fill_markout(order: dict, fill_price, signal: dict = None) -> None
     )
 
 
-# R17 (23 Oct): taker_signal_counterfactuals.jsonl is retired. Its touch and
-# marketable limit came from the ticker BBO (state bid/ask), its latencies were
-# fixed modelled values rather than measured order round-trips, and its
-# markouts were sampled from ticker/L1 tape marks. None of that can be checked
-# against the real Bitfinex book, so the PRIME RULE cannot verify a row. The
-# writer stays off until it is rebuilt on a bfx_book_10l walk with measured
-# delay. The file name stays declared so reset/wipe lists still find old copies.
-TAKER_SIGNAL_COUNTERFACTUAL_ENABLED = False
-
-
-def _capture_taker_signal_counterfactual(call_id: str, direction: str, signal_ts: float,
-                                         latency: float, context: dict) -> None:
-    if not TAKER_SIGNAL_COUNTERFACTUAL_ENABLED:
-        _execution_markout_counters["taker_r17_skipped"] += 1
-        return
-    try:
-        now = time.time()
-        with state_lock:
-            bid = _buf_float(state.get("bid"), 0.0)
-            ask = _buf_float(state.get("ask"), 0.0)
-            bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
-            book = copy.deepcopy(state.get("order_book") or {})
-            book_ts = state.get("book_ts")
-        sign = execution_markouts.direction_sign(direction)
-        touch = ask if sign > 0 else bid
-        side = "buy" if sign > 0 else "sell"
-        notional = (
-            execution_markouts.COUNTERFACTUAL_MARGIN_USD
-            * execution_markouts.COUNTERFACTUAL_LEVERAGE
-        )
-        qty = notional / touch if touch > 0 else 0.0
-        sim = (
-            simulate_marketable_limit_fill(
-                side, qty, touch * (1.005 if sign > 0 else 0.995),
-                book.get("asks") if sign > 0 else book.get("bids"),
-                book_observed_ts=book_ts,
-            )
-            if touch > 0 else {}
-        )
-        vwap = _buf_float(sim.get("avg_price"), 0.0)
-        entry = vwap if vwap > 0 and sim.get("fully_filled") else None
-        row = {
-            "schema": execution_markouts.TAKER_SCHEMA,
-            "shared_ai_call_id": call_id,
-            "direction": direction,
-            "signal_ts": round(signal_ts, 3),
-            "latency_sec": latency,
-            "observed_ts": round(now, 3),
-            "bid": bid or None, "ask": ask or None,
-            "bbo_age_sec": None if not bbo_ts else round(now - bbo_ts, 3),
-            "touch_price": touch or None,
-            "depth_vwap": vwap or None,
-            "requested_notional_usd": notional,
-            "requested_qty": qty,
-            "filled_qty": sim.get("filled_qty"),
-            "levels_consumed": sim.get("levels_consumed"),
-            "book_observed_ts": book_ts,
-            "entry_price": entry,
-            "entry_basis": "DEPTH_VWAP" if entry else "UNAVAILABLE",
-            "fee_profile": EXCHANGE_FEE_PROFILE,
-            "taker_fee_usd": bitfinex_cost_profile.fee_usd(notional, maker=False),
-            **context,
-        }
-        if not entry:
-            row["markouts"] = {}
-            row["markouts_complete"] = False
-            _safe_append_jsonl(
-                execution_markouts.TAKER_FILE, row,
-                label="TAKER_SIGNAL_COUNTERFACTUAL", fallback_on_error=False,
-            )
-            return
-        _taker_counterfactual_book.register(
-            f"taker:{call_id}:{latency:g}", anchor_ts=now, entry_price=entry,
-            direction=direction, row=row,
-        )
-    except Exception as exc:
-        _execution_markout_counters["taker_capture_failures"] += 1
-        logger.warning(f"[TAKER CF] capture failed call={call_id}: {exc} [PIPELINE ENFORCEMENT]")
-
-
-def _schedule_taker_signal_counterfactual(ctx: dict, ai: dict, direction: str) -> None:
-    """Price an immediate taker entry for every directional signal at each modelled latency."""
-    if execution_markouts.direction_sign(direction) == 0:
-        return
-    if not TAKER_SIGNAL_COUNTERFACTUAL_ENABLED:
-        # R17: no timers, no rows. Count the skip so the monitor shows the stop.
-        _execution_markout_counters["taker_r17_skipped"] += 1
-        return
-    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
-    signal_ts = time.time()
-    context = {
-        "raw_ai_decision": (ai or {}).get("raw_decision") or (ai or {}).get("decision"),
-        "tile_registry_signature": active_tile_registry_signature(),
-    }
-    for latency in execution_markouts.TAKER_LATENCIES_SEC:
-        timer = threading.Timer(
-            latency, _capture_taker_signal_counterfactual,
-            args=(call_id, direction, signal_ts, latency, context),
-        )
-        timer.daemon = True
-        timer.start()
-    _execution_markout_counters["taker_signals_scheduled"] += 1
+# Wipe-list filename only (R22): taker_signal_counterfactuals writer deleted;
+# keep the basename so reset/wipe lists still find old copies.
+TAKER_SIGNAL_COUNTERFACTUAL_FILE = "taker_signal_counterfactuals.jsonl"
 
 
 def _record_adaptive_entry_decision(lane: str, decision: dict, *, quote_ctx: dict | None = None) -> None:
@@ -30281,36 +30174,17 @@ def adaptive_entry_status_snapshot() -> dict:
         return copy.deepcopy(_adaptive_entry_stats)
 
 
-# R17 (23 Oct): the shadow-exit recorder is retired. It replayed exits over
-# ticker/L1 marks with no depth, which the PRIME RULE cannot verify. The file
-# name stays declared so reset/wipe lists still remove any old copy.
+# Wipe-list filename only (R22): shadow_exit_paths recorder deleted;
+# keep the basename so reset/wipe lists still remove any old copy.
 SHADOW_EXIT_PATH_FILE = "shadow_exit_paths.jsonl"
-SHADOW_EXIT_RECORDER_ENABLED = False
-R17_RETIRED_STATUS = "disabled: R17"
-
-
-def _r17_retired_view(source: str) -> dict:
-    return {"source": source, "enabled": False, "retired": "R17", "status": R17_RETIRED_STATUS,
-            "detail": "source retired (R17)"}
-
-
-def shadow_exit_recorder_status_snapshot() -> dict:
-    return _r17_retired_view("shadow_exit_paths")
 
 
 def execution_markout_status_snapshot() -> dict:
     return {
         **dict(_execution_markout_counters),
         "fill_pending": _fill_markout_book.pending_count(),
-        "taker_pending": _taker_counterfactual_book.pending_count(),
-        "dropped": _fill_markout_book.dropped + _taker_counterfactual_book.dropped,
+        "dropped": _fill_markout_book.dropped,
         "horizons_sec": list(execution_markouts.MARKOUT_HORIZONS_SEC),
-        "taker_latencies_sec": list(execution_markouts.TAKER_LATENCIES_SEC),
-        "taker_signal_counterfactual": (
-            {"source": "taker_signal_counterfactuals", "enabled": True}
-            if TAKER_SIGNAL_COUNTERFACTUAL_ENABLED
-            else _r17_retired_view("taker_signal_counterfactuals")
-        ),
     }
 
 
@@ -35168,7 +35042,6 @@ _READ_ONLY_GET_PATHS = {
     "/api/system-health", "/api/system-health/alerts", "/alerts",
     "/api/analyzer/genome", "/api/download_debug_config",
     "/api/monitor/summary", "/api/monitor/lanes", "/static/dashboard.js",
-    "/api/shadow_exits/summary",
     "/restart-cause", "/api/restart-cause",
 }
 # Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
@@ -35195,7 +35068,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
     "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
     "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
-    "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
+    "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
     "/api/monitor/reconcile", "/api/monitor/tile-integrity", "/api/monitor/fill-provenance",
     "/api/monitor/nonaccum-plans",
     # R16 (RK 24 Oct): V3 ledger rows written without a countable stamp since ?since=TS
@@ -49741,15 +49614,6 @@ def monitor_alerts_full():
     return _monitor_tiles_guard(build, 1_500_000)
 
 
-@app.route('/api/monitor/shadow-exits', methods=["GET"])
-def monitor_shadow_exits():
-    """Shadow-exit recorder status + aggregates (was admin-only /api/research/shadow_exits)."""
-    def build(now):
-        return {"schema": "shadow_exit_runtime_view_v1", **_monitor_tiles_common(now),
-                **_r17_retired_view("shadow_exit_paths"), "observation_only": True}
-    return _monitor_tiles_guard(build, 1_000_000)
-
-
 @app.route('/api/monitor/chase_buckets', methods=["GET"])
 def monitor_chase_buckets():
     """Chase-window table, recomputed on every request (Strategist CHASE-GAP). ?since=<epoch ts>."""
@@ -49949,18 +49813,6 @@ def monitor_streams_page(name):
         resp.headers["X-Stream-" + key.replace("_", "-").title()] = str(value)
     resp.headers["Cache-Control"] = "no-store"
     return resp
-
-
-@app.route('/api/research/shadow_exits')
-def research_shadow_exits():
-    """Admin-only (not in _READ_ONLY_GET_PATHS). Retired (R17): no recorder runs."""
-    return jsonify({"schema": "shadow_exit_runtime_view_v1", **_r17_retired_view("shadow_exit_paths"),
-                    "observation_only": True})
-
-
-@app.route('/api/shadow_exits/summary')
-def shadow_exits_public_summary():
-    return jsonify({"schema": "shadow_exit_public_summary_v1", **_r17_retired_view("shadow_exit_paths")})
 
 
 
@@ -51402,10 +51254,8 @@ def status():
             },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
-                "taker_counterfactual_file": execution_markouts.TAKER_FILE,
                 **execution_markout_status_snapshot(),
             },
-            "shadow_exit_recorder": shadow_exit_recorder_status_snapshot(),
             "adaptive_entry": {
                 "file": ADAPTIVE_ENTRY_DECISIONS_FILE,
                 **adaptive_entry_status_snapshot(),
@@ -55646,6 +55496,28 @@ _ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671  # 2026-10-18 06:01:11 AEDT, the re
 FRESH_START_TS = _ANALYZER_BUNDLE_FRESH_FLOOR_TS
 FRESH_START_UTC = datetime.fromtimestamp(FRESH_START_TS, timezone.utc).isoformat()
 _ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
+# Fix A (plan sha e448f5f67f8a): mirror status must advertise an explicit RED label —
+# never HTTP 404 — when no validated analyzer_mirror_bundle_v2 is installed.
+_ANALYZER_BUNDLE_NO_VALIDATED_REASON = "NO_VALIDATED_ANALYZER_BUNDLE"
+
+
+def _analyzer_mirror_no_validated_bundle_payload(*, legacy_preserved: bool) -> dict:
+    """Honest no-bundle body for /api/analyzer-mirror/status (status/health/alarm RED)."""
+    detail = "no complete validated analyzer bundle is installed"
+    return {
+        "available": False,
+        "status": "RED",
+        "health": "RED",
+        "reason": _ANALYZER_BUNDLE_NO_VALIDATED_REASON,
+        "detail": detail,
+        "required_schema": _ANALYZER_BUNDLE_SCHEMA,
+        "legacy_data_preserved": bool(legacy_preserved),
+        "alarms": [{
+            "code": _ANALYZER_BUNDLE_NO_VALIDATED_REASON,
+            "severity": "critical",
+            "detail": detail,
+        }],
+    }
 
 
 def _analyzer_bundle_fresh_gate(report_manifest) -> None:
@@ -56093,13 +55965,13 @@ def api_analyzer_mirror_status():
         return jsonify({"error": "unauthorized"}), 401
     active = _active_analyzer_mirror_dir()
     if active is None:
+        # Fix A: non-404 RED — 404 was misread as "route missing" (R36).
         legacy_preserved = _analyzer_mirror_dir().exists()
-        return jsonify({
-            "available": False,
-            "reason": "no complete validated analyzer bundle is installed",
-            "required_schema": _ANALYZER_BUNDLE_SCHEMA,
-            "legacy_data_preserved": legacy_preserved,
-        }), 404
+        resp = jsonify(_analyzer_mirror_no_validated_bundle_payload(
+            legacy_preserved=legacy_preserved,
+        ))
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
     try:
         payload = json.loads(
             (active / "status.json").read_text(encoding="utf-8")
@@ -56108,6 +55980,7 @@ def api_analyzer_mirror_status():
         resp.headers['Cache-Control'] = 'no-store'
         return resp
     except (OSError, ValueError, TypeError):
+        # Plan Fix A covers only `active is None` (R38). Unreadable status.json stays 404.
         return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
 
 
@@ -58862,7 +58735,6 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
             # not file appends (HM E1.1).
             del post_ticks, censored
             write_counter += 1
-            # R17 (23 Oct): the shadow_exit_paths recorder is retired.
             if replay_complete:
                 paper_tid = paper_multiverse_trade_id(
                     trade_id,

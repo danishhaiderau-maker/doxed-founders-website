@@ -97,8 +97,11 @@ def test_signals_merge_sources_and_commit_rule(fixture_dir):
     a, b, c = sigs["scan-a"], sigs["scan-b"], sigs["scan-c"]
     assert a["ai_committed"] and a["ai_explicit_aligned"] and a["direction"] == "LONG"
     assert b["explicit_abstain"] and b["score_led_side"] == "SHORT" and b["direction"] == "NONE"
-    assert b["counterfactual_direction"] == "SHORT" and b["sources"] == {"adaptive_entry_decisions",
-                                                                          "taker_signal_counterfactuals"}
+    # R17: taker_signal_counterfactuals is retired — never merged into signal rows.
+    assert "counterfactual_direction" not in b
+    assert b["sources"] == {"adaptive_entry_decisions"}
+    retired = srt.retired_stream_read("taker_signal_counterfactuals.jsonl")
+    assert retired["EMPTY_BECAUSE"] == "R17_RETIRED" and retired["rows_read"] == 0
     # gap 15 < 30: aligned with the score-led side but not committed under the bot's telemetry rule
     assert c["ai_explicit_aligned"] and not c["ai_committed"]
     assert sigs["xvl-1"]["signal_kind"] == "XVENUE_SIGNAL" and sigs["xvl-1"]["direction"] == "LONG"

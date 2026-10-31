@@ -437,9 +437,12 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
 class GsPremiumEvaluator(PremiumEvaluator):
     """GS-01: H-C's premium rule in its own instance.
 
-    R22 (R0c plan eb14e8711d31 / HM 46a97b4debee): xvp_shadow_signals.jsonl is NOT
-    REQUIRED (no unique raw prices) — writer removed unconditionally. Paper orders
-    remain the only record; SHADOW_FILE stays None like GS-05.
+    Signal path (cross_venue_premium evaluate/qualify → paper attempt) stays live.
+    R22 (R0c plan eb14e8711d31 / HM 46a97b4debee NOT REQUIRED) + HM/RK 30 Oct 2026:
+    ``xvp_shadow_signals.jsonl`` is RETIRED (ticker/L1-priced shadow_outcome);
+    writer removed. ``SHADOW_FILE = None`` stops stream + outcome recording only;
+    GS-01 still triggers paper via ``_xvl_maybe_attempt_paper``. Paper orders
+    remain the only record (same as GS-05).
     """
 
     ID_PREFIX = "gsxvp"

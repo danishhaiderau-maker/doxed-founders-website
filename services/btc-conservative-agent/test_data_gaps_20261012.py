@@ -37,12 +37,12 @@ def test_collector_subscribes_status_channel():
     assert '"channel": "status", "key": DERIV_KEY' in src
 
 
-# (g) xvp shadow stream — R22 writers gone; monitor key retained -------------------------
-def test_gs01_writes_xvp_shadow_and_other_instances_do_not():
+# (g) xvp shadow stream RETIRED (HM 30 Oct / R22); GS-01 signal path keeps SHADOW_FILE None ----
+def test_gs01_does_not_write_xvp_shadow_stream_anymore():
     """R22 (HM 46a97b4debee): no evaluator appends xvp_shadow_signals.jsonl.
 
-    Assert count preserved: GS-01 + four sibling evaluators all SHADOW_FILE is None,
-    and the STREAMS catalog key remains for wipe/monitor resurrection RED.
+    GS-01 + four sibling evaluators all SHADOW_FILE is None; STREAMS catalog key
+    and RETIRED_STREAMS stay for wipe/monitor resurrection RED.
     """
     import regime_adaptive_binding as rab
     assert rab.GsPremiumEvaluator.SHADOW_FILE is None
@@ -50,6 +50,7 @@ def test_gs01_writes_xvp_shadow_and_other_instances_do_not():
                 rab.FadePoolPremiumEvaluator):
         assert cls.SHADOW_FILE is None
     assert ms.STREAMS["xvp_shadow_signals"] == "xvp_shadow_signals.jsonl"
+    assert "xvp_shadow_signals" in ms.RETIRED_STREAMS
 
 
 # (h) rotated parts + time range + health ------------------------------------------------------

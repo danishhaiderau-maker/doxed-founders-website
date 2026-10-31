@@ -32,6 +32,7 @@ test_analyzer_execution_evidence_ui.py
 test_analyzer_generation_fail_closed.py
 test_analyzer_integrity_reconciliation.py
 test_analyzer_loopback_url_contract.py
+test_analyzer_mirror_status_fix_a.py
 test_analyzer_mobile_access_contract.py
 test_analyzer_once_incumbent.py
 test_analyzer_route_visual_contract.py
@@ -317,6 +318,7 @@ test_monitor_integrity.py
 test_monitor_ladder_legs_and_route_floor.py
 test_monitor_lanes_funnel_epoch_scope.py
 test_monitor_lanes_self_sim_closes.py
+test_monitor_stream_health_failclosed.py
 test_monitor_streams.py
 test_monitor_streams_parts_budget.py
 test_monitor_tiles_api.py
@@ -510,8 +512,6 @@ test_script_style_suites.py
 test_seal_past_analysis_fallback.py
 test_session_trade_counts.py
 test_shadow_chase_buckets.py
-test_shadow_exit_path_1s.py
-test_shadow_exit_report.py
 test_shadow_model_publication.py
 test_shadow_outcome_reconstruction.py
 test_shadow_result_stream.py
@@ -575,7 +575,6 @@ tests/test_v3_ledger_index.py
 test_ci_test_inventory.py
 test_showcase_manual_close_generation.py
 test_execution_funnel_corruption_repair.py
-test_shadow_exit_paths.py
 test_experimental_tile_contract.py
 test_clean_epoch_reset_plan.py
 test_research_deletion_preflight_contract.py
@@ -625,7 +624,6 @@ test_r5_retention.py
 test_r5_keep.py
 test_rotation_cap.py
 test_remaining_deleters_killswitch.py
-test_taker_counterfactual_r17.py
 test_signal_replay_r17.py
 test_v22_retired_r17.py
 test_delay_pool_f1.py
@@ -636,7 +634,6 @@ test_live_ack_pool.py
 test_first_after_rk3.py
 test_rk1_live_exit_stamps.py
 test_r17_gap_detector.py
-test_shadow_exit_backfill_r3_blocked.py
 test_integration_848_resolution.py
 test_r17_retired_sources.py
 test_hm_r4_b2_guardian.py

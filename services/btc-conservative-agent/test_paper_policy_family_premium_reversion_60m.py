@@ -47,10 +47,10 @@ def test_rule_keeps_the_frozen_premium_thresholds_with_a_sixty_minute_hold():
     assert rule.side_for(2.0) == LONG and rule.side_for(-2.0) == SHORT and rule.side_for(0.5) is None
 
 
-def test_evaluator_writes_the_registered_premium_shadow_file():
+def test_evaluator_does_not_write_retired_xvp_shadow_file():
     evaluator = policy.make_evaluator()
     assert isinstance(evaluator, PremiumEvaluator)
-    # R22: PremiumEvaluator no longer appends xvp_shadow_signals.jsonl.
+    # R22 / HM 30 Oct: xvp_shadow_signals RETIRED — no shadow_outcome recording.
     assert evaluator.SHADOW_FILE is None
     assert evaluator.policy_id == policy.POLICY_ID and evaluator.policy_signature == policy.POLICY_SIGNATURE
 
