@@ -172,3 +172,66 @@ def test_no_silent_stop_write_return_in_emit_source():
     assert "_emit_to_spool" in body
     # The old silent discard pattern must be gone.
     assert "if self._stop_write:\n            return\n        super().emit(record)" not in body
+
+
+REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
+
+
+def _status_json(bot_mod):
+    """GET /api/status with probe cache disabled (full payload, not boot stub)."""
+    bot_mod._PROBE_CACHE_TTL_SEC = 0.0
+    for cache in getattr(bot_mod, "_PROBE_CACHES", []):
+        try:
+            cache.clear()
+        except Exception:
+            pass
+    resp = bot_mod.app.test_client().get("/api/status", environ_base=REMOTE)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert isinstance(body, dict)
+    return body
+
+
+def _assert_status_has_cap_refusals(body: dict) -> None:
+    """Shared status-surface assert (M5 target)."""
+    assert "runtime_log_retention" in body, "status payload missing runtime_log_retention"
+    retention = body["runtime_log_retention"]
+    assert isinstance(retention, dict)
+    assert "cap_refusals" in retention, "runtime_log_retention missing cap_refusals"
+    assert isinstance(retention["cap_refusals"], int)
+
+
+def test_api_status_exposes_runtime_log_retention_cap_refusals(monkeypatch):
+    """GET /api/status must expose runtime_log_retention.cap_refusals (R46 / R23)."""
+    import bot as bot_mod
+
+    monkeypatch.setattr(bot_mod, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    body = _status_json(bot_mod)
+    _assert_status_has_cap_refusals(body)
+    # Source pin: status() must assign the retention block (M5 target line).
+    src = (HERE / "bot.py").read_text(encoding="utf-8")
+    assert 'payload["runtime_log_retention"] = _runtime_log_retention_status()' in src
+
+
+def test_mutation_m5_removing_runtime_log_retention_fails(monkeypatch):
+    """Mutation M5: removing runtime_log_retention from status payload must fail.
+
+    HM FAIL c67e285f184e — prior suite only hit ``_runtime_log_retention_status()``
+    and survived deleting ``payload['runtime_log_retention'] = …`` in ``status()``.
+    """
+    import bot as bot_mod
+
+    monkeypatch.setattr(bot_mod, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    body = _status_json(bot_mod)
+    _assert_status_has_cap_refusals(body)
+
+    mutant = dict(body)
+    del mutant["runtime_log_retention"]
+    with pytest.raises(AssertionError):
+        _assert_status_has_cap_refusals(mutant)
+
+    # Field present but cap_refusals stripped (except-path shape) also fails.
+    thin = dict(body)
+    thin["runtime_log_retention"] = {"schema": "runtime_log_retention_v1"}
+    with pytest.raises(AssertionError):
+        _assert_status_has_cap_refusals(thin)
