@@ -473,3 +473,37 @@ def test_stream_is_retired_allowlisted_case_and_rotation():
     assert eg.stream_is_retired_allowlisted("v3/ledgers/Market_Segment.jsonl.2") is True
     assert eg.stream_is_retired_allowlisted("v3/ledgers/decision.jsonl") is False
     assert eg.stream_is_retired_allowlisted("decision.jsonl") is False
+
+
+def test_named_g4_file_unplaced_rows_guard_raises_when_retired_forced_false(tmp_path, monkeypatch):
+    """G4 / Strategist 1fc3b61cbd4a: file_unplaced_rows belt at analyzer_epoch_guard.py:361-362.
+
+    Force stream_is_retired_allowlisted False (slip-through); guard_no_market_segment_open must raise.
+    Fails when those guard calls are removed.
+    """
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    _write_jsonl(seg, [{"record_id": "g4", "ts": PRE, "data_epoch_id": OLD}])
+    monkeypatch.setattr(eg, "stream_is_retired_allowlisted", lambda *_a, **_k: False)
+    with pytest.raises(RuntimeError, match="market_segment"):
+        list(eg.file_unplaced_rows(seg, "v3/ledgers/market_segment.jsonl",
+                                   de.new_manifest(EPOCH, started_at_ts=START), floor_ts=START))
+
+
+def test_named_g6_monitor_report_guard_raises_when_retired_forced_false(tmp_path, guard, monkeypatch):
+    """G6 / Strategist 1fc3b61cbd4a: StreamReadMonitor.report belt at analyzer_epoch_guard.py:650-651.
+
+    Force stream_is_retired_allowlisted False after recording a market_segment raw open;
+    guard_no_market_segment_open must raise. Fails when those guard calls are removed.
+    """
+    g, monitor = guard
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    _write_jsonl(seg, [{"record_id": "g6", "ts": PRE, "data_epoch_id": OLD}])
+    open(seg, encoding="utf-8").close()
+    assert any("market_segment" in Path(p).name.lower() for p in monitor.files), monitor.files
+    monkeypatch.setattr(eg, "stream_is_retired_allowlisted", lambda *_a, **_k: False)
+    with pytest.raises(RuntimeError, match="market_segment"):
+        monitor.report(g.manifest, floor_ts=START)

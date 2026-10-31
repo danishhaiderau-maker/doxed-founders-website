@@ -6,7 +6,7 @@ import analyzer_epoch_guard as eg
 EPOCH_ID = "ce-20261004-v31-freeze21b"
 MANIFEST = {"epoch_id": EPOCH_ID, "started_at_ts": 1_791_000_000.0}
 FLOOR = 1_792_263_671.2608788
-REL = "v3/ledgers/market_segment.jsonl"
+REL = "v3/ledgers/signal_snapshot.jsonl"
 
 
 def seg(start, end):
@@ -15,7 +15,7 @@ def seg(start, end):
 
 
 def write(tmp_path, rows):
-    p = tmp_path / "market_segment.jsonl"
+    p = tmp_path / "signal_snapshot.jsonl"
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     return p
 
