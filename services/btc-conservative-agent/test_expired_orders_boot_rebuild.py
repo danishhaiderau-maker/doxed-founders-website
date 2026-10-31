@@ -322,23 +322,67 @@ def test_mutant_l375_strategy_evidence_helper_checks_flag():
     assert reb.assert_not_strategy_evidence(good) is True
 
 
-def test_real_format_expired_orders_csv_fixture_hydrates():
-    """Fixture row mirrors production expired_orders_3f.csv writer columns."""
-    assert REAL_ROW_FIXTURE.is_file()
+def test_l375_missing_strategy_evidence_eligible_fails_closed():
+    """:375 fail-closed when strategy_evidence_eligible key is MISSING."""
+    row = {"boot_rebuilt_from_csv": True}  # key absent
+    assert "strategy_evidence_eligible" not in row
+    # Guard must NOT certify as safe (returns False = fail closed).
+    assert reb.assert_not_strategy_evidence(row) is False
+
+
+def test_l375_none_strategy_evidence_eligible_fails_closed():
+    """:375 fail-closed when strategy_evidence_eligible is None."""
+    row = {"boot_rebuilt_from_csv": True, "strategy_evidence_eligible": None}
+    assert reb.assert_not_strategy_evidence(row) is False
+
+
+def test_real_format_fixture_every_row_column_count_matches_header():
+    """Every body row has exactly len(header) columns (csv module)."""
     text = REAL_ROW_FIXTURE.read_text(encoding="utf-8")
-    header = text.splitlines()[0].split(",")
+    assert "·" in text  # UTF-8 middot preserved from laptop rows
+    rows = list(csv.reader(text.splitlines()))
+    assert len(rows) >= 2
+    header = rows[0]
+    assert len(header) == 45
     assert header[:3] == ["time", "trade_id", "dir"]
+    for i, row in enumerate(rows[1:], start=2):
+        assert len(row) == len(header), f"line {i}: {len(row)} cols != header {len(header)}"
+
+
+def test_real_format_expired_orders_csv_fixture_hydrates():
+    """HM laptop rows 593–596 fixture (sha12 ef566358d9a3) hydrates read-only."""
+    import hashlib
+
+    raw = REAL_ROW_FIXTURE.read_bytes()
+    assert hashlib.sha256(raw).hexdigest()[:12] == "ef566358d9a3"
+    text = raw.decode("utf-8")
+    rows = list(csv.reader(text.splitlines()))
+    header = rows[0]
     assert "expired_ts" in header and "research_lane" in header
     assert "lifecycle_completeness_schema" in header
+    assert "long_score" in header and "short_score" in header and "score_gap" in header
+    # Empty conf / paper_no_fill / score_* cells preserved exactly where present.
+    conf_i, pn_i = header.index("conf"), header.index("paper_no_fill")
+    assert rows[3][conf_i] == "" and rows[4][conf_i] == ""
+    assert rows[4][pn_i] == ""
+    assert rows[3][header.index("long_score")] == ""
+    assert rows[3][header.index("short_score")] == ""
+    assert rows[3][header.index("score_gap")] == ""
+
     out = reb.apply_boot_rebuild(
         csv_path=str(REAL_ROW_FIXTURE), epoch_cutoff_ts=None, display_cap=20,
     )
     assert out["receipt"]["status"] == "GREEN"
-    assert out["receipt"]["expired_orders_total"] == 1
+    assert out["receipt"]["expired_orders_total"] == 4
     assert out["receipt"]["csv_bytes_unchanged"] is True
-    row = out["in_scope_rows"][0]
-    assert row["trade_id"] == "gs1-r34boot-sample01"
-    assert row["dir"] == "SHORT"
-    assert row["research_lane"] == "GS01_PREMIUM_FOLLOW_ATR_TP"
-    assert row["boot_rebuilt_from_csv"] is True
-    assert row["strategy_evidence_eligible"] is False
+    ids = [r["trade_id"] for r in out["in_scope_rows"]]
+    assert ids == [
+        "gb2-ca150419d002",
+        "rnd-811393d853a5",
+        "gs1-e2996e1eba2c",
+        "gs1-3bddef53964d",
+    ]
+    for row in out["in_scope_rows"]:
+        assert row["boot_rebuilt_from_csv"] is True
+        assert row["strategy_evidence_eligible"] is False
+        assert "·" in str(row.get("research_model") or "")
