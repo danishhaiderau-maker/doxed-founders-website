@@ -32,6 +32,7 @@ test_analyzer_execution_evidence_ui.py
 test_analyzer_generation_fail_closed.py
 test_analyzer_integrity_reconciliation.py
 test_analyzer_loopback_url_contract.py
+test_analyzer_mirror_status_fix_a.py
 test_analyzer_mobile_access_contract.py
 test_analyzer_once_incumbent.py
 test_analyzer_route_visual_contract.py
