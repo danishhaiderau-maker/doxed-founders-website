@@ -21,6 +21,21 @@ RETIRED_STREAM_ALLOWLIST: dict[str, str] = {
     "market_segment": "MARKET_SEGMENTS_RETIRED_R17",
 }
 
+# AMEND2 C3 (RK 31 Oct 12:38 AEDT): exact dashboard/evaluator status label — never GREEN.
+MARKET_SEGMENT_STATUS_LABEL = (
+    "RETIRED / MARKET_SEGMENTS_RETIRED_R17 (write-stopped at cap, not deleted)"
+)
+
+
+def status_label_for_retired_stream(stream: str) -> str | None:
+    """Human status label for an allowlisted retired stream (C3 exact string for market_segment)."""
+    reason = RETIRED_STREAM_ALLOWLIST.get(stream)
+    if reason is None:
+        return None
+    if stream == "market_segment":
+        return MARKET_SEGMENT_STATUS_LABEL
+    return f"RETIRED / {reason}"
+
 # Recorded from the live file (doxed-btc-bot, read-only, 25 Oct 2026 03:38 AEDT).
 # mtime 1792830018 = 24 Oct 2026 19:20:18 AEDT (last write before MARKET_SEGMENT_WRITES_RETIRED).
 RETIREMENT_FINGERPRINTS: dict[str, dict[str, int]] = {

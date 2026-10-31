@@ -414,9 +414,11 @@ def _posix_lock_and_unlink(path: Path):
 SEGMENT_PRUNED_R5 = "PRUNED_R5"
 
 from retired_streams import (  # noqa: E402
+    MARKET_SEGMENT_STATUS_LABEL,
     RETIRED_STREAM_ALLOWLIST,
     SOFT_RETIRED_EXEMPTION_REFUSALS,
     retired_stream_unchanged,
+    status_label_for_retired_stream,
 )
 
 
@@ -2841,12 +2843,39 @@ class V3EvidenceStore:
             except OSError as exc:
                 defects.append({"segment": path.as_posix(), "reason": str(exc)})
         retired_report = {}
+        # AMEND2 C3 / H4: every allowlisted retired stream is reported (never GREEN), even when
+        # unchanged identity means open_read_only did not soft-exclude it.
+        for name, ruling in RETIRED_STREAM_ALLOWLIST.items():
+            entry = {
+                "status": "RETIRED",
+                "reason": ruling,
+                "status_label": status_label_for_retired_stream(name) or ruling,
+            }
+            if name in contaminated:
+                entry["status"] = "RETIRED_CONTAMINATED"
+                entry["contamination"] = contaminated[name]
+            elif name in retired:
+                entry["reason"] = retired[name]
+            retired_report[name] = entry
         for name, ruling in retired.items():
+            if name in retired_report:
+                continue
             entry = {"status": "RETIRED", "reason": ruling}
             if name in contaminated:
                 entry["status"] = "RETIRED_CONTAMINATED"
                 entry["contamination"] = contaminated[name]
             retired_report[name] = entry
+
+        def _ledger_status_label(ledger: str) -> str:
+            if ledger in contaminated:
+                return "RETIRED_CONTAMINATED"
+            if ledger in RETIRED_STREAM_ALLOWLIST or ledger in retired:
+                # C3 exact string for market_segment; other retired streams keep RETIRED.
+                return status_label_for_retired_stream(ledger) or "RETIRED"
+            if any(d.get("ledger") == ledger for d in defects):
+                return "RED"
+            return "GREEN"
+
         return {
             "schema": "v3_store_verification_v1",
             "epoch_id": self.epoch_id,
@@ -2854,16 +2883,13 @@ class V3EvidenceStore:
             "market_segment_count": segment_count,
             "defects": defects,
             "passed": not defects,
-            # RETIRED streams are reported as RETIRED / RETIRED_CONTAMINATED, never GREEN (RK PASS 25 Oct).
+            # RETIRED streams are reported as C3 label / RETIRED_CONTAMINATED, never GREEN (AMEND2 C3 / H4).
             "ledger_status": {
-                ledger: (
-                    ("RETIRED_CONTAMINATED" if ledger in contaminated else "RETIRED")
-                    if ledger in retired
-                    else ("RED" if any(d.get("ledger") == ledger for d in defects) else "GREEN")
-                )
+                ledger: _ledger_status_label(ledger)
                 for ledger in LEDGER_NAMES  # R3-NON-INPUT: status labels from counts/defects only, no ledger read
             },
             "retired_streams": retired_report,
+            "market_segment_status_label": MARKET_SEGMENT_STATUS_LABEL,
         }
 
     def verify_write_set(

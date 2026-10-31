@@ -20,6 +20,7 @@ test_analyzer_ai_provider_outage_quarantine.py
 test_analyzer_ai_served_model_cohort.py
 test_analyzer_api_generation_truth.py
 test_analyzer_atomic_publication.py
+test_analyzer_bundle_rebuild_pin_2ac0.py
 test_analyzer_canonical_input_binding.py
 test_analyzer_chase_integrity.py
 test_analyzer_compact_summary_provenance.py

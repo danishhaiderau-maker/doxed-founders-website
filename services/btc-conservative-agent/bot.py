@@ -55816,7 +55816,10 @@ def _analyzer_current_pointer_path() -> Path:
 # placed every row. fresh_epoch.cutoff_utc earlier than the floor (or missing), or any straddle/unstamped row left
 # unguarded in the generation receipt, rejects the bundle at install AND at serve (/analysis, /api/analyzer/summary
 # then answer 503 "no valid bundle"). Fail closed.
-_ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671  # 2026-10-18 06:01:11 AEDT, the real fresh start
+# Epoch floor / rebuild tip / AMEND2 method ids — single source in analyzer_book10_regime (R4; no duplicate literals).
+import analyzer_book10_regime as _abr_rebuild_pin  # noqa: E402  — late import beside mirror helpers
+
+_ANALYZER_BUNDLE_FRESH_FLOOR_TS = int(_abr_rebuild_pin.EPOCH_FLOOR_TS)
 # RK PASS 12:48 (R8 B): the operator-facing "data epoch started" / session start is the real fresh start, not the
 # 4 Oct DATA_EPOCH manifest stamp (DATA_EPOCH_ID itself is unchanged; the manifest stamp stays visible beside it).
 FRESH_START_TS = _ANALYZER_BUNDLE_FRESH_FLOOR_TS
@@ -55825,6 +55828,12 @@ _ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
 # Fix A (plan sha e448f5f67f8a): mirror status must advertise an explicit RED label —
 # never HTTP 404 — when no validated analyzer_mirror_bundle_v2 is installed.
 _ANALYZER_BUNDLE_NO_VALIDATED_REASON = "NO_VALIDATED_ANALYZER_BUNDLE"
+
+# Seal 2ac09364eb63 B1 — install/serve pin (COMPLETED @ e70bac80 + AMEND2 + method).
+_ANALYZER_REBUILD_PIN_TIP = str(_abr_rebuild_pin.ANALYZER_COMPLETED_TIP)
+_ANALYZER_REBUILD_PIN_TIP_SHORT = str(_abr_rebuild_pin.ANALYZER_COMPLETED_TIP_SHORT)
+_ANALYZER_REBUILD_AMEND2_SHA12 = str(_abr_rebuild_pin.AMEND2_SPEC_SHA12)
+_ANALYZER_REBUILD_METHOD_ID = str(_abr_rebuild_pin.REGIME_METHOD_ID)
 
 
 def _analyzer_mirror_no_validated_bundle_payload(*, legacy_preserved: bool) -> dict:
@@ -55844,6 +55853,151 @@ def _analyzer_mirror_no_validated_bundle_payload(*, legacy_preserved: bool) -> d
             "detail": detail,
         }],
     }
+
+
+def _analyzer_rebuild_expected_prereg_hash() -> str:
+    """Shared prereg hash of the frozen AMEND2 constant block (N=1)."""
+    import analyzer_book10_regime as abr
+    return str(abr.PARAMS_PREREG_HASH)
+
+
+def _analyzer_bundle_rebuild_pin_gate(report_manifest) -> None:
+    """Seal 2ac09364eb63 B1: reject install/serve unless COMPLETED@e70bac80 + AMEND2 + method pin.
+
+    Fail closed on empty/short git rev (HM R2 d7570845a12b): require len>=12 and
+    rev[:12] == tip_short. No tip.startswith(short-prefix) bypass.
+    """
+    if not isinstance(report_manifest, dict):
+        raise ValueError("analyzer bundle report manifest missing for rebuild pin")
+    pin = report_manifest.get("rebuild_pin") or report_manifest.get("regime_derivation") or {}
+    if not isinstance(pin, dict):
+        raise ValueError("analyzer bundle rebuild_pin missing")
+    status = str(pin.get("run_status") or pin.get("analyzer_run_status") or "").strip().upper()
+    if status != "COMPLETED":
+        raise ValueError(f"analyzer bundle rebuild_pin run_status not COMPLETED: {status!r}")
+    rev = str(pin.get("analyzer_git_rev") or pin.get("git_rev") or "").strip().lower()
+    tip = _ANALYZER_REBUILD_PIN_TIP.lower()
+    tip_short = _ANALYZER_REBUILD_PIN_TIP_SHORT.lower()
+    if not rev:
+        raise ValueError("analyzer bundle rebuild_pin analyzer_git_rev empty")
+    # Exact pin match only: full tip or exact tip_short (12-char health form). No partial/extra suffix.
+    if len(rev) < 12 or rev not in (tip, tip_short):
+        raise ValueError(f"analyzer bundle rebuild_pin analyzer_git_rev mismatch: {rev!r}")
+    amend2 = str(pin.get("amend2_sha12") or "").strip().lower()
+    if amend2 != _ANALYZER_REBUILD_AMEND2_SHA12:
+        raise ValueError(f"analyzer bundle rebuild_pin amend2_sha12 mismatch: {amend2!r}")
+    method = str(pin.get("regime_method_id") or pin.get("method_id") or "").strip()
+    if method != _ANALYZER_REBUILD_METHOD_ID:
+        raise ValueError(f"analyzer bundle rebuild_pin regime_method_id mismatch: {method!r}")
+    expected = _analyzer_rebuild_expected_prereg_hash()
+    got = str(pin.get("params_prereg_hash") or "").strip().lower()
+    if got != expected.lower():
+        raise ValueError("analyzer bundle rebuild_pin params_prereg_hash mismatch")
+
+
+def _analyzer_bundle_inventory_metrics(report_manifest) -> dict:
+    """Rows / regimes / cutoff used by the R34 no-shrink gate (B3).
+
+    Missing/unreadable counts are flagged — callers must fail closed (not treat as 0).
+    """
+    if not isinstance(report_manifest, dict):
+        return {
+            "rows": 0,
+            "regimes": 0,
+            "cutoff_ts": 0.0,
+            "rows_missing": True,
+            "regimes_missing": True,
+            "cutoff_missing": True,
+        }
+    rows = None
+    for key in ("row_count", "trade_count", "n_rows", "counted_rows"):
+        if key not in report_manifest:
+            continue
+        try:
+            rows = int(report_manifest.get(key))
+            break
+        except (TypeError, ValueError):
+            rows = None
+            break
+    if rows is None:
+        receipt = report_manifest.get("generation_receipt")
+        if isinstance(receipt, dict) and "row_count" in receipt:
+            try:
+                rows = int(receipt.get("row_count"))
+            except (TypeError, ValueError):
+                rows = None
+    regimes = None
+    for key in ("regime_count", "n_regimes", "regimes_labeled"):
+        if key not in report_manifest:
+            continue
+        try:
+            regimes = int(report_manifest.get(key))
+            break
+        except (TypeError, ValueError):
+            regimes = None
+            break
+    raw = (report_manifest.get("fresh_epoch") or {}).get("cutoff_utc") if isinstance(
+        report_manifest.get("fresh_epoch"), dict
+    ) else None
+    cutoff_ts = None
+    if raw not in (None, ""):
+        try:
+            cutoff = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if cutoff.tzinfo is None:
+                raise ValueError("naive")
+            cutoff_ts = float(cutoff.timestamp())
+        except (TypeError, ValueError):
+            cutoff_ts = None
+    return {
+        "rows": 0 if rows is None else max(0, rows),
+        "regimes": 0 if regimes is None else max(0, regimes),
+        "cutoff_ts": 0.0 if cutoff_ts is None else cutoff_ts,
+        "rows_missing": rows is None,
+        "regimes_missing": regimes is None,
+        "cutoff_missing": cutoff_ts is None,
+    }
+
+
+def _analyzer_bundle_no_shrink_gate(prior_manifest, new_manifest) -> None:
+    """Seal 2ac09364eb63 B3 / R34: reject silent shrink of rows/regimes/cutoff vs prior generation.
+
+    First install (prior_manifest is None) is allowed. A present-but-unreadable prior,
+    or missing inventory counts on either side, fails closed (HM R2 d7570845a12b).
+    """
+    if prior_manifest is None:
+        return
+    if not isinstance(prior_manifest, dict):
+        raise ValueError("analyzer bundle R34 prior generation unreadable")
+    if not isinstance(new_manifest, dict):
+        raise ValueError("analyzer bundle R34 new generation unreadable")
+    prior = _analyzer_bundle_inventory_metrics(prior_manifest)
+    new = _analyzer_bundle_inventory_metrics(new_manifest)
+    for label, metrics in (("prior", prior), ("new", new)):
+        missing = [
+            name
+            for name, flag in (
+                ("rows", metrics["rows_missing"]),
+                ("regimes", metrics["regimes_missing"]),
+                ("cutoff", metrics["cutoff_missing"]),
+            )
+            if flag
+        ]
+        if missing:
+            raise ValueError(
+                f"analyzer bundle R34 inventory incomplete ({label}): missing {', '.join(missing)}"
+            )
+    reasons = []
+    if new["rows"] < prior["rows"]:
+        reasons.append(f"rows {new['rows']} < prior {prior['rows']}")
+    if new["regimes"] < prior["regimes"]:
+        reasons.append(f"regimes {new['regimes']} < prior {prior['regimes']}")
+    if new["cutoff_ts"] < prior["cutoff_ts"]:
+        reasons.append(f"cutoff {new['cutoff_ts']} < prior {prior['cutoff_ts']}")
+    if reasons:
+        raise ValueError(
+            "analyzer bundle R34 shrink rejected (needs separate RK reason card): "
+            + "; ".join(reasons)
+        )
 
 
 def _analyzer_bundle_fresh_gate(report_manifest) -> None:
@@ -55886,8 +56040,11 @@ def _valid_analyzer_generation(candidate: Path) -> bool:
             and isinstance(manifest.get("files"), list)
         ):
             return False
-        _analyzer_bundle_fresh_gate(
-            json.loads((candidate / "report_manifest.json").read_text(encoding="utf-8")))
+        report_manifest = json.loads(
+            (candidate / "report_manifest.json").read_text(encoding="utf-8")
+        )
+        _analyzer_bundle_fresh_gate(report_manifest)
+        _analyzer_bundle_rebuild_pin_gate(report_manifest)
         declared = {}
         for row in manifest["files"]:
             rel = str((row or {}).get("path") or "").replace("\\", "/")
@@ -56139,6 +56296,7 @@ def _validated_analyzer_bundle_manifest(archive: zipfile.ZipFile, members: list)
     if hashlib.sha256(report_payload).hexdigest() != str(manifest["source_report_manifest_sha256"]).lower():
         raise ValueError("source report manifest hash does not match bundle provenance")
     _analyzer_bundle_fresh_gate(report_manifest)
+    _analyzer_bundle_rebuild_pin_gate(report_manifest)
     provenance = report_manifest.get("analysis_provenance") or {}
     comparisons = {
         "analyzer_run_id": report_manifest.get("analyzer_sync_id"),
@@ -56185,6 +56343,26 @@ def _install_analyzer_bundle(payload: bytes, meta: dict) -> dict:
             with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
                 members = _safe_analyzer_bundle_members(archive)
                 manifest = _validated_analyzer_bundle_manifest(archive, members)
+                # R34 no-shrink vs prior active generation (seal 2ac09364eb63 B3).
+                # Prior present but unreadable → fail closed (HM R2 d7570845a12b).
+                prior_manifest = None
+                prior_dir = _active_analyzer_mirror_dir()
+                if prior_dir is not None:
+                    try:
+                        prior_manifest = json.loads(
+                            (prior_dir / "report_manifest.json").read_text(encoding="utf-8")
+                        )
+                    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                        raise ValueError(
+                            "analyzer bundle R34 prior generation unreadable"
+                        ) from exc
+                    if not isinstance(prior_manifest, dict):
+                        raise ValueError("analyzer bundle R34 prior generation unreadable")
+                try:
+                    new_report = json.loads(archive.read("report_manifest.json").decode("utf-8"))
+                except (KeyError, UnicodeDecodeError, ValueError, TypeError) as exc:
+                    raise ValueError(f"invalid source report manifest on install: {exc}") from exc
+                _analyzer_bundle_no_shrink_gate(prior_manifest, new_report)
                 staging.mkdir(parents=True, exist_ok=False)
                 declared = {
                     str(row["path"]).replace("\\", "/").casefold(): row

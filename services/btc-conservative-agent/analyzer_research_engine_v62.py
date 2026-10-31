@@ -1247,6 +1247,25 @@ def _epoch_admit(relpath, row):
     return not guard.declared or guard.admit(os.path.basename(relpath), row)
 
 
+def _epoch_audit_stream_is_retired(relpath: str) -> bool:
+    """True when ``relpath`` is an allowlisted retired V3 ledger (AMEND2 / Strategist 4a0806630d3a).
+
+    Epoch purity must never open these files — the read would be unguarded against
+    ``market_segment`` and would poison generation receipt / bundle-install gates.
+    """
+    from retired_streams import RETIRED_STREAM_ALLOWLIST
+
+    # Case-insensitive basename (Strategist / HM): Market_Segment.jsonl must match.
+    base = Path(str(relpath).replace("\\", "/")).name.lower()
+    stem, dot, suffix = base.rpartition(".")
+    if dot and suffix.isdigit():
+        base = stem
+        stem, dot, suffix = base.rpartition(".")
+    if suffix in ("jsonl", "csv") and stem in {k.lower() for k in RETIRED_STREAM_ALLOWLIST}:
+        return True
+    return False
+
+
 def _epoch_audit_streams(data_root):
     """Current-cohort data files under the analyzer data root (active + numeric rotations)."""
     import data_epoch as de
@@ -1266,6 +1285,9 @@ def _epoch_audit_streams(data_root):
             # Market tape is epoch independent; ops ledgers (relay quarantine/retirement, runtime
             # telemetry, receipts) are never analyzer evidence (#420).
             continue
+        # Strategist 4a0806630d3a: skip retired streams (never open market_segment.jsonl here).
+        if _epoch_audit_stream_is_retired(relpath):
+            continue
         yield path, relpath
 
 
@@ -1279,12 +1301,16 @@ def _epoch_purity_audit(guard, data_root, guarded=None):
     """
     import data_epoch as de
     from analyzer_epoch_guard import file_pre_epoch_rows, guarded_read
+    import analyzer_book10_regime as abr
 
     if not guard.declared:
         return 0, {}
     found = {}
     with guarded_read("<purity-audit>", "inventory"):
         for path, relpath in _epoch_audit_streams(data_root):
+            # Belt: refuse market_segment paths even if a future candidate slip-through.
+            abr.guard_no_market_segment_open(path)
+            abr.guard_no_market_segment_open(relpath)
             try:
                 bad = file_pre_epoch_rows(path, relpath, guard.manifest, guard.floor_ts)
             except OSError as exc:
@@ -1430,13 +1456,16 @@ def _mirror_publish_freshness():
         return {"error": f"{type(exc).__name__}: {exc}"[:300], "publish_stale": None}
 
 
-ANALYZER_MIN_FLOOR_TS = 1792263671
+# Single source with analyzer_book10_regime.EPOCH_FLOOR_TS (Strategist f21717ab1c85 nit).
+import analyzer_book10_regime as _abr_epoch_floor  # noqa: E402
+
+ANALYZER_MIN_FLOOR_TS = int(_abr_epoch_floor.EPOCH_FLOOR_TS)
 
 
 def _analyzer_floor_epoch_ts():
     """RK #882 12:48: analyzer floor = max(epoch manifest started_at_ts, fresh_start_epoch.json epoch_ts).
 
-    Never below ANALYZER_MIN_FLOOR_TS (1792263671).  DATA_EPOCH_ID is not involved.
+    Never below ANALYZER_MIN_FLOOR_TS (= abr.EPOCH_FLOOR_TS).  DATA_EPOCH_ID is not involved.
     """
     from research_segment_epoch import fresh_start_epoch
 
@@ -2826,8 +2855,15 @@ def _tape_rows_near(times, before_sec, after_sec=1.0):
 
 
 def _load_jsonl_rows(path):
-    """Load all rows from a JSONL research dataset."""
+    """Load all rows from a JSONL research dataset.
+
+    AMEND2 H2/C2: refuse market_segment paths (guard wired on every open).
+    """
+    import analyzer_book10_regime as abr
+
+    abr.guard_no_market_segment_open(path)
     path = _agent_data_path(path)
+    abr.guard_no_market_segment_open(path)
     rows = []
     if not os.path.exists(path):
         return rows
@@ -2846,6 +2882,58 @@ def _load_jsonl_rows(path):
     except Exception as e:
         print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return rows
+
+
+_BOOK10_REGIME_CACHE: list | None = None
+_TRADES_REGIME_CACHE: list | None = None
+_BOOK10_REGIME_LOAD_ERROR: str | None = None
+
+
+def _reset_book10_regime_caches_for_tests() -> None:
+    """Test-only: clear AMEND2 book/trades caches between cases."""
+    global _BOOK10_REGIME_CACHE, _TRADES_REGIME_CACHE, _BOOK10_REGIME_LOAD_ERROR
+    _BOOK10_REGIME_CACHE = None
+    _TRADES_REGIME_CACHE = None
+    _BOOK10_REGIME_LOAD_ERROR = None
+
+
+def _require_book10_rows_for_regime() -> list:
+    """Load bfx_book_10l_1s.jsonl once; fail closed if unavailable (no silent UNKNOWN)."""
+    global _BOOK10_REGIME_CACHE, _BOOK10_REGIME_LOAD_ERROR
+    import analyzer_book10_regime as abr
+
+    if _BOOK10_REGIME_LOAD_ERROR is not None:
+        raise RuntimeError(_BOOK10_REGIME_LOAD_ERROR)
+    if _BOOK10_REGIME_CACHE is not None:
+        return _BOOK10_REGIME_CACHE
+    abr.assert_book_source(abr.BOOK10_FILE)
+    rows = _load_jsonl_rows(abr.BOOK10_FILE)
+    if not rows:
+        _BOOK10_REGIME_LOAD_ERROR = (
+            "AMEND2 book10 rows unavailable — refuse silent UNKNOWN / R34 shrink-open"
+        )
+        raise RuntimeError(_BOOK10_REGIME_LOAD_ERROR)
+    _BOOK10_REGIME_CACHE = list(rows)
+    return _BOOK10_REGIME_CACHE
+
+
+def _require_trades_rows_for_regime() -> list:
+    """Load bfx_trades.jsonl once for intensity diagnostics (AMEND2; never discard)."""
+    global _TRADES_REGIME_CACHE
+    import analyzer_book10_regime as abr
+
+    if _TRADES_REGIME_CACHE is not None:
+        return _TRADES_REGIME_CACHE
+    abr.assert_trades_source(abr.TRADES_FILE)
+    # Empty trades file is allowed (intensity=0) but the source must be the canonical file.
+    path = _agent_data_path(abr.TRADES_FILE)
+    abr.guard_no_market_segment_open(path)
+    if not os.path.exists(path):
+        raise RuntimeError(
+            "AMEND2 trades source bfx_trades.jsonl missing — refuse discard-open"
+        )
+    _TRADES_REGIME_CACHE = list(_load_jsonl_rows(abr.TRADES_FILE))
+    return _TRADES_REGIME_CACHE
 
 
 def load_reversal_study():
@@ -19400,30 +19488,44 @@ def _trades_for_regime_analysis(trades=None, session=None):
 
 
 def _regime_tags_from_row(row) -> dict:
-    try:
-        from research.research_trade_accumulator import compute_regime_tags
+    """AMEND2 (seal 2ac09364eb63): book10+trades helper only — never market_segment or legacy accumulator tags.
 
-        if hasattr(row, "to_dict"):
-            row = row.to_dict()
-        return compute_regime_tags(row or {})
-    except ImportError:
-        pass
-    ts = row.get("close_ts") or row.get("ts") or row.get("entry_ts") or ""
-    weekend = "unknown"
-    try:
-        dt = pd.Timestamp(ts)
-        if pd.notna(dt):
-            weekend = "weekend" if dt.dayofweek >= 5 else "weekday"
-    except Exception:
-        pass
-    adx = _adx_bucket_val(row.get("adx_at_entry") or row.get("adx"))
-    spread = str(row.get("directional_spread_bucket") or "unk")
-    key = f"{weekend}|{adx}|spread_{spread}"
-    return {"regime_key": key, "day_type": weekend, "adx": adx, "spread_bucket": spread}
+    book_rows / trade_rows are required. Missing book → raise (caller surfaces fail-closed);
+    do not omit book rows (that produced silent all-UNKNOWN / R34 shrink-open).
+    """
+    if hasattr(row, "to_dict"):
+        row = row.to_dict()
+    import analyzer_book10_regime as abr
+
+    book_rows = _require_book10_rows_for_regime()
+    trade_rows = _require_trades_rows_for_regime()
+    return abr.tags_from_trade_row(row or {}, book_rows=book_rows, trade_rows=trade_rows)
 
 
 def _regime_key_from_row(row) -> str:
+    """AMEND2 regime key; book10 gap → raise (callers must wrap fail-closed)."""
     return _regime_tags_from_row(row).get("regime_key", "unknown")
+
+
+def _roster_policy_fail_closed_payload(*, scope: str, reason: str, error: str) -> dict:
+    """UNKNOWN + named reason + RED when regime inputs unavailable (HM d836cfc7cf2d / Strategist f21717)."""
+    return {
+        "schema": "roster_policy_v2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "session_scope": scope,
+        "current_regime": "UNKNOWN",
+        "action": "COLLECT_ONLY",
+        "confidence": "LOW",
+        "reason": reason,
+        "status": "RED",
+        "health": "RED",
+        "ok": False,
+        "error": error,
+        "tile_weights": {},
+        "auto_apply": False,
+        "requires_human_approval": True,
+        "note": "NOT TESTED: analyzer regime inputs unavailable (AMEND2 fail-closed)",
+    }
 
 
 def regime_leaderboard_report(trades=None, session=None, min_trades=3):
@@ -19449,7 +19551,23 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
     work = _enrich_trades_with_buckets(trades.drop_duplicates(subset=["trade_id"], keep="last").copy())
     if "research_lane" not in work.columns:
         work["research_lane"] = "UNKNOWN"
-    tag_rows = work.apply(_regime_tags_from_row, axis=1)
+    try:
+        tag_rows = work.apply(_regime_tags_from_row, axis=1)
+    except (RuntimeError, ValueError) as exc:
+        # Fail closed — never emit all-UNKNOWN cells that silently shrink R34 regimes.
+        payload = {
+            "schema": "regime_leaderboard_v1",
+            "session_scope": scope,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "cells": [],
+            "regimes": [],
+            "ok": False,
+            "error": str(exc),
+            "note": "NOT TESTED: analyzer regime inputs unavailable (AMEND2 fail-closed)",
+        }
+        with open(REGIME_LEADERBOARD_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
     work["regime_key"] = tag_rows.apply(lambda t: t.get("regime_key"))
     for dim in ("day_type", "session", "adx", "volatility", "funding", "liquidity"):
         work[dim] = tag_rows.apply(lambda t, d=dim: t.get(d))
@@ -19516,21 +19634,52 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
 
 
 def roster_policy_report(trades=None, session=None, regime_payload=None, benchmark_report=None):
-    """Recommend lane weights from regime leaderboard — human approval required before bot applies."""
+    """Recommend lane weights from regime leaderboard — human approval required before bot applies.
+
+    Book10/trades gap must not halt later reports (R34): wrap like regime_leaderboard_report
+    → UNKNOWN + named reason + RED (HM d836cfc7cf2d / Strategist f21717ab1c85).
+    """
     if session is None:
         session = load_research_session()
+    scope = _shadow_scope_label(session)
     trades = _trades_for_regime_analysis(trades=trades, session=session)
     if regime_payload is None:
         regime_payload = _load_json_report(REGIME_LEADERBOARD_REPORT_FILE) or {}
+    # Leaderboard already fail-closed → propagate RED without re-raising.
+    if isinstance(regime_payload, dict) and regime_payload.get("ok") is False:
+        payload = _roster_policy_fail_closed_payload(
+            scope=scope,
+            reason=str(regime_payload.get("note") or "REGIME_LEADERBOARD_UNAVAILABLE"),
+            error=str(regime_payload.get("error") or "leaderboard_fail_closed"),
+        )
+        try:
+            with open(ROSTER_POLICY_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"  ⚠️ Could not write {ROSTER_POLICY_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+        return payload
     regimes = regime_payload.get("regimes") or []
     min_n = int(regime_payload.get("min_trades_per_cell") or 3)
 
-    # Detect current regime from latest trade timestamp
+    # Detect current regime from latest trade timestamp (wrap book10 gap — never crash pipeline).
     current_regime = "unknown"
     if trades is not None and not trades.empty:
         sort_cols = [c for c in ("close_ts", "ts") if c in trades.columns]
         last = trades.sort_values(by=sort_cols[0] if sort_cols else trades.columns[0], ascending=False).iloc[0]
-        current_regime = _regime_key_from_row(last)
+        try:
+            current_regime = _regime_key_from_row(last)
+        except (RuntimeError, ValueError) as exc:
+            payload = _roster_policy_fail_closed_payload(
+                scope=scope,
+                reason="BOOK10_OR_TRADES_UNAVAILABLE",
+                error=str(exc),
+            )
+            try:
+                with open(ROSTER_POLICY_FILE, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except Exception as e:
+                print(f"  ⚠️ Could not write {ROSTER_POLICY_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+            return payload
 
     match = next((r for r in regimes if r.get("regime") == current_regime and r.get("conclusion_allowed")), None)
     if not match and regimes:
