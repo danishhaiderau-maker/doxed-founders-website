@@ -310,6 +310,7 @@ def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard,
     monkeypatch.setattr(eg, "file_pre_epoch_rows", tracking)
     retained, by_stream = engine._epoch_purity_audit(g, str(tmp_path))
     assert not any("market_segment" in r for r in seen_rels), seen_rels
+    assert any(r.endswith("decision.jsonl") for r in seen_rels), seen_rels
     assert not any("market_segment" in k for k in by_stream), by_stream
     assert "v3/ledgers/market_segment.jsonl" not in by_stream
     # Helper + mutation: skip removed → retired path would be selected.
