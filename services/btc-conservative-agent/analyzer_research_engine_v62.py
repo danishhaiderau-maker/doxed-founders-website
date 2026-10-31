@@ -1255,12 +1255,13 @@ def _epoch_audit_stream_is_retired(relpath: str) -> bool:
     """
     from retired_streams import RETIRED_STREAM_ALLOWLIST
 
-    base = Path(str(relpath).replace("\\", "/")).name
+    # Case-insensitive basename (Strategist / HM): Market_Segment.jsonl must match.
+    base = Path(str(relpath).replace("\\", "/")).name.lower()
     stem, dot, suffix = base.rpartition(".")
     if dot and suffix.isdigit():
         base = stem
         stem, dot, suffix = base.rpartition(".")
-    if suffix in ("jsonl", "csv") and stem in RETIRED_STREAM_ALLOWLIST:
+    if suffix in ("jsonl", "csv") and stem in {k.lower() for k in RETIRED_STREAM_ALLOWLIST}:
         return True
     return False
 

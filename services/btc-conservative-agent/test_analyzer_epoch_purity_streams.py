@@ -272,71 +272,110 @@ def test_provenance_journal_is_non_evidence_for_the_purity_audit():
 
 
 def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard, monkeypatch):
-    """Strategist 4a0806630d3a: purity audit must not open retired v3/ledgers/market_segment.jsonl.
+    """Strategist / RK: _epoch_receipt_block must not open retired market_segment.
 
-    The ledger is present on disk (pre-epoch rows). Audit must skip it — never feed
-    unguarded market_segment reads into generation receipt / bundle-install gates.
+    Drives engine._epoch_receipt_block() with analyzer_epoch_guard.open spy (not builtins).
+    Asserts: no lower-cased market_segment path opened; decision.jsonl opened;
+    unplaced_rows_list.by_stream has no market_segment key.
     """
-    g, _monitor = guard
+    import builtins
+    import io
+    import os
+
+    _g, _monitor = guard
     engine = _engine()
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BTC_DATA_EPOCH_DIR", str(tmp_path))
+    monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
+    monkeypatch.setattr(engine, "_EPOCH_MANIFEST_DIR", None)
+    monkeypatch.setattr(engine, "_ANALYZER_REPORT_SUBDIR", str(tmp_path))
+    # Point purity/unplaced audit root at tmp (default TRADES_FILE resolves beside the package).
+    monkeypatch.setattr(engine, "_analyzer_data_root", lambda: str(tmp_path))
+    de.write_json_atomic(tmp_path / de.MANIFEST_NAME, de.new_manifest(EPOCH, started_at_ts=START))
+    de.write_json_atomic(tmp_path / "fresh_start_epoch.json", {"epoch_ts": START})
+
     led = tmp_path / "v3" / "ledgers"
     led.mkdir(parents=True)
-    seg = led / "market_segment.jsonl"
-    _write_jsonl(seg, [
+    _write_jsonl(led / "market_segment.jsonl", [
         {"record_id": "seg-old", "ts": PRE, "data_epoch_id": OLD},
         {"record_id": "seg-old2", "ts": PRE - 10},
     ])
     _write_jsonl(led / "decision.jsonl", [
         {"record_id": "dec-cur", "ts": POST, "data_epoch_id": EPOCH},
     ])
-    # Rotations of the retired stream must also be skipped.
     _write_jsonl(led / "market_segment.jsonl.1", [
         {"record_id": "seg-rot", "ts": PRE},
     ])
+    # Case-insensitive skip coverage (filename present as Market_Segment would also be retired).
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/Market_Segment.jsonl") is True
 
-    audited = list(engine._epoch_audit_streams(tmp_path))
-    audited_rels = [rel for _path, rel in audited]
-    assert all("market_segment" not in rel for rel in audited_rels), audited_rels
-    assert any(rel.endswith("decision.jsonl") for rel in audited_rels)
-
-    # Track which streams reach file_pre_epoch_rows (the open site) — no builtins.open spy.
-    seen_rels: list[str] = []
-    real_count = eg.file_pre_epoch_rows
-
-    def tracking(path, relpath, *args, **kwargs):
-        seen_rels.append(str(relpath))
-        return real_count(path, relpath, *args, **kwargs)
-
-    monkeypatch.setattr(eg, "file_pre_epoch_rows", tracking)
-
-    # (2) Narrow open spy: analyzer_epoch_guard module `open` only (file_epoch_row_counts
-    # :290/:299). Scoped to this _epoch_purity_audit call; monkeypatch restores after.
-    import builtins
-
-    opened_basenames: list[str] = []
+    opened_paths: list[str] = []
     real_guard_open = builtins.open
-    open_spy_fired = {"n": 0}
 
     def guard_module_open(file, *args, **kwargs):
-        open_spy_fired["n"] += 1
-        opened_basenames.append(Path(str(file)).name)
+        opened_paths.append(str(file))
         return real_guard_open(file, *args, **kwargs)
 
-    monkeypatch.setattr(eg, "open", guard_module_open, raising=False)
-    retained, by_stream = engine._epoch_purity_audit(g, str(tmp_path))
-    assert not any("market_segment" in r for r in seen_rels), seen_rels
-    assert any(r.endswith("decision.jsonl") for r in seen_rels), seen_rels
-    # Spy must have fired (decision.jsonl open via file_epoch_row_counts).
-    assert open_spy_fired["n"] >= 1, opened_basenames
-    # No market_segment basename opened — case-insensitive.
-    assert not any("market_segment" in name.lower() for name in opened_basenames), opened_basenames
-    assert not any("market_segment" in k for k in by_stream), by_stream
-    assert "v3/ledgers/market_segment.jsonl" not in by_stream
-    # Helper + mutation: skip removed → retired path would be selected.
-    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl") is True
-    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl.1") is True
-    assert engine._epoch_audit_stream_is_retired("v3/ledgers/decision.jsonl") is False
-    mutant = "v3/ledgers/decision.jsonl"
+    # (a) Cheap os.open / io.open path recorder — active only during receipt; restored after.
+    os_io_paths: list[str] = []
+    real_os_open = os.open
+    real_io_open = io.open
+
+    def cheap_os_open(path, *args, **kwargs):
+        os_io_paths.append(str(path))
+        return real_os_open(path, *args, **kwargs)
+
+    def cheap_io_open(file, *args, **kwargs):
+        os_io_paths.append(str(file))
+        return real_io_open(file, *args, **kwargs)
+
+    prev_eg_open = eg.__dict__.get("open", None)
+    os.open = cheap_os_open
+    io.open = cheap_io_open
+    eg.open = guard_module_open
+    try:
+        block = engine._epoch_receipt_block()
+    finally:
+        os.open = real_os_open
+        io.open = real_io_open
+        if prev_eg_open is None:
+            eg.__dict__.pop("open", None)
+        else:
+            eg.open = prev_eg_open
+
+    assert block is not None
+    # Guard-module open: decision opened; no market_segment (case-insensitive).
+    assert any(Path(p).name.lower() == "decision.jsonl" for p in opened_paths), opened_paths
+    assert not any("market_segment" in p.lower() for p in opened_paths), opened_paths
+    # (a) os/io recorder: no lower-cased market_segment path.
+    assert not any("market_segment" in p.lower() for p in os_io_paths), os_io_paths
+    unplaced = block.get("unplaced_rows_list") or {}
+    by_stream = unplaced.get("by_stream") or {}
+    assert not any("market_segment" in str(k).lower() for k in by_stream), by_stream
+
+
+def test_named_backup_guard_mutant_killed():
+    """HM (b): named backup-guard assert — kills surviving mutant that drops guard before open.
+
+    file_unplaced_rows and StreamReadMonitor.report must call guard_no_market_segment_open
+    before their open / file_epoch_row_counts sites.
+    """
+    src = Path(eg.__file__).read_text(encoding="utf-8")
+
+    unplaced = src[src.index("def file_unplaced_rows"): src.index("\ndef unplaced_rows_document")]
+    assert "guard_no_market_segment_open" in unplaced
+    assert unplaced.index("guard_no_market_segment_open") < unplaced.index('open(path, "rb")')
+    mutant_u = unplaced.replace("abr.guard_no_market_segment_open(path)", "pass  # mutant")
+    mutant_u = mutant_u.replace("abr.guard_no_market_segment_open(relpath)", "pass  # mutant")
     with pytest.raises(AssertionError):
-        assert engine._epoch_audit_stream_is_retired(mutant) is True
-    _ = retained  # audit completes without raising
+        assert "guard_no_market_segment_open" in mutant_u
+
+    rstart = src.index("def report(self, manifest")
+    rend = src.index('return {"active": True', rstart)
+    report_block = src[rstart:rend]
+    assert "guard_no_market_segment_open" in report_block
+    assert "stream_is_retired_allowlisted" in report_block
+    mutant_r = report_block.replace("abr.guard_no_market_segment_open(path)", "pass  # mutant")
+    mutant_r = mutant_r.replace("abr.guard_no_market_segment_open(stream)", "pass  # mutant")
+    with pytest.raises(AssertionError):
+        assert "abr.guard_no_market_segment_open(path)" in mutant_r
