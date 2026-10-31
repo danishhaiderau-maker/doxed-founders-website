@@ -197,7 +197,15 @@ def test_forced_close_never_enters_the_persistent_lane_ledger(tmp_path):
 
 
 def test_boot_segregates_after_session_trades_load():
-    main_src = BOT_SOURCE[BOT_SOURCE.index("    load_session_trades_from_csv()\n    _recompute_research_balance_from_trades()"):]
+    # R34 inserts rebuild_expired_orders_from_csv(reason="boot") between load and recompute.
+    boot_needle = (
+        "    load_session_trades_from_csv()\n"
+        "    try:\n"
+        "        rebuild_expired_orders_from_csv(reason=\"boot\")\n"
+    )
+    main_src = BOT_SOURCE[BOT_SOURCE.index(boot_needle):]
+    assert main_src.index("rebuild_expired_orders_from_csv") < main_src.index("_recompute_research_balance_from_trades()")
+    assert main_src.index("_recompute_research_balance_from_trades()") < main_src.index("_segregate_lane_pnl_ledger_for_epoch()")
     assert main_src.index("_segregate_lane_pnl_ledger_for_epoch()") < main_src.index("_start_api_state_cache_refresher()")
     assert "exit_reason=exit_reason," in BOT_SOURCE
 
