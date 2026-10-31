@@ -55642,10 +55642,12 @@ def _analyzer_bundle_rebuild_pin_gate(report_manifest) -> None:
     if status != "COMPLETED":
         raise ValueError(f"analyzer bundle rebuild_pin run_status not COMPLETED: {status!r}")
     rev = str(pin.get("analyzer_git_rev") or pin.get("git_rev") or "").strip().lower()
+    tip = _ANALYZER_REBUILD_PIN_TIP.lower()
     tip_short = _ANALYZER_REBUILD_PIN_TIP_SHORT.lower()
     if not rev:
         raise ValueError("analyzer bundle rebuild_pin analyzer_git_rev empty")
-    if len(rev) < 12 or rev[:12] != tip_short:
+    # Exact pin match only: full tip or exact tip_short (12-char health form). No partial/extra suffix.
+    if len(rev) < 12 or rev not in (tip, tip_short):
         raise ValueError(f"analyzer bundle rebuild_pin analyzer_git_rev mismatch: {rev!r}")
     amend2 = str(pin.get("amend2_sha12") or "").strip().lower()
     if amend2 != _ANALYZER_REBUILD_AMEND2_SHA12:

@@ -1430,13 +1430,16 @@ def _mirror_publish_freshness():
         return {"error": f"{type(exc).__name__}: {exc}"[:300], "publish_stale": None}
 
 
-ANALYZER_MIN_FLOOR_TS = 1792263671
+# Single source with analyzer_book10_regime.EPOCH_FLOOR_TS (Strategist f21717ab1c85 nit).
+import analyzer_book10_regime as _abr_epoch_floor  # noqa: E402
+
+ANALYZER_MIN_FLOOR_TS = int(_abr_epoch_floor.EPOCH_FLOOR_TS)
 
 
 def _analyzer_floor_epoch_ts():
     """RK #882 12:48: analyzer floor = max(epoch manifest started_at_ts, fresh_start_epoch.json epoch_ts).
 
-    Never below ANALYZER_MIN_FLOOR_TS (1792263671).  DATA_EPOCH_ID is not involved.
+    Never below ANALYZER_MIN_FLOOR_TS (= abr.EPOCH_FLOOR_TS).  DATA_EPOCH_ID is not involved.
     """
     from research_segment_epoch import fresh_start_epoch
 
@@ -19474,7 +19477,29 @@ def _regime_tags_from_row(row) -> dict:
 
 
 def _regime_key_from_row(row) -> str:
+    """AMEND2 regime key; book10 gap → raise (callers must wrap fail-closed)."""
     return _regime_tags_from_row(row).get("regime_key", "unknown")
+
+
+def _roster_policy_fail_closed_payload(*, scope: str, reason: str, error: str) -> dict:
+    """UNKNOWN + named reason + RED when regime inputs unavailable (HM d836cfc7cf2d / Strategist f21717)."""
+    return {
+        "schema": "roster_policy_v2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "session_scope": scope,
+        "current_regime": "UNKNOWN",
+        "action": "COLLECT_ONLY",
+        "confidence": "LOW",
+        "reason": reason,
+        "status": "RED",
+        "health": "RED",
+        "ok": False,
+        "error": error,
+        "tile_weights": {},
+        "auto_apply": False,
+        "requires_human_approval": True,
+        "note": "NOT TESTED: analyzer regime inputs unavailable (AMEND2 fail-closed)",
+    }
 
 
 def regime_leaderboard_report(trades=None, session=None, min_trades=3):
@@ -19583,21 +19608,52 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
 
 
 def roster_policy_report(trades=None, session=None, regime_payload=None, benchmark_report=None):
-    """Recommend lane weights from regime leaderboard — human approval required before bot applies."""
+    """Recommend lane weights from regime leaderboard — human approval required before bot applies.
+
+    Book10/trades gap must not halt later reports (R34): wrap like regime_leaderboard_report
+    → UNKNOWN + named reason + RED (HM d836cfc7cf2d / Strategist f21717ab1c85).
+    """
     if session is None:
         session = load_research_session()
+    scope = _shadow_scope_label(session)
     trades = _trades_for_regime_analysis(trades=trades, session=session)
     if regime_payload is None:
         regime_payload = _load_json_report(REGIME_LEADERBOARD_REPORT_FILE) or {}
+    # Leaderboard already fail-closed → propagate RED without re-raising.
+    if isinstance(regime_payload, dict) and regime_payload.get("ok") is False:
+        payload = _roster_policy_fail_closed_payload(
+            scope=scope,
+            reason=str(regime_payload.get("note") or "REGIME_LEADERBOARD_UNAVAILABLE"),
+            error=str(regime_payload.get("error") or "leaderboard_fail_closed"),
+        )
+        try:
+            with open(ROSTER_POLICY_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            print(f"  ⚠️ Could not write {ROSTER_POLICY_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+        return payload
     regimes = regime_payload.get("regimes") or []
     min_n = int(regime_payload.get("min_trades_per_cell") or 3)
 
-    # Detect current regime from latest trade timestamp
+    # Detect current regime from latest trade timestamp (wrap book10 gap — never crash pipeline).
     current_regime = "unknown"
     if trades is not None and not trades.empty:
         sort_cols = [c for c in ("close_ts", "ts") if c in trades.columns]
         last = trades.sort_values(by=sort_cols[0] if sort_cols else trades.columns[0], ascending=False).iloc[0]
-        current_regime = _regime_key_from_row(last)
+        try:
+            current_regime = _regime_key_from_row(last)
+        except (RuntimeError, ValueError) as exc:
+            payload = _roster_policy_fail_closed_payload(
+                scope=scope,
+                reason="BOOK10_OR_TRADES_UNAVAILABLE",
+                error=str(exc),
+            )
+            try:
+                with open(ROSTER_POLICY_FILE, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except Exception as e:
+                print(f"  ⚠️ Could not write {ROSTER_POLICY_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+            return payload
 
     match = next((r for r in regimes if r.get("regime") == current_regime and r.get("conclusion_allowed")), None)
     if not match and regimes:

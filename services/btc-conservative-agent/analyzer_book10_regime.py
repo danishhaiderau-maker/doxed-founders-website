@@ -106,10 +106,20 @@ def assert_book_source(path_name: str) -> None:
 
 
 def guard_no_market_segment_open(path: str | Any) -> None:
-    """Raise if a path names market_segment (H2/C2 mutation target). Wired on open paths."""
+    """Raise if a path names market_segment (H2/C2). Case-insensitive via .lower() (AMEND2 C2 / HM d836cfc7cf2d)."""
     text = str(path)
-    if "market_segment" in text:
+    if "market_segment" in text.lower():
         raise RuntimeError(f"AMEND2 forbids opening market_segment path: {text}")
+
+
+# Real-data book10+trades regime cost note (Strategist f21717ab1c85).
+# Naive per-trade full scan of ~1e5 book rows × ~1.4e4 trades ≈ 1.4e9 steps —
+# expected wall time on Fly/laptop can approach the 45-min analyzer STOP budget.
+# Prefer windowed/index slices (see book_rows_for_window) for production runs.
+REGIME_RUNTIME_NOTE = (
+    "BOOK10_TRADES_DIRVOL_V1: per-trade full book scan is O(n_trades * n_book); "
+    "real-data estimate ~1.4e9 steps — use indexed window slices; risk of 45-min STOP."
+)
 
 
 def _mid_from_book_row(row: Mapping[str, Any]) -> float | None:
@@ -151,18 +161,23 @@ def _trade_intensity_in_window(
     t: float,
     trade_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Look-ahead-free trade-print diagnostics from bfx_trades only (plan intensity role)."""
+    """Look-ahead-free trade-print diagnostics from bfx_trades only (plan intensity role).
+
+    Pre-epoch trades halt even when outside the 900s window (no silent skip).
+    """
     start = t - float(VOL_WINDOW_SEC)
     n = 0
     notional = 0.0
     for row in trade_rows:
         ts = _row_ts(row)
-        if ts is None or ts > t or ts < start:
+        if ts is None or ts > t:
             continue
         if ts < EPOCH_FLOOR_TS:
             raise ValueError(
                 f"AMEND2 pre-epoch trade row ts={ts} — halt (R5); do not filter silently"
             )
+        if ts < start:
+            continue
         n += 1
         try:
             px = float(row.get("price") or row.get("px") or 0.0)
@@ -171,6 +186,32 @@ def _trade_intensity_in_window(
         except (TypeError, ValueError):
             continue
     return {"trade_prints": n, "trade_notional": notional}
+
+
+def book_rows_for_window(
+    t: float,
+    book_rows: Sequence[Mapping[str, Any]],
+    *,
+    window_sec: float = DIR_WINDOW_SEC,
+) -> list[Mapping[str, Any]]:
+    """Index/slice helper: rows with EPOCH_FLOOR_TS <= ts <= t and ts >= t - window.
+
+    Pre-epoch rows in the offered set still halt (R5). Reduces O(n_book) work per label.
+    """
+    start = t - float(window_sec)
+    out: list[Mapping[str, Any]] = []
+    for row in book_rows:
+        ts = _row_ts(row)
+        if ts is None or ts > t:
+            continue
+        if ts < EPOCH_FLOOR_TS:
+            raise ValueError(
+                f"AMEND2 pre-epoch book row ts={ts} — halt (R5); do not filter silently"
+            )
+        if ts < start:
+            continue
+        out.append(row)
+    return out
 
 
 def classify_at(
@@ -198,17 +239,16 @@ def classify_at(
             "method_id": REGIME_METHOD_ID,
         }
 
-    # Slot mids from book rows with ts <= t only (no look-ahead).
+    # Indexed window slice (halts on any pre-epoch row in the offered set).
+    windowed = book_rows_for_window(
+        t, book_rows, window_sec=float(DIR_WINDOW_SEC) + float(MAX_MID_AGE_SEC) + float(STEP_SEC)
+    )
     slots: dict[int, float] = {}
     last_mid_ts: float | None = None
-    for row in book_rows:
+    for row in windowed:
         ts = _row_ts(row)
-        if ts is None or ts > t:
+        if ts is None:
             continue
-        if ts < EPOCH_FLOOR_TS:
-            raise ValueError(
-                f"AMEND2 pre-epoch book row ts={ts} — halt (R5); do not filter silently"
-            )
         mid = _mid_from_book_row(row)
         if mid is None:
             continue

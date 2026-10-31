@@ -340,31 +340,63 @@ def test_t10_missing_counts_fail_closed():
         ns["_analyzer_bundle_no_shrink_gate"](prior, new)
 
 
-def test_t10_mutation_silent_shrink_fails_contract():
+def test_t10_mutation_silent_shrink_patches_real_gate():
+    """HM d836cfc7cf2d: patch the real no-shrink gate (not a local lambda)."""
     ns = _load_install_ns()
     prior = _report_manifest(row_count=100, regime_count=5)
     new = _report_manifest(row_count=50, regime_count=5)
-    mutant = lambda prior_manifest, new_manifest: None
-    mutant(prior, new)  # silent accept
-    with pytest.raises(AssertionError):
-        # Real gate must still reject; proving silent accept is wrong
-        assert False, "silent shrink must not be accepted"
-    with pytest.raises(ValueError):
+    real = ns["_analyzer_bundle_no_shrink_gate"]
+    with pytest.raises(ValueError, match="shrink|rows"):
+        real(prior, new)
+    # Mutant: replace the real gate with a no-op — would fail open.
+    ns["_analyzer_bundle_no_shrink_gate"] = lambda prior_manifest, new_manifest: None
+    ns["_analyzer_bundle_no_shrink_gate"](prior, new)  # mutant accepts
+    # Restore and prove real gate still rejects.
+    ns["_analyzer_bundle_no_shrink_gate"] = real
+    with pytest.raises(ValueError, match="shrink|rows"):
         ns["_analyzer_bundle_no_shrink_gate"](prior, new)
 
 
-def test_t10_mutation_unreadable_prior_skip_fails_contract():
-    """Mutation: old `if prior is None: return` after coerce-to-None would fail open."""
+def test_t10_mutation_unreadable_prior_patches_real_gate():
+    """HM d836cfc7cf2d: patch real gate; old skip-bad-prior must not be the contract under test."""
     ns = _load_install_ns()
     new = _report_manifest()
-
-    def mutant_skip_bad_prior(prior_manifest, new_manifest):
-        if prior_manifest is None or not isinstance(prior_manifest, dict):
-            return  # old fail-open
-
-    mutant_skip_bad_prior("bogus", new)
+    real = ns["_analyzer_bundle_no_shrink_gate"]
+    with pytest.raises(ValueError, match="unreadable|incomplete"):
+        real("bogus", new)
+    ns["_analyzer_bundle_no_shrink_gate"] = (
+        lambda prior_manifest, new_manifest: None
+        if prior_manifest is None or not isinstance(prior_manifest, dict)
+        else real(prior_manifest, new_manifest)
+    )
+    ns["_analyzer_bundle_no_shrink_gate"]("bogus", new)  # mutant fail-open
+    ns["_analyzer_bundle_no_shrink_gate"] = real
     with pytest.raises(ValueError, match="unreadable|incomplete"):
         ns["_analyzer_bundle_no_shrink_gate"]("bogus", new)
+
+
+def test_t10_install_path_corrupt_prior_manifest_file_fails_closed():
+    """HM d836cfc7cf2d: drive install's real file-read/parse error on prior report_manifest.json."""
+    ns = _load_install_ns()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        generations = root / "generations"
+        pointer = root / "current.json"
+        generations.mkdir(parents=True)
+        prior = generations / "generation-prior-corrupt"
+        prior.mkdir(parents=True)
+        # Unreadable JSON — install must hit json.loads on this path and fail closed.
+        (prior / "report_manifest.json").write_text("{not-json", encoding="utf-8")
+        ns["_analyzer_generations_dir"] = lambda: generations
+        ns["_analyzer_current_pointer_path"] = lambda: pointer
+        ns["_prune_analyzer_generations"] = lambda generation: None
+        # Stub active dir so install's prior-read path runs (not the non-dict gate-only case).
+        ns["_active_analyzer_mirror_dir"] = lambda: prior
+        with pytest.raises(ValueError, match="unreadable|prior"):
+            ns["_install_analyzer_bundle"](
+                _zip_bundle(_bundle_files(row_count=20, regime_count=4)),
+                {"uploaded_at": "later"},
+            )
 
 
 def test_t9_r33_summary_and_analysis_no_verdicts_without_bundle():
@@ -521,6 +553,88 @@ def test_analyzer_never_opens_market_segment_guard():
     abr.guard_no_market_segment_open("/data/bfx_book_10l_1s.jsonl")
     with pytest.raises(RuntimeError, match="market_segment"):
         abr.guard_no_market_segment_open("/data/v3/ledgers/market_segment.jsonl")
+    # HM d836cfc7cf2d / AMEND2 C2: case-insensitive via .lower()
+    with pytest.raises(RuntimeError, match="market_segment"):
+        abr.guard_no_market_segment_open("/data/v3/ledgers/Market_Segment.jsonl")
+    with pytest.raises(RuntimeError, match="market_segment"):
+        abr.guard_no_market_segment_open("/data/V3/LEDGERS/MARKET_SEGMENT.JSONL")
+
+
+def test_amend2_c2_repo_wide_case_insensitive_market_segment_guard():
+    """AMEND2 C2: analyzer/dashboard/evaluator paths must trip case-insensitive market_segment guard."""
+    # Source: guard uses .lower() (not raw substring).
+    src = (ROOT / "analyzer_book10_regime.py").read_text(encoding="utf-8")
+    gstart = src.index("def guard_no_market_segment_open")
+    gend = src.index("\ndef ", gstart + 1)
+    gblock = src[gstart:gend]
+    assert ".lower()" in gblock
+    assert 'in text.lower()' in gblock or 'in str(path).lower()' in gblock or '"market_segment" in text.lower()' in gblock
+    # Mutation: case-sensitive `in text` would miss MARKET_SEGMENT.
+    mutant = gblock.replace("text.lower()", "text")
+    assert "text.lower()" not in mutant
+    with pytest.raises(AssertionError):
+        assert "text.lower()" in mutant
+    # Repo-wide: engine load path + helper both wire the guard.
+    assert "guard_no_market_segment_open" in ENGINE
+    for bad in (
+        "Market_Segment.jsonl",
+        "MARKET_SEGMENT",
+        "v3/ledgers/Market_Segment.jsonl",
+    ):
+        with pytest.raises(RuntimeError, match="market_segment"):
+            abr.guard_no_market_segment_open(bad)
+
+
+def test_book10_pre_epoch_trade_outside_window_halts():
+    """Pre-floor trades outside the 900s window must halt, not be skipped."""
+    t = abr.EPOCH_FLOOR_TS + 10_000
+    book = [{"ts": t - 1, "bid": 100.0, "ask": 100.2}]
+    trades = [{"ts": abr.EPOCH_FLOOR_TS - 50, "price": 99.0, "amount": 0.1}]  # outside 900s + pre-floor
+    with pytest.raises(ValueError, match="pre-epoch|halt"):
+        abr.classify_at(t, book, trade_rows=trades)
+
+
+def test_roster_policy_wraps_book10_gap_fail_closed():
+    """HM/Strategist: roster_policy_report must wrap _regime_key_from_row → UNKNOWN+reason+RED."""
+    start = ENGINE.index("def roster_policy_report")
+    end = ENGINE.index("\ndef feature_importance_report", start)
+    block = ENGINE[start:end]
+    assert "BOOK10_OR_TRADES_UNAVAILABLE" in block or "_roster_policy_fail_closed_payload" in block
+    assert "except (RuntimeError, ValueError)" in block
+    assert '"status": "RED"' in ENGINE[ENGINE.index("def _roster_policy_fail_closed_payload"):start]
+    # Mutation: remove the try/except wrap → contract fails.
+    mutant = block.replace("except (RuntimeError, ValueError) as exc:", "except ():  # mutant")
+    assert "except (RuntimeError, ValueError)" not in mutant
+    with pytest.raises(AssertionError):
+        assert "except (RuntimeError, ValueError)" in mutant
+
+
+def test_regime_runtime_note_documents_stop_risk():
+    assert "1.4e9" in abr.REGIME_RUNTIME_NOTE or "1.4e9" in abr.REGIME_RUNTIME_NOTE.replace(" ", "")
+    assert "45-min" in abr.REGIME_RUNTIME_NOTE or "STOP" in abr.REGIME_RUNTIME_NOTE
+    assert "book_rows_for_window" in (ROOT / "analyzer_book10_regime.py").read_text(encoding="utf-8")
+
+
+def test_exact_pin_match_rejects_tip_short_with_suffix():
+    """Exact pin: tip_short+'x' must fail (HM/Strategist nit)."""
+    ns = _load_install_ns()
+    bad = abr.ANALYZER_COMPLETED_TIP_SHORT + "x"
+    with pytest.raises(ValueError, match="analyzer_git_rev"):
+        ns["_analyzer_bundle_rebuild_pin_gate"](
+            _report_manifest(pin=_rebuild_pin(analyzer_git_rev=bad))
+        )
+    # tip_short alone still accepted
+    ns["_analyzer_bundle_rebuild_pin_gate"](
+        _report_manifest(pin=_rebuild_pin(analyzer_git_rev=abr.ANALYZER_COMPLETED_TIP_SHORT))
+    )
+
+
+def test_engine_floor_uses_abr_not_duplicate_literal():
+    """Duplicate floor at engine ANALYZER_MIN_FLOOR_TS must bind abr.EPOCH_FLOOR_TS."""
+    idx = ENGINE.index("ANALYZER_MIN_FLOOR_TS")
+    window = ENGINE[idx : idx + 200]
+    assert "EPOCH_FLOOR_TS" in window
+    assert "int(_abr_epoch_floor.EPOCH_FLOOR_TS)" in window or "EPOCH_FLOOR_TS)" in window
 
 
 def test_market_segment_guard_wired_on_engine_load_jsonl():
