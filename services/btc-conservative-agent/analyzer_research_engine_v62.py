@@ -1247,6 +1247,24 @@ def _epoch_admit(relpath, row):
     return not guard.declared or guard.admit(os.path.basename(relpath), row)
 
 
+def _epoch_audit_stream_is_retired(relpath: str) -> bool:
+    """True when ``relpath`` is an allowlisted retired V3 ledger (AMEND2 / Strategist 4a0806630d3a).
+
+    Epoch purity must never open these files — the read would be unguarded against
+    ``market_segment`` and would poison generation receipt / bundle-install gates.
+    """
+    from retired_streams import RETIRED_STREAM_ALLOWLIST
+
+    base = Path(str(relpath).replace("\\", "/")).name
+    stem, dot, suffix = base.rpartition(".")
+    if dot and suffix.isdigit():
+        base = stem
+        stem, dot, suffix = base.rpartition(".")
+    if suffix in ("jsonl", "csv") and stem in RETIRED_STREAM_ALLOWLIST:
+        return True
+    return False
+
+
 def _epoch_audit_streams(data_root):
     """Current-cohort data files under the analyzer data root (active + numeric rotations)."""
     import data_epoch as de
@@ -1266,6 +1284,9 @@ def _epoch_audit_streams(data_root):
             # Market tape is epoch independent; ops ledgers (relay quarantine/retirement, runtime
             # telemetry, receipts) are never analyzer evidence (#420).
             continue
+        # Strategist 4a0806630d3a: skip retired streams (never open market_segment.jsonl here).
+        if _epoch_audit_stream_is_retired(relpath):
+            continue
         yield path, relpath
 
 
@@ -1279,12 +1300,16 @@ def _epoch_purity_audit(guard, data_root, guarded=None):
     """
     import data_epoch as de
     from analyzer_epoch_guard import file_pre_epoch_rows, guarded_read
+    import analyzer_book10_regime as abr
 
     if not guard.declared:
         return 0, {}
     found = {}
     with guarded_read("<purity-audit>", "inventory"):
         for path, relpath in _epoch_audit_streams(data_root):
+            # Belt: refuse market_segment paths even if a future candidate slip-through.
+            abr.guard_no_market_segment_open(path)
+            abr.guard_no_market_segment_open(relpath)
             try:
                 bad = file_pre_epoch_rows(path, relpath, guard.manifest, guard.floor_ts)
             except OSError as exc:

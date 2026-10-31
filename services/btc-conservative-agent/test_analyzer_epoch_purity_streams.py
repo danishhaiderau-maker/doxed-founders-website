@@ -269,3 +269,56 @@ def test_provenance_journal_is_non_evidence_for_the_purity_audit():
     assert de.non_evidence("canonical_dataset_manifest.jsonl")
     assert "canonical_dataset_manifest.jsonl" in de.NON_EVIDENCE_BASES
     assert not de.non_evidence("v3/canonical_dataset_manifest.jsonl")
+
+
+def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard, monkeypatch):
+    """Strategist 4a0806630d3a: purity audit must not open retired v3/ledgers/market_segment.jsonl.
+
+    The ledger is present on disk (pre-epoch rows). Audit must skip it — never feed
+    unguarded market_segment reads into generation receipt / bundle-install gates.
+    """
+    g, _monitor = guard
+    engine = _engine()
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    _write_jsonl(seg, [
+        {"record_id": "seg-old", "ts": PRE, "data_epoch_id": OLD},
+        {"record_id": "seg-old2", "ts": PRE - 10},
+    ])
+    _write_jsonl(led / "decision.jsonl", [
+        {"record_id": "dec-cur", "ts": POST, "data_epoch_id": EPOCH},
+    ])
+    # Rotations of the retired stream must also be skipped.
+    _write_jsonl(led / "market_segment.jsonl.1", [
+        {"record_id": "seg-rot", "ts": PRE},
+    ])
+
+    audited = list(engine._epoch_audit_streams(tmp_path))
+    audited_rels = [rel for _path, rel in audited]
+    assert all("market_segment" not in rel for rel in audited_rels), audited_rels
+    assert any(rel.endswith("decision.jsonl") for rel in audited_rels)
+
+    opened: list[str] = []
+    real_open = open
+
+    def spy_open(file, *args, **kwargs):
+        name = str(file)
+        if "market_segment" in name.lower():
+            opened.append(name)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", spy_open)
+    retained, by_stream = engine._epoch_purity_audit(g, str(tmp_path))
+    assert opened == [], opened
+    assert not any("market_segment" in k for k in by_stream), by_stream
+    # Active ledger may still be audited (0 pre-epoch here).
+    assert "v3/ledgers/market_segment.jsonl" not in by_stream
+    # Helper + mutation: skip removed → retired path would be selected.
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl") is True
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl.1") is True
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/decision.jsonl") is False
+    mutant = "v3/ledgers/decision.jsonl"
+    with pytest.raises(AssertionError):
+        assert engine._epoch_audit_stream_is_retired(mutant) is True
+    _ = retained  # audit completes without raising
