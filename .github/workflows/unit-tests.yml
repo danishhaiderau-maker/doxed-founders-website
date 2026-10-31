@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     # 90m: #954 tip after master merge (#955 allowlisted Fix A) exceeded the prior 60m
     # hard cancel (OBSERVED run 41158249581 @1606aeecff43). Prior green heads were ~56–57m.
+    # Card seal 9153bcb8f78e companion: allowlisted pytest step must alert (or split the job) at
+    # ~75% of this timeout (~67.5 min). Soft-ignoring >75% growth is forbidden.
     timeout-minutes: 90
     defaults:
       run:
@@ -92,6 +94,11 @@ jobs:
       - name: Run the allowlisted test files (ci/unit_test_allowlist.txt)
         # Allowlist of files that pass under pytest; KNOWN_RED files are listed with owner and date in
         # ci/known_red.txt, and test_ci_test_inventory.py fails when a test file is in neither list.
+        # Card seal 9153bcb8f78e (C3): if this step wall-time exceeds ~75% of jobs.unit-tests
+        # timeout-minutes (0.75 × 90 ≈ 67.5 min), emit a CI ::warning with measured minutes (alert
+        # path chosen). Alternate split plan (not executed here): move API tsx specs and/or
+        # script-style runners and/or an allowlist shard into a parallel job so pytest stays under
+        # the 75% threshold. Soft-ignoring >75% growth is forbidden (R26/R36).
         run: |
           deselect=""
           while IFS='|' read -r node _; do
@@ -102,7 +109,21 @@ jobs:
           files="$(grep -v '^#' ci/unit_test_allowlist.txt | grep -v '^$' | tr '\n' ' ')"
           # --rootdir . pins node ids to this service dir. Without it the ../../scripts/ entries move the
           # rootdir to the repo root, the known_red_tests.txt node ids stop matching and nothing is deselected.
+          start_ts=$(date +%s)
+          set +e
           python -m pytest $files $deselect --rootdir . -q -p no:cacheprovider
+          rc=$?
+          set -e
+          end_ts=$(date +%s)
+          elapsed_sec=$((end_ts - start_ts))
+          # 0.75 × 90 min = 67.5 min = 4050 s (card seal 9153bcb8f78e)
+          threshold_sec=4050
+          elapsed_min=$(awk -v s="$elapsed_sec" 'BEGIN { printf "%.1f", s / 60 }')
+          echo "allowlisted pytest wall: ${elapsed_min} min (75% alert threshold 67.5 min @ 90m job timeout)"
+          if [ "$elapsed_sec" -ge "$threshold_sec" ]; then
+            echo "::warning title=unit-tests pytest headroom::Allowlisted pytest step took ${elapsed_min} min (>= 75% of 90m job timeout ≈ 67.5 min). Split plan if growth continues: move API tsx specs and/or script-style runners and/or an allowlist shard into a parallel job. Card seal 9153bcb8f78e."
+          fi
+          exit $rc
       - name: Run script-style safety and contract files as `python file` (ci/script_style_tests.txt)
         # These files have no pytest collection (module-level checks / __main__), so pytest never runs them.
         # Each must exit 0; a failure here is a real red. The deploy job runs some of them the same way.
