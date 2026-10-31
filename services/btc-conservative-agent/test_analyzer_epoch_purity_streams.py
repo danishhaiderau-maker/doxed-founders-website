@@ -379,3 +379,97 @@ def test_named_backup_guard_mutant_killed():
     mutant_r = mutant_r.replace("abr.guard_no_market_segment_open(stream)", "pass  # mutant")
     with pytest.raises(AssertionError):
         assert "abr.guard_no_market_segment_open(path)" in mutant_r
+
+
+def test_unplaced_rows_document_excludes_market_segment_variants(tmp_path, guard, monkeypatch):
+    """HM 8f785b4bd03d (1): unplaced_rows_document excludes market_segment .jsonl / .jsonl.1 / Market_Segment.
+
+    Open spy must fire (non-retired ledger) and must never see a lower-cased market_segment path.
+    Fails when the retired-stream filter in unplaced_rows_document is removed.
+    """
+    import builtins
+    import io
+
+    g, _monitor = guard
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    _write_jsonl(led / "market_segment.jsonl", [
+        {"record_id": "seg-old", "ts": PRE, "data_epoch_id": OLD},
+    ])
+    _write_jsonl(led / "market_segment.jsonl.1", [
+        {"record_id": "seg-rot", "ts": PRE},
+    ])
+    _write_jsonl(led / "Market_Segment.jsonl", [
+        {"record_id": "seg-case", "ts": PRE, "data_epoch_id": OLD},
+    ])
+    _write_jsonl(led / "decision.jsonl", [
+        {"record_id": "dec-pre", "ts": PRE},
+    ])
+
+    opened: list[str] = []
+    real_open = builtins.open
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", spy_open)
+        m.setattr(io, "open", spy_open)
+        doc = eg.unplaced_rows_document(tmp_path, g.manifest, floor_ts=START)
+
+    assert opened, "open spy must fire during unplaced_rows_document"
+    assert any(Path(p).name.lower() == "decision.jsonl" for p in opened), opened
+    assert not any("market_segment" in p.lower() for p in opened), opened
+    assert not any("market_segment" in str(k).lower() for k in (doc.get("by_stream") or {})), doc
+
+
+def test_stream_read_monitor_report_skips_recorded_market_segment(tmp_path, guard, monkeypatch):
+    """HM 8f785b4bd03d (2): StreamReadMonitor.report skips a recorded market_segment raw read.
+
+    Fails when the stream_is_retired_allowlisted skip in report() is removed.
+    """
+    import builtins
+    import io
+
+    g, monitor = guard
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    dec = led / "decision.jsonl"
+    _write_jsonl(seg, [{"record_id": "seg-raw", "ts": PRE, "data_epoch_id": OLD}])
+    _write_jsonl(dec, [{"record_id": "dec-raw", "ts": PRE}])
+
+    # Record raw opens into the installed monitor (audit hook).
+    open(seg, encoding="utf-8").close()
+    open(dec, encoding="utf-8").close()
+    assert any("market_segment" in Path(p).name.lower() for p in monitor.files), monitor.files
+
+    opened: list[str] = []
+    real_open = builtins.open
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", spy_open)
+        m.setattr(io, "open", spy_open)
+        report = monitor.report(g.manifest, floor_ts=START)
+
+    assert not any("market_segment" in str(k).lower() for k in report["pre_epoch_rows_admitted_by_stream"]), report
+    assert not any("market_segment" in str(k).lower() for k in report["unguarded_stream_reads"]), report
+    assert not any("market_segment" in p.lower() for p in opened), opened
+    # Non-retired recorded read still counted (spy may open decision during recount).
+    assert "v3/ledgers/decision.jsonl" in report["unguarded_stream_reads"]
+
+
+def test_stream_is_retired_allowlisted_case_and_rotation():
+    """HM 8f785b4bd03d (3): stream_is_retired_allowlisted covers case fold and numeric rotation."""
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/market_segment.jsonl") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/Market_Segment.jsonl") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/MARKET_SEGMENT.jsonl") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/market_segment.jsonl.1") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/Market_Segment.jsonl.2") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/decision.jsonl") is False
+    assert eg.stream_is_retired_allowlisted("decision.jsonl") is False
