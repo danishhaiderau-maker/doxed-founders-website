@@ -481,9 +481,9 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
                 nulls[key] = round(missing / len(tail), 4)
         last_ts = cur.get("last_ts")
         age = round(now - last_ts, 1) if last_ts else None
-        # #944 fail-closed classifier + #949 STREAM_SIZE_CAP RED for strategist streams.
+        # #944 fail-closed classifier + #949/#954 STREAM_SIZE_CAP RED/UNKNOWN (H1) for strategist.
         status, limit_age = classify_stream_status(name, age, last_ts)
-        if name in strategist_names and size_cap.get("level") == "RED":
+        if name in strategist_names and size_cap.get("level") in ("RED", "UNKNOWN"):
             status = "RED"
         retired_since = RETIRED_STREAMS.get(name)
         entry = {
@@ -504,6 +504,8 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
                 "level": size_cap.get("level"),
                 "reason": "STREAM_SIZE_CAP",
                 "card": (size_cap.get("status") or {}).get("card"),
+                "sinks": size_cap.get("sinks"),
+                "stop_writing": size_cap.get("stop_writing"),
             }
         out[name] = entry
     return {"schema": "monitor_stream_health_v1", "streams": out, "archive_locations": ARCHIVE_NOTE,

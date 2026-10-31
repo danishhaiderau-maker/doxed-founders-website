@@ -282,6 +282,153 @@ def test_size_cap_amber_then_red_before_hard_stop(tmp_path, monkeypatch):
     assert card["title"] == "URGENT partial 1 of 5"
 
 
+def test_size_cap_a5_red_then_green_stays_red(tmp_path, monkeypatch):
+    """A5: RED Sink then GREEN Sink → aggregate stays RED (WORST, not last-writer).
+
+    Mutation proof: if `_publish_status` overwrote the whole file with the last
+    sink only (no WORST / no sinks map), a later GREEN sink would clear RED and
+    this assert on aggregate ``level == "RED"`` would fail.
+    """
+    import disk_alert
+    for row in disk_alert.red_conditions():
+        disk_alert.clear_red(row["reason"])
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    alarms = []
+    monkeypatch.setattr(ssc, "_log", lambda msg: alarms.append(msg))
+    red_path = tmp_path / ssc.BOOK_FILE
+    # Seed over-cap bytes so init publishes RED+stop for the book sink.
+    red_path.write_bytes(b"x" * 250)
+    s_red = ssc.Sink(str(red_path), rotate_bytes=10 ** 9, max_total_bytes=200)
+    assert s_red._alarm_level == "RED" and s_red.size_cap_hits >= 1
+    status_red = json.loads((tmp_path / ssc.SIZE_CAP_STATUS_FILE).read_text())
+    assert status_red["level"] == "RED"
+    # GREEN sink (empty trades) must not clear the RED aggregate.
+    s_green = ssc.Sink(str(tmp_path / ssc.TRADES_FILE), rotate_bytes=10 ** 9, max_total_bytes=10 ** 9)
+    assert s_green._alarm_level == "GREEN"
+    status = json.loads((tmp_path / ssc.SIZE_CAP_STATUS_FILE).read_text())
+    assert status["level"] == "RED", status
+    assert status["sinks"][ssc.BOOK_FILE]["level"] == "RED"
+    assert status["sinks"][ssc.TRADES_FILE]["level"] == "GREEN"
+    # Mutation: last-writer-wins without WORST would leave level GREEN here.
+    last_writer_would_be = status["sinks"][ssc.TRADES_FILE]["level"]
+    assert last_writer_would_be == "GREEN"
+    assert status["level"] != last_writer_would_be
+
+
+def test_size_cap_a6_corrupt_or_missing_level_never_green(tmp_path):
+    """A6/H2: truncated/invalid JSON or sink with no level → UNKNOWN, never GREEN.
+
+    Also asserts tmp publish uses a unique per-writer name (H2).
+    Mutation: treating missing level as GREEN must fail the never-GREEN assert.
+    """
+    import disk_alert
+    dest = tmp_path / ssc.SIZE_CAP_STATUS_FILE
+    dest.write_text("{not-json", encoding="utf-8")
+    bad = disk_alert.stream_size_cap_status(tmp_path)
+    assert bad["level"] == "UNKNOWN" and bad.get("exists") is False
+    assert bad["level"] != "GREEN"
+    # Missing level on a sink entry → that sink UNKNOWN; roster incomplete → UNKNOWN.
+    dest.write_text(json.dumps({
+        "schema": ssc.SIZE_CAP_SCHEMA,
+        "reason": ssc.SIZE_CAP_REASON,
+        "level": "GREEN",
+        "stop_writing": False,
+        "sinks": {
+            ssc.BOOK_FILE: {"path": str(tmp_path / ssc.BOOK_FILE), "stop_writing": False},
+            ssc.TRADES_FILE: {"level": "GREEN", "path": str(tmp_path / ssc.TRADES_FILE)},
+        },
+    }), encoding="utf-8")
+    folded = disk_alert.stream_size_cap_status(tmp_path)
+    assert folded["sinks"][ssc.BOOK_FILE]["level"] == "UNKNOWN"
+    assert folded["level"] == "UNKNOWN"
+    assert folded["level"] != "GREEN"
+    src = (Path(__file__).parent / "strategist_streams_collector.py").read_text()
+    # H2 strengthened: unique per-writer tmp (pid+thread), not a shared ".tmp" clobber name;
+    # and the publish lock must wrap the write+replace (inspect source).
+    assert 'f"{dest}.tmp.{os.getpid()}.{threading.get_ident()}"' in src
+    assert "_size_cap_publish_lock" in src
+    assert "with _size_cap_publish_lock:" in src
+    publish_src = src[src.index("def _publish_status") : src.index("\n    def ", src.index("def _publish_status") + 1)]
+    assert "os.replace(tmp, dest)" in publish_src
+    lock_at = publish_src.index("with _size_cap_publish_lock:")
+    tmp_at = publish_src.index('f"{dest}.tmp.{os.getpid()}.{threading.get_ident()}"')
+    replace_at = publish_src.index("os.replace(tmp, dest)")
+    assert lock_at < tmp_at < replace_at, "tmp write+replace must sit under _size_cap_publish_lock"
+
+
+def test_size_cap_h1_unknown_is_red_on_alarm_health_not_stop_writing(tmp_path, monkeypatch):
+    """H1 + HM nit: UNKNOWN aggregate → disk_alert RED + monitor health RED;
+    UNKNOWN total must NOT set stop_writing (F1 / HM nit).
+
+    Mutation: if compute_disk_alert only escalates on level==\"RED\" (not UNKNOWN),
+    alert.level stays GREEN and this fails. If UNKNOWN forced stop_writing=True,
+    the stop_writing assert fails.
+    """
+    import disk_alert
+    import monitor_streams
+    for row in disk_alert.red_conditions():
+        disk_alert.clear_red(row["reason"])
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    # Partial roster: one GREEN expected sink → missing keys → aggregate UNKNOWN.
+    ssc.Sink(str(tmp_path / ssc.BOOK_FILE), rotate_bytes=10 ** 9, max_total_bytes=10 ** 9)
+    status = json.loads((tmp_path / ssc.SIZE_CAP_STATUS_FILE).read_text())
+    assert status["level"] == "UNKNOWN"
+    assert status["stop_writing"] is False, "HM nit: UNKNOWN total must NOT set stop_writing"
+    folded = disk_alert.stream_size_cap_status(tmp_path)
+    assert folded["level"] == "UNKNOWN"
+    assert folded["stop_writing"] is False
+    alert = disk_alert.compute_disk_alert({
+        "total_bytes": 100, "used_bytes": 1, "data_dir": str(tmp_path),
+    })
+    assert alert["level"] == "RED"
+    assert any(r.get("reason") == "STREAM_SIZE_CAP" for r in alert["retention_red"])
+    # Seed a fresh strategist stream part so health walks the strategist path.
+    book = tmp_path / ssc.BOOK_FILE
+    book.write_text(json.dumps({"s": 100, "b": [[1, 1]], "a": [[2, 1]], "receive_ts": 100.0}) + "\n")
+    health = monitor_streams.health(str(tmp_path), now=100.5)
+    assert health["stream_size_cap"]["level"] == "UNKNOWN"
+    assert health["stream_size_cap"].get("stop_writing") is False
+    strat = health["streams"]["bfx_book_10l"]
+    assert strat["status"] == "RED"
+    assert strat.get("size_cap", {}).get("level") == "UNKNOWN"
+
+
+def test_size_cap_m2_collector_five_sinks_missing_key_unknown(tmp_path, monkeypatch):
+    """M2: real 5-sink Collector; remove one key → reader WORST UNKNOWN."""
+    import disk_alert
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    ssc.Collector(str(tmp_path))
+    status = json.loads((tmp_path / ssc.SIZE_CAP_STATUS_FILE).read_text())
+    assert set(ssc.EXPECTED_STREAM_SINKS) <= set(status["sinks"])
+    assert status["level"] == "GREEN"
+    assert status["stop_writing"] is False
+    del status["sinks"][ssc.EVENTS_FILE]
+    status["level"] = "GREEN"  # stale aggregate; reader must recompute
+    (tmp_path / ssc.SIZE_CAP_STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
+    folded = disk_alert.stream_size_cap_status(tmp_path)
+    assert folded["level"] == "UNKNOWN"
+    assert folded["stop_writing"] is False
+
+
+def test_size_cap_m1_oserror_logged_not_swallowed(tmp_path, monkeypatch):
+    """M1: OSError on publish is logged (not silent pass)."""
+    logs = []
+    monkeypatch.setattr(ssc, "_log", lambda msg: logs.append(msg))
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    path = tmp_path / "cap.jsonl"
+    s = ssc.Sink(str(path), rotate_bytes=10 ** 9, max_total_bytes=10 ** 9)
+    logs.clear()
+    real_replace = ssc.os.replace
+
+    def boom(src, dst):
+        raise OSError("simulated publish fail")
+
+    monkeypatch.setattr(ssc.os, "replace", boom)
+    s._publish_status("GREEN", 0.0, stop_writing=False, need=0)
+    assert any("OSError" in m and ssc.SIZE_CAP_STATUS_FILE in m for m in logs), logs
+    monkeypatch.setattr(ssc.os, "replace", real_replace)
+
+
 def test_entrypoint_and_stream_catalog_wired():
     here = Path(__file__).parent
     assert "nice -n 10 python /app/strategist_streams_collector.py" in (here / "fly-entrypoint.sh").read_text()
