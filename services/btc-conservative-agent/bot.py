@@ -257,11 +257,8 @@ from chase_offset_touch_grid import (
     arm_compressed_shadow_chase,
     arm_touch_grid_rows,
     candle_ts_sec,
-    new_grid_state,
     orig_limit_price,
     poll_compressed_shadow_chase,
-    poll_grid_state,
-    recover_compressed_shadow_states,
 )
 from order_multiverse import (
     ORDER_MULTIVERSE_FILE,
@@ -16580,16 +16577,8 @@ def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str,
     return "VALID", f"FILL_REVALIDATION_SAME_{direction}"
 
 
-def _chase_grid_recovery_candidates() -> tuple:
-    """Newest sealed rotation (highest N) then the active chase grid."""
-    newest = rotation_cap.newest_rotation(CHASE_OFFSET_TOUCH_GRID_FILE)
-    if newest is None:
-        return (CHASE_OFFSET_TOUCH_GRID_FILE,)
-    return (newest, CHASE_OFFSET_TOUCH_GRID_FILE)
-
-
 def _recover_compressed_shadow_chases_once(now: float = None) -> None:
-    """Load active and terminal shared-call owners before any new arm."""
+    """Mark recovery done. R22: no chase_offset_touch_grid.jsonl recovery read."""
     global _compressed_shadow_recovery_attempted
     # This book has its own lock.  Collector maturation can legitimately hold
     # the fresh-epoch serialization lock while rebuilding terminal evidence;
@@ -16598,58 +16587,17 @@ def _recover_compressed_shadow_chases_once(now: float = None) -> None:
     with _compressed_shadow_lock:
         if _compressed_shadow_recovery_attempted:
             return
-        durable_rows = []
-        # ".1" is the OLDEST rotation; recovery needs the NEWEST one (DISK-CAP fix).
-        for candidate in _chase_grid_recovery_candidates():
-            try:
-                with open(candidate, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        try:
-                            row = json.loads(line)
-                        except (TypeError, ValueError):
-                            continue
-                        if row.get("schema") == "compressed_chase_shadow_v1":
-                            durable_rows.append(row)
-                            call_id = str(row.get("shared_ai_call_id") or "").strip()
-                            if call_id:
-                                _compressed_shadow_seen_call_ids.add(call_id)
-            except OSError:
-                continue
-        for tid, recovered in recover_compressed_shadow_states(
-            durable_rows, now_ts=float(now or time.time()),
-        ).items():
-            _compressed_shadow_chase_book.setdefault(tid, recovered)
+        # R22 / RK 7524ab402ae2: retired-jsonl recovery read removed (plan line 203).
+        # Shadow-chase half stays in-memory only (writers already gone).
         _compressed_shadow_recovery_attempted = True
 
 
 def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None, ask_qty=None):
-    """Poll chase/shadow books in memory. R22: no chase_offset_touch_grid.jsonl appends."""
+    """Poll shadow-chase books in memory. R22: touch-grid poll half removed."""
     if price is None or float(price) <= 0:
         return
     now = time.time()
-    dead = []
-    if _touch_grid_book:
-        for tid, grid in list(_touch_grid_book.items()):
-            try:
-                if now > float(grid.get("expires_ts") or 0):
-                    dead.append(tid)
-                    continue
-                # R22: durable TOUCH_GRID appends removed (STOP-WRITE / NOT NEEDED).
-                poll_grid_state(
-                    grid,
-                    now_ts=now,
-                    last=float(price),
-                    high=float(price),
-                    low=float(price),
-                    bid=None if not bid else float(bid),
-                    ask=None if not ask else float(ask),
-                    bid_qty=None if not bid_qty else float(bid_qty),
-                    ask_qty=None if not ask_qty else float(ask_qty),
-                )
-            except Exception as exc:
-                logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
-        for tid in dead:
-            _touch_grid_book.pop(tid, None)
+    # R22 / RK 7524ab402ae2: _touch_grid_book poll loop deleted (STOP-WRITE / NOT NEEDED).
     _recover_compressed_shadow_chases_once(now)
     shadow_dead = []
     shadow_rows = []
@@ -20445,7 +20393,7 @@ def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
         row["tile_admission_basis"] = admission_basis
         row["note"] = "discovery path-touch only; no paper/live order"
         # R22: chase_offset_touch_grid.jsonl append removed (STOP-WRITE / NOT NEEDED).
-    _touch_grid_book[trade_id] = new_grid_state(rows)
+    # R22 / RK 7524ab402ae2: no _touch_grid_book fill (touch-grid arm/poll half gone).
     _discovery_touch_grid_seen_call_ids.add(call_id)
     _collector_record_touch_grid_call(armed=True, ai_executes=raw_ai_executes)
     logger.info(
@@ -24085,32 +24033,12 @@ def _note_shadow_chase_bucket_records(rows) -> None:
 
 
 def _load_shadow_chase_bucket_records_once() -> None:
+    """In-memory shadow-chase notes only. R22: no retired chase jsonl read."""
     with _shadow_chase_bucket_records_lock:
         if _shadow_chase_bucket_state["loaded"]:
             return
+        # R22 / RK 7524ab402ae2: retired-jsonl recovery/load removed (plan line 203).
         _shadow_chase_bucket_state["loaded"] = True
-        marker = shadow_chase_buckets.SHADOW_CHASE_BUCKET_SCHEMA
-        loaded = []
-        # ".1" is the OLDEST rotation; recovery needs the NEWEST one (DISK-CAP fix).
-        for candidate in _chase_grid_recovery_candidates():
-            try:
-                with open(candidate, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        if marker not in line:
-                            continue
-                        try:
-                            row = json.loads(line)
-                        except ValueError:
-                            continue
-                        if row.get("schema") == marker:
-                            loaded.append(row)
-            except OSError:
-                continue
-        seen = {str(row.get("trade_id")) for row in _shadow_chase_bucket_records}
-        for row in loaded:
-            if str(row.get("trade_id")) not in seen:
-                _shadow_chase_bucket_records.appendleft(row)
-        _shadow_chase_bucket_state["appended"] += len(loaded)
 
 
 def _load_chase_analytics_snapshot() -> dict:
@@ -51491,7 +51419,6 @@ def status():
             "research_coverage": {
                 "schema": "research_dashboard_coverage_v1",
                 "discovery_touch_grid_shared_calls": len(_discovery_touch_grid_seen_call_ids),
-                "touch_grid_books_inflight": len(_touch_grid_book),
                 "compressed_shadow_books_inflight": len(_compressed_shadow_chase_book),
                 "order_multiverse_pending": len(_order_multiverse_pending_src),
                 "order_multiverse_written": len(_order_multiverse_written),

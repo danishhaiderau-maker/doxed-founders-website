@@ -107,6 +107,8 @@ def test_bot_feeds_shadow_tracker_only_from_the_shadow_poll_and_appends_evidence
 
 
 def _snapshot_namespace(tmp_path, chasing=(), rows=()):
+    # R22 / RK 7524ab402ae2: retired chase jsonl is not a recovery source; keep file for
+    # negative proof that load ignores disk rows.
     grid = tmp_path / "chase_offset_touch_grid.jsonl"
     grid.write_text("".join(json.dumps(r) + "\n" for r in rows) + '{"schema": "chase_offset_touch_grid_v1"}\n',
                     encoding="utf-8")
@@ -119,7 +121,7 @@ def _snapshot_namespace(tmp_path, chasing=(), rows=()):
     }
     tree = ast.parse(BOT_SOURCE)
     wanted = {"_note_shadow_chase_bucket_records", "_load_shadow_chase_bucket_records_once",
-              "_load_chase_analytics_snapshot", "_chase_grid_recovery_candidates"}
+              "_load_chase_analytics_snapshot"}
     body = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
@@ -135,7 +137,9 @@ def test_snapshot_populates_simulated_buckets_and_labels_no_live_chasing_tile(tm
     row = {"schema": scb.SHADOW_CHASE_BUCKET_SCHEMA, "execution_class": "SHADOW_ONLY", "places_order": False,
            "trade_id": "t1", "epoch_id": "epoch-a", "chase_count": 3, "filled": True, "net_bp": 6.0,
            "time_to_fill_sec": 300}
-    ns = _snapshot_namespace(tmp_path, rows=[row])
+    # In-memory note path (R22: no retired-jsonl recovery/load).
+    ns = _snapshot_namespace(tmp_path, rows=[])
+    ns["_note_shadow_chase_bucket_records"]([row])
     snap = ns["_load_chase_analytics_snapshot"]()
     assert snap["status"] == "SIMULATED_SHADOW" and snap["records"] == 1
     assert snap["label"] == scb.SIMULATED_LABEL
@@ -156,16 +160,17 @@ def test_snapshot_keeps_live_tile_section_separate_when_a_tile_chases(tmp_path):
 
 
 def test_chase_recovery_reads_newest_rotation_not_oldest_dot_one(tmp_path):
-    """DISK-CAP: ".1" is the OLDEST rotation; recovery must read the newest."""
-    base = tmp_path / "chase_offset_touch_grid.jsonl"
+    """R22 / RK 7524ab402ae2: retired chase jsonl is never a recovery/load source."""
+    assert "_chase_grid_recovery_candidates" not in BOT_SOURCE
     old = {"schema": scb.SHADOW_CHASE_BUCKET_SCHEMA, "execution_class": "SHADOW_ONLY", "places_order": False,
            "trade_id": "old", "epoch_id": "epoch-a", "chase_count": 1, "filled": True, "net_bp": 1.0,
            "time_to_fill_sec": 10}
     new = {**old, "trade_id": "new"}
     (tmp_path / "chase_offset_touch_grid.jsonl.1").write_text(json.dumps(old) + "\n", encoding="utf-8")
     (tmp_path / "chase_offset_touch_grid.jsonl.7").write_text(json.dumps(new) + "\n", encoding="utf-8")
-    ns = _snapshot_namespace(tmp_path, rows=[])
-    assert ns["_chase_grid_recovery_candidates"]() == (str(tmp_path / "chase_offset_touch_grid.jsonl.7"), str(base))
+    ns = _snapshot_namespace(tmp_path, rows=[new, old])
     ns["_load_shadow_chase_bucket_records_once"]()
     ids = {r["trade_id"] for r in ns["_shadow_chase_bucket_records"]}
-    assert "new" in ids and "old" not in ids
+    # Disk rows (newest or oldest) must not be recovered into the in-memory book.
+    assert "new" not in ids and "old" not in ids
+    assert ids == set()

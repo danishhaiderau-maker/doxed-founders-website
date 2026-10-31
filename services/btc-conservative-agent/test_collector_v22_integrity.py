@@ -485,10 +485,11 @@ class CollectorIntegrityTests(unittest.TestCase):
         try:
             holder.start()
             self.assertTrue(lock_held.wait(1.0))
-            with mock.patch("builtins.open", side_effect=FileNotFoundError), \
-                 mock.patch.object(bot, "recover_compressed_shadow_states", return_value={}):
-                worker.start()
-                self.assertTrue(recovered.wait(1.0))
+            # R22 / RK 7524ab402ae2: recovery is in-memory flag only (no retired-jsonl read);
+            # still must not block behind the collector epoch lock.
+            worker.start()
+            self.assertTrue(recovered.wait(1.0))
+            self.assertTrue(bot._compressed_shadow_recovery_attempted)
         finally:
             release_lock.set()
             holder.join(2.0)

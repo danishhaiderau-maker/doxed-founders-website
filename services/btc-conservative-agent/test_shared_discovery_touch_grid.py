@@ -74,7 +74,8 @@ def test_shared_discovery_touch_grid_arms_once_without_paper_orders(tmp_path, mo
     assert arm(ctx, ai) is False  # duplicate shared call
     # R22: chase_offset_touch_grid writers removed — durable appends must stay empty.
     assert appended == []
-    assert len(book) == 1
+    # RK 7524ab402ae2: no _touch_grid_book fill (touch-grid arm/poll half gone).
+    assert len(book) == 0
     assert "scan-discovery-1" in seen
     assert coverage == [{"armed": True, "ai_executes": True}]
 
@@ -86,7 +87,8 @@ def test_ai_rejected_tile_eligible_call_still_arms_discovery_grid(tmp_path):
 
     assert arm({"price": 100000.0}, ai) is True
     assert appended == []  # R22: no durable chase grid append
-    assert len(book) == 1
+    # RK 7524ab402ae2: discovery marks seen/coverage without filling _touch_grid_book.
+    assert len(book) == 0
     assert coverage == [{"armed": True, "ai_executes": False}]
 
 

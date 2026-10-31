@@ -162,9 +162,13 @@ def test_poll_grid_emits_certain_touch_after_uncertain_first_touch():
 
 
 def test_bot_passes_l1_quantities_to_touch_grid():
+    """RK 7524ab402ae2: touch-grid poll half gone; shadow-chase half + call site kept."""
     poll = _function_source("_poll_chase_offset_touch_grid")
-    assert "bid_qty=None if not bid_qty else float(bid_qty)" in poll
-    assert "ask_qty=None if not ask_qty else float(ask_qty)" in poll
+    assert "poll_grid_state(" not in poll
+    assert "for tid, grid in list(_touch_grid_book.items())" not in poll
+    assert "bid_qty=None if not bid_qty else float(bid_qty)" not in poll
+    assert "ask_qty=None if not ask_qty else float(ask_qty)" not in poll
+    assert "poll_compressed_shadow_chase(" in poll
     assert "_poll_chase_offset_touch_grid(price, grid_bid, grid_ask, grid_bid_qty, grid_ask_qty)" in SOURCE
 
 

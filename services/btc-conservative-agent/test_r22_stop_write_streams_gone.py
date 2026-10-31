@@ -100,3 +100,24 @@ def test_exempt_streams_still_named_in_monitor_catalog():
 
 def test_order_multiverse_entry_grid_status_stays_disabled_r17():
     assert '"order_multiverse_entry_grid_file": "disabled: R17"' in BOT
+
+
+def test_r22_touch_grid_poll_arm_recovery_symbols_gone():
+    """RK 7524ab402ae2: touch-grid half + retired-jsonl recovery read removed; shadow kept."""
+    assert "touch_grid_books_inflight" not in BOT
+    assert "_chase_grid_recovery_candidates" not in BOT
+    assert "_touch_grid_book[trade_id] = new_grid_state(rows)" not in BOT
+    assert "poll_grid_state" not in BOT
+    assert "new_grid_state" not in BOT
+    assert "recover_compressed_shadow_states" not in BOT
+    # Shadow-chase half kept.
+    assert "def _poll_chase_offset_touch_grid(" in BOT
+    assert "poll_compressed_shadow_chase(" in BOT
+    assert "def _arm_shared_compressed_shadow_chase(" in BOT
+    poll = next(
+        n for n in TREE.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_poll_chase_offset_touch_grid"
+    )
+    poll_src = ast.get_source_segment(BOT, poll) or ""
+    assert "for tid, grid in list(_touch_grid_book.items())" not in poll_src
+    assert "poll_compressed_shadow_chase(" in poll_src
