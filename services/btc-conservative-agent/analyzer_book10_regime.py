@@ -3,13 +3,16 @@
 Binding: ANALYZER-SPEC AMEND2 whole-file sha12 ``659e184f2435``;
 param provenance ``4e89e0d0…`` (literal copy of dyn_regime freeze; N=1).
 Never opens ``market_segment``. Labels at t use only data with ts <= t.
+
+Canonical epoch floor / segment cut live here only (R4) — consumers import these
+constants rather than re-stating the literals.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 REGIME_METHOD_ID = "BOOK10_TRADES_DIRVOL_V1"
 DIR_WINDOW_SEC = 900
@@ -21,7 +24,8 @@ VOL_HIGH_RV_BP = 20.0
 VOL_MED_RV_BP = 10.0
 MIN_RETURNS = 72
 MAX_MID_AGE_SEC = 5.0
-EPOCH_FLOOR_TS = 1792263671  # R5 fresh start
+# Single source for R5 fresh-start floor (also used by analyzer_mirror fresh gate).
+EPOCH_FLOOR_TS = 1792263671  # 18 Oct 2026 06:01:11 AEDT
 SEGMENT_CUT_TS = 1792830000  # 24 Oct 19:20 AEDT write-stop
 AMEND2_SPEC_SHA12 = "659e184f2435"
 ANALYZER_COMPLETED_TIP = "e70bac80cd5004f8d95bb4641146b102518f096e"
@@ -101,6 +105,13 @@ def assert_book_source(path_name: str) -> None:
         raise ValueError(f"AMEND2 book source must be {BOOK10_FILE}, got {path_name!r}")
 
 
+def guard_no_market_segment_open(path: str | Any) -> None:
+    """Raise if a path names market_segment (H2/C2 mutation target). Wired on open paths."""
+    text = str(path)
+    if "market_segment" in text:
+        raise RuntimeError(f"AMEND2 forbids opening market_segment path: {text}")
+
+
 def _mid_from_book_row(row: Mapping[str, Any]) -> float | None:
     bid = row.get("bid")
     ask = row.get("ask")
@@ -136,17 +147,48 @@ def _row_ts(row: Mapping[str, Any]) -> float | None:
     return None
 
 
+def _trade_intensity_in_window(
+    t: float,
+    trade_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Look-ahead-free trade-print diagnostics from bfx_trades only (plan intensity role)."""
+    start = t - float(VOL_WINDOW_SEC)
+    n = 0
+    notional = 0.0
+    for row in trade_rows:
+        ts = _row_ts(row)
+        if ts is None or ts > t or ts < start:
+            continue
+        if ts < EPOCH_FLOOR_TS:
+            raise ValueError(
+                f"AMEND2 pre-epoch trade row ts={ts} — halt (R5); do not filter silently"
+            )
+        n += 1
+        try:
+            px = float(row.get("price") or row.get("px") or 0.0)
+            qty = abs(float(row.get("amount") or row.get("qty") or row.get("size") or 0.0))
+            notional += px * qty
+        except (TypeError, ValueError):
+            continue
+    return {"trade_prints": n, "trade_notional": notional}
+
+
 def classify_at(
     t: float,
     book_rows: Sequence[Mapping[str, Any]],
     *,
     trade_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Look-ahead-free label at time t from book10 (+ optional trades diagnostics).
+    """Look-ahead-free label at time t from book10 (+ trades diagnostics).
 
-    Only rows with ts <= t enter the window. Pre-epoch ts < EPOCH_FLOOR_TS → UNKNOWN.
+    Only rows with ts <= t enter the window. Pre-epoch contamination → halt (raise).
+    ``trade_rows is None`` is forbidden (callers must pass a sequence, possibly empty).
     """
-    del trade_rows  # intensity diagnostics reserved; labels use book mid path only
+    if trade_rows is None:
+        raise ValueError("AMEND2 requires trade_rows sequence (use () if none); refuse discard-open")
+    if book_rows is None:
+        raise ValueError("AMEND2 requires book_rows; refuse silent UNKNOWN")
+
     if t < EPOCH_FLOOR_TS:
         return {
             "regime_key": UNKNOWN,
@@ -164,12 +206,16 @@ def classify_at(
         if ts is None or ts > t:
             continue
         if ts < EPOCH_FLOOR_TS:
-            continue
+            raise ValueError(
+                f"AMEND2 pre-epoch book row ts={ts} — halt (R5); do not filter silently"
+            )
         mid = _mid_from_book_row(row)
         if mid is None:
             continue
         slots[int(ts) // STEP_SEC] = mid
         last_mid_ts = float(ts)
+
+    trade_diag = _trade_intensity_in_window(t, trade_rows)
 
     if last_mid_ts is None or (t - last_mid_ts) > MAX_MID_AGE_SEC:
         return {
@@ -178,6 +224,7 @@ def classify_at(
             "vol_bucket": UNKNOWN,
             "reason": "STALE_OR_EMPTY_MID",
             "method_id": REGIME_METHOD_ID,
+            **trade_diag,
         }
 
     end_slot = int(t) // STEP_SEC
@@ -201,6 +248,7 @@ def classify_at(
             "reason": "THIN_COVERAGE",
             "n_returns": len(returns),
             "method_id": REGIME_METHOD_ID,
+            **trade_diag,
         }
 
     drift_bp = sum(returns) * 10_000.0
@@ -229,11 +277,26 @@ def classify_at(
         "n_returns": len(returns),
         "method_id": REGIME_METHOD_ID,
         "reason": "OK",
+        **trade_diag,
     }
 
 
-def tags_from_trade_row(row: Mapping[str, Any], book_rows: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
-    """Analyzer regime tags for one trade/fill row (AMEND2 path; never market_segment)."""
+def tags_from_trade_row(
+    row: Mapping[str, Any],
+    book_rows: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    trade_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Analyzer regime tags for one trade/fill row (AMEND2 path; never market_segment).
+
+    ``book_rows`` and ``trade_rows`` are required (pass ``()`` only when intentionally empty
+    after a successful load). ``None`` means the caller forgot to wire inputs → fail closed.
+    """
+    if book_rows is None:
+        raise ValueError("AMEND2 tags_from_trade_row requires book_rows; refuse silent UNKNOWN")
+    if trade_rows is None:
+        raise ValueError("AMEND2 tags_from_trade_row requires trade_rows; refuse discard-open")
+
     ts = None
     for key in ("close_ts", "entry_ts", "ts", "filled_at_ts"):
         raw = row.get(key)
@@ -260,7 +323,7 @@ def tags_from_trade_row(row: Mapping[str, Any], book_rows: Sequence[Mapping[str,
             "method_id": REGIME_METHOD_ID,
             "reason": "NO_TS",
         }
-    labels = classify_at(ts, book_rows or (), trade_rows=None)
+    labels = classify_at(ts, book_rows, trade_rows=trade_rows)
     day_type = "unknown"
     try:
         from datetime import datetime, timezone
@@ -279,10 +342,3 @@ def tags_from_trade_row(row: Mapping[str, Any], book_rows: Sequence[Mapping[str,
         "funding": "unk",
         "liquidity": "unk",
     }
-
-
-def guard_no_market_segment_open(path: str | Any) -> None:
-    """Raise if a path names market_segment (H2/C2 mutation target)."""
-    text = str(path)
-    if "market_segment" in text:
-        raise RuntimeError(f"AMEND2 forbids opening market_segment path: {text}")

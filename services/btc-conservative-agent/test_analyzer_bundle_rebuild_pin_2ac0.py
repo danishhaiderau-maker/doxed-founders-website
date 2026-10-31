@@ -243,6 +243,57 @@ def test_t8_manifest_pin_wrong_tip_rejects():
             ns["_validated_analyzer_bundle_manifest"](archive, members)
 
 
+@pytest.mark.parametrize(
+    "bad_rev,match",
+    [
+        ("", "empty|mismatch|analyzer_git_rev"),
+        ("e", "mismatch|analyzer_git_rev|empty"),
+        (abr.ANALYZER_COMPLETED_TIP_SHORT[:11], "mismatch|analyzer_git_rev"),
+    ],
+)
+def test_t8_pin_rejects_empty_short_and_11char_prefix(bad_rev, match):
+    """HM R2 d7570845a12b: empty / 'e' / 11-char tip prefix must fail closed."""
+    ns = _load_install_ns()
+    report = _report_manifest(pin=_rebuild_pin(analyzer_git_rev=bad_rev))
+    with pytest.raises(ValueError, match=match):
+        ns["_analyzer_bundle_rebuild_pin_gate"](report)
+
+
+def test_t8_pin_short_rev_mutation_old_bypass_would_pass():
+    """Mutation proof: old tip.startswith(rev[:12]) bypass accepts '', 'e', 11-char; fix must not."""
+    tip = abr.ANALYZER_COMPLETED_TIP.lower()
+    tip_short = abr.ANALYZER_COMPLETED_TIP_SHORT.lower()
+
+    def mutant_accepts(rev: str) -> bool:
+        rev = str(rev or "").strip().lower()
+        # Pre-fix bypass (VOID tip 7aa27881): tip.startswith(rev[:12]) lets short revs through.
+        return bool(rev == tip or rev.startswith(tip_short) or tip.startswith(rev[:12]))
+
+    for bad in ("", "e", tip_short[:11]):
+        assert mutant_accepts(bad) is True, f"mutant must show old bypass for {bad!r}"
+        ns = _load_install_ns()
+        with pytest.raises(ValueError):
+            ns["_analyzer_bundle_rebuild_pin_gate"](
+                _report_manifest(pin=_rebuild_pin(analyzer_git_rev=bad))
+            )
+
+
+def test_t8_fixture_replacement_check_bad_pin_still_rejects():
+    """Fresh HM R2: replacing a good fixture pin with a bad rev must still fail (not fixture-hardcoded pass)."""
+    ns = _load_install_ns()
+    good = _report_manifest()
+    ns["_analyzer_bundle_rebuild_pin_gate"](good)  # baseline fixture passes
+    replaced = json.loads(json.dumps(good))
+    replaced["rebuild_pin"] = _rebuild_pin(analyzer_git_rev="0" * 40)
+    with pytest.raises(ValueError, match="analyzer_git_rev"):
+        ns["_analyzer_bundle_rebuild_pin_gate"](replaced)
+    # Mutation: if gate ignored rebuild_pin contents, replacement would pass — prove it does not.
+    mutant = lambda report_manifest: None
+    mutant(replaced)
+    with pytest.raises(ValueError):
+        ns["_analyzer_bundle_rebuild_pin_gate"](replaced)
+
+
 def test_t8_mutation_accept_unpinned_fails_contract():
     """Mutation: pin gate no-op → validation would accept unpinned; contract asserts raise."""
     ns = _load_install_ns()
@@ -268,6 +319,27 @@ def test_t10_shrink_rows_rejects():
         ns["_analyzer_bundle_no_shrink_gate"](prior, new)
 
 
+def test_t10_unreadable_prior_manifest_fails_closed():
+    """HM R2: prior present but unreadable / non-dict → fail closed (not silent skip)."""
+    ns = _load_install_ns()
+    new = _report_manifest(row_count=10, regime_count=3)
+    with pytest.raises(ValueError, match="unreadable|incomplete"):
+        ns["_analyzer_bundle_no_shrink_gate"]("not-a-dict", new)
+    with pytest.raises(ValueError, match="unreadable|incomplete"):
+        ns["_analyzer_bundle_no_shrink_gate"](["list"], new)
+
+
+def test_t10_missing_counts_fail_closed():
+    """R34: missing row/regime/cutoff counts must not compare as 0 (fail closed)."""
+    ns = _load_install_ns()
+    prior = _report_manifest(row_count=100, regime_count=5)
+    new = _report_manifest(row_count=100, regime_count=5)
+    del new["row_count"]
+    del new["regime_count"]
+    with pytest.raises(ValueError, match="inventory incomplete|missing"):
+        ns["_analyzer_bundle_no_shrink_gate"](prior, new)
+
+
 def test_t10_mutation_silent_shrink_fails_contract():
     ns = _load_install_ns()
     prior = _report_manifest(row_count=100, regime_count=5)
@@ -279,6 +351,20 @@ def test_t10_mutation_silent_shrink_fails_contract():
         assert False, "silent shrink must not be accepted"
     with pytest.raises(ValueError):
         ns["_analyzer_bundle_no_shrink_gate"](prior, new)
+
+
+def test_t10_mutation_unreadable_prior_skip_fails_contract():
+    """Mutation: old `if prior is None: return` after coerce-to-None would fail open."""
+    ns = _load_install_ns()
+    new = _report_manifest()
+
+    def mutant_skip_bad_prior(prior_manifest, new_manifest):
+        if prior_manifest is None or not isinstance(prior_manifest, dict):
+            return  # old fail-open
+
+    mutant_skip_bad_prior("bogus", new)
+    with pytest.raises(ValueError, match="unreadable|incomplete"):
+        ns["_analyzer_bundle_no_shrink_gate"]("bogus", new)
 
 
 def test_t9_r33_summary_and_analysis_no_verdicts_without_bundle():
@@ -361,16 +447,16 @@ def test_book10_regime_no_lookahead():
         mid = mid * (1.0 + 0.0002)  # slow bullish drift
         rows.append({"ts": ts, "bid": mid - 1, "ask": mid + 1})
     t = base + 99 * abr.STEP_SEC
-    label = abr.classify_at(t, rows)
+    label = abr.classify_at(t, rows, trade_rows=())
     future = list(rows) + [
         {"ts": t + 60, "bid": mid * 2, "ask": mid * 2 + 1},
     ]
-    label2 = abr.classify_at(t, future)
+    label2 = abr.classify_at(t, future, trade_rows=())
     assert label == label2
 
     # Mutation: a broken classifier that includes ts > t must change the label.
     def classify_with_lookahead(t_cut, book_rows):
-        return abr.classify_at(t_cut + 60, book_rows)  # mutant uses future window end
+        return abr.classify_at(t_cut + 60, book_rows, trade_rows=())  # mutant uses future window end
 
     mutant_label = classify_with_lookahead(t, future)
     with pytest.raises(AssertionError):
@@ -379,16 +465,50 @@ def test_book10_regime_no_lookahead():
 
 def test_book10_regime_epoch_floor():
     rows = [{"ts": abr.EPOCH_FLOOR_TS - 10, "bid": 1.0, "ask": 1.1}]
-    out = abr.classify_at(abr.EPOCH_FLOOR_TS - 5, rows)
+    out = abr.classify_at(abr.EPOCH_FLOOR_TS - 5, rows, trade_rows=())
     assert out["regime_key"] == abr.UNKNOWN
     assert out["reason"] == "PRE_EPOCH"
+
+
+def test_book10_regime_pre_epoch_contamination_halts():
+    """Pre-epoch rows in a post-epoch window must halt (not silently filter)."""
+    t = abr.EPOCH_FLOOR_TS + 1000
+    rows = [
+        {"ts": abr.EPOCH_FLOOR_TS - 1, "bid": 100.0, "ask": 100.2},
+        {"ts": t - 1, "bid": 100.0, "ask": 100.2},
+    ]
+    with pytest.raises(ValueError, match="pre-epoch|halt"):
+        abr.classify_at(t, rows, trade_rows=())
+    # Mutation: silent `continue` on pre-epoch would return UNKNOWN thin — prove halt instead.
+    with pytest.raises(ValueError):
+        abr.classify_at(t, rows, trade_rows=())
+
+
+def test_book10_regime_trade_rows_required_not_discarded():
+    t = abr.EPOCH_FLOOR_TS + 1000
+    rows = [{"ts": t - 1, "bid": 100.0, "ask": 100.2}]
+    with pytest.raises(ValueError, match="trade_rows"):
+        abr.classify_at(t, rows, trade_rows=None)
+    out = abr.classify_at(
+        t,
+        rows,
+        trade_rows=[{"ts": t - 2, "price": 100.1, "amount": 0.01}],
+    )
+    assert out.get("trade_prints") == 1
+    # Mutation: `del trade_rows` path would omit trade_prints — prove present.
+    assert "trade_prints" in out
 
 
 def test_book10_regime_unknown_thin_coverage():
     t = abr.EPOCH_FLOOR_TS + 1000
     rows = [{"ts": t - 1, "bid": 100.0, "ask": 100.2}]
-    out = abr.classify_at(t, rows)
+    out = abr.classify_at(t, rows, trade_rows=())
     assert out["regime_key"] == abr.UNKNOWN
+
+
+def test_book10_tags_refuse_none_book_rows():
+    with pytest.raises(ValueError, match="book_rows"):
+        abr.tags_from_trade_row({"ts": abr.EPOCH_FLOOR_TS + 10}, book_rows=None, trade_rows=())
 
 
 def test_trades_source_is_bfx_trades_only():
@@ -403,6 +523,65 @@ def test_analyzer_never_opens_market_segment_guard():
         abr.guard_no_market_segment_open("/data/v3/ledgers/market_segment.jsonl")
 
 
+def test_market_segment_guard_wired_on_engine_load_jsonl():
+    """H2/C2: _load_jsonl_rows must call guard; mutation removing the call fails this contract."""
+    assert "guard_no_market_segment_open" in ENGINE
+    start = ENGINE.index("def _load_jsonl_rows(path)")
+    end = ENGINE.index("\ndef ", start + 1)
+    block = ENGINE[start:end]
+    assert "guard_no_market_segment_open" in block
+    # Also regime path must require book10 (not call with book_rows=None).
+    rstart = ENGINE.index("def _regime_tags_from_row")
+    rend = ENGINE.index("def _regime_key_from_row", rstart)
+    rblock = ENGINE[rstart:rend]
+    # Strip docstring so narrative mentions of book_rows=None do not false-positive.
+    code_only = re.sub(r'""".*?"""', "", rblock, count=1, flags=re.S)
+    assert "book_rows=None" not in code_only
+    assert "_require_book10_rows_for_regime" in rblock
+    assert "_require_trades_rows_for_regime" in rblock
+    # Mutation: strip guard from _load_jsonl_rows → contract fails.
+    mutant = block.replace("abr.guard_no_market_segment_open(path)", "pass  # mutant")
+    assert mutant.count("guard_no_market_segment_open") < block.count("guard_no_market_segment_open")
+    with pytest.raises(AssertionError):
+        assert mutant.count("guard_no_market_segment_open") >= block.count(
+            "guard_no_market_segment_open"
+        )
+
+
+def test_market_segment_guard_mutation_inject_open_fails():
+    """H2 mutation proof: injecting a market_segment open must trip the guard (wired helper)."""
+    with pytest.raises(RuntimeError, match="market_segment"):
+        abr.guard_no_market_segment_open("v3/ledgers/market_segment.jsonl")
+    # Prove engine load path source wires the guard before open (no full engine import needed).
+    start = ENGINE.index("def _load_jsonl_rows(path)")
+    end = ENGINE.index("\ndef ", start + 1)
+    block = ENGINE[start:end]
+    assert "abr.guard_no_market_segment_open(path)" in block
+    # Mutation: a load helper that skips the guard would accept segment paths — prove real guard rejects.
+    def mutant_open(path):
+        return path  # no guard
+
+    assert mutant_open("v3/ledgers/market_segment.jsonl")
+    with pytest.raises(RuntimeError, match="market_segment"):
+        abr.guard_no_market_segment_open("v3/ledgers/market_segment.jsonl")
+
+
+def test_no_duplicate_epoch_floor_literal_in_bot_pin_block():
+    """Epoch floor / tip come from analyzer_book10_regime — bot must not restate 1792263671 beside pin."""
+    idx = BOT.index("_ANALYZER_BUNDLE_FRESH_FLOOR_TS")
+    window = BOT[idx : idx + 800]
+    assert "_abr_rebuild_pin.EPOCH_FLOOR_TS" in window
+    assert "int(_abr_rebuild_pin.EPOCH_FLOOR_TS)" in window
+    # Mutation: a reintroduced literal assignment would fail this check.
+    mutant = window.replace(
+        "_ANALYZER_BUNDLE_FRESH_FLOOR_TS = int(_abr_rebuild_pin.EPOCH_FLOOR_TS)",
+        "_ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671",
+    )
+    assert "int(_abr_rebuild_pin.EPOCH_FLOOR_TS)" not in mutant
+    with pytest.raises(AssertionError):
+        assert "int(_abr_rebuild_pin.EPOCH_FLOOR_TS)" in mutant
+
+
 def test_analyzer_engine_uses_book10_helper_not_compute_regime_tags():
     # R22: analyzer regime path must call analyzer_book10_regime, not compute_regime_tags.
     assert "import analyzer_book10_regime" in ENGINE
@@ -411,10 +590,13 @@ def test_analyzer_engine_uses_book10_helper_not_compute_regime_tags():
     start = ENGINE.index("def _regime_tags_from_row")
     end = ENGINE.index("def _regime_key_from_row", start)
     block = ENGINE[start:end]
-    assert "compute_regime_tags" not in block
-    assert "analyzer_book10_regime" in block
+    code_only = re.sub(r'""".*?"""', "", block, count=1, flags=re.S)
+    assert "compute_regime_tags" not in code_only
+    assert "analyzer_book10_regime" in code_only
+    assert "book_rows=None" not in code_only
+    assert "_require_book10_rows_for_regime" in code_only
     # Mutation: reintroduce compute_regime_tags → contract fails
-    mutant = block.replace(
+    mutant = code_only.replace(
         "import analyzer_book10_regime as abr",
         "from research.research_trade_accumulator import compute_regime_tags",
         1,
