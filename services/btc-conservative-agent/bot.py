@@ -369,6 +369,52 @@ _AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "a
 AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+# R46 never-drop: bounded overflow spool after STOP_WRITE (size + part caps; no unlink).
+LOG_SPOOL_MAX_BYTES = int(os.getenv("LOG_SPOOL_MAX_BYTES", str(LOG_MAX_BYTES)))  # 50 MiB / part
+LOG_SPOOL_PART_CAP = int(os.getenv("LOG_SPOOL_PART_CAP", str(LOG_BACKUP_COUNT)))  # 5 parts
+_RUNTIME_LOG_SPOOL_STATS = {
+    "diverted_records": 0,
+    "spool_bytes": 0,
+    "spool_parts_used": 0,
+    "cap_refusals": 0,
+    "spool_cap_red": False,
+    "last_divert_ts": None,
+    "last_error": None,
+}
+_RUNTIME_LOG_SPOOL_STATS_LOCK = threading.Lock()
+
+
+def _runtime_log_retention_status() -> dict:
+    """Spool / drop counters for /api/status (R46)."""
+    with _RUNTIME_LOG_SPOOL_STATS_LOCK:
+        snap = dict(_RUNTIME_LOG_SPOOL_STATS)
+    snap.update({
+        "schema": "runtime_log_retention_v1",
+        "size_cap_bytes": int(LOG_SPOOL_MAX_BYTES),
+        "part_cap": int(LOG_SPOOL_PART_CAP),
+        "primary_size_cap_bytes": int(LOG_MAX_BYTES),
+        "stop_write_latched": bool(retention_stop_write.is_stopped("runtime_log")),
+    })
+    return snap
+
+
+def _runtime_log_spool_paths(base_filename: str) -> list[str]:
+    """Ordered spool part paths for ``base_filename`` (part 1 has no numeric suffix)."""
+    cap = max(1, int(LOG_SPOOL_PART_CAP or 1))
+    paths = [f"{base_filename}.spool"]
+    for part in range(2, cap + 1):
+        paths.append(f"{base_filename}.spool.{part}")
+    return paths
+
+
+def _bump_runtime_log_spool_stats(**kwargs) -> None:
+    with _RUNTIME_LOG_SPOOL_STATS_LOCK:
+        for key, value in kwargs.items():
+            if key in ("diverted_records", "cap_refusals") and isinstance(value, int):
+                _RUNTIME_LOG_SPOOL_STATS[key] = int(_RUNTIME_LOG_SPOOL_STATS.get(key) or 0) + value
+            else:
+                _RUNTIME_LOG_SPOOL_STATS[key] = value
+
 
 class AsciiSafeFormatter(logging.Formatter):
     """Windows consoles (cp1252) choke on unicode arrows in log lines."""
@@ -379,12 +425,14 @@ class AsciiSafeFormatter(logging.Formatter):
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
-    """Rotating file handler that never drops backups (PR2 / R25).
+    """Rotating file handler that never drops backups (PR2 / R25) and never
+    silently discards records after STOP_WRITE (R46).
 
     Stdlib ``RotatingFileHandler.doRollover`` unlinks the oldest backup when
     ``backupCount > 0``. Here, size pressure latches stop-write + 70/85 RED and
-    refuses further file emits. Console / stderr handlers are unaffected so
-    force-flat, disarm, and R20 keep logging.
+    stops further *primary* growth; further emits divert to a bounded spool
+    (``LOG_SPOOL_MAX_BYTES`` × ``LOG_SPOOL_PART_CAP``) with no unlink. Console /
+    stderr handlers are unaffected so force-flat, disarm, and R20 keep logging.
     """
 
     def __init__(self, *args, **kwargs):
@@ -395,6 +443,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         super().__init__(*args, **kwargs)
         self._rollover_failed = False
         self._stop_write = False
+        self._spool_cap_latched = False
 
     def shouldRollover(self, record):
         if self._rollover_failed or self._stop_write:
@@ -402,9 +451,149 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         return super().shouldRollover(record)
 
     def emit(self, record):
-        if self._stop_write:
+        if self._stop_write or self._rollover_failed:
+            self._emit_to_spool(record)
             return
-        super().emit(record)
+        try:
+            super().emit(record)
+        except Exception:
+            # Write failure: fail loud via handleError, keep RED, spool the line.
+            self.handleError(record)
+            try:
+                retention_stop_write.latch(
+                    "runtime_log", reason="RUNTIME_LOG_EMIT_WRITE_FAILURE",
+                    used=0, cap=int(self.maxBytes or LOG_MAX_BYTES or 1),
+                    detail={"path": self.baseFilename, "rule": "R46_NEVER_SILENT_DROP"},
+                )
+            except Exception:
+                pass
+            self._stop_write = True
+            self._emit_to_spool(record)
+
+    def _emit_to_spool(self, record):
+        """Append ``record`` to the bounded overflow spool (R46). Never unlinks."""
+        try:
+            msg = self.format(record)
+            if not msg.endswith("\n"):
+                msg += "\n"
+            payload = msg.encode(self.encoding or "utf-8", errors="replace")
+        except Exception:
+            self.handleError(record)
+            _bump_runtime_log_spool_stats(
+                cap_refusals=1, last_error="FORMAT_FAILED", last_divert_ts=time.time(),
+            )
+            try:
+                sys.stderr.write(
+                    f"[RUNTIME_LOG_SPOOL] FORMAT_FAILED base={self.baseFilename}\n"
+                )
+            except Exception:
+                pass
+            return
+
+        size_cap = max(1, int(LOG_SPOOL_MAX_BYTES or LOG_MAX_BYTES or 1))
+        paths = _runtime_log_spool_paths(self.baseFilename)
+        try:
+            with self.lock:
+                target = None
+                for path in paths:
+                    try:
+                        cur = os.path.getsize(path) if os.path.exists(path) else 0
+                    except OSError:
+                        cur = 0
+                    if cur + len(payload) <= size_cap:
+                        target = path
+                        break
+                    if cur < size_cap and cur + len(payload) > size_cap and cur == 0:
+                        # Empty part but payload alone exceeds cap — still write truncated? No: refuse loud.
+                        continue
+                if target is None:
+                    # All parts full: loud RED, stop further spool growth, no unlink, no silent discard.
+                    self._spool_cap_latched = True
+                    try:
+                        used = 0
+                        parts_used = 0
+                        for path in paths:
+                            if os.path.exists(path):
+                                parts_used += 1
+                                try:
+                                    used += os.path.getsize(path)
+                                except OSError:
+                                    pass
+                        retention_stop_write.latch(
+                            "runtime_log",
+                            reason="RUNTIME_LOG_SPOOL_CAP",
+                            used=used,
+                            cap=size_cap * len(paths),
+                            detail={
+                                "path": self.baseFilename,
+                                "spool_part_cap": len(paths),
+                                "spool_size_cap_bytes": size_cap,
+                                "rule": "R46_BOUNDED_SPOOL_NO_UNLINK",
+                            },
+                        )
+                    except Exception:
+                        pass
+                    _bump_runtime_log_spool_stats(
+                        cap_refusals=1,
+                        spool_cap_red=True,
+                        spool_parts_used=len(paths),
+                        last_error="SPOOL_CAP",
+                        last_divert_ts=time.time(),
+                    )
+                    try:
+                        sys.stderr.write(
+                            f"[RUNTIME_LOG_SPOOL_CAP] RED base={self.baseFilename} "
+                            f"part_cap={len(paths)} size_cap_bytes={size_cap} "
+                            f"refused_bytes={len(payload)}\n"
+                        )
+                    except Exception:
+                        pass
+                    return
+
+                parent = os.path.dirname(target) or "."
+                os.makedirs(parent, exist_ok=True)
+                with open(target, "ab") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                # Refresh telemetry
+                parts_used = 0
+                total_bytes = 0
+                for path in paths:
+                    if os.path.exists(path):
+                        parts_used += 1
+                        try:
+                            total_bytes += os.path.getsize(path)
+                        except OSError:
+                            pass
+                _bump_runtime_log_spool_stats(
+                    diverted_records=1,
+                    spool_bytes=total_bytes,
+                    spool_parts_used=parts_used,
+                    last_divert_ts=time.time(),
+                    last_error=None,
+                )
+        except Exception as exc:
+            self.handleError(record)
+            _bump_runtime_log_spool_stats(
+                cap_refusals=1,
+                last_error=type(exc).__name__,
+                last_divert_ts=time.time(),
+            )
+            try:
+                retention_stop_write.latch(
+                    "runtime_log", reason="RUNTIME_LOG_SPOOL_WRITE_FAILURE",
+                    used=0, cap=size_cap,
+                    detail={"path": self.baseFilename, "error": type(exc).__name__},
+                )
+            except Exception:
+                pass
+            try:
+                sys.stderr.write(
+                    f"[RUNTIME_LOG_SPOOL] WRITE_FAILURE {type(exc).__name__} "
+                    f"base={self.baseFilename}\n"
+                )
+            except Exception:
+                pass
 
     def doRollover(self):
         if self._rollover_failed or self._stop_write:
@@ -35191,6 +35380,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/fresh-start", "/api/monitor/full-reset", "/api/monitor/full-reset/receipt",
     "/api/monitor/fills/by-model",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
+    "/api/runtime_log/retained",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
     "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
@@ -51016,6 +51206,43 @@ def api_runtime_headroom_alias():
     return _lcm.live_headroom()
 
 
+@app.route('/api/runtime_log/retained', methods=["GET"])
+def api_runtime_log_retained():
+    """R46 GET read-back: primary + bounded spool tails after STOP_WRITE (monitor token)."""
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    log_path = os.getenv("BOT_LOG_FILE", LOG_FILE if "LOG_FILE" in globals() else "bot_runtime.log")
+    max_bytes = 65536
+    try:
+        primary_tail = _read_log_tail(log_path, max_lines=200, max_bytes=max_bytes)
+    except Exception as exc:  # noqa: BLE001
+        primary_tail = f"<unreadable:{type(exc).__name__}>"
+    spool_parts = []
+    for path in _runtime_log_spool_paths(log_path):
+        try:
+            exists = os.path.exists(path)
+            size = os.path.getsize(path) if exists else 0
+            tail = _read_log_tail(path, max_lines=200, max_bytes=max_bytes) if exists and size else ""
+        except Exception as exc:  # noqa: BLE001
+            exists, size, tail = False, 0, f"<unreadable:{type(exc).__name__}>"
+        spool_parts.append({
+            "path": path,
+            "exists": bool(exists),
+            "size_bytes": int(size),
+            "tail": tail,
+        })
+    payload = {
+        "schema": "runtime_log_retained_v1",
+        "primary_path": log_path,
+        "primary_tail": primary_tail,
+        "spool_parts": spool_parts,
+        "retention": _runtime_log_retention_status(),
+        "size_cap_bytes": int(LOG_SPOOL_MAX_BYTES),
+        "part_cap": int(LOG_SPOOL_PART_CAP),
+    }
+    return _monitor_response(payload, max_bytes=256 * 1024)
+
+
 
 @app.after_request
 def _inject_system_health_banner(response):
@@ -51384,6 +51611,13 @@ def status():
         **_runtime_blindspot_status_fields(now),
     }
     payload["collection_epoch_parity"] = _collection_epoch_parity(payload["lifecycle_pipeline"])
+    try:
+        payload["runtime_log_retention"] = _runtime_log_retention_status()
+    except Exception as exc:  # noqa: BLE001 - status must never fail on retention telemetry
+        payload["runtime_log_retention"] = {
+            "schema": "runtime_log_retention_v1",
+            "error": type(exc).__name__,
+        }
     return jsonify(payload)
 
 
