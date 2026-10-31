@@ -16546,14 +16546,6 @@ def _ensure_collector_v22_epoch() -> str:
     return epoch_id
 
 
-def _arm_chase_offset_touch_grid(signal: dict):
-    """R22 retired: chase_offset_touch_grid.jsonl writers removed (STOP-WRITE / NOT NEEDED).
-
-    Hook kept so call sites stay visible; no durable append and no in-memory book growth.
-    """
-    return
-
-
 def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str, str]:
     """Reuse the current fill-time direction semantics without enabling execution."""
     with state_lock:
@@ -29083,7 +29075,6 @@ def process_signal(event: dict):
                 trade_id=signal.get("trade_id") or trade_id,
                 direction=signal.get("final_direction") or ai.get("direction"),
             )
-            _arm_chase_offset_touch_grid(signal)
             if not (_preentry_evidence_deferrable(research_lane) and _enqueue_preentry_evidence(
                 "MULTIVERSE_PROVISIONAL", _preentry_evidence_keys(signal),
                 {"signal": _stable_pending_signal_copy(signal)}, lane=research_lane,

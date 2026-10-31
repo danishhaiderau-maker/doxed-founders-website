@@ -54,7 +54,7 @@ def test_ttl_complete_and_paper_id_hooks():
     assert "_sync_order_multiverse(" in SOURCE
     assert "invert_on" in SOURCE
     assert "MTF_1M_REFRESH_SEC = 15" in SOURCE
-    assert "_arm_chase_offset_touch_grid(signal)" in SOURCE
+    assert "_arm_chase_offset_touch_grid" not in SOURCE
     assert "_sync_order_multiverse(signal, path_complete=False)" in SOURCE
 
 
