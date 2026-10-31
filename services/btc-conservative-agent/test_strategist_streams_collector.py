@@ -2,7 +2,28 @@
 import json
 from pathlib import Path
 
+import pytest
+
+import disk_alert
 import strategist_streams_collector as ssc
+
+
+@pytest.fixture(autouse=True)
+def _r25_bind_disk_alert_to_tmp(tmp_path, monkeypatch):
+    """R25: Sink._ensure_disk_alert writes BOT_DATA_DIR/retention/disk_alert_red.json
+    (or cwd when unset). Bind every collector test to tmp_path so the clone stays clean.
+    """
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path / "bot_data"))
+    disk_alert.configure(None)
+    for row in list(disk_alert.red_conditions()):
+        disk_alert.clear_red(row["reason"])
+    yield
+    disk_alert.configure(None)
+    for row in list(disk_alert.red_conditions()):
+        disk_alert.clear_red(row["reason"])
+    # Guard: never leave a retention state file under the package / repo cwd.
+    stray = Path(__file__).resolve().parent / "retention" / "disk_alert_red.json"
+    assert not stray.exists(), f"R25 leak: {stray}"
 
 
 def _rows(p):

@@ -73,7 +73,7 @@ def runtime(tmp_path_factory, monkeypatch):
            "reset_provisional_events": Mock(), "save_persistent_config": Mock(),
            "_update_data_sync_identity_epoch_cache": Mock(), "bot_start_time": 100,
            "replay_buffers": {}, "_cycle_3m_written_buckets": {}, "_cycle_3m_inflight_buckets": set(),
-           "_touch_grid_book": {}, "_compressed_shadow_chase_book": {}, "_compressed_shadow_seen_call_ids": set(),
+           "_compressed_shadow_chase_book": {}, "_compressed_shadow_seen_call_ids": set(),
            "_discovery_touch_grid_seen_call_ids": set(), "_order_multiverse_state": {},
            "_order_multiverse_pending_src": {}, "_order_multiverse_path_complete": {},
            "_order_multiverse_post_ttl_done": {}, "_order_multiverse_written": set(),

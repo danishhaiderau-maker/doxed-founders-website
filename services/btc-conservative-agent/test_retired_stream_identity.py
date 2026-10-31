@@ -41,11 +41,27 @@ def _pin(monkeypatch, root, led="market_segment"):
 
 def test_allowlist_is_exactly_market_segment():
     assert retired_streams.RETIRED_STREAM_ALLOWLIST == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+    # Declared pin (plan eb14e8711d31); merge gate must Fly-confirm-measure these four or STOP.
     assert retired_streams.RETIREMENT_FINGERPRINTS["market_segment"] == {
-        "rows": 18322, "mtime": 1792830018, "size": 37969967}
+        "rows": 18289, "mtime": 1792899429, "size": 37892450}
     assert "RETIRED_STREAM_WRITTEN_SINCE_RETIREMENT" in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
     # Hard refusals (epoch/tile/…) must NOT be soft — tipMatch softens fingerprint family only.
     assert "RETIRED_IDENTITY_EPOCH_ID_DIFFERS" not in retired_streams.SOFT_RETIRED_EXEMPTION_REFUSALS
+
+
+def test_market_segment_fingerprint_pin_rejects_wrong_rows_size_mtime(monkeypatch):
+    """Mutation: wrong rows/size/mtime must fail the pin contract (R23)."""
+    pin = retired_streams.RETIREMENT_FINGERPRINTS["market_segment"]
+    assert pin == {"rows": 18289, "mtime": 1792899429, "size": 37892450}
+    for key, bad in (("rows", 18322), ("size", 37969967), ("mtime", 1792830018)):
+        broken = dict(pin)
+        broken[key] = bad
+        monkeypatch.setitem(retired_streams.RETIREMENT_FINGERPRINTS, "market_segment", broken)
+        assert retired_streams.RETIREMENT_FINGERPRINTS["market_segment"][key] == bad
+        assert retired_streams.RETIREMENT_FINGERPRINTS["market_segment"] != {
+            "rows": 18289, "mtime": 1792899429, "size": 37892450}
+    monkeypatch.setitem(retired_streams.RETIREMENT_FINGERPRINTS, "market_segment", dict(pin))
+    assert retired_streams.RETIREMENT_FINGERPRINTS["market_segment"] == pin
 
 
 def test_stale_retired_pointer_passes_and_is_unreadable_retired(tmp_path, monkeypatch):

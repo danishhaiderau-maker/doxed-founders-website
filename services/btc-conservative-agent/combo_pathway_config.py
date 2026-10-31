@@ -788,7 +788,7 @@ COMBO_LANE_SPECS = {
                           "MODEL-A tails, not fitted here; the only non-AI idea in the freeze"),
             control_lane=None,
             control_meaning=("Clock tile, never paired by shared AI call; the evaluator's shadow outcome of every "
-                             "qualifying second (xvp_shadow_signals.jsonl, logged whether or not the tile is ON) "
+                             "qualifying second (xvp shadow stream writers R22-retired; paper ledger is the record) "
                              "is the comparison"),
             sessions=FREEZE21_SESSIONS_ALL, min_distinct_hours=150, min_fills=300,
             k1_after_distinct_hours=80, k4_max_drawdown_usd=3.0, variants_tried=4,

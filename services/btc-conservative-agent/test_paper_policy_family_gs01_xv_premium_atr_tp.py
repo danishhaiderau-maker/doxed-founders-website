@@ -19,7 +19,7 @@ def test_registry_owns_a_paper_only_non_ai_premium_tile():
 def test_own_evaluator_reuses_the_premium_rule_without_a_shadow_file():
     evaluator = policy.make_evaluator()
     assert isinstance(evaluator, GsPremiumEvaluator) and isinstance(evaluator, PremiumEvaluator)
-    # HM 30 Oct: xvp stream RETIRED — SHADOW_FILE None stops recording; signal path intact.
+    # R22 / HM 30 Oct: xvp stream RETIRED — SHADOW_FILE None stops recording; signal path intact.
     assert evaluator.SHADOW_FILE is None and evaluator.ID_PREFIX == "gsxvp"
     assert evaluator.policy_id == policy.POLICY_ID
 

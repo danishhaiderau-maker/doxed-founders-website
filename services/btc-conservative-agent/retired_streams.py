@@ -11,6 +11,11 @@ copy. open_read_only soft-excludes the retired stream on fingerprint-family refu
 keeps hard-raising only on identity (epoch/tile/field) mismatches.
 
 Adding or changing an entry here REQUIRES an RK ruling. Do not edit without one.
+
+R21 same-run rule (R0c wave plan sha eb14e8711d31): any R21 action that changes a
+fingerprinted file MUST, in the same run, re-measure live rows/size/mtime/sha256 and land
+the matching RETIREMENT_FINGERPRINTS update (or STOP / R34 RED on mismatch vs a declared
+plan pin — never land a surprise measured value). See docs/LEDGER_STAMP_MONITOR_CHECKLIST.md.
 """
 from __future__ import annotations
 
@@ -21,10 +26,14 @@ RETIRED_STREAM_ALLOWLIST: dict[str, str] = {
     "market_segment": "MARKET_SEGMENTS_RETIRED_R17",
 }
 
-# Recorded from the live file (doxed-btc-bot, read-only, 25 Oct 2026 03:38 AEDT).
-# mtime 1792830018 = 24 Oct 2026 19:20:18 AEDT (last write before MARKET_SEGMENT_WRITES_RETIRED).
+# R0c follow-up (plan sha eb14e8711d31). Pin ONLY if Fly confirm-measure at merge gate
+# matches all four: rows 18289 / size 37892450 / file sha
+# 7ca7436d1ba4f4a92dd9150983d00b012c64c79e9e21198035e2b7e0f2319f57 / mtime 1792899429.
+# On any mismatch → STOP / R34 RED / do not merge / escalate RK / never land a new measured
+# value (HM b73586b2dc16). Prior pin (18322 / 37969967 / mtime 1792830018) kept in
+# retired_streams.py.bak-2113a082dbad. R21 receipt 6c51ea64c3e1; HM CARRY 4d36b9db01f1.
 RETIREMENT_FINGERPRINTS: dict[str, dict[str, int]] = {
-    "market_segment": {"rows": 18322, "mtime": 1792830018, "size": 37969967},
+    "market_segment": {"rows": 18289, "mtime": 1792899429, "size": 37892450},
 }
 
 # open_read_only: exclude the retired stream (serve no rows) instead of raising a store-wide

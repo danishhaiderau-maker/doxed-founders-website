@@ -40,6 +40,7 @@ from cross_venue_lead import (
 
 # HM/RK 30 Oct 2026: xvp_shadow_signals stream + shadow_outcome recording RETIRED
 # (ticker/L1-priced). Signal evaluation for GS-01 stays; SHADOW_FILE None skips append.
+# Historical basename "xvp_shadow_signals.jsonl" remains on wipe/monitor tables only.
 SHADOW_FILE = None
 TRIGGER_SCHEMA = "xvp_shadow_trigger_v1"
 OUTCOME_SCHEMA = "xvp_shadow_outcome_v1"
@@ -278,7 +279,7 @@ class PremiumEvaluator(LeadEvaluator):
     ID_PREFIX = "xvp"
     TRIGGER_SCHEMA = TRIGGER_SCHEMA
     OUTCOME_SCHEMA = OUTCOME_SCHEMA
-    SHADOW_FILE = SHADOW_FILE
+    SHADOW_FILE = None  # R22: no xvp_shadow_signals.jsonl appends (NOT REQUIRED)
     SIGNAL_KEY = "premium_dev_bp"
     TRIGGER_FEATURE_KEY = "xvp_trigger"
     TRIGGER_FEATURE_FIELDS = (

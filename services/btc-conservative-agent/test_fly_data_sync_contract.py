@@ -181,7 +181,9 @@ def test_every_static_serialized_jsonl_target_is_declared_before_first_write():
     assert observed_literals <= declared_literals
     assert {"XVL_SHADOW_FILE", "ADAPTIVE_ENTRY_DECISIONS_FILE", "RETIRED_TILE_BOUNDARY_FILE"} <= declared_constants
     assert {"fill_markouts.jsonl", "taker_signal_counterfactuals.jsonl",
-            "xvp_shadow_signals.jsonl", "xvs_shadow_signals.jsonl"} <= declared_literals
+            "xvs_shadow_signals.jsonl"} <= declared_literals
+    # R22: xvp_shadow_signals writers removed — must not be a serialized append literal.
+    assert "xvp_shadow_signals.jsonl" not in declared_literals
     assert "FILL_QUALITY_FILE" in declared_constants
     assert "TYPE_B_RESEARCH_V2_EVENT_FILE" not in declared_constants
     assert "execution_funnel.jsonl" in declared_literals
@@ -231,11 +233,13 @@ def _load_jsonl_writer(tmp_path):
         def __init__(self):
             self.messages = []
 
-        def error(self, message):
-            self.messages.append(str(message))
+        def error(self, message, *args):
+            self.messages.append(str(message) % args if args else str(message))
 
         def warning(self, message, *args):
             self.messages.append(str(message) % args if args else str(message))
+
+    import retention_stop_write
 
     namespace = {
         "os": os,
@@ -264,6 +268,8 @@ def _load_jsonl_writer(tmp_path):
         },
         "utc_iso": lambda: datetime.now(timezone.utc).isoformat(),
         "logger": _Logger(),
+        # R0c latch gate in _safe_append_jsonl (isolated exec needs the module).
+        "retention_stop_write": retention_stop_write,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace

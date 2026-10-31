@@ -14,7 +14,9 @@ DERIV = [1791799452000, None, 83587.04, 83535, None, 61480653.7, None, 179182080
 
 
 # (c) per-second funding / mark stream -------------------------------------------------------
-def test_deriv_status_parsed_and_written_per_second(tmp_path):
+def test_deriv_status_parsed_and_written_per_second(tmp_path, monkeypatch):
+    # R25: Sink._ensure_disk_alert persists under BOT_DATA_DIR (else cwd) — bind to tmp.
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path / "bot_data"))
     p = ssc.parse_deriv_status(DERIV)
     assert p["mark"] == 83531.33 and p["fund_cur"] == 0.00007265 and p["oi"] == 9173.22 and p["spot"] == 83535
     c = ssc.Collector(str(tmp_path))
@@ -37,8 +39,13 @@ def test_collector_subscribes_status_channel():
     assert '"channel": "status", "key": DERIV_KEY' in src
 
 
-# (g) xvp shadow stream RETIRED (HM 30 Oct); GS-01 signal path keeps SHADOW_FILE None ----------
+# (g) xvp shadow stream RETIRED (HM 30 Oct / R22); GS-01 signal path keeps SHADOW_FILE None ----
 def test_gs01_does_not_write_xvp_shadow_stream_anymore():
+    """R22 (HM 46a97b4debee): no evaluator appends xvp_shadow_signals.jsonl.
+
+    GS-01 + four sibling evaluators all SHADOW_FILE is None; STREAMS catalog key
+    and RETIRED_STREAMS stay for wipe/monitor resurrection RED.
+    """
     import regime_adaptive_binding as rab
     assert rab.GsPremiumEvaluator.SHADOW_FILE is None
     for cls in (rab.Gs5PremiumEvaluator, rab.Gs7PremiumEvaluator, rab.DanishRouterPremiumEvaluator,

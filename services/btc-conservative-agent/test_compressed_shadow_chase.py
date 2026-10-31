@@ -147,7 +147,8 @@ def test_runtime_owns_one_shadow_schedule_per_shared_ai_call():
     assert "spawn_continuous_lane_from_ai_scan" not in source
 
 
-def test_arm_result_receipt_is_durable_non_execution_evidence():
+def test_arm_result_receipt_is_log_only_r22_no_append():
+    """R22: arm receipts stay evidence-shaped in logs but never append the chase grid."""
     root = Path(__file__).resolve().parents[2]
     source = (root / "services/btc-conservative-agent/bot.py").read_text(
         encoding="utf-8"
@@ -158,27 +159,23 @@ def test_arm_result_receipt_is_durable_non_execution_evidence():
         if isinstance(node, ast.FunctionDef)
         and node.name == "_record_compressed_shadow_arm_result"
     )
+    assert "_safe_append_jsonl" not in ast.unparse(helper)
+    logs = []
     namespace = {
-        "_safe_append_jsonl": lambda path, row, label: writes.append((path, row, label)) or True,
-        "CHASE_OFFSET_TOUCH_GRID_FILE": "grid.jsonl",
-        "utc_iso": lambda: "2026-08-29T00:00:00+00:00",
+        "logger": type("L", (), {"info": staticmethod(lambda msg: logs.append(msg))})(),
     }
-    writes = []
     exec(compile(ast.Module(body=[helper], type_ignores=[]), "<arm-receipt>", "exec"), namespace)
 
     assert namespace["_record_compressed_shadow_arm_result"](
         "scan-receipt", "UNSUPPORTED", "MISSING_SIGNAL_PRICE",
         direction="LONG", trade_id="shadow-1", epoch_id="epoch-1",
     ) is True
-    assert len(writes) == 1
-    _, row, label = writes[0]
-    assert row["schema"] == "compressed_chase_arm_receipt_v1"
-    assert row["shared_ai_call_id"] == "scan-receipt"
-    assert row["status"] == "UNSUPPORTED"
-    assert row["reason"] == "MISSING_SIGNAL_PRICE"
-    assert row["shadow_only"] is True
-    assert row["places_order"] is False
-    assert label == "SHADOW_CHASE_ARM_RECEIPT"
+    assert len(logs) == 1
+    assert "compressed_chase_arm_receipt_v1" in logs[0]
+    assert "scan-receipt" in logs[0]
+    assert "UNSUPPORTED" in logs[0]
+    assert "MISSING_SIGNAL_PRICE" in logs[0]
+    assert "r22_no_append=1" in logs[0]
 
 
 def test_arm_path_records_all_forward_failure_classes():
@@ -196,6 +193,6 @@ def test_arm_path_records_all_forward_failure_classes():
         "ARM_EXCEPTION:",
         "STAGE_ZERO_APPEND_FAILED",
         "EPOCH_CHANGED_DURING_ARM",
-        "STAGE_ZERO_DURABLE",
+        "STAGE_ZERO_IN_MEMORY_R22",
     ):
         assert reason in helper
