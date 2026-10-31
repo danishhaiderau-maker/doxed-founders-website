@@ -180,16 +180,20 @@ REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
 def _status_json(bot_mod):
     """GET /api/status full payload (bootstrap must already be complete).
 
-    Clears probe cache via the shared helper — never mutates
-    ``_PROBE_CACHE_TTL_SEC`` (TTL<=0 bypasses the cache and breaks
-    ``test_http_emergency_admission`` probe-cache asserts).
+    Never mutates ``_PROBE_CACHE_TTL_SEC`` (TTL<=0 bypasses the cache and
+    breaks ``test_http_emergency_admission``). Clears the probe cache
+    *after* the GET so a warm ``/api/status`` entry cannot leak into
+    later suites (e.g. ``test_runtime_uptime`` within the 1 s TTL).
     """
-    bot_mod._probe_cache_clear_all()
-    resp = bot_mod.app.test_client().get("/api/status", environ_base=REMOTE)
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert isinstance(body, dict)
-    return body
+    try:
+        bot_mod._probe_cache_clear_all()
+        resp = bot_mod.app.test_client().get("/api/status", environ_base=REMOTE)
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert isinstance(body, dict)
+        return body
+    finally:
+        bot_mod._probe_cache_clear_all()
 
 
 def _assert_status_has_cap_refusals(body: dict) -> None:
@@ -199,6 +203,17 @@ def _assert_status_has_cap_refusals(body: dict) -> None:
     assert isinstance(retention, dict)
     assert "cap_refusals" in retention, "runtime_log_retention missing cap_refusals"
     assert isinstance(retention["cap_refusals"], int)
+
+
+@pytest.fixture(autouse=True)
+def _no_probe_cache_leak_from_status_reads():
+    """Module teardown: drop any /api/status|/health probe cache this file filled."""
+    yield
+    try:
+        import bot as bot_mod
+        bot_mod._probe_cache_clear_all()
+    except Exception:
+        pass
 
 
 def test_api_status_exposes_runtime_log_retention_cap_refusals(monkeypatch):
