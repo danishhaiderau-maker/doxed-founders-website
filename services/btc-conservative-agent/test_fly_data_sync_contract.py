@@ -512,6 +512,7 @@ def test_all_direct_append_opens_are_bounded_writer_internals_or_diagnostics():
         "_agent_dbg",                 # bounded ordinary diagnostic log
         "_archive_receipt_log",       # #678 append-only receipt audit trail, rotated at 2 MiB
         "_dynamic_csv_writer_once",   # serialized by dynamic_csv_writer/csv_lock
+        "_emit_to_spool",             # R46 runtime_log bounded overflow spool (size×part caps; no unlink; RED at cap)
         "_safe_append_jsonl",         # serialized by the per-path JSONL lock
         "dump_system_state",          # crash diagnostics, not research evidence
     }
