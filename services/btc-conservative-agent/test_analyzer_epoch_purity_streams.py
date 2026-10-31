@@ -299,20 +299,18 @@ def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard,
     assert all("market_segment" not in rel for rel in audited_rels), audited_rels
     assert any(rel.endswith("decision.jsonl") for rel in audited_rels)
 
-    opened: list[str] = []
-    real_open = open
+    # Track which streams reach file_pre_epoch_rows (the open site) — no builtins.open spy.
+    seen_rels: list[str] = []
+    real_count = eg.file_pre_epoch_rows
 
-    def spy_open(file, *args, **kwargs):
-        name = str(file)
-        if "market_segment" in name.lower():
-            opened.append(name)
-        return real_open(file, *args, **kwargs)
+    def tracking(path, relpath, *args, **kwargs):
+        seen_rels.append(str(relpath))
+        return real_count(path, relpath, *args, **kwargs)
 
-    monkeypatch.setattr("builtins.open", spy_open)
+    monkeypatch.setattr(eg, "file_pre_epoch_rows", tracking)
     retained, by_stream = engine._epoch_purity_audit(g, str(tmp_path))
-    assert opened == [], opened
+    assert not any("market_segment" in r for r in seen_rels), seen_rels
     assert not any("market_segment" in k for k in by_stream), by_stream
-    # Active ledger may still be audited (0 pre-epoch here).
     assert "v3/ledgers/market_segment.jsonl" not in by_stream
     # Helper + mutation: skip removed → retired path would be selected.
     assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl") is True
