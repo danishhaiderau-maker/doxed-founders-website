@@ -575,6 +575,8 @@ def test_platform_relay_evidence_validation_rejects_wrong_scope_and_duplicate_ev
 
 
 def _load_analyzer_bundle_validators():
+    import analyzer_book10_regime as abr
+
     namespace = {
         "Path": Path,
         "zipfile": zipfile,
@@ -591,20 +593,51 @@ def _load_analyzer_bundle_validators():
         "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
         "_ANALYZER_BUNDLE_FRESH_FLOOR_TS": 1792263671,
         "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
+        "_ANALYZER_REBUILD_PIN_TIP": abr.ANALYZER_COMPLETED_TIP,
+        "_ANALYZER_REBUILD_PIN_TIP_SHORT": abr.ANALYZER_COMPLETED_TIP_SHORT,
+        "_ANALYZER_REBUILD_AMEND2_SHA12": abr.AMEND2_SPEC_SHA12,
+        "_ANALYZER_REBUILD_METHOD_ID": abr.REGIME_METHOD_ID,
+        "_analyzer_rebuild_expected_prereg_hash": lambda: abr.PARAMS_PREREG_HASH,
     }
     tree = ast.parse(BOT)
     selected = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef)
-        and node.name in {"_safe_analyzer_bundle_members", "_validated_analyzer_bundle_manifest",
-                          "_analyzer_bundle_fresh_gate"}
+        and node.name in {
+            "_safe_analyzer_bundle_members",
+            "_validated_analyzer_bundle_manifest",
+            "_analyzer_bundle_fresh_gate",
+            "_analyzer_bundle_rebuild_pin_gate",
+            "_analyzer_bundle_inventory_metrics",
+            "_analyzer_bundle_no_shrink_gate",
+            "_analyzer_rebuild_expected_prereg_hash",
+        }
     ]
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace
 
 
+def _rebuild_pin_fixture():
+    """Seal 2ac09364eb63 B1 pin — COMPLETED @ e70bac80 + AMEND2 + method/params."""
+    import analyzer_book10_regime as abr
+
+    return abr.rebuild_pin_block()
+
+
 def _ensure_source_report_manifest(files):
     if files.get("report_manifest.json") not in (None, b"{}"):
+        # Still require rebuild_pin on caller-supplied manifests that omit it.
+        try:
+            existing = json.loads(files["report_manifest.json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict) and "rebuild_pin" not in existing:
+            existing["rebuild_pin"] = _rebuild_pin_fixture()
+            if "row_count" not in existing:
+                existing["row_count"] = 10
+            if "regime_count" not in existing:
+                existing["regime_count"] = 3
+            files["report_manifest.json"] = json.dumps(existing, sort_keys=True).encode()
         return
     text_artifacts = sorted(
         path for path in files
@@ -631,6 +664,9 @@ def _ensure_source_report_manifest(files):
             "report_count": len(reports),
             "reports": reports,
             "text_artifacts": text_artifacts,
+            "row_count": 10,
+            "regime_count": 3,
+            "rebuild_pin": _rebuild_pin_fixture(),
         },
         sort_keys=True,
     ).encode()
@@ -764,6 +800,8 @@ def test_analyzer_bundle_rejects_missing_extra_duplicate_and_bad_hash_members():
 
 
 def test_analyzer_bundle_install_is_atomic_and_bad_hash_preserves_current_generation():
+    import analyzer_book10_regime as abr
+
     tree = ast.parse(BOT)
     wanted = {
         "_valid_analyzer_generation",
@@ -773,6 +811,10 @@ def test_analyzer_bundle_install_is_atomic_and_bad_hash_preserves_current_genera
         "_validated_analyzer_bundle_manifest",
         "_install_analyzer_bundle",
         "_analyzer_bundle_fresh_gate",
+        "_analyzer_bundle_rebuild_pin_gate",
+        "_analyzer_bundle_inventory_metrics",
+        "_analyzer_bundle_no_shrink_gate",
+        "_analyzer_rebuild_expected_prereg_hash",
     }
     selected = [
         node for node in tree.body
@@ -799,6 +841,11 @@ def test_analyzer_bundle_install_is_atomic_and_bad_hash_preserves_current_genera
         "_ANALYZER_BUNDLE_FRESH_FLOOR_TS": 1792263671,
         "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
         "_ANALYZER_INSTALL_LOCK": threading.RLock(),
+        "_ANALYZER_REBUILD_PIN_TIP": abr.ANALYZER_COMPLETED_TIP,
+        "_ANALYZER_REBUILD_PIN_TIP_SHORT": abr.ANALYZER_COMPLETED_TIP_SHORT,
+        "_ANALYZER_REBUILD_AMEND2_SHA12": abr.AMEND2_SPEC_SHA12,
+        "_ANALYZER_REBUILD_METHOD_ID": abr.REGIME_METHOD_ID,
+        "_analyzer_rebuild_expected_prereg_hash": lambda: abr.PARAMS_PREREG_HASH,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
 

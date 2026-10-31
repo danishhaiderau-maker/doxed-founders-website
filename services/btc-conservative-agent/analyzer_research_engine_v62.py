@@ -19400,26 +19400,24 @@ def _trades_for_regime_analysis(trades=None, session=None):
 
 
 def _regime_tags_from_row(row) -> dict:
+    """AMEND2 (seal 2ac09364eb63): book10+trades helper only — never market_segment or legacy accumulator tags."""
+    if hasattr(row, "to_dict"):
+        row = row.to_dict()
     try:
-        from research.research_trade_accumulator import compute_regime_tags
+        import analyzer_book10_regime as abr
 
-        if hasattr(row, "to_dict"):
-            row = row.to_dict()
-        return compute_regime_tags(row or {})
-    except ImportError:
-        pass
-    ts = row.get("close_ts") or row.get("ts") or row.get("entry_ts") or ""
-    weekend = "unknown"
-    try:
-        dt = pd.Timestamp(ts)
-        if pd.notna(dt):
-            weekend = "weekend" if dt.dayofweek >= 5 else "weekday"
+        return abr.tags_from_trade_row(row or {}, book_rows=None)
     except Exception:
         pass
-    adx = _adx_bucket_val(row.get("adx_at_entry") or row.get("adx"))
-    spread = str(row.get("directional_spread_bucket") or "unk")
-    key = f"{weekend}|{adx}|spread_{spread}"
-    return {"regime_key": key, "day_type": weekend, "adx": adx, "spread_bucket": spread}
+    # Fail-closed UNKNOWN — do not fall back to segment/accumulator regime tags (R22 one path).
+    return {
+        "regime_key": "UNKNOWN",
+        "day_type": "unknown",
+        "adx": "unk",
+        "spread_bucket": "unk",
+        "method_id": "BOOK10_TRADES_DIRVOL_V1",
+        "reason": "HELPER_UNAVAILABLE",
+    }
 
 
 def _regime_key_from_row(row) -> str:
