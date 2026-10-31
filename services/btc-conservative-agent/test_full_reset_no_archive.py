@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import analyzer_book10_regime as abr
 import clean_epoch_wipe as wipe
 import full_reset_no_archive as frna
 import research_freeze
@@ -951,10 +952,12 @@ def test_c4b_bitfinex_named_reports_are_analyzer_derived_with_file_line_evidence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
 _BOT_MIRROR_FUNCS = ("_data_sync_runtime_root", "_data_sync_volume_root", "_analyzer_mirror_dir",
                      "_analyzer_generations_dir", "_analyzer_current_pointer_path", "_valid_analyzer_generation",
                      "_recover_latest_analyzer_generation", "_active_analyzer_mirror_dir",
-                     "_analyzer_bundle_fresh_gate")
+                     "_analyzer_bundle_fresh_gate", "_analyzer_bundle_rebuild_pin_gate",
+                     "_analyzer_rebuild_expected_prereg_hash")
 
 
 def _bot_mirror_namespace():
@@ -969,12 +972,20 @@ def _bot_mirror_namespace():
           "_ANALYZER_BUNDLE_MANIFEST": "bundle_manifest.json", "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
           "_ANALYZER_BUNDLE_ALLOWED_SUFFIXES": frozenset((".html", ".txt", ".json", ".log")),
           "_ANALYZER_BUNDLE_MAX_MEMBER_BYTES": 50 * 1024 * 1024, "_ANALYZER_BUNDLE_FRESH_FLOOR_TS": 1792263671,
+          "_ANALYZER_REBUILD_PIN_TIP": abr.ANALYZER_COMPLETED_TIP,
+          "_ANALYZER_REBUILD_PIN_TIP_SHORT": abr.ANALYZER_COMPLETED_TIP_SHORT,
+          "_ANALYZER_REBUILD_AMEND2_SHA12": abr.AMEND2_SPEC_SHA12,
+          "_ANALYZER_REBUILD_METHOD_ID": abr.REGIME_METHOD_ID,
           "datetime": __import__("datetime").datetime}
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), ns)
     return ns
 
 
-_FRESH_REPORT_MANIFEST = b'{"fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"}}'
+_REBUILD_PIN = abr.rebuild_pin_block()
+_FRESH_REPORT_MANIFEST = json.dumps({
+    "fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"},
+    "rebuild_pin": _REBUILD_PIN,
+}).encode()
 
 
 def _fly_mirror(vol: Path, report_manifest: bytes = _FRESH_REPORT_MANIFEST) -> Path:
@@ -1161,9 +1172,17 @@ def test_c3b_classify_fly_scope_rejects_traversal_and_empty_segments():
     assert frna.classify_fly_scope("@data/analyzer_current.json") == (frna.DELETE, "FLY_ANALYZER_CURRENT_POINTER")
 
 
-_PRE_CUTOFF = b'{"fresh_epoch": {"cutoff_utc": "2026-10-04T08:13:26+00:00"}}'
-_STRADDLE = (b'{"fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"}, "generation_receipt": '
-             b'{"data_epoch": {"straddle_rows_unguarded": 4, "unstamped_rows_unguarded": 0}}}')
+_PRE_CUTOFF = json.dumps({
+    "fresh_epoch": {"cutoff_utc": "2026-10-04T08:13:26+00:00"},
+    "rebuild_pin": _REBUILD_PIN,
+}).encode()
+_STRADDLE = json.dumps({
+    "fresh_epoch": {"cutoff_utc": "2026-10-17T19:01:11+00:00"},
+    "generation_receipt": {
+        "data_epoch": {"straddle_rows_unguarded": 4, "unstamped_rows_unguarded": 0},
+    },
+    "rebuild_pin": _REBUILD_PIN,
+}).encode()
 
 
 def _ungated_mirror_namespace():
