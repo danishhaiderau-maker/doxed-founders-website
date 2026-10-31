@@ -37,14 +37,15 @@ def test_collector_subscribes_status_channel():
     assert '"channel": "status", "key": DERIV_KEY' in src
 
 
-# (g) xvp shadow stream restarted by GS-01 ----------------------------------------------------
-def test_gs01_writes_xvp_shadow_and_other_instances_do_not():
+# (g) xvp shadow stream RETIRED (HM 30 Oct); GS-01 signal path keeps SHADOW_FILE None ----------
+def test_gs01_does_not_write_xvp_shadow_stream_anymore():
     import regime_adaptive_binding as rab
-    assert rab.GsPremiumEvaluator.SHADOW_FILE == "xvp_shadow_signals.jsonl"
+    assert rab.GsPremiumEvaluator.SHADOW_FILE is None
     for cls in (rab.Gs5PremiumEvaluator, rab.Gs7PremiumEvaluator, rab.DanishRouterPremiumEvaluator,
                 rab.FadePoolPremiumEvaluator):
         assert cls.SHADOW_FILE is None
     assert ms.STREAMS["xvp_shadow_signals"] == "xvp_shadow_signals.jsonl"
+    assert "xvp_shadow_signals" in ms.RETIRED_STREAMS
 
 
 # (h) rotated parts + time range + health ------------------------------------------------------

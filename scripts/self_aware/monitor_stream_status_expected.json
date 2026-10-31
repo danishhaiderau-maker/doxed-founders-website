@@ -1,0 +1,13 @@
+{
+  "schema": "monitor_stream_status_expected_v1",
+  "description": "Laptop watcher / system-health map from /api/monitor/streams/health status → severity. UNKNOWN_THRESHOLD is always RED (fail-closed).",
+  "status_severity": {
+    "OK": "GREEN",
+    "STALE": "RED",
+    "NO_TS": "RED",
+    "UNKNOWN_THRESHOLD": "RED",
+    "MISSING": "RED",
+    "RETIRED": "GREEN",
+    "RETIRED_RESURRECTED": "RED"
+  }
+}

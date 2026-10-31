@@ -437,13 +437,14 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
 class GsPremiumEvaluator(PremiumEvaluator):
     """GS-01: H-C's premium rule in its own instance.
 
-    DATA-GAPS-20261012 (g): H-C / PREMIUM_REVERSION_60M / GS-07 (the only writers of
-    xvp_shadow_signals.jsonl) were retired, so the stream went silent on 11 Oct 09:51 UTC.
-    GS-01 now keeps it alive (rows tagged research_lane=GS-01, trigger ids ``gsxvp-*``).
+    Signal path (cross_venue_premium evaluate/qualify → paper attempt) stays live.
+    HM/RK 30 Oct 2026: ``xvp_shadow_signals.jsonl`` is RETIRED (ticker/L1-priced
+    shadow_outcome). ``SHADOW_FILE = None`` stops stream + outcome recording only;
+    GS-01 still triggers paper via ``_xvl_maybe_attempt_paper``.
     """
 
     ID_PREFIX = "gsxvp"
-    SHADOW_FILE = "xvp_shadow_signals.jsonl"
+    SHADOW_FILE = None
     TRIGGER_FEATURE_KEY = "gsxvp_trigger"
 
 

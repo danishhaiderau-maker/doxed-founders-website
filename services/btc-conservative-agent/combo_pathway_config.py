@@ -368,7 +368,7 @@ def _shadow_exits_except(*live: str) -> tuple[str, ...]:
     return tuple(x for x in ALL_SHADOW_EXITS if x not in live)
 
 
-# Shadow-exit recorder view of SHADOW_EXIT_SET (shadow_exit_paths.py kinds).
+# Shadow-exit catalog view of SHADOW_EXIT_SET (tile-card / analyzer metadata only).
 # Every tile replays the whole catalog under its own time backstop and hard
 # stop; ids the tile lists in ``shadow_exits`` are its card's shadow-only exits
 # (role CARD_SHADOW), the rest are CATALOG comparisons. Observation only: none
