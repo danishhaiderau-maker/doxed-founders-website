@@ -267,3 +267,78 @@ def test_bot_wires_boot_rebuild_after_session_trades():
     assert boot_idx > 0 and trades_idx > 0
     # Startup call follows the trades restore (same boot block).
     assert boot_idx > trades_idx
+
+
+# --- HM e7ed251f5055 surviving mutants (:33 / :145 / :375) — real kills ---
+
+REAL_ROW_FIXTURE = ROOT / "fixtures" / "expired_orders_3f_real_row.csv"
+
+
+def test_mutant_l33_zero_and_subsecond_ts_gate():
+    """Kill expired_orders_boot_rebuild.py:33 (`return ts if ts > 0 else None`).
+
+    Healthy pin only — R23 proof applies `return ts` / `ts >= 0` / `ts > 1` and
+    shows this test FAIL. Surviving mutants without this test: those three.
+    """
+    assert reb._parse_ts(0) is None
+    assert reb._parse_ts(0.0) is None
+    assert reb.row_epoch_ts({"expired_ts": 0}) is None
+    assert reb._parse_ts(0.5) == 0.5
+    selected = reb.select_in_scope_rows(
+        [{"trade_id": "zero-ts", "expired_ts": 0, "research_lane": "CONTINUOUS"}],
+        epoch_cutoff_ts=10.0,
+    )
+    assert selected["unique_in_scope_total"] == 0
+    assert selected["epoch_excluded"][0]["label"] == "UNDATED_EXCLUDED"
+
+
+def test_mutant_l145_quote_balance_required_on_last_line(tmp_path):
+    """Kill expired_orders_boot_rebuild.py:145 (`count('"') % 2 == 0`).
+
+    Healthy pin only — R23 proof applies `return True` and shows this test FAIL.
+    looks_torn alone does not catch a last line with >header fields + odd quote.
+    """
+    path = tmp_path / "expired_orders_3f.csv"
+    good = _row("good", ts=200.0)
+    torn = (
+        "2026-10-18T12:00:00+00:00,ok-tid,LONG,100,100,100.0,200.0,1.0,0.5,"
+        "RESEARCH,TTL_EXPIRED,CONTINUOUS,x\""
+    )
+    _write_csv(path, [good], torn_last=torn)
+    out = reb.apply_boot_rebuild(csv_path=str(path), epoch_cutoff_ts=None, display_cap=20)
+    assert out["receipt"]["expired_orders_total"] == 1
+    assert out["receipt"]["skipped_rows"] == 1
+    assert out["receipt"]["skip_reasons"].get("HALF_WRITTEN_LAST_LINE") == 1
+
+
+def test_mutant_l375_strategy_evidence_helper_checks_flag():
+    """Kill expired_orders_boot_rebuild.py:375 (`… is False`).
+
+    Healthy pin only — R23 proof applies `return True` and shows this test FAIL.
+    """
+    bad = {"boot_rebuilt_from_csv": True, "strategy_evidence_eligible": True}
+    good = {"boot_rebuilt_from_csv": True, "strategy_evidence_eligible": False}
+    assert reb.assert_not_strategy_evidence(bad) is False
+    assert reb.assert_not_strategy_evidence(good) is True
+
+
+def test_real_format_expired_orders_csv_fixture_hydrates():
+    """Fixture row mirrors production expired_orders_3f.csv writer columns."""
+    assert REAL_ROW_FIXTURE.is_file()
+    text = REAL_ROW_FIXTURE.read_text(encoding="utf-8")
+    header = text.splitlines()[0].split(",")
+    assert header[:3] == ["time", "trade_id", "dir"]
+    assert "expired_ts" in header and "research_lane" in header
+    assert "lifecycle_completeness_schema" in header
+    out = reb.apply_boot_rebuild(
+        csv_path=str(REAL_ROW_FIXTURE), epoch_cutoff_ts=None, display_cap=20,
+    )
+    assert out["receipt"]["status"] == "GREEN"
+    assert out["receipt"]["expired_orders_total"] == 1
+    assert out["receipt"]["csv_bytes_unchanged"] is True
+    row = out["in_scope_rows"][0]
+    assert row["trade_id"] == "gs1-r34boot-sample01"
+    assert row["dir"] == "SHORT"
+    assert row["research_lane"] == "GS01_PREMIUM_FOLLOW_ATR_TP"
+    assert row["boot_rebuilt_from_csv"] is True
+    assert row["strategy_evidence_eligible"] is False
