@@ -110,8 +110,9 @@ def test_retired_market_segment_idle_with_reason_never_green(tmp_path):
     _others(tmp_path)
     res = mon.check(tmp_path, SINCE)
     ms = res["ledgers"]["market_segment"]
-    assert ms["status"] == "IDLE" and ms["idle_reason"] == "MARKET_SEGMENTS_RETIRED_R17"
-    assert res["status"] == "IDLE" and res["idle_ledgers"] == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+    assert ms["status"] == "IDLE" and ms["idle_reason"] == mon.MARKET_SEGMENT_STATUS_LABEL
+    assert ms["status_label"] == mon.MARKET_SEGMENT_STATUS_LABEL
+    assert res["status"] == "IDLE" and res["idle_ledgers"] == {"market_segment": mon.MARKET_SEGMENT_STATUS_LABEL}
     assert mon.main(["--data-dir", str(tmp_path), "--since", str(SINCE)]) == 3
 
 

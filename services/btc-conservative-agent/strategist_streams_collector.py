@@ -75,6 +75,8 @@ PARADEX_BBO = "https://api.prod.paradex.trade/v1/bbo/BTC-USD-PERP"  # WS needs S
 BOOK_FILE, TRADES_FILE, VENUE_FILE = "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "venue_bbo_1m.jsonl"
 DERIV_FILE = "bfx_deriv_status_1s.jsonl"
 EVENTS_FILE = "bfx_ws_events.jsonl"
+# Locked expected Sink roster (plan size_cap; Collector opens exactly these five).
+EXPECTED_STREAM_SINKS = (BOOK_FILE, TRADES_FILE, VENUE_FILE, DERIV_FILE, EVENTS_FILE)
 HIST_SEC = 15  # per-source history: last value per receive second, kept this long (close lags <= ~10 s catch-up)
 DERIV_KEY = "deriv:" + BFX_SYMBOL
 MAX_DERIV_AGE_SEC = 10.0  # Bitfinex pushes deriv status every ~1-4 s; rows carry age_s
@@ -100,6 +102,10 @@ STREAM_SINK_COUNT = 5
 TOTAL_ALL_STREAMS_CAP_BYTES = MAX_TOTAL_BYTES * STREAM_SINK_COUNT  # 40 GiB default
 SIZE_CAP_STATUS_FILE = "strategist_stream_size_cap.json"
 SIZE_CAP_REASON = "STREAM_SIZE_CAP"
+SIZE_CAP_SCHEMA = "strategist_stream_size_cap_v1"
+# WORST fold: RED > UNKNOWN > AMBER > GREEN (absent expected sink → UNKNOWN).
+_LEVEL_RANK = {"GREEN": 0, "AMBER": 1, "UNKNOWN": 2, "RED": 3}
+_size_cap_publish_lock = threading.Lock()
 SILENT_RECONNECT_SEC = 30.0
 MAX_QUOTE_AGE_SEC = 2.0
 # A quiet book sends no delta; Bitfinex guarantees a heartbeat at least every 15 s on a live connection. While ANY message
@@ -162,6 +168,35 @@ def _measure_total_bytes(path: str) -> int:
     return total
 
 
+def _normalize_size_cap_level(level) -> str:
+    text = str(level or "").strip().upper()
+    return text if text in _LEVEL_RANK else "UNKNOWN"
+
+
+def worst_size_cap_level(*levels) -> str:
+    """Aggregate WORST: RED > UNKNOWN > AMBER > GREEN."""
+    worst = "GREEN"
+    for level in levels:
+        cand = _normalize_size_cap_level(level)
+        if _LEVEL_RANK[cand] > _LEVEL_RANK[worst]:
+            worst = cand
+    return worst
+
+
+def _pressure_level(projected: int, max_total_bytes: int) -> tuple[str, float, bool]:
+    """AMBER@70%, RED@85%, hard stop when projected exceeds cap. stop is measured-only (F1)."""
+    cap = max(1, int(max_total_bytes))
+    ratio = float(projected) / float(cap)
+    stop = projected > int(max_total_bytes)
+    if stop or ratio >= 0.85:
+        level = "RED"
+    elif ratio >= 0.70:
+        level = "AMBER"
+    else:
+        level = "GREEN"
+    return level, ratio, stop
+
+
 class Sink:
     """Append-only JSONL with size-based rename rotation (never unlinks)."""
 
@@ -179,6 +214,18 @@ class Sink:
         self._bytes = _measure_total_bytes(path)
         self._lock = threading.Lock()
         self._ensure_disk_alert()
+        # Publish once at Sink init (need=0); required ALARM when not GREEN / stop.
+        level, ratio, stop = _pressure_level(self._bytes, self.max_total_bytes)
+        self._alarm_level = level if not stop else "RED"
+        if level != "GREEN" or stop:
+            _log(
+                f"ALARM {SIZE_CAP_REASON} level={self._alarm_level} stop_writing={stop} "
+                f"path={self.path} used_bytes={self._bytes} need=0 "
+                f"cap={self.max_total_bytes} ratio={ratio:.4f}"
+            )
+        self._publish_status(self._alarm_level, ratio, stop_writing=stop, need=0)
+        if stop:
+            self.size_cap_hits += 1
 
     @staticmethod
     def _ensure_disk_alert() -> None:
@@ -190,30 +237,110 @@ class Sink:
         except Exception:  # noqa: BLE001 — alarm path must not crash the collector
             pass
 
+    def _sink_key(self) -> str:
+        return os.path.basename(self.path)
+
     def _publish_status(self, level: str, ratio: float, *, stop_writing: bool, need: int) -> None:
-        row = {
-            "schema": "strategist_stream_size_cap_v1",
-            "reason": SIZE_CAP_REASON,
+        """RMW per-sink status under module lock; WORST across expected roster (H2 tmp under lock)."""
+        sink_row = {
             "level": level,
             "path": self.path,
             "used_bytes": self._bytes,
             "need": need,
             "cap_bytes": self.max_total_bytes,
             "ratio": round(ratio, 4),
-            "stop_writing": stop_writing,
-            "card": size_cap_card(),
+            "stop_writing": bool(stop_writing),
             "ts": time.time(),
         }
-        try:
-            directory = os.path.dirname(self.path) or "."
-            dest = os.path.join(directory, SIZE_CAP_STATUS_FILE)
-            tmp = dest + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(row, fh, separators=(",", ":"), sort_keys=True)
-            os.replace(tmp, dest)
-        except OSError:
-            pass
-        if level == "RED":
+        directory = os.path.dirname(self.path) or "."
+        dest = os.path.join(directory, SIZE_CAP_STATUS_FILE)
+        with _size_cap_publish_lock:
+            existing: dict = {}
+            try:
+                with open(dest, "r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, ValueError, TypeError):
+                existing = {}
+            sinks = dict(existing.get("sinks") or {}) if isinstance(existing.get("sinks"), dict) else {}
+            # Migrate legacy one-sink row into sinks map when present.
+            if not sinks and existing.get("path"):
+                legacy_key = os.path.basename(str(existing.get("path")))
+                sinks[legacy_key] = {
+                    "level": existing.get("level") or "UNKNOWN",
+                    "path": existing.get("path"),
+                    "used_bytes": existing.get("used_bytes"),
+                    "need": existing.get("need"),
+                    "cap_bytes": existing.get("cap_bytes"),
+                    "ratio": existing.get("ratio"),
+                    "stop_writing": bool(existing.get("stop_writing")),
+                    "ts": existing.get("ts"),
+                }
+            sinks[self._sink_key()] = sink_row
+            # Roster mode (Collector / any expected basename): missing expected key → UNKNOWN.
+            # Non-roster single-sink tests fold only published sinks (no invented UNKNOWNs).
+            roster_active = (
+                self._sink_key() in EXPECTED_STREAM_SINKS
+                or any(name in sinks for name in EXPECTED_STREAM_SINKS)
+            )
+            levels = []
+            if roster_active:
+                for name in EXPECTED_STREAM_SINKS:
+                    entry = sinks.get(name)
+                    if not isinstance(entry, dict):
+                        levels.append("UNKNOWN")
+                    else:
+                        levels.append(_normalize_size_cap_level(entry.get("level")))
+            for key, entry in sinks.items():
+                if roster_active and key in EXPECTED_STREAM_SINKS:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                levels.append(_normalize_size_cap_level(entry.get("level")))
+            aggregate = worst_size_cap_level(*levels) if levels else "UNKNOWN"
+            any_stop = any(bool((sinks.get(n) or {}).get("stop_writing")) for n in sinks)
+            # Legacy top-level path/bytes from worst *concrete* measured sink (not UNKNOWN-only).
+            concrete = None
+            concrete_rank = -1
+            for name in EXPECTED_STREAM_SINKS:
+                entry = sinks.get(name)
+                if not isinstance(entry, dict):
+                    continue
+                cand = _normalize_size_cap_level(entry.get("level"))
+                if cand == "UNKNOWN":
+                    continue
+                if _LEVEL_RANK[cand] > concrete_rank:
+                    concrete = entry
+                    concrete_rank = _LEVEL_RANK[cand]
+            row = {
+                "schema": SIZE_CAP_SCHEMA,
+                "reason": SIZE_CAP_REASON,
+                "level": aggregate,
+                "sinks": sinks,
+                "stop_writing": bool(any_stop),  # measured sink stops only — never UNKNOWN-alone (F1/HM nit)
+                "card": size_cap_card(),
+                "ts": time.time(),
+                "path": (concrete or {}).get("path"),
+                "used_bytes": (concrete or {}).get("used_bytes"),
+                "need": (concrete or {}).get("need"),
+                "cap_bytes": (concrete or {}).get("cap_bytes"),
+                "ratio": (concrete or {}).get("ratio"),
+            }
+            # H2: unique tmp name + full write+replace under the module lock.
+            tmp = f"{dest}.tmp.{os.getpid()}.{threading.get_ident()}"
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(row, fh, separators=(",", ":"), sort_keys=True)
+                os.replace(tmp, dest)
+            except OSError as exc:
+                # Leave unique tmp in place on failure (R25: Sink must not os.unlink/remove).
+                _log(
+                    f"OSError publishing {SIZE_CAP_STATUS_FILE}: "
+                    f"{type(exc).__name__}: {exc} dest={dest} tmp={tmp}"
+                )
+        # raise_red only for measured RED (not UNKNOWN-alone aggregate).
+        if level == "RED" or stop_writing:
             try:
                 import disk_alert
                 disk_alert.raise_red(
@@ -226,15 +353,7 @@ class Sink:
 
     def _apply_pressure(self, projected: int, need: int) -> bool:
         """AMBER@70%, RED STREAM_SIZE_CAP@85%, stop at >=100%. Returns True when write must stop."""
-        cap = max(1, int(self.max_total_bytes))
-        ratio = float(projected) / float(cap)
-        stop = projected > self.max_total_bytes
-        if stop or ratio >= 0.85:
-            level = "RED"
-        elif ratio >= 0.70:
-            level = "AMBER"
-        else:
-            level = "GREEN"
+        level, ratio, stop = _pressure_level(projected, self.max_total_bytes)
         if level != self._alarm_level or stop:
             self._alarm_level = level
             if level != "GREEN" or stop:

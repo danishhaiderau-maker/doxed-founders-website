@@ -15,13 +15,47 @@ import rotation_cap
 
 @pytest.fixture(autouse=True)
 def _clear_red_and_latches():
+    disk_alert.configure(None)
     retention_stop_write.clear_latches()
+    retention_stop_write.set_volume_used_ratio(None)
     for row in disk_alert.red_conditions():
         disk_alert.clear_red(row["reason"])
     yield
     retention_stop_write.clear_latches()
+    retention_stop_write.set_volume_used_ratio(None)
     for row in disk_alert.red_conditions():
         disk_alert.clear_red(row["reason"])
+    disk_alert.configure(None)
+
+
+def _green_size_cap_dir(tmp_path):
+    """Plant GREEN size-cap so H1 missing-file RED cannot mask lifecycle A7a."""
+    import json
+
+    (tmp_path / "strategist_stream_size_cap.json").write_text(json.dumps({
+        "schema": "strategist_stream_size_cap_v1",
+        "reason": "STREAM_SIZE_CAP",
+        "level": "GREEN",
+        "stop_writing": False,
+        "sinks": {
+            name: {"level": "GREEN", "stop_writing": False}
+            for name in (
+                "bfx_book_10l_1s.jsonl",
+                "bfx_trades.jsonl",
+                "venue_bbo_1m.jsonl",
+                "bfx_deriv_status_1s.jsonl",
+                "bfx_ws_events.jsonl",
+            )
+        },
+    }), encoding="utf-8")
+    return str(tmp_path)
+
+
+def _bind_retention_state(tmp_path):
+    """Persist disk_alert RED state under tmp_path/retention — never the working folder."""
+    state = tmp_path / "retention" / "disk_alert_red.json"
+    disk_alert.configure(state)
+    return state
 
 
 def _seg(root, i, size, mtime):
@@ -148,6 +182,159 @@ def test_lifecycle_alarm_ladder_70_85(tmp_path):
     _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "x2", 200, now - 700)
     res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
     assert res["over_cap"] is True and res["stop_write"] is True and res["removed"] == 0
+
+
+def test_a7a_lifecycle_unknown_receipt_reports_red(tmp_path, monkeypatch):
+    """A7a/F3: UNKNOWN decision → lifecycle receipt alarm_level is RED (never GREEN/UNKNOWN)
+    and REAL alarm/health surfaces (disk_alert.compute_disk_alert /health fold) are RED.
+
+    Fixture: GREEN cap ratio + volume_ratio=None → level_for_ratios UNKNOWN.
+    Mutation proof (REAL code): monkeypatch ``retention_stop_write.receipt_alarm_level``
+    to soft-GREEN / passthrough UNKNOWN → receipt RED + compute_disk_alert RED fail (R23).
+    """
+    import json
+
+    _bind_retention_state(tmp_path)
+    data_dir = _green_size_cap_dir(tmp_path)
+    retention_stop_write.set_volume_used_ratio(None)
+    now = time.time()
+    _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "u1", 100, now - 60)
+    assert retention_stop_write.level_for_ratios(0.1, None) == "UNKNOWN"
+    assert retention_stop_write.should_stop_write(used=100, cap=1000, volume_ratio=None) is False
+    # Normalised helper: case / missing / garbage → RED; known levels uppercased.
+    assert retention_stop_write.receipt_alarm_level("UNKNOWN") == "RED"
+    assert retention_stop_write.receipt_alarm_level("unknown") == "RED"
+    assert retention_stop_write.receipt_alarm_level(None) == "RED"
+    assert retention_stop_write.receipt_alarm_level("") == "RED"
+    assert retention_stop_write.receipt_alarm_level("amber") == "AMBER"
+    assert retention_stop_write.receipt_alarm_level("bogus") == "RED"
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
+    assert res["alarm_level"] == "RED", res
+    assert res["alarm_level"] != "UNKNOWN"
+    assert res["alarm_level"] != "GREEN"
+    assert res["stop_write"] is False
+    assert r5.lifecycle_bundles_stop_write_latched() is False
+    # Receipt file (audit surface): written row must be RED, never UNKNOWN/GREEN.
+    receipts = list(tmp_path.rglob("cap_receipts.jsonl"))
+    assert receipts, "expected lifecycle receipt for RED alarm_level"
+    rows = [json.loads(line) for path in receipts for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    life = [row for row in rows if row.get("kind") == "LIFECYCLE_BUNDLE_CAP_PRESSURE_R5"]
+    assert life and all(row.get("alarm_level") == "RED" for row in life), life
+    # REAL alarm/health surface (plan A7a / H3): /health reads compute_disk_alert — not a
+    # test-built dict. GREEN size-cap plant ensures H1 missing-file cannot fake this RED.
+    health_out = disk_alert.compute_disk_alert({
+        "total_bytes": 100, "used_bytes": 10, "data_dir": data_dir,
+    })
+    assert health_out["level"] == "RED", health_out
+    assert health_out["level"] != "GREEN"
+    assert health_out["level"] != "UNKNOWN"
+    assert any(
+        str(row.get("reason") or "") == "LIFECYCLE_BUNDLE_CAP_PRESSURE"
+        for row in (health_out.get("retention_red") or [])
+    ), health_out.get("retention_red")
+    assert health_out.get("stream_size_cap", {}).get("level") == "GREEN"
+    # retention/ state must live under tmp_path — never a cwd-relative working folder.
+    state_file = tmp_path / "retention" / "disk_alert_red.json"
+    assert state_file.is_file(), state_file
+    assert "LIFECYCLE_BUNDLE_CAP_PRESSURE" in state_file.read_text(encoding="utf-8")
+    # Mutation against the REAL helper cap_lifecycle_bundles calls (not a local stand-in).
+    retention_stop_write.clear_latches()
+    for row in disk_alert.red_conditions():
+        disk_alert.clear_red(row["reason"])
+
+    def soft_green_or_passthru(level):
+        # MUTANT: restore ``or "GREEN"`` / leave UNKNOWN ambiguous (pre-F3).
+        text = str(level).strip() if level is not None else ""
+        return text or "GREEN"
+
+    monkeypatch.setattr(retention_stop_write, "receipt_alarm_level", soft_green_or_passthru)
+    mut_root = tmp_path / "mut_a7a"
+    _bind_retention_state(mut_root)
+    mut_data_dir = _green_size_cap_dir(mut_root)
+    _bundle(mut_root, "lifecycle_bundles", "lifecycle-", "m1", 100, now - 60)
+    mut = r5.cap_lifecycle_bundles(mut_root, max_bytes=1000, now=now)
+    mut_health = disk_alert.compute_disk_alert({
+        "total_bytes": 100, "used_bytes": 10, "data_dir": mut_data_dir,
+    })
+    with pytest.raises(AssertionError):
+        assert mut["alarm_level"] == "RED"
+    with pytest.raises(AssertionError):
+        # Real alarm/health surface must also fail on the soft-GREEN / UNKNOWN mutant.
+        assert mut_health["level"] == "RED"
+
+
+def test_a7b_lifecycle_unknown_alone_does_not_stop_write(tmp_path, monkeypatch):
+    """A7b/F1: UNKNOWN alone must NOT stop-write / latch / block collection.
+
+    Positive control: measured RED ratio DOES stop-write.
+    Mutation proof (REAL code): monkeypatch ``should_stop_write`` so UNKNOWN stops →
+    ``stop_write is False`` fails (R23).
+    """
+    _bind_retention_state(tmp_path)
+    retention_stop_write.set_volume_used_ratio(None)
+    now = time.time()
+    _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "u2", 100, now - 60)
+    assert retention_stop_write.should_stop_write(used=100, cap=1000, volume_ratio=None) is False
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
+    assert res["stop_write"] is False
+    assert r5.lifecycle_bundles_stop_write_latched() is False
+    assert retention_stop_write.is_stopped(r5.FAMILY_LIFECYCLE_BUNDLES) is False
+    # Positive control: measured RED ratio (>=0.85) stops.
+    retention_stop_write.clear_latches()
+    _bundle(tmp_path, "lifecycle_bundles", "lifecycle-", "r1", 900, now - 60)
+    red = r5.cap_lifecycle_bundles(tmp_path, max_bytes=1000, now=now)
+    assert red["alarm_level"] == "RED"
+    assert red["stop_write"] is True
+    assert r5.lifecycle_bundles_stop_write_latched() is True
+    # Mutation against REAL should_stop_write used by evaluate_and_latch.
+    retention_stop_write.clear_latches()
+    retention_stop_write.set_volume_used_ratio(None)
+
+    def mutant_should_stop(*, used=None, cap=None, volume_ratio=None, hard_over=False):
+        if hard_over:
+            return True
+        level = retention_stop_write.level_for_ratios(
+            retention_stop_write.used_ratio(used, cap),
+            volume_ratio,
+        )
+        return level in ("RED", "UNKNOWN")  # MUTANT: UNKNOWN stops
+
+    monkeypatch.setattr(retention_stop_write, "should_stop_write", mutant_should_stop)
+    mut_root = tmp_path / "mut_a7b"
+    _bundle(mut_root, "lifecycle_bundles", "lifecycle-", "m2", 100, now - 60)
+    assert retention_stop_write.should_stop_write(used=100, cap=1000, volume_ratio=None) is True
+    mut = r5.cap_lifecycle_bundles(mut_root, max_bytes=1000, now=now)
+    with pytest.raises(AssertionError):
+        assert mut["stop_write"] is False
+
+
+def test_is_stopped_rejects_non_red_latch_mutation(monkeypatch):
+    """HM: ``is_stopped`` must require alarm_level RED — any-latch ``bool(row)`` is forbidden.
+
+    AMBER latch must not stop. Mutation: replace ``is_stopped`` with ``bool(latch_state)``
+    → AMBER-not-stopped assert fails (R23).
+    """
+    retention_stop_write.clear_latches()
+    retention_stop_write.set_volume_used_ratio(None)
+    amber = retention_stop_write.evaluate_and_latch(
+        "hm_amber_family", used=75, cap=100, reason="HM_AMBER_LATCH",
+    )
+    assert amber["alarm_level"] == "AMBER"
+    assert retention_stop_write.latch_state("hm_amber_family")
+    assert retention_stop_write.is_stopped("hm_amber_family") is False
+    red = retention_stop_write.evaluate_and_latch(
+        "hm_red_family", used=90, cap=100, reason="HM_RED_LATCH",
+    )
+    assert red["alarm_level"] == "RED"
+    assert retention_stop_write.is_stopped("hm_red_family") is True
+
+    def mutant_any_latch(family: str) -> bool:
+        return bool(retention_stop_write.latch_state(family))  # MUTANT: any latch = stop
+
+    monkeypatch.setattr(retention_stop_write, "is_stopped", mutant_any_latch)
+    assert retention_stop_write.is_stopped("hm_amber_family") is True  # mutant fires
+    with pytest.raises(AssertionError):
+        assert retention_stop_write.is_stopped("hm_amber_family") is False
 
 
 def test_purge_retired_transfer_never_rmtree_mutation(tmp_path):
@@ -312,6 +499,7 @@ def test_rejected_arming_env_absent_from_pr4_paths():
 
 
 def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path):
+    _bind_retention_state(tmp_path)
     retention_stop_write.latch(r5.FAMILY_LIFECYCLE_BUNDLES, reason="t", used=10, cap=1, now=time.time())
     retention_stop_write.latch(r5.FAMILY_V22, reason="t", used=10, cap=1, now=time.time())
     bot = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
@@ -333,6 +521,8 @@ def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path):
 
 def test_lifecycle_materialize_respects_stop_write(tmp_path):
     from lifecycle_bundles import LifecycleKey, materialize_bundle
+    # HM tmp_path fence (same as force-flat / A7a): never cwd-relative retention/.
+    _bind_retention_state(tmp_path)
     retention_stop_write.latch(r5.FAMILY_LIFECYCLE_BUNDLES, reason="t", used=10, cap=1, now=time.time())
     key = LifecycleKey(collection_epoch_id="e", episode_id="ep", policy_signature="p", research_lane="H_A")
     out = materialize_bundle(tmp_path, key, [])

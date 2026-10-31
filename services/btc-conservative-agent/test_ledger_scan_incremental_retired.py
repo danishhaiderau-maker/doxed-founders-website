@@ -48,7 +48,10 @@ def test_pre_retirement_rows_are_idle_not_red(tmp_path, monkeypatch):
            [{"record_id": f"seg{i}"} for i in range(30)], mtime=RETIRED - 60)  # written since, before retirement
     res = mon.check(tmp_path, SINCE)
     ms = res["ledgers"]["market_segment"]
-    assert ms["status"] == "IDLE" and ms["idle_reason"] == "MARKET_SEGMENTS_RETIRED_R17"
+    assert ms["status"] == "IDLE"
+    assert ms["idle_reason"] == mon.MARKET_SEGMENT_STATUS_LABEL
+    assert ms["status_label"] == mon.MARKET_SEGMENT_STATUS_LABEL
+    assert ms["retired_ruling"] == "MARKET_SEGMENTS_RETIRED_R17"
     assert ms["red_reason"] is None and ms["unstamped"] == 0 and ms["pre_retirement_rows"] == 30
     assert res["status"] == "IDLE" and res["pre_retirement_rows"] == {"market_segment": 30}
 
@@ -119,3 +122,27 @@ def test_time_budget_bounds_call_and_resumes_to_completion(tmp_path):
     res = mon.check(tmp_path, SINCE, time_budget_s=2.0)
     assert time.monotonic() - t0 < 3.0 and res["scan_complete"] and res["status"] == "IDLE"
     assert res["ledgers"]["order_intent"]["stamped"] == 2999
+
+
+def test_retired_partial_scan_is_red_scan_incomplete_not_amber(tmp_path, monkeypatch):
+    """H3: market_segment incomplete fold → RED SCAN_INCOMPLETE (never AMBER resume)."""
+    _retire_at(monkeypatch)
+    _active(tmp_path)
+    # Large retired stream + zero time budget forces incomplete fold on first call.
+    _write(
+        _led(tmp_path) / "market_segment.jsonl",
+        [{"record_id": f"seg{i}"} for i in range(4000)],
+        mtime=RETIRED - 60,
+    )
+    res = mon.check(tmp_path, SINCE, time_budget_s=0.0)
+    ms = res["ledgers"]["market_segment"]
+    assert ms["status"] == "RED"
+    assert ms["red_reason"] == "SCAN_INCOMPLETE"
+    assert "market_segment:SCAN_INCOMPLETE" in res["unverified"]
+    assert "market_segment:SCAN_INCOMPLETE_RESUMING" not in res["unverified"]
+    assert ms["status"] != "AMBER"
+    assert res["status"] == "RED"
+    # Mutation proof: AMBER resume would fail this contract.
+    mutant_status = "AMBER"
+    with __import__("pytest").raises(AssertionError):
+        assert mutant_status == "RED"

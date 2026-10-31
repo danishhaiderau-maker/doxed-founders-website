@@ -147,20 +147,93 @@ def level_for_ratio(ratio: float | None) -> str:
     return "GREEN"
 
 
+# Size-cap WORST fold (must match strategist_streams_collector): RED > UNKNOWN > AMBER > GREEN.
+_SIZE_CAP_LEVEL_RANK = {"GREEN": 0, "AMBER": 1, "UNKNOWN": 2, "RED": 3}
+_EXPECTED_STREAM_SINKS = (
+    "bfx_book_10l_1s.jsonl",
+    "bfx_trades.jsonl",
+    "venue_bbo_1m.jsonl",
+    "bfx_deriv_status_1s.jsonl",
+    "bfx_ws_events.jsonl",
+)
+
+
+def _normalize_size_cap_level(level) -> str:
+    text = str(level or "").strip().upper()
+    return text if text in _SIZE_CAP_LEVEL_RANK else "UNKNOWN"
+
+
+def _worst_size_cap_level(*levels) -> str:
+    worst = "GREEN"
+    for level in levels:
+        cand = _normalize_size_cap_level(level)
+        if _SIZE_CAP_LEVEL_RANK[cand] > _SIZE_CAP_LEVEL_RANK[worst]:
+            worst = cand
+    return worst
+
+
 def stream_size_cap_status(data_dir: str | os.PathLike | None) -> dict[str, Any]:
-    """Read strategist collector size-cap status (cross-process; RED => STREAM_SIZE_CAP)."""
+    """Read strategist collector size-cap status (cross-process; RED/UNKNOWN => STREAM_SIZE_CAP).
+
+    H1: missing/corrupt/no-level → UNKNOWN (never GREEN). Alarm surface treats UNKNOWN as RED.
+    F1: ``stop_writing`` is passed through from the file (measured only) — never forced by UNKNOWN.
+    """
     if not data_dir:
-        return {"level": "UNKNOWN", "red": []}
+        return {"level": "UNKNOWN", "red": [], "sinks": {}, "stop_writing": False}
     path = Path(data_dir) / "strategist_stream_size_cap.json"
     try:
         row = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return {"level": "UNKNOWN", "red": [], "exists": False}
+        return {"level": "UNKNOWN", "red": [], "exists": False, "sinks": {}, "stop_writing": False}
     if not isinstance(row, dict):
-        return {"level": "UNKNOWN", "red": [], "exists": False}
-    level = str(row.get("level") or "UNKNOWN")
+        return {"level": "UNKNOWN", "red": [], "exists": False, "sinks": {}, "stop_writing": False}
+    raw_sinks = row.get("sinks") if isinstance(row.get("sinks"), dict) else {}
+    sinks: dict[str, Any] = {}
+    for key, entry in raw_sinks.items():
+        if not isinstance(entry, dict):
+            sinks[str(key)] = {"level": "UNKNOWN"}
+            continue
+        sink = dict(entry)
+        sink["level"] = _normalize_size_cap_level(entry.get("level"))
+        sinks[str(key)] = sink
+    # Legacy one-sink file (no sinks map): treat top-level as a single sink.
+    if not sinks and row.get("path"):
+        legacy_key = Path(str(row.get("path"))).name
+        sinks[legacy_key] = {
+            "level": _normalize_size_cap_level(row.get("level")),
+            "path": row.get("path"),
+            "used_bytes": row.get("used_bytes"),
+            "need": row.get("need"),
+            "cap_bytes": row.get("cap_bytes"),
+            "ratio": row.get("ratio"),
+            "stop_writing": bool(row.get("stop_writing")),
+            "ts": row.get("ts"),
+        }
+    roster_present = any(name in sinks for name in _EXPECTED_STREAM_SINKS)
+    levels = []
+    if roster_present:
+        for name in _EXPECTED_STREAM_SINKS:
+            entry = sinks.get(name)
+            if not isinstance(entry, dict):
+                levels.append("UNKNOWN")
+            else:
+                levels.append(_normalize_size_cap_level(entry.get("level")))
+        for key, entry in sinks.items():
+            if key in _EXPECTED_STREAM_SINKS or not isinstance(entry, dict):
+                continue
+            levels.append(_normalize_size_cap_level(entry.get("level")))
+    elif sinks:
+        levels = [_normalize_size_cap_level((sinks[k] or {}).get("level")) for k in sinks]
+    else:
+        # File exists but empty/no sinks: honor top-level level (normalize missing → UNKNOWN).
+        levels = [_normalize_size_cap_level(row.get("level"))]
+    level = _worst_size_cap_level(*levels) if levels else "UNKNOWN"
+    stop_writing = bool(row.get("stop_writing")) or any(
+        bool((sinks.get(k) or {}).get("stop_writing")) for k in sinks
+    )
     red = []
-    if level == "RED" or row.get("stop_writing"):
+    # H1 alarm surface: RED or UNKNOWN (or measured stop) → retention_red entry.
+    if level in ("RED", "UNKNOWN") or stop_writing:
         red.append({
             "reason": str(row.get("reason") or "STREAM_SIZE_CAP"),
             "source": "strategist_streams",
@@ -169,8 +242,17 @@ def stream_size_cap_status(data_dir: str | os.PathLike | None) -> dict[str, Any]
             "used_bytes": row.get("used_bytes"),
             "cap_bytes": row.get("cap_bytes"),
             "card": row.get("card"),
+            "level": level,
+            "stop_writing": stop_writing,
         })
-    return {"level": level, "red": red, "exists": True, "status": row}
+    return {
+        "level": level,
+        "red": red,
+        "exists": True,
+        "status": row,
+        "sinks": sinks,
+        "stop_writing": stop_writing,
+    }
 
 
 def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -186,10 +268,22 @@ def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
     retention = red_conditions()
     segment = segment_store_red(volume.get("transfer") if isinstance(volume.get("transfer"), Mapping) else None)
     retention = retention + segment["red"]
-    data_dir = volume.get("data_dir") or volume.get("root") or os.getcwd()
+    # data_dir/root/BOT_DATA_DIR preferred; getcwd last-resort for the status payload.
+    # H1/R36: UNKNOWN→RED always on the alarm surface — no soft skip when unbound
+    # (volume-only unit callers must plant a GREEN size-cap file; see test_disk_alert).
+    data_dir = (
+        volume.get("data_dir")
+        or volume.get("root")
+        or (os.environ.get("BOT_DATA_DIR") or "").strip()
+        or os.getcwd()
+    )
     stream_cap = stream_size_cap_status(data_dir)
     retention = retention + list(stream_cap.get("red") or [])
-    if retention or stream_cap.get("level") == "RED":
+    # H1 locked: stream_size_cap UNKNOWN or RED → disk alert RED (alarm surface; not stop-write).
+    # F1: this is alarm-level RED, not an automatic stop-write trigger from UNKNOWN alone.
+    # M5: the UNKNOWN clause is load-bearing even when retention_red already has STREAM_SIZE_CAP
+    # (tests monkeypatch empty red + UNKNOWN level to kill a RED-only mutant).
+    if retention or stream_cap.get("level") in ("RED", "UNKNOWN"):
         level = "RED"
     return {
         "schema": SCHEMA,

@@ -20,6 +20,7 @@ test_analyzer_ai_provider_outage_quarantine.py
 test_analyzer_ai_served_model_cohort.py
 test_analyzer_api_generation_truth.py
 test_analyzer_atomic_publication.py
+test_analyzer_bundle_rebuild_pin_2ac0.py
 test_analyzer_canonical_input_binding.py
 test_analyzer_chase_integrity.py
 test_analyzer_compact_summary_provenance.py
@@ -497,6 +498,7 @@ test_runtime_hygiene.py
 test_runtime_identity_incidents.py
 test_runtime_incident_history.py
 test_runtime_liveness_isolation.py
+test_runtime_log_never_drop_r46.py
 test_runtime_p0_lifecycle_guards.py
 test_runtime_revision.py
 test_runtime_telemetry.py

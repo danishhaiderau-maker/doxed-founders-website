@@ -52,7 +52,7 @@ def test_route_red_when_unstamped_since_and_green_otherwise(tmp_path, monkeypatc
     body = _client().get(PATH + "?since=1792001000").get_json()
     # retired market_segment is IDLE with its reason, never GREEN (RK/HM R2)
     assert body["status"] == "IDLE" and body["unstamped_rows_since"] == 0
-    assert body["idle_ledgers"] == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+    assert body["idle_ledgers"] == {"market_segment": mon.MARKET_SEGMENT_STATUS_LABEL}
 
 
 def test_route_bad_since_is_400(monkeypatch):
