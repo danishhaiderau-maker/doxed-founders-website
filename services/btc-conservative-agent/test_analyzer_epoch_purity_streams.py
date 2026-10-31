@@ -274,13 +274,13 @@ def test_provenance_journal_is_non_evidence_for_the_purity_audit():
 def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard, monkeypatch):
     """Strategist / RK: _epoch_receipt_block must not open retired market_segment.
 
-    Drives engine._epoch_receipt_block() with analyzer_epoch_guard.open spy (not builtins).
-    Asserts: no lower-cased market_segment path opened; decision.jsonl opened;
-    unplaced_rows_list.by_stream has no market_segment key.
+    HM 3dd1d520a888: monkeypatch builtins.open AND io.open only around the single
+    _epoch_receipt_block call (monkeypatch.context restores). Kills a plain open()
+    of market_segment.jsonl inside the receipt path. Assert spy fired; no
+    lower-cased market_segment path; rotated market_segment.jsonl.1 skipped.
     """
     import builtins
     import io
-    import os
 
     _g, _monitor = guard
     engine = _engine()
@@ -306,59 +306,59 @@ def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard,
     _write_jsonl(led / "market_segment.jsonl.1", [
         {"record_id": "seg-rot", "ts": PRE},
     ])
-    # Case-insensitive skip coverage (filename present as Market_Segment would also be retired).
+    # Case-insensitive skip + rotated-file skip (ba93b912).
     assert engine._epoch_audit_stream_is_retired("v3/ledgers/Market_Segment.jsonl") is True
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl") is True
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl.1") is True
 
     opened_paths: list[str] = []
-    real_guard_open = builtins.open
+    real_open = builtins.open
 
-    def guard_module_open(file, *args, **kwargs):
+    def spy_open(file, *args, **kwargs):
         opened_paths.append(str(file))
-        return real_guard_open(file, *args, **kwargs)
+        return real_open(file, *args, **kwargs)
 
-    # (a) Cheap os.open / io.open path recorder — active only during receipt; restored after.
-    os_io_paths: list[str] = []
-    real_os_open = os.open
-    real_io_open = io.open
-
-    def cheap_os_open(path, *args, **kwargs):
-        os_io_paths.append(str(path))
-        return real_os_open(path, *args, **kwargs)
-
-    def cheap_io_open(file, *args, **kwargs):
-        os_io_paths.append(str(file))
-        return real_io_open(file, *args, **kwargs)
-
-    prev_eg_open = eg.__dict__.get("open", None)
-    os.open = cheap_os_open
-    io.open = cheap_io_open
-    eg.open = guard_module_open
-    try:
+    # Active only for the single receipt call; fixture monkeypatch.context restores both.
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", spy_open)
+        m.setattr(io, "open", spy_open)
         block = engine._epoch_receipt_block()
-    finally:
-        os.open = real_os_open
-        io.open = real_io_open
-        if prev_eg_open is None:
-            eg.__dict__.pop("open", None)
-        else:
-            eg.open = prev_eg_open
 
     assert block is not None
-    # Guard-module open: decision opened; no market_segment (case-insensitive).
+    assert opened_paths, "open spy must fire during _epoch_receipt_block"
     assert any(Path(p).name.lower() == "decision.jsonl" for p in opened_paths), opened_paths
     assert not any("market_segment" in p.lower() for p in opened_paths), opened_paths
-    # (a) os/io recorder: no lower-cased market_segment path.
-    assert not any("market_segment" in p.lower() for p in os_io_paths), os_io_paths
     unplaced = block.get("unplaced_rows_list") or {}
     by_stream = unplaced.get("by_stream") or {}
     assert not any("market_segment" in str(k).lower() for k in by_stream), by_stream
+
+
+def test_named_purity_audit_belt_guard_blocks_slipped_market_segment(tmp_path, guard, monkeypatch):
+    """Behavioral: fails when analyzer_research_engine_v62.py:1312-1313 belt guard is removed.
+
+    Force a market_segment slip-through past _epoch_audit_streams skip; the belt
+    abr.guard_no_market_segment_open calls must raise before any open. No source-text.
+    """
+    g, _monitor = guard
+    engine = _engine()
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    _write_jsonl(seg, [{"record_id": "seg-slip", "ts": PRE, "data_epoch_id": OLD}])
+
+    def slipped(_data_root):
+        yield seg, "v3/ledgers/market_segment.jsonl"
+
+    monkeypatch.setattr(engine, "_epoch_audit_streams", slipped)
+    with pytest.raises(RuntimeError, match="market_segment"):
+        engine._epoch_purity_audit(g, str(tmp_path))
 
 
 def test_named_backup_guard_mutant_killed():
     """HM (b): named backup-guard assert — kills surviving mutant that drops guard before open.
 
     file_unplaced_rows and StreamReadMonitor.report must call guard_no_market_segment_open
-    before their open / file_epoch_row_counts sites.
+    before their open / file_epoch_row_counts sites. Source-text checks kept as extra.
     """
     src = Path(eg.__file__).read_text(encoding="utf-8")
 
