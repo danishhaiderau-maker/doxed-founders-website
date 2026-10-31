@@ -255,7 +255,6 @@ from chase_offset_touch_grid import (
     COMPRESSED_SHADOW_POLICY_SIGNATURE,
     TOUCH_GRID_FILE as CHASE_OFFSET_TOUCH_GRID_FILE,
     arm_compressed_shadow_chase,
-    arm_touch_grid_rows,
     candle_ts_sec,
     orig_limit_price,
     poll_compressed_shadow_chase,
@@ -15850,7 +15849,6 @@ def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
 _cycle_3m_written_buckets = {}
 _cycle_3m_inflight_buckets = set()
 _cycle_3m_bucket_lock = threading.Lock()
-_touch_grid_book = {}
 _compressed_shadow_chase_book = {}
 _shadow_chase_bucket_book = {}
 _compressed_shadow_seen_call_ids = set()
@@ -16483,7 +16481,6 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
         with _cycle_3m_bucket_lock:
             _cycle_3m_written_buckets.clear()
             _cycle_3m_inflight_buckets.clear()
-        _touch_grid_book.clear()
         with _compressed_shadow_lock:
             _compressed_shadow_chase_book.clear()
             _compressed_shadow_seen_call_ids.clear()
@@ -16594,7 +16591,7 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None
     if price is None or float(price) <= 0:
         return
     now = time.time()
-    # R22 / RK 7524ab402ae2: _touch_grid_book poll loop deleted (STOP-WRITE / NOT NEEDED).
+    # R22 / RK 7524ab402ae2: touch-grid book poll loop deleted (STOP-WRITE / NOT NEEDED).
     _recover_compressed_shadow_chases_once(now)
     shadow_dead = []
     shadow_rows = []
@@ -20326,10 +20323,10 @@ def _discovery_touch_grid_admission(ai: dict) -> tuple:
 
 
 def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
-    """Arm one shadow-only 0.01–0.30% touch grid per tile-eligible AI call.
+    """Mark one tile-eligible AI call for discovery coverage (shadow-only; no orders).
 
     Family tiles skip the per-lane grid so their paper anchors stay pure.
-    Discovery still needs the full offset grid joined by ``shared_ai_call_id``.
+    R22: discarded chase-grid row build / durable append / in-memory book fill removed.
     Never places paper or live orders.
     """
     basis_ai, admission_basis = _discovery_touch_grid_admission(ai)
@@ -20348,14 +20345,6 @@ def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
     if not call_id or raw_direction not in ("LONG", "SHORT"):
         _collector_record_touch_grid_call(armed=False, ai_executes=raw_ai_executes)
         return False
-    direction = raw_direction
-    if invert_signal_active():
-        direction = "SHORT" if raw_direction == "LONG" else "LONG"
-    raw_ts = (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts")
-    try:
-        signal_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError):
-        signal_ts = time.time()
     signal_price = float(
         (ctx or {}).get("price")
         or ((ctx or {}).get("market_context") or {}).get("price")
@@ -20370,27 +20359,6 @@ def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
     trade_id = "discovery-grid-" + hashlib.sha256(
         f"{call_id}|discovery_touch_grid_v1".encode("utf-8")
     ).hexdigest()[:20]
-    ttl_sec = 1800.0
-    rows = arm_touch_grid_rows(
-        trade_id=trade_id,
-        direction=direction,
-        signal_price=signal_price,
-        signal_ts=signal_ts,
-        ttl_sec=ttl_sec,
-        # No tile paper anchor is claimed as live_orig for discovery rows.
-        live_offset_pct=-1.0,
-        invert_on=invert_signal_active(),
-    )
-    for row in rows:
-        row["places_live_order"] = False
-        row["discovery_shadow_only"] = True
-        row["shared_ai_call_id"] = call_id
-        row["ai_decision"] = str((ai or {}).get("decision") or "UNKNOWN").upper()
-        row["ai_verdict_executes"] = raw_ai_executes
-        row["tile_admission_basis"] = admission_basis
-        row["note"] = "discovery path-touch only; no paper/live order"
-        # R22: chase_offset_touch_grid.jsonl append removed (STOP-WRITE / NOT NEEDED).
-    # R22 / RK 7524ab402ae2: no _touch_grid_book fill (touch-grid arm/poll half gone).
     _discovery_touch_grid_seen_call_ids.add(call_id)
     _collector_record_touch_grid_call(armed=True, ai_executes=raw_ai_executes)
     logger.info(

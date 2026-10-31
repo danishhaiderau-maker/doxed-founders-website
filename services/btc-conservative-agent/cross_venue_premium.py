@@ -38,11 +38,10 @@ from cross_venue_lead import (
     _mid,
 )
 
-# Basename kept for wipe/monitor/readers of historical files. R22 / HM-RK 30 Oct:
-# xvp_shadow_signals stream + shadow_outcome recording RETIRED (ticker/L1-priced);
-# writers removed (HM 46a97b4debee NOT REQUIRED). PremiumEvaluator.SHADOW_FILE is
-# None so the shared _xvl_append path never opens this file; GS-01 signal path stays.
-SHADOW_FILE = "xvp_shadow_signals.jsonl"
+# HM/RK 30 Oct 2026: xvp_shadow_signals stream + shadow_outcome recording RETIRED
+# (ticker/L1-priced). Signal evaluation for GS-01 stays; SHADOW_FILE None skips append.
+# Historical basename "xvp_shadow_signals.jsonl" remains on wipe/monitor tables only.
+SHADOW_FILE = None
 TRIGGER_SCHEMA = "xvp_shadow_trigger_v1"
 OUTCOME_SCHEMA = "xvp_shadow_outcome_v1"
 STATUS_WARMING = "MEAN_WARMING_UP"

@@ -64,10 +64,17 @@ def test_xvp_evaluator_shadow_file_is_none():
     assert GsPremiumEvaluator.SHADOW_FILE is None
 
 
+def test_xvp_module_shadow_file_is_none():
+    """HM #956: module SHADOW_FILE must stay None so lead_lag never opens xvp stream."""
+    import cross_venue_premium as xvp
+
+    assert xvp.SHADOW_FILE is None
+
+
 def test_xvp_basename_kept_for_wipe_and_monitor_not_serialized_append():
-    assert 'SHADOW_FILE = "xvp_shadow_signals.jsonl"' in Path(__file__).with_name(
-        "cross_venue_premium.py"
-    ).read_text(encoding="utf-8")
+    src = Path(__file__).with_name("cross_venue_premium.py").read_text(encoding="utf-8")
+    assert "SHADOW_FILE = None" in src
+    assert 'SHADOW_FILE = "xvp_shadow_signals.jsonl"' not in src
     # Historical basename stays on wipe / monitor / rotation tables (no bot.py append).
     assert '"xvp_shadow_signals.jsonl"' in Path(__file__).with_name(
         "full_reset_no_archive.py"
@@ -103,10 +110,11 @@ def test_order_multiverse_entry_grid_status_stays_disabled_r17():
 
 
 def test_r22_touch_grid_poll_arm_recovery_symbols_gone():
-    """RK 7524ab402ae2: touch-grid half + retired-jsonl recovery read removed; shadow kept."""
+    """RK 7524ab402ae2 + HM #956: touch-grid book/arm rows + recovery read gone; shadow kept."""
     assert "touch_grid_books_inflight" not in BOT
     assert "_chase_grid_recovery_candidates" not in BOT
-    assert "_touch_grid_book[trade_id] = new_grid_state(rows)" not in BOT
+    assert "_touch_grid_book" not in BOT
+    assert "arm_touch_grid_rows" not in BOT
     assert "poll_grid_state" not in BOT
     assert "new_grid_state" not in BOT
     assert "recover_compressed_shadow_states" not in BOT
@@ -119,5 +127,4 @@ def test_r22_touch_grid_poll_arm_recovery_symbols_gone():
         if isinstance(n, ast.FunctionDef) and n.name == "_poll_chase_offset_touch_grid"
     )
     poll_src = ast.get_source_segment(BOT, poll) or ""
-    assert "for tid, grid in list(_touch_grid_book.items())" not in poll_src
     assert "poll_compressed_shadow_chase(" in poll_src

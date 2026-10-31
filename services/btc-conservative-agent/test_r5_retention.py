@@ -311,7 +311,7 @@ def test_rejected_arming_env_absent_from_pr4_paths():
     assert "R5_RETENTION_DELETES_ENABLED" not in bot
 
 
-def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path):
+def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path, monkeypatch):
     retention_stop_write.latch(r5.FAMILY_LIFECYCLE_BUNDLES, reason="t", used=10, cap=1, now=time.time())
     retention_stop_write.latch(r5.FAMILY_V22, reason="t", used=10, cap=1, now=time.time())
     bot = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
@@ -324,11 +324,14 @@ def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path):
     sink = (Path(__file__).resolve().parent / "strategist_streams_collector.py").read_text(encoding="utf-8")
     assert "r5_retention" not in sink and "retention_stop_write" not in sink
     import strategist_streams_collector as ssc
+    # R25: Sink configures disk_alert under BOT_DATA_DIR (else cwd) — bind to tmp.
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path / "bot_data"))
     path = tmp_path / "book10.jsonl"
     # #949 Sink: keep= removed; cap is max_total_bytes (merge-adapt only).
     s = ssc.Sink(str(path), rotate_bytes=10_000, max_total_bytes=10 * 1024 * 1024)
     s.write({"m": 1, "pad": "ok"})
     assert path.exists() and s.rows >= 1
+    assert not (Path(__file__).resolve().parent / "retention" / "disk_alert_red.json").exists()
 
 
 def test_lifecycle_materialize_respects_stop_write(tmp_path):
