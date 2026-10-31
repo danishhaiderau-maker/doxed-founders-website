@@ -943,6 +943,8 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
         "api_data_sync_analyzer_report",
         "api_analyzer_mirror_status",
         "_analyzer_mirror_no_validated_bundle_payload",
+        "_analyzer_mirror_unreadable_status_payload",
+        "classify_analyzer_mirror_status_for_monitor",
     }
     selected = [
         node for node in tree.body
@@ -966,6 +968,7 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
             "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
             "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
             "_ANALYZER_BUNDLE_NO_VALIDATED_REASON": "NO_VALIDATED_ANALYZER_BUNDLE",
+            "_ANALYZER_STATUS_UNREADABLE_REASON": "ANALYZER_STATUS_UNREADABLE",
             "_ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES": 50 * 1024 * 1024,
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)

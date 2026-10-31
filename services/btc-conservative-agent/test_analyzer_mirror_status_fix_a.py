@@ -1,10 +1,10 @@
-"""Fix A — /api/analyzer-mirror/status no-bundle → non-404 RED NO_VALIDATED_ANALYZER_BUNDLE.
+"""Analyzer-mirror status label — Fix A + seal ca14dba80fca (unreadable 200).
 
-Plan: docs/plan-shipping-analyzer-fix-20261031.md sha e448f5f67f8a
-Governing RC: internal/rootcause-shipping-analyzer-20261031.md sha 6361e65285b1
-(E1–E3 receipts 3c6baee9dd58). Keep /api/analyzer/summary and /analysis/* at 503.
-Unreadable status.json stays HTTP 404 (plan covers only `active is None`).
-Monitor/dashboard consumers = NOT TESTED (R39 follow-up). Fix A ≠ DONE (R31/R41).
+Seal: docs/card-analyzer-mirror-status-label-20261031.md ca14dba80fca
+Prior Fix A: docs/plan-shipping-analyzer-fix-20261031.md sha e448f5f67f8a
+Rules R0–R48 1120edc5b538. Keep /api/analyzer/summary and /analysis/* at 503
+when no validated bundle. Unreadable status.json → HTTP 200 RED
+ANALYZER_STATUS_UNREADABLE (never 404). Mutation tests required (R23).
 """
 from __future__ import annotations
 
@@ -21,7 +21,9 @@ ROOT = Path(__file__).resolve().parent
 BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
 
 _REASON = "NO_VALIDATED_ANALYZER_BUNDLE"
+_UNREADABLE = "ANALYZER_STATUS_UNREADABLE"
 _NO_VALID = "no valid bundle"
+_SCHEMA = "analyzer_mirror_bundle_v2"
 
 _NO_BUNDLE_200 = """\
         resp = jsonify(_analyzer_mirror_no_validated_bundle_payload(
@@ -38,12 +40,24 @@ _NO_BUNDLE_404_MUTANT = """\
             "legacy_data_preserved": legacy_preserved,
         }), 404"""
 
+_UNREADABLE_200 = """\
+        resp = jsonify(_analyzer_mirror_unreadable_status_payload(
+            legacy_preserved=legacy_preserved,
+        ))
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200"""
+
+_UNREADABLE_404_MUTANT = """\
+        return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404"""
+
 
 def _status_fns(source: str = BOT):
     tree = ast.parse(source)
     wanted = {
         "api_analyzer_mirror_status",
         "_analyzer_mirror_no_validated_bundle_payload",
+        "_analyzer_mirror_unreadable_status_payload",
+        "classify_analyzer_mirror_status_for_monitor",
     }
     selected = [
         node for node in tree.body
@@ -72,20 +86,22 @@ def _client_from_source(
         "monitor_integrity_authorized": lambda: monitor,
         "_active_analyzer_mirror_dir": lambda: active,
         "_analyzer_mirror_dir": lambda: legacy,
-        "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
+        "_ANALYZER_BUNDLE_SCHEMA": _SCHEMA,
         "_ANALYZER_BUNDLE_NO_VALIDATED_REASON": reason_const,
+        "_ANALYZER_STATUS_UNREADABLE_REASON": _UNREADABLE,
     }
     exec(
         compile(ast.Module(body=_status_fns(source), type_ignores=[]), "bot.py", "exec"),
         namespace,
     )
-    return app.test_client()
+    return app.test_client(), namespace
 
 
 def _client(*, active, legacy: Path, admin: bool = True, monitor: bool = False):
-    return _client_from_source(
+    client, _ns = _client_from_source(
         BOT, active=active, legacy=legacy, admin=admin, monitor=monitor
     )
+    return client
 
 
 def _assert_no_bundle_red(client, *, legacy_preserved: bool = True):
@@ -97,10 +113,25 @@ def _assert_no_bundle_red(client, *, legacy_preserved: bool = True):
     assert body["status"] == "RED"
     assert body["health"] == "RED"
     assert body["reason"] == _REASON
-    assert body["required_schema"] == "analyzer_mirror_bundle_v2"
+    assert body["required_schema"] == _SCHEMA
     assert body["legacy_data_preserved"] is legacy_preserved
     assert body["alarms"][0]["code"] == _REASON
     assert body["alarms"][0]["severity"] == "critical"
+    assert response.headers.get("Cache-Control") == "no-store"
+
+
+def _assert_unreadable_red(client, *, legacy_preserved: bool = True):
+    response = client.get("/api/analyzer-mirror/status")
+    assert response.status_code == 200
+    assert response.status_code != 404
+    body = response.json
+    assert body["available"] is False
+    assert body["status"] == "RED"
+    assert body["health"] == "RED"
+    assert body["reason"] == _UNREADABLE
+    assert body["required_schema"] == _SCHEMA
+    assert body["legacy_data_preserved"] is legacy_preserved
+    assert body["alarms"][0]["code"] == _UNREADABLE
     assert response.headers.get("Cache-Control") == "no-store"
 
 
@@ -170,6 +201,7 @@ def _analysis_client(*, active, authed: bool = True):
 
 
 def test_no_validated_bundle_returns_red_non_404_on_status_health_alarm():
+    """S1: active is None → 200 available=false NO_VALIDATED_ANALYZER_BUNDLE."""
     with tempfile.TemporaryDirectory() as tmp:
         legacy = Path(tmp) / "legacy"
         legacy.mkdir()
@@ -184,11 +216,16 @@ def test_legacy_data_preserved_false_when_no_legacy_dir():
 
 
 def test_valid_bundle_status_still_200_available_true():
+    """S2: valid v2 status.json → 200 available=true schema v2."""
     with tempfile.TemporaryDirectory() as tmp:
         gen = Path(tmp) / "generation-ok"
         gen.mkdir()
         (gen / "status.json").write_text(
-            '{"schema":"analyzer_mirror_bundle_v2","complete":true,"generation":"g1"}',
+            json.dumps({
+                "schema": _SCHEMA,
+                "complete": True,
+                "generation": "g1",
+            }),
             encoding="utf-8",
         )
         legacy = Path(tmp) / "legacy"
@@ -199,31 +236,63 @@ def test_valid_bundle_status_still_200_available_true():
         body = response.json
         assert body["available"] is True
         assert body["generation"] == "g1"
+        assert body["schema"] == _SCHEMA
         assert body.get("reason") != _REASON
+        assert body.get("reason") != _UNREADABLE
         assert response.headers.get("Cache-Control") == "no-store"
 
 
-def test_unreadable_status_json_stays_404():
-    """R38: Fix A does not rewrite the except branch — unreadable status.json → 404."""
+def test_wrong_schema_while_pointer_set_is_unreadable_red():
+    """S3: wrong/missing schema on disk while pointer set → not soft-GREEN."""
+    with tempfile.TemporaryDirectory() as tmp:
+        gen = Path(tmp) / "generation-wrong-schema"
+        gen.mkdir()
+        (gen / "status.json").write_text(
+            json.dumps({"schema": "analyzer_mirror_bundle_v1", "complete": True}),
+            encoding="utf-8",
+        )
+        legacy = Path(tmp) / "legacy"
+        legacy.mkdir()
+        _assert_unreadable_red(_client(active=gen, legacy=legacy), legacy_preserved=True)
+
+
+def test_unreadable_status_json_returns_200_analyzer_status_unreadable():
+    """S4/B1: unreadable status.json → 200 available=false ANALYZER_STATUS_UNREADABLE."""
     with tempfile.TemporaryDirectory() as tmp:
         gen = Path(tmp) / "generation-broken"
         gen.mkdir()
         (gen / "status.json").write_text("{not-json", encoding="utf-8")
         legacy = Path(tmp) / "legacy"
         legacy.mkdir()
-        client = _client(active=gen, legacy=legacy)
-        response = client.get("/api/analyzer-mirror/status")
-        assert response.status_code == 404
-        assert response.json["available"] is False
-        assert response.json["reason"] == "no local analyzer report uploaded yet"
+        _assert_unreadable_red(_client(active=gen, legacy=legacy), legacy_preserved=True)
 
 
 def test_unauth_still_401():
+    """S5."""
     with tempfile.TemporaryDirectory() as tmp:
         legacy = Path(tmp)
         client = _client(active=None, legacy=legacy, admin=False, monitor=False)
         response = client.get("/api/analyzer-mirror/status")
         assert response.status_code == 401
+
+
+def test_monitor_classifier_200_available_false_is_red():
+    """S6/B3: monitor sees 200 + available=false as RED (not GREEN / not route-missing)."""
+    _, ns = _client_from_source(
+        BOT,
+        active=None,
+        legacy=Path("/tmp"),
+    )
+    classify = ns["classify_analyzer_mirror_status_for_monitor"]
+    assert classify(200, {"available": False, "status": "RED", "reason": _REASON}) == "RED"
+    assert classify(200, {"available": False, "status": "RED", "reason": _UNREADABLE}) == "RED"
+    assert classify(404, {"available": False}) == "RED_MISLABEL_404"
+    assert classify(404, {"available": False}) != "GREEN"
+    # Mutation: treating available=false as healthy must fail this contract.
+    with pytest.raises(AssertionError):
+        assert classify(200, {"available": False}) == "GREEN"
+    with pytest.raises(AssertionError):
+        assert classify(200, {"available": False}) == "ROUTE_MISSING"
 
 
 def test_mutation_proof_restore_404_fails_red_contract():
@@ -234,13 +303,30 @@ def test_mutation_proof_restore_404_fails_red_contract():
     with tempfile.TemporaryDirectory() as tmp:
         legacy = Path(tmp) / "legacy"
         legacy.mkdir()
-        client = _client_from_source(mutant, active=None, legacy=legacy)
+        client, _ns = _client_from_source(mutant, active=None, legacy=legacy)
         with pytest.raises(AssertionError):
             _assert_no_bundle_red(client)
-        # Mutant behaviour itself: 404, not RED body.
         response = client.get("/api/analyzer-mirror/status")
         assert response.status_code == 404
         assert response.json.get("status") != "RED"
+
+
+def test_mutation_proof_unreadable_404_restored_fails():
+    """S4 mutation: restore HTTP 404 for unreadable → contract FAIL (B1)."""
+    assert _UNREADABLE_200 in BOT
+    mutant = BOT.replace(_UNREADABLE_200, _UNREADABLE_404_MUTANT, 1)
+    assert mutant != BOT
+    with tempfile.TemporaryDirectory() as tmp:
+        gen = Path(tmp) / "generation-broken"
+        gen.mkdir()
+        (gen / "status.json").write_text("{not-json", encoding="utf-8")
+        legacy = Path(tmp) / "legacy"
+        legacy.mkdir()
+        client, _ns = _client_from_source(mutant, active=gen, legacy=legacy)
+        with pytest.raises(AssertionError):
+            _assert_unreadable_red(client)
+        response = client.get("/api/analyzer-mirror/status")
+        assert response.status_code == 404
 
 
 def test_mutation_proof_health_amber_fails_red_contract():
@@ -252,7 +338,7 @@ def test_mutation_proof_health_amber_fails_red_contract():
     with tempfile.TemporaryDirectory() as tmp:
         legacy = Path(tmp) / "legacy"
         legacy.mkdir()
-        client = _client_from_source(mutant, active=None, legacy=legacy)
+        client, _ns = _client_from_source(mutant, active=None, legacy=legacy)
         with pytest.raises(AssertionError):
             _assert_no_bundle_red(client)
         body = client.get("/api/analyzer-mirror/status").json
@@ -268,7 +354,7 @@ def test_mutation_proof_reason_drift_fails_red_contract():
     with tempfile.TemporaryDirectory() as tmp:
         legacy = Path(tmp) / "legacy"
         legacy.mkdir()
-        client = _client_from_source(mutant, active=None, legacy=legacy)
+        client, _ns = _client_from_source(mutant, active=None, legacy=legacy)
         with pytest.raises(AssertionError):
             _assert_no_bundle_red(client)
         assert client.get("/api/analyzer-mirror/status").json["reason"] == "NO_BUNDLE"
@@ -303,7 +389,6 @@ def test_analysis_routes_no_bundle_return_503():
         assert "no complete validated analyzer bundle" in body["error"] or body[
             "error"
         ] == _NO_VALID
-        # No dashboard/HTML body when fail-closed.
         assert b"<!DOCTYPE" not in (response.data or b"")
         assert b"<html" not in (response.data or b"").lower()
 
@@ -386,7 +471,7 @@ def test_mutation_proof_legacy_false_flipped_is_caught():
     with tempfile.TemporaryDirectory() as tmp:
         missing = Path(tmp) / "no-such-legacy-dir"
         assert not missing.exists()
-        client = _client_from_source(mutant, active=None, legacy=missing)
+        client, _ns = _client_from_source(mutant, active=None, legacy=missing)
         with pytest.raises(AssertionError):
             _assert_no_bundle_red(client, legacy_preserved=False)
         assert client.get("/api/analyzer-mirror/status").json[
@@ -394,18 +479,40 @@ def test_mutation_proof_legacy_false_flipped_is_caught():
         ] is True
 
 
+def test_s7_reverted_pre_b1_unreadable_404_fails_new_contract():
+    """S7/B3: real reverted pre-B1 unreadable→404 code fails the new 200 contract."""
+    # Revert only the unreadable branch to the pre-B1 404 shape (real code, not string-search pass).
+    pre_b1 = BOT.replace(_UNREADABLE_200, _UNREADABLE_404_MUTANT, 1)
+    assert pre_b1 != BOT
+    assert "ANALYZER_STATUS_UNREADABLE" in BOT
+    with tempfile.TemporaryDirectory() as tmp:
+        gen = Path(tmp) / "generation-broken"
+        gen.mkdir()
+        (gen / "status.json").write_text("{not-json", encoding="utf-8")
+        legacy = Path(tmp) / "legacy"
+        legacy.mkdir()
+        client, _ns = _client_from_source(pre_b1, active=gen, legacy=legacy)
+        with pytest.raises(AssertionError):
+            _assert_unreadable_red(client)
+        assert client.get("/api/analyzer-mirror/status").status_code == 404
+
+
 if __name__ == "__main__":
     test_no_validated_bundle_returns_red_non_404_on_status_health_alarm()
     test_legacy_data_preserved_false_when_no_legacy_dir()
     test_valid_bundle_status_still_200_available_true()
-    test_unreadable_status_json_stays_404()
+    test_wrong_schema_while_pointer_set_is_unreadable_red()
+    test_unreadable_status_json_returns_200_analyzer_status_unreadable()
     test_unauth_still_401()
+    test_monitor_classifier_200_available_false_is_red()
     test_summary_no_bundle_returns_503()
     test_analysis_routes_no_bundle_return_503()
     test_mutation_proof_restore_404_fails_red_contract()
+    test_mutation_proof_unreadable_404_restored_fails()
     test_mutation_proof_health_amber_fails_red_contract()
     test_mutation_proof_reason_drift_fails_red_contract()
     test_mutation_proof_summary_503_softened_is_caught()
     test_mutation_proof_analysis_503_softened_is_caught()
     test_mutation_proof_legacy_false_flipped_is_caught()
-    print("analyzer mirror status Fix A checks passed")
+    test_s7_reverted_pre_b1_unreadable_404_fails_new_contract()
+    print("analyzer mirror status label (ca14dba80fca) checks passed")
