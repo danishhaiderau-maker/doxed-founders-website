@@ -168,7 +168,34 @@ def test_red_only_when_our_fly_checks_also_fail_and_annotated():
     assert fps.annotate_checks(checks, r) == 2
     assert checks[0]["hint"].startswith("likely Fly platform incident: Machines API errors (https://status.flyio.net/")
     assert checks[0]["platform_correlation"]["likely_platform"] is True
-    assert "platform_correlation" not in checks[2] and "platform_correlation" not in checks[3]
+    # Option B / R36 (Gate 0 DRIFT_DIMS_DROPPED): non-failing rows keep the key present as null.
+    assert "platform_correlation" in checks[2] and checks[2]["platform_correlation"] is None
+    assert "platform_correlation" in checks[3] and checks[3]["platform_correlation"] is None
+
+
+def test_option_b_every_checks_row_always_has_platform_correlation_key():
+    """Mutation: dropping always-present emit must fail Option B / Gate 0 class."""
+    checks = [
+        {"id": "fly.process", "status": "RED", "hint": "not alive"},
+        {"id": "shipper.progress", "status": "GREEN", "hint": ""},
+        {"id": "ws.ticks", "status": "GREEN", "hint": ""},
+    ]
+    r = fps.assess(_snap(_incident()), checks, NOW, "sin")
+    fps.annotate_checks(checks, r)
+    for row in checks:
+        assert "platform_correlation" in row, row.get("id")
+    assert checks[0]["platform_correlation"] is not None
+    assert checks[1]["platform_correlation"] is None
+    assert checks[2]["platform_correlation"] is None
+    # Mutation proof: a helper that omits the key on quiet rows fails Option B.
+    quiet = {"id": "quiet.row", "status": "GREEN"}
+    bad = [dict(quiet)]
+    # Simulate pre-Option-B optional attach (only failing ids).
+    failing = {f["id"] for f in r.get("app_failing_checks") or []}
+    for c in bad:
+        if c.get("id") in failing:
+            c["platform_correlation"] = {"likely_platform": False}
+    assert "platform_correlation" not in bad[0]
 
 
 def test_fly_gap_amber_alone_does_not_escalate_platform_to_red():
@@ -227,7 +254,8 @@ def test_selfaware_finding_annotates_fly_findings_without_network_when_offline()
     fd = diagnose.check_fly_platform(facts, found, state)
     assert fd.id == "fly.platform_status" and fd.severity == "RED"
     assert found[0].causes[0]["cause"] == "fly_platform_incident" and len(found[0].causes) == 1
-    assert "platform_correlation" not in found[1].evidence
+    # Option B / R36: non-correlated finding evidence keeps key present as null (not absent).
+    assert "platform_correlation" in found[1].evidence and found[1].evidence["platform_correlation"] is None
     assert facts["fly_platform"]["classification"] == "RED"
     offline = diagnose.check_fly_platform({"now": NOW, "watcher": {}}, [], {})
     assert offline.severity == "SKIP" and "NOT_PROBED" in offline.observed

@@ -692,6 +692,7 @@ test_tile_fade3_deriv_rotation.py
 ../../scripts/test_fly_deploy_reset_proof.py
 ../../scripts/test_fly_deploy_workflow_order.py
 ../../scripts/test_fly_failure_paper_resume.py
+../../scripts/test_fly_platform_status.py
 ../../scripts/test_fly_full_reset_gate.py
 ../../scripts/test_fly_postdeploy_active_gate.py
 ../../scripts/test_fly_preserve_maintenance.py

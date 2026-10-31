@@ -42,19 +42,24 @@ def assess(facts: dict[str, Any], findings: list[Any], state: dict[str, Any], no
 
 
 def annotate(findings: list[Any], res: dict[str, Any]) -> None:
-    """Attach the platform correlation to failing diagnose.Finding objects (evidence + leading cause)."""
+    """Option B (R36): every finding evidence always carries ``platform_correlation``.
+
+    Failing Fly-correlated findings get the object + leading cause; others get ``null``.
+    """
     corr = res.get("correlation") or {}
     failing = {f["id"] for f in res.get("app_failing_checks") or []}
     for f in findings:
-        if f.id not in failing:
-            continue
-        f.evidence["platform_correlation"] = {
-            "likely_platform": corr.get("likely_platform"), "title": corr.get("title"), "url": corr.get("url"),
-            "classification": res.get("classification")}
-        if corr.get("likely_platform"):
-            f.causes = [{"cause": "fly_platform_incident", "confidence": "likely", "evidence": corr.get("url"),
-                         "text": f"likely Fly platform incident: {corr.get('title')} ({corr.get('url')})"}] + [
-                c for c in f.causes if c.get("cause") != "unknown"]
+        if f.id in failing:
+            f.evidence["platform_correlation"] = {
+                "likely_platform": corr.get("likely_platform"), "title": corr.get("title"), "url": corr.get("url"),
+                "classification": res.get("classification")}
+            if corr.get("likely_platform"):
+                f.causes = [{"cause": "fly_platform_incident", "confidence": "likely", "evidence": corr.get("url"),
+                             "text": f"likely Fly platform incident: {corr.get('title')} ({corr.get('url')})"}] + [
+                    c for c in f.causes if c.get("cause") != "unknown"]
+        else:
+            # Always present; null ≠ missing (Gate 0 DRIFT_DIMS_DROPPED).
+            f.evidence["platform_correlation"] = None
 
 
 def finding(res: dict[str, Any]) -> dict[str, Any]:
