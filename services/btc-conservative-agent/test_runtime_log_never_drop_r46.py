@@ -178,13 +178,13 @@ REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
 
 
 def _status_json(bot_mod):
-    """GET /api/status with probe cache disabled (full payload, not boot stub)."""
-    bot_mod._PROBE_CACHE_TTL_SEC = 0.0
-    for cache in getattr(bot_mod, "_PROBE_CACHES", []):
-        try:
-            cache.clear()
-        except Exception:
-            pass
+    """GET /api/status full payload (bootstrap must already be complete).
+
+    Clears probe cache via the shared helper — never mutates
+    ``_PROBE_CACHE_TTL_SEC`` (TTL<=0 bypasses the cache and breaks
+    ``test_http_emergency_admission`` probe-cache asserts).
+    """
+    bot_mod._probe_cache_clear_all()
     resp = bot_mod.app.test_client().get("/api/status", environ_base=REMOTE)
     assert resp.status_code == 200
     body = resp.get_json()
@@ -206,6 +206,8 @@ def test_api_status_exposes_runtime_log_retention_cap_refusals(monkeypatch):
     import bot as bot_mod
 
     monkeypatch.setattr(bot_mod, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    # Do not touch _PROBE_CACHE_TTL_SEC — leave the production clamp intact.
+    assert 0.0 < bot_mod._PROBE_CACHE_TTL_SEC <= 1.0
     body = _status_json(bot_mod)
     _assert_status_has_cap_refusals(body)
     # Source pin: status() must assign the retention block (M5 target line).
