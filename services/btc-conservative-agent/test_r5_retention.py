@@ -499,6 +499,7 @@ def test_rejected_arming_env_absent_from_pr4_paths():
 
 
 def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path):
+    _bind_retention_state(tmp_path)
     retention_stop_write.latch(r5.FAMILY_LIFECYCLE_BUNDLES, reason="t", used=10, cap=1, now=time.time())
     retention_stop_write.latch(r5.FAMILY_V22, reason="t", used=10, cap=1, now=time.time())
     bot = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
