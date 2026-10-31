@@ -308,9 +308,28 @@ def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard,
         return real_count(path, relpath, *args, **kwargs)
 
     monkeypatch.setattr(eg, "file_pre_epoch_rows", tracking)
+
+    # (2) Narrow open spy: analyzer_epoch_guard module `open` only (file_epoch_row_counts
+    # :290/:299). Scoped to this _epoch_purity_audit call; monkeypatch restores after.
+    import builtins
+
+    opened_basenames: list[str] = []
+    real_guard_open = builtins.open
+    open_spy_fired = {"n": 0}
+
+    def guard_module_open(file, *args, **kwargs):
+        open_spy_fired["n"] += 1
+        opened_basenames.append(Path(str(file)).name)
+        return real_guard_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(eg, "open", guard_module_open, raising=False)
     retained, by_stream = engine._epoch_purity_audit(g, str(tmp_path))
     assert not any("market_segment" in r for r in seen_rels), seen_rels
     assert any(r.endswith("decision.jsonl") for r in seen_rels), seen_rels
+    # Spy must have fired (decision.jsonl open via file_epoch_row_counts).
+    assert open_spy_fired["n"] >= 1, opened_basenames
+    # No market_segment basename opened — case-insensitive.
+    assert not any("market_segment" in name.lower() for name in opened_basenames), opened_basenames
     assert not any("market_segment" in k for k in by_stream), by_stream
     assert "v3/ledgers/market_segment.jsonl" not in by_stream
     # Helper + mutation: skip removed → retired path would be selected.
