@@ -143,6 +143,7 @@ Last status refresh: 2026-10-26 05:02 AEDT. Boss = Cursor Project.
 | `#911` fly.revision serving-deploy fields | **OPEN** — quiet-bundle next | [#911](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/911) |
 | `#884` Fly deploy step allowlist | **OPEN** head `ebb63738` — quiet-bundle after `#911` | [#884](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/884) |
 | `#908` tracker remaster | **OPEN** this PR — remastered onto `c7b3d1690`; **HOLD** squash until after `#884` | [#908](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/908) |
+| Dispatch-only Fly deploy lock | **OPEN** head `7afd45416713a927eda7c1526d4aaf6d6bfd870b` | [#939](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/939) |
 | Simplified dashboard PR | **BLOCKED** need Boss PR#/branch | HANDOFF |
 | Memory-leak 3h verdict | **QUEUED** | store `internal/btc-memory-leak-9c12c3bb.md` |
 | GS-01 arm @ $0.25 | **BLOCKED** — all gates + Danish OK | — |
