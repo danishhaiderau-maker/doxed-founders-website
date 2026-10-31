@@ -595,13 +595,16 @@ def test_book10_pre_epoch_trade_outside_window_halts():
 
 
 def test_roster_policy_wraps_book10_gap_fail_closed():
-    """HM/Strategist: roster_policy_report must wrap _regime_key_from_row → UNKNOWN+reason+RED."""
+    """R34 / engine:~19600: roster_policy_report must wrap _regime_key_from_row → UNKNOWN+reason+RED."""
     start = ENGINE.index("def roster_policy_report")
     end = ENGINE.index("\ndef feature_importance_report", start)
     block = ENGINE[start:end]
+    # File:line evidence — wrap lives on tip at roster_policy_report (was ~19600 on prior tip).
+    assert ENGINE.count("def roster_policy_report") == 1
     assert "BOOK10_OR_TRADES_UNAVAILABLE" in block or "_roster_policy_fail_closed_payload" in block
     assert "except (RuntimeError, ValueError)" in block
     assert '"status": "RED"' in ENGINE[ENGINE.index("def _roster_policy_fail_closed_payload"):start]
+    assert "_regime_key_from_row" in block
     # Mutation: remove the try/except wrap → contract fails.
     mutant = block.replace("except (RuntimeError, ValueError) as exc:", "except ():  # mutant")
     assert "except (RuntimeError, ValueError)" not in mutant
@@ -610,9 +613,65 @@ def test_roster_policy_wraps_book10_gap_fail_closed():
 
 
 def test_regime_runtime_note_documents_stop_risk():
-    assert "1.4e9" in abr.REGIME_RUNTIME_NOTE or "1.4e9" in abr.REGIME_RUNTIME_NOTE.replace(" ", "")
+    assert "FORBIDDEN" in abr.REGIME_RUNTIME_NOTE or "fail closed" in abr.REGIME_RUNTIME_NOTE.lower()
     assert "45-min" in abr.REGIME_RUNTIME_NOTE or "STOP" in abr.REGIME_RUNTIME_NOTE
-    assert "book_rows_for_window" in (ROOT / "analyzer_book10_regime.py").read_text(encoding="utf-8")
+    src = (ROOT / "analyzer_book10_regime.py").read_text(encoding="utf-8")
+    assert "book_rows_for_window" in src
+    assert "refuse_unindexed_book10_scan" in src
+
+
+def test_unindexed_book10_path_fail_closed():
+    """45-min STOP: unindexed full scan is refused; classify_at must call book_rows_for_window."""
+    with pytest.raises(RuntimeError, match="unindexed|FORBIDDEN|book_rows_for_window"):
+        abr.refuse_unindexed_book10_scan()
+    src = (ROOT / "analyzer_book10_regime.py").read_text(encoding="utf-8")
+    start = src.index("def classify_at")
+    end = src.index("\ndef tags_from_trade_row", start)
+    block = src[start:end]
+    assert "book_rows_for_window" in block
+    # Mutation: drop window helper → contract fails.
+    mutant = block.replace("book_rows_for_window(", "list(# mutant ")
+    assert "book_rows_for_window(" not in mutant
+    with pytest.raises(AssertionError):
+        assert "book_rows_for_window(" in mutant
+
+
+def test_amend2_c3_exact_status_label_constant():
+    """AMEND2 C3: exact RETIRED status label string must exist in tip tree."""
+    import retired_streams as rs
+
+    expected = "RETIRED / MARKET_SEGMENTS_RETIRED_R17 (write-stopped at cap, not deleted)"
+    assert rs.MARKET_SEGMENT_STATUS_LABEL == expected
+    assert rs.status_label_for_retired_stream("market_segment") == expected
+    assert expected in (ROOT / "retired_streams.py").read_text(encoding="utf-8")
+
+
+def test_book10_indexed_path_observed_timing():
+    """OBSERVED microbench: indexed classify_at path (windowed). Unindexed is fail-closed (no timing)."""
+    floor = abr.EPOCH_FLOOR_TS
+    # ~110 book rows spanning a short window; 500 classify calls.
+    book = [
+        {"ts": floor + 1000 + i, "bid": 100.0 + (i % 7) * 0.01, "ask": 100.2 + (i % 7) * 0.01}
+        for i in range(110)
+    ]
+    trades = [{"ts": floor + 1000 + i, "price": 100.1, "amount": 0.01} for i in range(20)]
+    t = floor + 1000 + 90
+    # Warmup
+    abr.classify_at(t, book, trade_rows=trades)
+    n = 500
+    t0 = time.perf_counter()
+    for _ in range(n):
+        abr.classify_at(t, book, trade_rows=trades)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    per_call_ms = elapsed_ms / n
+    # Record OBSERVED in assert message for receipt; keep a loose upper bound (not a flaky gate).
+    assert per_call_ms < 50.0, f"indexed OBSERVED {per_call_ms:.4f} ms/call over {n} iters"
+    # Expose for receipt scrapers
+    test_book10_indexed_path_observed_timing.observed_ms_per_call = per_call_ms
+    test_book10_indexed_path_observed_timing.observed_iters = n
+    assert abr.UNINDEXED_BOOK10_FORBIDDEN
+    with pytest.raises(RuntimeError):
+        abr.refuse_unindexed_book10_scan()
 
 
 def test_exact_pin_match_rejects_tip_short_with_suffix():

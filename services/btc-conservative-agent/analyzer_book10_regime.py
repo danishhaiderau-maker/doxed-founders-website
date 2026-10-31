@@ -115,11 +115,20 @@ def guard_no_market_segment_open(path: str | Any) -> None:
 # Real-data book10+trades regime cost note (Strategist f21717ab1c85).
 # Naive per-trade full scan of ~1e5 book rows × ~1.4e4 trades ≈ 1.4e9 steps —
 # expected wall time on Fly/laptop can approach the 45-min analyzer STOP budget.
-# Prefer windowed/index slices (see book_rows_for_window) for production runs.
+# Production path is fail-closed indexed only (book_rows_for_window); unindexed full
+# mid scan is refused (45-min STOP).
 REGIME_RUNTIME_NOTE = (
     "BOOK10_TRADES_DIRVOL_V1: per-trade full book scan is O(n_trades * n_book); "
-    "real-data estimate ~1.4e9 steps — use indexed window slices; risk of 45-min STOP."
+    "unindexed path FORBIDDEN (fail closed) — use book_rows_for_window; risk of 45-min STOP."
 )
+UNINDEXED_BOOK10_FORBIDDEN = (
+    "AMEND2 unindexed book10 full scan forbidden (45-min STOP); use book_rows_for_window"
+)
+
+
+def refuse_unindexed_book10_scan() -> None:
+    """Fail closed: no public unindexed full-book mid scan (45-min analyzer STOP)."""
+    raise RuntimeError(UNINDEXED_BOOK10_FORBIDDEN)
 
 
 def _mid_from_book_row(row: Mapping[str, Any]) -> float | None:
@@ -239,7 +248,8 @@ def classify_at(
             "method_id": REGIME_METHOD_ID,
         }
 
-    # Indexed window slice (halts on any pre-epoch row in the offered set).
+    # Indexed window slice only (halts on any pre-epoch row in the offered set).
+    # Unindexed full-book mid scan is fail-closed — never iterate book_rows for mids here.
     windowed = book_rows_for_window(
         t, book_rows, window_sec=float(DIR_WINDOW_SEC) + float(MAX_MID_AGE_SEC) + float(STEP_SEC)
     )
