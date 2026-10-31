@@ -91,10 +91,25 @@ def test_healthy_state_is_green_and_lag_thresholds():
     assert (amber["status"], red["status"], fine["status"]) == ("AMBER", "RED", "GREEN")
 
 
-def test_no_beacon_is_unknown_not_alerting_and_stale_beacon_is_amber():
-    assert _v(beacon=None)["status"] == "UNKNOWN" and _v(beacon=None)["alert"] is False
-    stale = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5}, beacon_received_at=NOW - 3600)
-    assert stale["status"] == "AMBER" and "BEACON_STALE" in stale["reasons"][0]
+def test_no_beacon_is_red_and_stale_tiers_use_shared_amber10_red30():
+    """Card 9fd17232b95b: missing → RED; AMBER@10m / RED@30m from shared constant family."""
+    missing = _v(beacon=None)
+    assert missing["status"] == "RED" and missing["alert"] is True
+    assert "NO_LAPTOP_BEACON_NO_ACK" in missing["reason_codes"]
+    # Shared family: RED = 3 × AMBER base
+    assert ep.BEACON_STALE_AMBER_SEC == 10 * 60
+    assert ep.BEACON_STALE_RED_SEC == 3 * ep.BEACON_STALE_AMBER_SEC
+    assert ep.BEACON_STALE_SEC == ep.BEACON_STALE_RED_SEC
+    amber = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5},
+               beacon_received_at=NOW - ep.BEACON_STALE_AMBER_SEC)
+    assert amber["status"] == "AMBER" and "BEACON_STALE" in amber["reason_codes"]
+    red = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5},
+             beacon_received_at=NOW - ep.BEACON_STALE_RED_SEC)
+    assert red["status"] == "RED" and "BEACON_STALE" in red["reason_codes"]
+    # Fresh (<10m) with matched seqs is not beacon-stale
+    fresh = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5},
+               beacon_received_at=NOW - 60)
+    assert fresh["status"] == "GREEN" and "BEACON_STALE" not in fresh["reason_codes"]
 
 
 def test_epoch_and_prefix_mismatch_are_red():
@@ -264,7 +279,9 @@ def test_beacon_post_get_validation_and_head_verdict(tmp_path):
     env.ship_all()
     app = env.app()
     st, head = _call(app, "head")
-    assert st == 200 and head["sync_verdict"]["status"] == "UNKNOWN" and head["laptop_status"] is None
+    # Evaluator 1 (_sync_view /head): missing beacon → RED (R27), not UNKNOWN soft-OK
+    assert st == 200 and head["sync_verdict"]["status"] == "RED" and head["laptop_status"] is None
+    assert "NO_LAPTOP_BEACON_NO_ACK" in head["sync_verdict"]["reason_codes"]
     assert _call(app, "laptop-status", method="POST", body=b"{bad")[0] == 400
     assert _call(app, "laptop-status", method="POST", body=_beacon(schema="x"))[0] == 400
     assert _call(app, "laptop-status", method="POST", body=b"x" * 5000)[0] == 413
@@ -378,21 +395,116 @@ def _iso(ts):
     return _d.datetime.fromtimestamp(ts, _d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def test_no_beacon_but_fresh_ack_receipt_gives_applied_seq_and_a_coded_amber_not_unknown():
+def test_no_beacon_but_fresh_ack_receipt_gives_applied_seq_and_coded_red_missing_beacon():
     v = _v(published_seq=622, acked_seq=622, ack_received_at=_iso(NOW - 90))
-    assert v["status"] == "AMBER" and v["laptop_applied_seq"] == 622 and v["laptop_applied_source"] == "ACK_RECEIPT"
+    assert v["status"] == "RED" and v["laptop_applied_seq"] == 622 and v["laptop_applied_source"] == "ACK_RECEIPT"
     assert v["reason_codes"] == ["NO_LAPTOP_BEACON"] and v["ack_age_sec"] == 90 and v["ack_lag_seq"] == 0
 
 
 def test_no_beacon_stale_ack_receipt_while_behind_is_red_with_a_reason_and_ages():
     v = _v(published_seq=700, acked_seq=622, ack_received_at=_iso(NOW - 40 * 60))
-    assert v["status"] == "RED" and v["reason_codes"][0] == "ACK_STALE" and v["ack_lag_seq"] == 78
-    assert "78 behind" in v["reasons"][0]
+    assert v["status"] == "RED" and "ACK_STALE" in v["reason_codes"] and v["ack_lag_seq"] == 78
+    assert "NO_LAPTOP_BEACON" in v["reason_codes"]
+    assert "78 behind" in " ".join(v["reasons"])
 
 
-def test_no_beacon_and_no_ack_is_unknown_with_its_own_code_and_red_always_has_a_reason():
+def test_no_beacon_and_no_ack_is_red_with_its_own_code_and_red_always_has_a_reason():
     v = _v(published_seq=5, acked_seq=0)
-    assert v["status"] == "UNKNOWN" and v["reason_codes"] == ["NO_LAPTOP_BEACON_NO_ACK"]
+    assert v["status"] == "RED" and v["reason_codes"] == ["NO_LAPTOP_BEACON_NO_ACK"] and v["alert"] is True
     for kw in ({"published_seq": 1, "acked_seq": 0, "beacon": {"applied_seq": 9}}, ):
         r = _v(**kw)
         assert r["status"] != "RED" or r["reasons"]
+
+
+# ----------------------------------------------------------------- card 9fd17232b95b dual evaluators + cadence
+def test_beacon_staleness_enforced_on_server_sync_view_and_shipper_status_fields(tmp_path):
+    """Both evaluators must see missing → RED and RED@30m from the shared constant (not CustodyLag)."""
+    env = VEnv(tmp_path)
+    env.write("a.jsonl", _rows(0, 3))
+    env.ship_all()
+    app = env.app()
+
+    # Evaluator 1 — server _sync_view via /head (no beacon yet)
+    st, head = _call(app, "head")
+    assert st == 200 and head["sync_verdict"]["status"] == "RED"
+    assert "NO_LAPTOP_BEACON_NO_ACK" in head["sync_verdict"]["reason_codes"]
+
+    # Evaluator 2 — shipper sync_status_fields (no beacon doc)
+    fields = env.shipper().sync_status_fields(0)
+    assert fields["sync_verdict"] == "RED"
+    assert any(r.startswith("NO_LAPTOP_BEACON") for r in fields["sync_verdict_reasons"])
+
+    # Fresh beacon → both GREEN when seqs match
+    body = _beacon(applied_seq=1, applied_prefix="v1")
+    assert _call(app, "laptop-status", method="POST", body=body)[0] == 200
+    # Align shipper clock with server NOW used by POST
+    env.clock[0] = NOW
+    st, head = _call(app, "head")
+    # published may be 1 after one segment; applied 1 should not SEQ_REGRESS
+    assert "NO_LAPTOP_BEACON" not in head["sync_verdict"]["reason_codes"]
+    fields = env.shipper().sync_status_fields(1)
+    assert "NO_LAPTOP_BEACON" not in "".join(fields.get("sync_verdict_reasons") or [])
+
+    # Age the beacon to RED tier on disk; both evaluators must report BEACON_STALE RED
+    doc_path = env.state_dir / "laptop-status.json"
+    doc = json.loads(doc_path.read_text())
+    doc["received_ts"] = NOW - ep.BEACON_STALE_RED_SEC
+    doc_path.write_text(json.dumps(doc))
+    st, head = _call(app, "head")
+    assert head["sync_verdict"]["status"] == "RED"
+    assert "BEACON_STALE" in head["sync_verdict"]["reason_codes"]
+    fields = env.shipper().sync_status_fields(1)
+    assert fields["sync_verdict"] == "RED"
+    assert any("BEACON_STALE" in r for r in fields["sync_verdict_reasons"])
+
+
+def test_beacon_amber_tier_on_both_evaluators_at_shared_10m(tmp_path):
+    env = VEnv(tmp_path)
+    env.write("a.jsonl", _rows(0, 3))
+    env.ship_all()
+    app = env.app()
+    pub = int(json.loads((env.state_dir / "status.json").read_text()).get("shipped_seq") or 0)
+    assert _call(app, "laptop-status", method="POST",
+                 body=_beacon(applied_seq=pub, applied_prefix="v1"))[0] == 200
+    env.clock[0] = NOW
+    doc_path = env.state_dir / "laptop-status.json"
+    doc = json.loads(doc_path.read_text())
+    doc["received_ts"] = NOW - ep.BEACON_STALE_AMBER_SEC
+    doc_path.write_text(json.dumps(doc))
+    st, head = _call(app, "head")
+    assert head["sync_verdict"]["status"] == "AMBER"
+    assert "BEACON_STALE" in head["sync_verdict"]["reason_codes"]
+    fields = env.shipper().sync_status_fields(pub)
+    assert fields["sync_verdict"] == "AMBER"
+    assert any("BEACON_STALE" in r for r in fields["sync_verdict_reasons"])
+
+
+def test_beacon_post_cadence_default_at_most_300_seconds():
+    """Repo pull-loop default ≤ BEACON_POST_CADENCE_MAX_SEC; shared constant binds the ceiling."""
+    assert ep.BEACON_POST_CADENCE_DEFAULT_SEC <= ep.BEACON_POST_CADENCE_MAX_SEC == 300
+    loop = (Path(__file__).resolve().parents[2] / "scripts" / "research-segment-pull-loop.ps1").read_text("utf-8")
+    assert f"[int]$PullIntervalSec = {ep.BEACON_POST_CADENCE_DEFAULT_SEC}" in loop
+    # Raising the binding ceiling above 300 would fail this contract
+    assert ep.BEACON_POST_CADENCE_MAX_SEC <= 300
+
+
+def test_mutation_soft_amber_missing_beacon_must_fail():
+    """R23 mutation: mapping missing beacon to AMBER/GREEN must not satisfy the contract."""
+    v = _v(beacon=None, published_seq=5, acked_seq=5, ack_received_at=_iso(NOW - 30))
+    # Production path is RED. A soft-AMBER mutant would set status AMBER — prove we reject that.
+    assert v["status"] == "RED" and "NO_LAPTOP_BEACON" in v["reason_codes"]
+    soft = dict(v)
+    soft["status"] = "AMBER"
+    soft["alert"] = False
+    assert soft["status"] != "RED"  # mutant shape
+    # Contract gate: production verdict must stay RED (mutation proof against soft map)
+    assert _v(beacon=None, published_seq=5, acked_seq=5, ack_received_at=_iso(NOW - 30))["status"] == "RED"
+
+
+def test_mutation_soft_amber_only_at_30m_stale_must_fail():
+    """R23 mutation: RED@30m soft-mapped to AMBER fails the shared-tier contract."""
+    v = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5},
+           beacon_received_at=NOW - ep.BEACON_STALE_RED_SEC)
+    assert v["status"] == "RED" and "BEACON_STALE" in v["reason_codes"]
+    # Divergent hard-code of only AMBER at 30m would yield AMBER — production must not
+    assert not (v["status"] == "AMBER" and "BEACON_STALE" in v["reason_codes"])
