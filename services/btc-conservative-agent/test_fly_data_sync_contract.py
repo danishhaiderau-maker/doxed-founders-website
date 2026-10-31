@@ -939,7 +939,11 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
     from flask import Flask, jsonify, request
 
     tree = ast.parse(BOT)
-    wanted = {"api_data_sync_analyzer_report", "api_analyzer_mirror_status"}
+    wanted = {
+        "api_data_sync_analyzer_report",
+        "api_analyzer_mirror_status",
+        "_analyzer_mirror_no_validated_bundle_payload",
+    }
     selected = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -961,6 +965,7 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
             "_analyzer_mirror_dir": lambda: legacy,
             "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
             "_ANALYZER_BUNDLE_NO_VALID": "no valid bundle",
+            "_ANALYZER_BUNDLE_NO_VALIDATED_REASON": "NO_VALIDATED_ANALYZER_BUNDLE",
             "_ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES": 50 * 1024 * 1024,
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
@@ -973,8 +978,11 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
         assert response.json["required_schema"] == "analyzer_mirror_bundle_v2"
         assert (legacy / "analysis_dashboard.html").read_text(encoding="utf-8") == "forensic legacy"
         status = client.get("/api/analyzer-mirror/status")
-        assert status.status_code == 404
+        # Fix A (e448f5f67f8a): no-bundle is explicit RED, never HTTP 404-as-missing.
+        assert status.status_code == 200
         assert status.json["available"] is False
+        assert status.json["status"] == "RED"
+        assert status.json["reason"] == "NO_VALIDATED_ANALYZER_BUNDLE"
         assert status.json["legacy_data_preserved"] is True
 
 
