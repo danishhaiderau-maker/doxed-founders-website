@@ -243,7 +243,8 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
         "aged_count": len(aged), "fresh_count": len(fresh), "unacked_count": len(unacked),
         "would_have_cap_dropped": would_cap,
         "stop_write": bool(decision.get("stop_write")),
-        "alarm_level": decision.get("alarm_level") or "GREEN",
+        # F3 locked: UNKNOWN/missing → receipt reports RED (not ambiguous UNKNOWN / soft-GREEN).
+        "alarm_level": retention_stop_write.receipt_alarm_level(decision.get("alarm_level")),
         "used_ratio": decision.get("used_ratio"),
         "amber_at": retention_stop_write.AMBER_RATIO,
         "red_at": retention_stop_write.RED_RATIO,
@@ -254,6 +255,25 @@ def cap_lifecycle_bundles(root: str | os.PathLike, *, ack_root: str | os.PathLik
     if result["stop_write"] or result["alarm_level"] != "GREEN":
         _receipt(root, {"ts": round(now, 3), "kind": "LIFECYCLE_BUNDLE_CAP_PRESSURE_R5",
                         "rule": "R25_NEVER_DELETE", **result})
+    # H3/A7a alarm surface: UNKNOWN/missing decision escalates to RED on disk_alert
+    # (same fold /health reads via compute_disk_alert). F1: no stop-write / no latch.
+    raw_level = str(decision.get("alarm_level") or "").strip().upper()
+    if (
+        result["alarm_level"] == "RED"
+        and not result["stop_write"]
+        and raw_level in ("", "UNKNOWN")
+    ):
+        disk_alert.raise_red(
+            "LIFECYCLE_BUNDLE_CAP_PRESSURE",
+            {
+                "reason": "LIFECYCLE_BUNDLE_CAP_PRESSURE",
+                "family": FAMILY_LIFECYCLE_BUNDLES,
+                "used_ratio": result.get("used_ratio"),
+                "alarm_level": "RED",
+                "source": "receipt_alarm_level",
+            },
+            now=now,
+        )
     return result
 
 

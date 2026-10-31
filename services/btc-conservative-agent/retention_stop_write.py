@@ -69,7 +69,11 @@ def used_ratio(used: float | int | None, cap: float | int | None) -> float | Non
 
 
 def level_for_ratios(*ratios: float | None) -> str:
-    """Worst level across cap ratios and free-disk (AMBER 0.70 / RED 0.85)."""
+    """Worst level across cap ratios and free-disk (AMBER 0.70 / RED 0.85).
+
+    UNKNOWN ranks below AMBER for fold (GREEN→UNKNOWN only). F1: UNKNOWN alone
+    must not stop-write — see ``should_stop_write`` / ``is_stopped``.
+    """
     level = "GREEN"
     for ratio in ratios:
         candidate = disk_alert.level_for_ratio(ratio)
@@ -82,9 +86,29 @@ def level_for_ratios(*ratios: float | None) -> str:
     return level
 
 
+_RECEIPT_LEVELS = frozenset({"RED", "AMBER", "GREEN"})
+
+
+def receipt_alarm_level(level: Any | None) -> str:
+    """F3/C3: lifecycle receipt reports a normalised RED/AMBER/GREEN (never soft-GREEN).
+
+    UNKNOWN / missing / empty / unrecognised → RED on the receipt (alarm truth).
+    Actuation stays separate — callers must not use this for stop-write / latch (F1).
+    """
+    text = str(level).strip().upper() if level is not None else ""
+    if not text or text == "UNKNOWN":
+        return "RED"
+    if text in _RECEIPT_LEVELS:
+        return text
+    return "RED"
+
+
 def should_stop_write(*, used: float | int | None = None, cap: float | int | None = None,
                       volume_ratio: float | None = None, hard_over: bool = False) -> bool:
-    """Stop at hard over-cap, cap RED (>=85%), or free-disk RED (>=85%)."""
+    """Stop at hard over-cap, cap RED (>=85%), or free-disk RED (>=85%).
+
+    F1: measured RED ratio only — UNKNOWN alone must NOT stop-write.
+    """
     if hard_over:
         return True
     ratio = used_ratio(used, cap)
@@ -133,9 +157,15 @@ def latch(family: str, *, reason: str, used: float | int | None = None,
 
 
 def is_stopped(family: str) -> bool:
+    """True only when a latch exists with normalised alarm_level RED.
+
+    F1: AMBER / UNKNOWN / empty latch must NOT count as stopped — ``bool(row)`` alone is forbidden.
+    """
     with _lock:
         row = _latches.get(str(family))
-        return bool(row) and str(row.get("alarm_level") or "") == "RED"
+        if not row:
+            return False
+        return str(row.get("alarm_level") or "").strip().upper() == "RED"
 
 
 def latch_state(family: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
