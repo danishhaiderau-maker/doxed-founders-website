@@ -496,6 +496,7 @@ test_runtime_hygiene.py
 test_runtime_identity_incidents.py
 test_runtime_incident_history.py
 test_runtime_liveness_isolation.py
+test_runtime_log_never_drop_r46.py
 test_runtime_p0_lifecycle_guards.py
 test_runtime_revision.py
 test_runtime_telemetry.py

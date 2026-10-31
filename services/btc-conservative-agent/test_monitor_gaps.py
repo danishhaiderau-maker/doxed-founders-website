@@ -253,7 +253,8 @@ def test_new_routes_are_monitor_token_readable():
                  "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
                  "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
                  "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
-                 "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status"):
+                 "/api/runtime/headroom", "/api/runtime_log/retained",
+                 "/api/data_size", "/api/analyzer-mirror/status"):
         assert f'"{path}"' in block, path
 
 
