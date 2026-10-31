@@ -521,6 +521,8 @@ def test_stop_write_never_blocks_force_flat_disarm_r20_or_book10(tmp_path):
 
 def test_lifecycle_materialize_respects_stop_write(tmp_path):
     from lifecycle_bundles import LifecycleKey, materialize_bundle
+    # HM tmp_path fence (same as force-flat / A7a): never cwd-relative retention/.
+    _bind_retention_state(tmp_path)
     retention_stop_write.latch(r5.FAMILY_LIFECYCLE_BUNDLES, reason="t", used=10, cap=1, now=time.time())
     key = LifecycleKey(collection_epoch_id="e", episode_id="ep", policy_signature="p", research_lane="H_A")
     out = materialize_bundle(tmp_path, key, [])

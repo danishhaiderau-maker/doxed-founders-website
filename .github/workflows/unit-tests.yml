@@ -11,7 +11,9 @@ permissions:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90m: #954 tip after master merge (#955 allowlisted Fix A) exceeded the prior 60m
+    # hard cancel (OBSERVED run 41158249581 @1606aeecff43). Prior green heads were ~56–57m.
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: services/btc-conservative-agent
