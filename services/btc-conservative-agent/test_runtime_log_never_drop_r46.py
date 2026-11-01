@@ -25,12 +25,15 @@ def _reset_spool_stats(monkeypatch):
     monkeypatch.setenv("LOG_SPOOL_PART_CAP", "2")
     bot_mod.LOG_SPOOL_MAX_BYTES = 64
     bot_mod.LOG_SPOOL_PART_CAP = 2
+    monkeypatch.setenv("LOG_ARCHIVE_AMBER_BYTES", "32")
+    bot_mod.LOG_ARCHIVE_AMBER_BYTES = 32
     with bot_mod._RUNTIME_LOG_SPOOL_STATS_LOCK:
         bot_mod._RUNTIME_LOG_SPOOL_STATS.update({
             "diverted_records": 0,
             "spool_bytes": 0,
             "spool_parts_used": 0,
             "archived_parts": 0,
+            "archive_bytes": 0,
             "archive_renames": 0,
             "cap_refusals": 0,
             "spool_cap_red": False,
