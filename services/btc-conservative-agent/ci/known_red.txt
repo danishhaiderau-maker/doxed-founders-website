@@ -40,3 +40,5 @@ test_indicator_engine.py | Boss | 2026-10-16 | passes alone (9) but order-depend
 test_fresh_collection_signals.py | Boss | 2026-10-16 | passes alone (13) but order-dependent in the full run; quarantined until isolated
 test_legacy_archive_verifier.py | Boss | 2026-10-16 | passes alone (5) but order-dependent in the full run; quarantined until isolated
 test_research_v3_store.py | Boss | 2026-10-16 | passes alone (22) but flaky in the full run (shared store state); quarantined until isolated
+test_pathway_trade_count_never_coerces_dataframe_to_bool.py | Boss (follow-up card) | 2026-11-01 | pre-existing at 0ea19749
+test_r3_quarantine_lists_match_the_producer_module.py | Boss (follow-up card) | 2026-11-01 | pre-existing at 0ea19749

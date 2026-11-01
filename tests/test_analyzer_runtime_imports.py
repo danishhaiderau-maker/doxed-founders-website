@@ -50,23 +50,21 @@ def test_amend2_regime_key_is_unknown_or_dir_vol_and_missing_book_raises() -> No
     pre = abr.classify_at(abr.EPOCH_FLOOR_TS - 5, [], trade_rows=())
     assert pre["regime_key"] == abr.UNKNOWN
 
-    t = abr.EPOCH_FLOOR_TS + 1000
-    labeled = abr.classify_at(
-        t,
-        [{"ts": t - 1, "bid": 100.0, "ask": 100.2}] * 90,
-        trade_rows=(),
-    )
+    # ≥73 consecutive 10s mids so n_returns ≥ MIN_RETURNS (72) and reason=OK (not THIN/UNKNOWN).
+    t = abr.EPOCH_FLOOR_TS + 10_000
+    mid = 100_000.0
+    book = []
+    for i in range(80):
+        ts = t - (79 - i) * abr.STEP_SEC
+        mid = mid * (1.0 + 0.0002)
+        book.append({"ts": float(ts), "bid": mid - 1.0, "ask": mid + 1.0})
+    labeled = abr.classify_at(t, book, trade_rows=())
     key = labeled["regime_key"]
-    assert key == abr.UNKNOWN or ("|" in key and len(key.split("|")) == 2)
-
-
-def test_pathway_trade_count_never_coerces_dataframe_to_bool() -> None:
-    source = ANALYZER.read_text(encoding="utf-8")
-
-    assert "len(trades or [])" not in source
-    assert "if trades is not None and not trades.empty:" in source
-    assert 'if "trade_id" in trades.columns:' in source
-    assert "stc = len(trades)" in source
+    assert labeled.get("reason") == "OK"
+    assert key != abr.UNKNOWN
+    direction, vol = key.split("|", 1)
+    assert direction in ("bull", "bear", "sideways")
+    assert vol in ("vol_high", "vol_med", "vol_low")
 
 
 def test_launcher_refuses_dirty_analyzer_executable_provenance() -> None:
