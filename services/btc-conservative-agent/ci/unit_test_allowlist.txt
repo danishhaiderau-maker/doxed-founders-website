@@ -197,6 +197,7 @@ test_exit_report_cohort_integrity.py
 test_exit_reports_validation_current.py
 test_exit_shadow_world_current_stack.py
 test_expired_order_dashboard_contract.py
+test_expired_orders_boot_rebuild.py
 test_family_global_chase_gate.py
 test_family_policy_common.py
 test_family_tile_runtime_peak_persistence.py
