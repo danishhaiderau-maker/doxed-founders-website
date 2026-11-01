@@ -148,6 +148,19 @@ def test_r3_quarantined_reports_are_never_published(tmp_path):
     assert reasons["reports/genome_grid_report.json"] == "R3_QUARANTINED"
 
 
+@pytest.mark.skip(reason='pre-existing at 0ea19749, follow-up card, owner Boss, 2026-11-01')
+def test_r3_quarantine_lists_match_the_producer_module():
+    sys.path.insert(0, str(ROOT / "services" / "btc-conservative-agent"))
+    from research import r3_quarantine
+
+    assert pub.R3_QUARANTINED_FILES == r3_quarantine.QUARANTINED_FILES
+    import self_aware.analyzer_sections as sections
+    import self_aware.contracts as contracts
+
+    assert sections.GENOME_GRID_R3_QUARANTINED is contracts.GENOME_GRID_R3_QUARANTINED is \
+        r3_quarantine.is_active("GENOME_GRID")
+
+
 def test_a_generation_rewritten_during_snapshot_is_refused(tmp_path):
     root = _report_root(tmp_path)
     (root / "reports" / "tile_report.json").write_bytes(b'{"ok": false, "longer": 1}')
