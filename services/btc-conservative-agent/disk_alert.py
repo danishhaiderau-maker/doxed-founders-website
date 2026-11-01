@@ -32,6 +32,7 @@ MAX_RED_REASONS = 50
 
 _lock = threading.Lock()
 _red_conditions: dict[str, dict[str, Any]] = {}
+_amber_conditions: dict[str, dict[str, Any]] = {}
 _state_path: Path | None = None
 
 
@@ -42,6 +43,7 @@ def _persist_locked() -> None:
     try:
         _state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = _state_path.with_name(f".{_state_path.name}.tmp")
+        # Persist RED only (existing schema). AMBER is process-local loud signal.
         tmp.write_text(json.dumps({"schema": STATE_SCHEMA, "red": _red_conditions},
                                   sort_keys=True, default=str), encoding="utf-8")
         os.replace(tmp, _state_path)
@@ -54,7 +56,11 @@ def _expire_locked(now: float) -> bool:
                if now - float(v.get("last") or v.get("since") or 0.0) >= RED_HOLD_SECONDS]
     for key in expired:
         _red_conditions.pop(key, None)
-    return bool(expired)
+    amber_expired = [k for k, v in _amber_conditions.items()
+                     if now - float(v.get("last") or v.get("since") or 0.0) >= RED_HOLD_SECONDS]
+    for key in amber_expired:
+        _amber_conditions.pop(key, None)
+    return bool(expired or amber_expired)
 
 
 def configure(state_path: str | os.PathLike | None, *, now: float | None = None) -> None:
@@ -102,6 +108,30 @@ def raise_red(reason: str, detail: Mapping[str, Any] | None = None, *, now: floa
         _persist_locked()
 
 
+def raise_amber(reason: str, detail: Mapping[str, Any] | None = None, *, now: float | None = None) -> None:
+    """Record a loud retention AMBER (e.g. runtime_log archive-rename). Never silent.
+
+    Process-local (not persisted in the RED state file). Same hold window as RED.
+    Does not escalate ``compute_disk_alert`` to RED by itself.
+    """
+    now = float(now if now is not None else time.time())
+    with _lock:
+        _expire_locked(now)
+        previous = _amber_conditions.get(str(reason)) or {}
+        _amber_conditions[str(reason)] = {
+            **{k: v for k, v in dict(detail or {}).items() if k not in {"reason", "since", "last", "occurrences"}},
+            "reason": str(reason),
+            "since": float(previous.get("since") or now),
+            "last": now,
+            "occurrences": int(previous.get("occurrences") or 0) + 1,
+        }
+
+
+def clear_amber(reason: str) -> None:
+    with _lock:
+        _amber_conditions.pop(str(reason), None)
+
+
 def clear_red(reason: str) -> None:
     with _lock:
         if _red_conditions.pop(str(reason), None) is not None:
@@ -114,6 +144,14 @@ def red_conditions(now: float | None = None) -> list[dict[str, Any]]:
         if _expire_locked(now):
             _persist_locked()
         return [dict(v) for _, v in sorted(_red_conditions.items())]
+
+
+def amber_conditions(now: float | None = None) -> list[dict[str, Any]]:
+    now = float(now if now is not None else time.time())
+    with _lock:
+        if _expire_locked(now):
+            _persist_locked()
+        return [dict(v) for _, v in sorted(_amber_conditions.items())]
 
 
 def segment_store_red(transfer: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -266,6 +304,7 @@ def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
         ratio = None
     level = level_for_ratio(ratio)
     retention = red_conditions()
+    ambers = amber_conditions()
     segment = segment_store_red(volume.get("transfer") if isinstance(volume.get("transfer"), Mapping) else None)
     retention = retention + segment["red"]
     # data_dir/root/BOT_DATA_DIR preferred; getcwd last-resort for the status payload.
@@ -285,6 +324,9 @@ def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
     # (tests monkeypatch empty red + UNKNOWN level to kill a RED-only mutant).
     if retention or stream_cap.get("level") in ("RED", "UNKNOWN"):
         level = "RED"
+    elif ambers and level == "GREEN":
+        # Loud AMBER (e.g. runtime_log archive-rename) — never silent; never upgrades to RED alone.
+        level = "AMBER"
     return {
         "schema": SCHEMA,
         "level": level,
@@ -293,6 +335,7 @@ def compute_disk_alert(volume: Mapping[str, Any] | None) -> dict[str, Any]:
         "amber_at": AMBER_RATIO,
         "red_at": RED_RATIO,
         "retention_red": retention,
+        "retention_amber": ambers,
         "red_hold_seconds": RED_HOLD_SECONDS,
         "segment_store": segment,
         "stream_size_cap": stream_cap,

@@ -30,14 +30,30 @@ def _reset_spool_stats(monkeypatch):
             "diverted_records": 0,
             "spool_bytes": 0,
             "spool_parts_used": 0,
+            "archived_parts": 0,
+            "archive_renames": 0,
             "cap_refusals": 0,
             "spool_cap_red": False,
+            "archive_amber": False,
             "last_divert_ts": None,
+            "last_archive_ts": None,
             "last_error": None,
         })
     rsw.clear_latches("runtime_log")
+    try:
+        import disk_alert
+        for row in list(disk_alert.amber_conditions()):
+            disk_alert.clear_amber(row.get("reason"))
+    except Exception:
+        pass
     yield
     rsw.clear_latches("runtime_log")
+    try:
+        import disk_alert
+        for row in list(disk_alert.amber_conditions()):
+            disk_alert.clear_amber(row.get("reason"))
+    except Exception:
+        pass
 
 
 def _record(msg: str) -> logging.LogRecord:
@@ -95,32 +111,37 @@ def test_mutation_silent_return_fails_retention(tmp_path, monkeypatch):
     assert b"SHOULD_NOT_VANISH" in Path(str(log) + ".spool").read_bytes()
 
 
-def test_spool_cap_loud_red_no_unlink(tmp_path, monkeypatch):
-    """At size/part cap: loud RED + stop without unlinking existing spool parts."""
+def test_spool_full_archive_renames_amber_no_unlink(tmp_path, monkeypatch):
+    """Full active spool archive-renames (never unlinks); AMBER; line retained."""
     import bot as bot_mod
+    import disk_alert
     import retention_stop_write as rsw
 
     monkeypatch.chdir(tmp_path)
     log = tmp_path / "bot_runtime.log"
     log.write_bytes(b"p")
-    # Pre-fill both spool parts to the size cap.
+    # Pre-fill active spool to the size cap; prior archive stays.
     p1 = Path(str(log) + ".spool")
     p2 = Path(str(log) + ".spool.2")
     p1.write_bytes(b"a" * 64)
     p2.write_bytes(b"b" * 64)
-    before = {p1.name: p1.read_bytes(), p2.name: p2.read_bytes()}
+    before_archived = p2.read_bytes()
     handler = bot_mod.SafeRotatingFileHandler(str(log), maxBytes=50, backupCount=5, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(message)s"))
     handler._stop_write = True
     handler.emit(_record("OVERFLOW_AT_CAP"))
-    assert p1.read_bytes() == before[p1.name]
-    assert p2.read_bytes() == before[p2.name]
-    assert rsw.is_stopped("runtime_log")
-    latch = rsw.latch_state("runtime_log") or {}
-    assert latch.get("reason") == "RUNTIME_LOG_SPOOL_CAP"
+    # Prior .spool.2 untouched; full active renamed to .spool.3; fresh active has the line.
+    assert p2.read_bytes() == before_archived
+    assert (tmp_path / (log.name + ".spool.3")).read_bytes() == b"a" * 64
+    assert b"OVERFLOW_AT_CAP" in p1.read_bytes()
+    assert not rsw.is_stopped("runtime_log")  # archive-rename succeeded; no latch
+    ambers = disk_alert.amber_conditions()
+    assert any(r.get("reason") == "RUNTIME_LOG_ARCHIVE_RENAME" for r in ambers)
     status = bot_mod._runtime_log_retention_status()
-    assert status["cap_refusals"] >= 1
-    assert status["spool_cap_red"] is True
+    assert status["archive_renames"] >= 1
+    assert status["archive_amber"] is True
+    assert status["part_cap"] == 2
+    assert status["part_cap_means"] == "amber_threshold_archived_segments"
 
 
 def test_status_counter_advances_under_stop_write(tmp_path, monkeypatch):

@@ -248,16 +248,27 @@ def test_site_d_e_f_runtime_log_never_deletes(tmp_path, monkeypatch):
     for i in range(1, 4):
         (tmp_path / f"bot_runtime.log.{i}").write_bytes(b"y" * 10)
     monkeypatch.chdir(tmp_path)
-    before = {p.name: p.read_bytes() for p in tmp_path.glob("bot_runtime.log*")}
+    before_parts = {p.name: p.read_bytes() for p in tmp_path.glob("bot_runtime.log.*")}
+    primary_before = log.read_bytes()
     bot_mod._trim_oversized_log(str(log), max_bytes=50)
-    assert {p.name: p.read_bytes() for p in tmp_path.glob("bot_runtime.log*")} == before
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("bot_runtime.log.*")} == before_parts
+    assert log.read_bytes() == primary_before
     handler = bot_mod.SafeRotatingFileHandler(str(log), maxBytes=50, backupCount=5, encoding="utf-8")
     handler.doRollover()
-    assert handler._stop_write is True
-    assert {p.name: p.read_bytes() for p in tmp_path.glob("bot_runtime.log*")} == before
+    # Archive-rename path: existing .1/.2/.3 kept; primary content moved to .4; no STOP_WRITE.
+    assert handler._stop_write is False
+    assert {p.name: p.read_bytes() for p in [
+        tmp_path / "bot_runtime.log.1",
+        tmp_path / "bot_runtime.log.2",
+        tmp_path / "bot_runtime.log.3",
+    ]} == before_parts
+    assert (tmp_path / "bot_runtime.log.4").read_bytes() == primary_before
+    assert not log.exists() or log.stat().st_size == 0
     rec = logging.LogRecord("t", logging.INFO, __file__, 1, "hello", (), None)
     handler.emit(rec)
-    assert log.read_bytes() == before[log.name]
+    # Fresh primary accepts the emit; archived parts untouched.
+    assert b"hello" in log.read_bytes()
+    assert (tmp_path / "bot_runtime.log.4").read_bytes() == primary_before
 
 
 def test_site_f_mutation_super_dorollover_absent():
@@ -285,7 +296,8 @@ def test_env_not_a_kill_parametrized(tmp_path, monkeypatch):
                 p = tmp_path / f"{log.name}.{i}"
                 p.write_bytes(b"z" * 20)
                 parts.append(p)
-            before = {p.name: p.read_bytes() for p in parts}
+            before_archived = {p.name: p.read_bytes() for p in parts[1:]}
+            primary_bytes = log.read_bytes()
             max_bytes = 50
             if value.isdigit():
                 max_bytes = max(1, int(value)) if env_name != "LOG_BACKUP_COUNT" else 50
@@ -293,8 +305,14 @@ def test_env_not_a_kill_parametrized(tmp_path, monkeypatch):
             backup = int(value) if env_name == "LOG_BACKUP_COUNT" and value.isdigit() else 5
             handler = bot_mod.SafeRotatingFileHandler(str(log), maxBytes=50, backupCount=backup)
             handler.doRollover()
-            after = {p.name: p.read_bytes() for p in parts if p.exists()}
-            assert after == before, (env_name, value)
+            # Never-delete: prior .1/.2 bytes unchanged; primary content archived (not unlinked).
+            after_archived = {p.name: p.read_bytes() for p in parts[1:] if p.exists()}
+            assert after_archived == before_archived, (env_name, value)
+            archived = sorted(
+                [p for p in tmp_path.glob(log.name + ".*") if p.name.rsplit(".", 1)[-1].isdigit()],
+                key=lambda p: int(p.name.rsplit(".", 1)[-1]),
+            )
+            assert any(p.read_bytes() == primary_bytes for p in archived), (env_name, value)
 
 
 # ---------------------------------------------------------------------------
