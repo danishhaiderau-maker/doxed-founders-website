@@ -370,48 +370,215 @@ _AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "a
 AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
-# R46 never-drop: bounded overflow spool after STOP_WRITE (size + part caps; no unlink).
-LOG_SPOOL_MAX_BYTES = int(os.getenv("LOG_SPOOL_MAX_BYTES", str(LOG_MAX_BYTES)))  # 50 MiB / part
-LOG_SPOOL_PART_CAP = int(os.getenv("LOG_SPOOL_PART_CAP", str(LOG_BACKUP_COUNT)))  # 5 parts
+# R46 never-drop + archive-rename: overflow spool after STOP_WRITE latch fallback.
+# part_cap is an AMBER threshold for archived segments (never a hard delete/refuse).
+LOG_SPOOL_MAX_BYTES = int(os.getenv("LOG_SPOOL_MAX_BYTES", str(LOG_MAX_BYTES)))  # 50 MiB / active spool
+# Effective part_cap is ALWAYS >= 1 (Fly may set LOG_BACKUP_COUNT / LOG_SPOOL_PART_CAP to 0).
+_raw_spool_part_cap = int(os.getenv("LOG_SPOOL_PART_CAP", str(LOG_BACKUP_COUNT)))
+LOG_SPOOL_PART_CAP = max(1, _raw_spool_part_cap if _raw_spool_part_cap > 0 else max(1, LOG_BACKUP_COUNT, 1))
+# AMBER when total archived bytes >= this (default: part_cap × primary size cap).
+LOG_ARCHIVE_AMBER_BYTES = int(
+    os.getenv("LOG_ARCHIVE_AMBER_BYTES", str(max(1, LOG_SPOOL_PART_CAP) * max(1, LOG_MAX_BYTES)))
+)
+# RUNTIME_LOG_ARCHIVE_RENAME AMBER is process-local (disk_alert.raise_amber); a restart clears it.
+RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED = False
 _RUNTIME_LOG_SPOOL_STATS = {
     "diverted_records": 0,
     "spool_bytes": 0,
     "spool_parts_used": 0,
+    "archived_parts": 0,
+    "archive_bytes": 0,
+    "archive_renames": 0,
     "cap_refusals": 0,
     "spool_cap_red": False,
+    "archive_amber": False,
     "last_divert_ts": None,
+    "last_archive_ts": None,
     "last_error": None,
 }
 _RUNTIME_LOG_SPOOL_STATS_LOCK = threading.Lock()
 
 
+def _runtime_log_effective_part_cap() -> int:
+    """Never expose raw 0 — Fly env may set LOG_*_PART_CAP to 0 (HM e01b7073feb9)."""
+    return max(1, int(LOG_SPOOL_PART_CAP or 1))
+
+
 def _runtime_log_retention_status() -> dict:
-    """Spool / drop counters for /api/status (R46)."""
+    """Spool / archive / drop counters for /api/status (R46)."""
     with _RUNTIME_LOG_SPOOL_STATS_LOCK:
         snap = dict(_RUNTIME_LOG_SPOOL_STATS)
+    # Refresh archive_bytes from disk when a base path is known via LOG_FILE / BOT_LOG_FILE.
+    try:
+        base = os.getenv("BOT_LOG_FILE") or (LOG_FILE if "LOG_FILE" in globals() else None)
+        if base:
+            snap["archive_bytes"] = int(_runtime_log_archive_bytes(base))
+            snap["archived_parts"] = int(_runtime_log_count_archived(base))
+    except Exception:
+        pass
     snap.update({
         "schema": "runtime_log_retention_v1",
         "size_cap_bytes": int(LOG_SPOOL_MAX_BYTES),
-        "part_cap": int(LOG_SPOOL_PART_CAP),
+        # Corrected part_cap: effective AMBER threshold (>=1); never raw 0.
+        "part_cap": _runtime_log_effective_part_cap(),
+        "part_cap_means": "amber_threshold_archived_segments",
+        "archive_amber_bytes_threshold": int(LOG_ARCHIVE_AMBER_BYTES),
+        "archive_amber_persisted": bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
+        "archive_amber_clears_on_restart": not bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
         "primary_size_cap_bytes": int(LOG_MAX_BYTES),
         "stop_write_latched": bool(retention_stop_write.is_stopped("runtime_log")),
     })
+    # Guarantee keys exist even before first archive.
+    snap.setdefault("archive_bytes", 0)
+    snap.setdefault("archived_parts", 0)
     return snap
 
 
+def _runtime_log_next_archive_path(base_path: str) -> str:
+    """Next never-delete archive path: ``base.N`` with N = max existing + 1.
+
+    When ``base_path`` is the primary log, ignore the spool tree
+    (``base.spool`` / ``base.spool.N``) so primary and spool sequences stay
+    independent.
+    """
+    import glob as _glob
+    base_name = os.path.basename(base_path)
+    suffixes = []
+    for p in _glob.glob(base_path + ".*"):
+        suffix = p.rsplit(".", 1)[-1]
+        if not suffix.isdigit():
+            continue
+        if not base_path.endswith(".spool") and os.path.basename(p).startswith(base_name + ".spool"):
+            continue
+        suffixes.append(int(suffix))
+    return f"{base_path}.{max(suffixes, default=0) + 1}"
+
+
+def _runtime_log_archived_paths(base_filename: str) -> list[str]:
+    """Numeric archive paths for primary + spool (never-delete parts)."""
+    import glob as _glob
+    out: list[str] = []
+    base_name = os.path.basename(base_filename)
+    for p in _glob.glob(base_filename + ".*"):
+        suffix = p.rsplit(".", 1)[-1]
+        if not suffix.isdigit():
+            continue
+        if os.path.basename(p).startswith(base_name + ".spool"):
+            continue
+        out.append(p)
+    for p in _glob.glob(base_filename + ".spool.*"):
+        if p.rsplit(".", 1)[-1].isdigit():
+            out.append(p)
+    return out
+
+
+def _runtime_log_count_archived(base_filename: str) -> int:
+    """Count archived numeric segments for primary + spool (never-delete parts)."""
+    return len(_runtime_log_archived_paths(base_filename))
+
+
+def _runtime_log_archive_bytes(base_filename: str) -> int:
+    """Total bytes in archived numeric segments (primary + spool)."""
+    total = 0
+    for p in _runtime_log_archived_paths(base_filename):
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    return total
+
+
 def _runtime_log_spool_paths(base_filename: str) -> list[str]:
-    """Ordered spool part paths for ``base_filename`` (part 1 has no numeric suffix)."""
-    cap = max(1, int(LOG_SPOOL_PART_CAP or 1))
-    paths = [f"{base_filename}.spool"]
-    for part in range(2, cap + 1):
-        paths.append(f"{base_filename}.spool.{part}")
-    return paths
+    """Active spool + archived ``.spool.N`` parts (discovered; never capped by delete).
+
+    part_cap is an AMBER threshold only — archived parts accumulate via rename.
+    """
+    import glob as _glob
+    active = f"{base_filename}.spool"
+    archived = []
+    for p in _glob.glob(active + ".*"):
+        if p.rsplit(".", 1)[-1].isdigit():
+            archived.append(p)
+    archived.sort(key=lambda p: int(p.rsplit(".", 1)[-1]))
+    return [active] + archived
+
+
+def _runtime_log_raise_archive_amber(
+    *, base: str, archived_to: str, archived_count: int, archive_bytes: int | None = None,
+) -> None:
+    """Loud AMBER on archive-rename / over part_cap / over byte threshold.
+
+    AMBER is process-local (``disk_alert.raise_amber``); a restart clears it
+    (``RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED=False``).
+    """
+    part_cap = _runtime_log_effective_part_cap()
+    if archive_bytes is None:
+        # Prefer bytes for the owning primary path when ``base`` is a spool.
+        root = base[: -len(".spool")] if base.endswith(".spool") else base
+        try:
+            archive_bytes = _runtime_log_archive_bytes(root)
+        except Exception:
+            archive_bytes = 0
+    over_part_cap = archived_count >= part_cap
+    over_bytes = int(archive_bytes or 0) >= max(1, int(LOG_ARCHIVE_AMBER_BYTES or 1))
+    should_amber = over_part_cap or over_bytes
+    _bump_runtime_log_spool_stats(
+        archive_renames=1,
+        archived_parts=archived_count,
+        archive_bytes=int(archive_bytes or 0),
+        archive_amber=bool(should_amber),
+        last_archive_ts=time.time(),
+        last_error=None,
+    )
+    if not should_amber:
+        # Still loud on stderr for every rename (operator visibility), without AMBER latch.
+        try:
+            sys.stderr.write(
+                f"[RUNTIME_LOG_ARCHIVE_RENAME] base={base} -> {archived_to} "
+                f"archived_parts={archived_count} part_cap={part_cap} "
+                f"archive_bytes={int(archive_bytes or 0)} "
+                f"(below AMBER thresholds)\n"
+            )
+        except Exception:
+            pass
+        return
+    try:
+        import disk_alert as _disk_alert
+        _disk_alert.raise_amber(
+            "RUNTIME_LOG_ARCHIVE_RENAME",
+            {
+                "path": base,
+                "archived_to": archived_to,
+                "archived_parts": archived_count,
+                "archive_bytes": int(archive_bytes or 0),
+                "part_cap": part_cap,
+                "archive_amber_bytes_threshold": int(LOG_ARCHIVE_AMBER_BYTES),
+                "over_part_cap": over_part_cap,
+                "over_archive_bytes": over_bytes,
+                "persisted": bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
+                "clears_on_restart": not bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
+                "rule": "R25_ARCHIVE_RENAME_NEVER_DELETE",
+            },
+        )
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(
+            f"[RUNTIME_LOG_ARCHIVE_RENAME] AMBER base={base} -> {archived_to} "
+            f"archived_parts={archived_count} part_cap={part_cap} "
+            f"archive_bytes={int(archive_bytes or 0)} "
+            f"bytes_threshold={int(LOG_ARCHIVE_AMBER_BYTES)} "
+            f"over_part_cap={over_part_cap} over_bytes={over_bytes} "
+            f"clears_on_restart={not RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED}\n"
+        )
+    except Exception:
+        pass
 
 
 def _bump_runtime_log_spool_stats(**kwargs) -> None:
     with _RUNTIME_LOG_SPOOL_STATS_LOCK:
         for key, value in kwargs.items():
-            if key in ("diverted_records", "cap_refusals") and isinstance(value, int):
+            if key in ("diverted_records", "cap_refusals", "archive_renames") and isinstance(value, int):
                 _RUNTIME_LOG_SPOOL_STATS[key] = int(_RUNTIME_LOG_SPOOL_STATS.get(key) or 0) + value
             else:
                 _RUNTIME_LOG_SPOOL_STATS[key] = value
@@ -426,14 +593,17 @@ class AsciiSafeFormatter(logging.Formatter):
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
-    """Rotating file handler that never drops backups (PR2 / R25) and never
+    """Rotating file handler that never deletes log segments (R25/R34) and never
     silently discards records after STOP_WRITE (R46).
 
     Stdlib ``RotatingFileHandler.doRollover`` unlinks the oldest backup when
-    ``backupCount > 0``. Here, size pressure latches stop-write + 70/85 RED and
-    stops further *primary* growth; further emits divert to a bounded spool
-    (``LOG_SPOOL_MAX_BYTES`` × ``LOG_SPOOL_PART_CAP``) with no unlink. Console /
-    stderr handlers are unaffected so force-flat, disarm, and R20 keep logging.
+    ``backupCount > 0``. Here, size pressure **archive-renames** the full
+    primary to ``base.N`` (never unlink) and raises **AMBER**. The legacy
+    STOP_WRITE latch + bounded spool remains as a **fallback** when rename
+    fails. Under latch, full spool segments are also archive-renamed
+    (``.spool`` → ``.spool.N``); ``part_cap`` is an AMBER threshold only.
+    Console / stderr handlers stay unaffected so force-flat, disarm, and R20
+    keep logging.
     """
 
     def __init__(self, *args, **kwargs):
@@ -445,6 +615,40 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         self._rollover_failed = False
         self._stop_write = False
         self._spool_cap_latched = False
+        # Boot path: primary already over the cap → archive-rename once (never latch).
+        self._archive_primary_if_over_cap_at_boot()
+
+    def _archive_primary_if_over_cap_at_boot(self) -> None:
+        """HM R2: primary over cap at init → archive same bytes, fresh primary, no latch."""
+        try:
+            path = self.baseFilename
+            if not path or not os.path.exists(path):
+                return
+            size = os.path.getsize(path)
+            cap = max(1, int(self.maxBytes or LOG_MAX_BYTES or 1))
+            if size < cap:
+                return
+            dest = self._archive_rename_segment(path)
+            if dest is None:
+                return
+            archived_count = _runtime_log_count_archived(path)
+            archive_bytes = _runtime_log_archive_bytes(path)
+            _runtime_log_raise_archive_amber(
+                base=path, archived_to=dest,
+                archived_count=archived_count, archive_bytes=archive_bytes,
+            )
+            # Explicit: boot archive must not latch STOP_WRITE.
+            self._stop_write = False
+            self._rollover_failed = False
+        except (PermissionError, OSError) as exc:
+            # Boot rename failure: leave file in place; do not block boot with latch.
+            try:
+                sys.stderr.write(
+                    f"[RUNTIME_LOG_BOOT_ARCHIVE] rename failed ({type(exc).__name__}); "
+                    f"leaving primary in place base={getattr(self, 'baseFilename', None)}\n"
+                )
+            except Exception:
+                pass
 
     def shouldRollover(self, record):
         if self._rollover_failed or self._stop_write:
@@ -458,7 +662,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         try:
             super().emit(record)
         except Exception:
-            # Write failure: fail loud via handleError, keep RED, spool the line.
+            # Write failure: fail loud via handleError, latch fallback, spool the line.
             self.handleError(record)
             try:
                 retention_stop_write.latch(
@@ -471,8 +675,28 @@ class SafeRotatingFileHandler(RotatingFileHandler):
             self._stop_write = True
             self._emit_to_spool(record)
 
+    def _archive_rename_segment(self, path: str) -> str | None:
+        """Archive-rename full ``path`` to ``path.N`` via ``os.replace`` (never unlink).
+
+        Return dest or None. Never calls ``os.unlink`` / ``os.remove`` / ``Path.unlink``.
+        """
+        if not path or not os.path.exists(path):
+            return None
+        dest = _runtime_log_next_archive_path(path)
+        # Close our stream if it points at this path before rename.
+        if self.stream and os.path.abspath(getattr(self, "baseFilename", "") or "") == os.path.abspath(path):
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        # os.replace = atomic rename; never delete (R25). Dest must not already exist
+        # (next-N path is unique); replace still does not unlink other archives.
+        os.replace(path, dest)
+        return dest
+
     def _emit_to_spool(self, record):
-        """Append ``record`` to the bounded overflow spool (R46). Never unlinks."""
+        """Append ``record`` to the overflow spool (R46). Archive-rename when full; never unlink."""
         try:
             msg = self.format(record)
             if not msg.endswith("\n"):
@@ -492,71 +716,65 @@ class SafeRotatingFileHandler(RotatingFileHandler):
             return
 
         size_cap = max(1, int(LOG_SPOOL_MAX_BYTES or LOG_MAX_BYTES or 1))
-        paths = _runtime_log_spool_paths(self.baseFilename)
+        active = f"{self.baseFilename}.spool"
         try:
             with self.lock:
-                target = None
-                for path in paths:
+                try:
+                    cur = os.path.getsize(active) if os.path.exists(active) else 0
+                except OSError:
+                    cur = 0
+                if cur > 0 and cur + len(payload) > size_cap:
+                    # Full segment: archive-RENAME (never delete), then write to fresh active.
                     try:
-                        cur = os.path.getsize(path) if os.path.exists(path) else 0
-                    except OSError:
+                        dest = self._archive_rename_segment(active)
+                        if dest is None:
+                            raise OSError("archive rename returned None")
+                        archived_count = _runtime_log_count_archived(self.baseFilename)
+                        archive_bytes = _runtime_log_archive_bytes(self.baseFilename)
+                        _runtime_log_raise_archive_amber(
+                            base=active, archived_to=dest,
+                            archived_count=archived_count, archive_bytes=archive_bytes,
+                        )
                         cur = 0
-                    if cur + len(payload) <= size_cap:
-                        target = path
-                        break
-                    if cur < size_cap and cur + len(payload) > size_cap and cur == 0:
-                        # Empty part but payload alone exceeds cap — still write truncated? No: refuse loud.
-                        continue
-                if target is None:
-                    # All parts full: loud RED, stop further spool growth, no unlink, no silent discard.
-                    self._spool_cap_latched = True
-                    try:
-                        used = 0
-                        parts_used = 0
-                        for path in paths:
-                            if os.path.exists(path):
-                                parts_used += 1
-                                try:
-                                    used += os.path.getsize(path)
-                                except OSError:
-                                    pass
-                        retention_stop_write.latch(
-                            "runtime_log",
-                            reason="RUNTIME_LOG_SPOOL_CAP",
-                            used=used,
-                            cap=size_cap * len(paths),
-                            detail={
-                                "path": self.baseFilename,
-                                "spool_part_cap": len(paths),
-                                "spool_size_cap_bytes": size_cap,
-                                "rule": "R46_BOUNDED_SPOOL_NO_UNLINK",
-                            },
+                    except OSError as exc:
+                        # Fallback: existing STOP_WRITE latch + refuse this write loudly.
+                        self._spool_cap_latched = True
+                        try:
+                            retention_stop_write.latch(
+                                "runtime_log",
+                                reason="RUNTIME_LOG_SPOOL_ARCHIVE_FAILED",
+                                used=cur,
+                                cap=size_cap,
+                                detail={
+                                    "path": self.baseFilename,
+                                    "error": type(exc).__name__,
+                                    "part_cap": _runtime_log_effective_part_cap(),
+                                    "rule": "R46_LATCH_FALLBACK",
+                                },
+                            )
+                        except Exception:
+                            pass
+                        _bump_runtime_log_spool_stats(
+                            cap_refusals=1,
+                            spool_cap_red=True,
+                            last_error=f"ARCHIVE_FAILED:{type(exc).__name__}",
+                            last_divert_ts=time.time(),
                         )
-                    except Exception:
-                        pass
-                    _bump_runtime_log_spool_stats(
-                        cap_refusals=1,
-                        spool_cap_red=True,
-                        spool_parts_used=len(paths),
-                        last_error="SPOOL_CAP",
-                        last_divert_ts=time.time(),
-                    )
-                    try:
-                        sys.stderr.write(
-                            f"[RUNTIME_LOG_SPOOL_CAP] RED base={self.baseFilename} "
-                            f"part_cap={len(paths)} size_cap_bytes={size_cap} "
-                            f"refused_bytes={len(payload)}\n"
-                        )
-                    except Exception:
-                        pass
-                    return
+                        try:
+                            sys.stderr.write(
+                                f"[RUNTIME_LOG_SPOOL_CAP] RED latch-fallback base={self.baseFilename} "
+                                f"part_cap={_runtime_log_effective_part_cap()} err={type(exc).__name__}\n"
+                            )
+                        except Exception:
+                            pass
+                        return
 
-                parent = os.path.dirname(target) or "."
+                parent = os.path.dirname(active) or "."
                 os.makedirs(parent, exist_ok=True)
-                with open(target, "ab") as fh:
+                with open(active, "ab") as fh:
                     fh.write(payload)
                     fh.flush()
-                # Refresh telemetry
+                paths = _runtime_log_spool_paths(self.baseFilename)
                 parts_used = 0
                 total_bytes = 0
                 for path in paths:
@@ -570,6 +788,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                     diverted_records=1,
                     spool_bytes=total_bytes,
                     spool_parts_used=parts_used,
+                    archived_parts=_runtime_log_count_archived(self.baseFilename),
                     last_divert_ts=time.time(),
                     last_error=None,
                 )
@@ -607,6 +826,31 @@ class SafeRotatingFileHandler(RotatingFileHandler):
             except OSError:
                 size = 0
             cap = int(self.maxBytes or LOG_MAX_BYTES or 1)
+            # Preferred path: archive-RENAME the full primary segment (R25/R34).
+            try:
+                with self.lock:
+                    dest = self._archive_rename_segment(self.baseFilename)
+                    if dest is None and size > 0:
+                        raise OSError("primary archive rename returned None")
+                    # Fresh primary will be opened on next emit (delay=True).
+                    archived_count = _runtime_log_count_archived(self.baseFilename)
+                    archive_bytes = _runtime_log_archive_bytes(self.baseFilename)
+                    if dest is not None:
+                        _runtime_log_raise_archive_amber(
+                            base=self.baseFilename, archived_to=dest,
+                            archived_count=archived_count, archive_bytes=archive_bytes,
+                        )
+                    return
+            except (PermissionError, OSError) as exc:
+                # Fallback: existing STOP_WRITE latch (keep spool path alive).
+                try:
+                    sys.stderr.write(
+                        f"[RUNTIME_LOG_ROLLOVER] archive-rename failed "
+                        f"({type(exc).__name__}); latch STOP_WRITE fallback "
+                        f"base={self.baseFilename}\n"
+                    )
+                except Exception:
+                    pass
             retention_stop_write.evaluate_and_latch(
                 "runtime_log",
                 used=size,
@@ -615,14 +859,15 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                 detail={
                     "path": self.baseFilename,
                     "configured_backup_count": self._configured_backup_count,
-                    "rule": "R25_NEVER_DELETE",
+                    "part_cap": _runtime_log_effective_part_cap(),
+                    "rule": "R25_NEVER_DELETE_LATCH_FALLBACK",
                 },
             )
             self._stop_write = True
             retention_stop_write.latch(
                 "runtime_log", reason="RUNTIME_LOG_ROLLOVER_STOP_WRITE",
                 used=size, cap=cap,
-                detail={"path": self.baseFilename},
+                detail={"path": self.baseFilename, "fallback": True},
             )
         except (PermissionError, OSError):
             self._rollover_failed = True
@@ -51356,7 +51601,7 @@ def api_runtime_log_retained():
         "spool_parts": spool_parts,
         "retention": _runtime_log_retention_status(),
         "size_cap_bytes": int(LOG_SPOOL_MAX_BYTES),
-        "part_cap": int(LOG_SPOOL_PART_CAP),
+        "part_cap": _runtime_log_effective_part_cap(),
     }
     return _monitor_response(payload, max_bytes=256 * 1024)
 

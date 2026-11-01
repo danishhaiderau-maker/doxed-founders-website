@@ -38,10 +38,14 @@ def _clear():
     disk_alert.configure(None)
     for row in disk_alert.red_conditions():
         disk_alert.clear_red(row.get("reason"))
+    for row in disk_alert.amber_conditions():
+        disk_alert.clear_amber(row.get("reason"))
     yield
     disk_alert.configure(None)
     for row in disk_alert.red_conditions():
         disk_alert.clear_red(row.get("reason"))
+    for row in disk_alert.amber_conditions():
+        disk_alert.clear_amber(row.get("reason"))
 
 
 @pytest.mark.parametrize("used,level", [(69, "GREEN"), (70, "AMBER"), (84, "AMBER"), (85, "RED"), (99, "RED")])
