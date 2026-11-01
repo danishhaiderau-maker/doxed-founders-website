@@ -662,6 +662,7 @@ class RegimeComparator:
 CUSTODY_STALL_RED_SEC = 2 * 3600.0
 LAPTOP_ACK_STALL_RED_SEC = CUSTODY_STALL_RED_SEC  # back-compat alias
 SHIPPED_MINUS_CUSTODY_LAG = "SHIPPED_MINUS_CUSTODY_LAG"
+CUSTODY_SOURCE_UNAVAILABLE = "CUSTODY_SOURCE_UNAVAILABLE"
 
 
 def _iso_ts(value):
@@ -685,12 +686,79 @@ def _seq_int(value) -> int | None:
         return None
 
 
+def _default_latest_custody(store_root, prefix):
+    """Live custody receipt reader — store receipts only; never /head or status.json."""
+    import research_segment_prune as prune
+    return prune.latest_custody(store_root, prefix)
+
+
+def resolve_live_custody_for_lag(store_root, prefix, *, reader=None) -> dict:
+    """Shared live custody ``through_seq`` reader for lag/stall (R4).
+
+    Never reads ``/head`` or shipper ``status.json`` ``custody_through_seq`` (frozen 5093).
+    Returns ``{"ok": True, "through_seq": int, "received_at": ..., "source": "live"}`` or
+    ``{"ok": False, "error": CUSTODY_SOURCE_UNAVAILABLE, "source": "unavailable"}``.
+    """
+    reader = reader or _default_latest_custody
+    try:
+        if store_root is None or not prefix:
+            return {"ok": False, "error": CUSTODY_SOURCE_UNAVAILABLE, "source": "unavailable"}
+        receipt = reader(store_root, prefix)
+        if not isinstance(receipt, Mapping):
+            return {"ok": False, "error": CUSTODY_SOURCE_UNAVAILABLE, "source": "unavailable"}
+        seq = _seq_int(receipt.get("through_seq"))
+        if seq is None:
+            return {"ok": False, "error": CUSTODY_SOURCE_UNAVAILABLE, "source": "unavailable"}
+        return {
+            "ok": True,
+            "through_seq": seq,
+            "received_at": receipt.get("received_at"),
+            "source": "live",
+        }
+    except Exception:  # noqa: BLE001 — lag path fails closed as UNAVAILABLE
+        return {"ok": False, "error": CUSTODY_SOURCE_UNAVAILABLE, "source": "unavailable"}
+
+
+def apply_live_custody_to_transfer(transfer: Mapping | None, live: Mapping) -> dict:
+    """Re-key transfer lag fields onto live custody; preserve status field as legacy only."""
+    t = dict(transfer or {})
+    if "custody_through_seq_status" not in t:
+        t["custody_through_seq_status"] = t.get("custody_through_seq")
+    if live.get("ok"):
+        t["custody_through_seq"] = live["through_seq"]
+        if live.get("received_at"):
+            t["custody_received_at"] = live["received_at"]
+        t["custody_source"] = "live"
+        t.pop("custody_source_error", None)
+    else:
+        # Never fall back to status/head 5093 for lag algebra.
+        t["custody_through_seq"] = None
+        t["custody_source"] = "unavailable"
+        t["custody_source_error"] = live.get("error") or CUSTODY_SOURCE_UNAVAILABLE
+    return t
+
+
 def custody_stall(transfer: Mapping | None, now: float, *, seq_advanced_at: float | None = None) -> dict:
     """Custody seq stall: RED when shipped_seq - custody_through_seq > 0 and custody_through_seq has not
     advanced for CUSTODY_STALL_RED_SEC. Stall clock prefers ``seq_advanced_at`` (from CustodyLag when the
     seq last increased); single-shot /health uses ``custody_received_at`` (receipt time for that through
-    seq). Never keys on laptop_ack_advanced_at or prune_mode. Alert only, never a gate."""
+    seq). Never keys on laptop_ack_advanced_at or prune_mode. Alert only, never a gate.
+
+    ``custody_through_seq`` must already be the **live** custody seq (see
+    ``apply_live_custody_to_transfer``). Live source unavailable → RED ``CUSTODY_SOURCE_UNAVAILABLE``.
+    """
     t = dict(transfer or {})
+    last_err = (("SHIPPER: " + str(t.get("last_error")))[:200] if t.get("last_error") else None)
+    if t.get("custody_source") == "unavailable" or t.get("custody_source_error") == CUSTODY_SOURCE_UNAVAILABLE:
+        return {
+            "custody_last_advanced_utc": None,
+            "custody_stalled_s": None,
+            "custody_stall_reason": CUSTODY_SOURCE_UNAVAILABLE,
+            "custody_lag_segments": None,
+            "custody_stall_red": True,
+            "laptop_ack_stall_red": True,  # back-compat alias
+            "custody_last_error": last_err,
+        }
     shipped = _seq_int(t.get("shipped_seq"))
     custody = _seq_int(t.get("custody_through_seq"))
     lag = (shipped - custody) if (shipped is not None and custody is not None) else None
@@ -706,11 +774,12 @@ def custody_stall(transfer: Mapping | None, now: float, *, seq_advanced_at: floa
             "custody_lag_segments": lag,
             "custody_stall_red": reason is not None,
             "laptop_ack_stall_red": reason is not None,  # back-compat alias for /health readers
-            "custody_last_error": (("SHIPPER: " + str(t.get("last_error")))[:200] if t.get("last_error") else None)}
+            "custody_last_error": last_err}
 
 
 class CustodyLag:
-    """Shipper custody lag for /api/monitor/shipper: GREEN, or RED SHIPPED_MINUS_CUSTODY_LAG (BTC-480)."""
+    """Shipper custody lag for /api/monitor/shipper: GREEN, or RED SHIPPED_MINUS_CUSTODY_LAG /
+    CUSTODY_SOURCE_UNAVAILABLE (BTC-480 / re-key). Stall clock resets on live custody seq advance (T2b)."""
 
     def __init__(self, clock=time.time):
         self._clock = clock
@@ -729,6 +798,7 @@ class CustodyLag:
                 # Bootstrap from the receipt time for the stuck through-seq when present.
                 self._seq_advanced_at = _iso_ts(transfer.get("custody_received_at")) or now
             elif custody > self._last_custody_seq:
+                # T2b: a live custody advance resets the stall clock.
                 self._last_custody_seq = custody
                 self._seq_advanced_at = now
         try:
@@ -741,8 +811,11 @@ class CustodyLag:
             sample_lag = ack_lag
         if sample_lag is not None and (not self.samples or now - self.samples[-1][0] >= 60):
             self.samples.append((now, sample_lag))
-        alerts = [SHIPPED_MINUS_CUSTODY_LAG] if stall["custody_stall_red"] else []
+        reason = stall.get("custody_stall_reason")
+        alerts = [reason] if stall["custody_stall_red"] and reason else []
         return {"schema": SHIPPER_SCHEMA, **stall, "shipped_seq": shipped, "laptop_acked_seq": acked,
                 "ack_lag_segments": ack_lag, "custody_through_seq": transfer.get("custody_through_seq"),
+                "custody_through_seq_status": transfer.get("custody_through_seq_status"),
+                "custody_source": transfer.get("custody_source"),
                 "prune_mode": "off", "retention": "R5A_ELIGIBILITY_NEVER_DELETE",
                 "alerts": alerts, "level": RED if alerts else GREEN}
