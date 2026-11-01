@@ -364,20 +364,30 @@ def assess(snapshot: Mapping[str, Any] | None, app_checks: Iterable[Mapping[str,
 
 
 def annotate_checks(checks: Iterable[dict[str, Any]], result: Mapping[str, Any]) -> int:
-    """Tag our failing app checks with the platform correlation; returns how many were annotated."""
+    """Option B (R36): every checks-table row always carries ``platform_correlation``.
+
+    Failing app checks get the correlation object; all other rows get ``null``.
+    Returns how many rows received a non-null correlation object.
+    """
     corr = result.get("correlation") or {}
     failing = {f["id"] for f in result.get("app_failing_checks") or []}
     n = 0
     for c in checks:
-        if c.get("id") not in failing:
-            continue
-        c["platform_correlation"] = {"likely_platform": corr.get("likely_platform"), "title": corr.get("title"),
-                                     "url": corr.get("url"), "classification": result.get("classification")}
-        if corr.get("likely_platform"):
-            note = f"likely Fly platform incident: {corr.get('title')} ({corr.get('url')})"
-            if note not in str(c.get("hint") or ""):
-                c["hint"] = f"{note}; {c.get('hint') or ''}".rstrip("; ")
-        n += 1
+        if c.get("id") in failing:
+            c["platform_correlation"] = {
+                "likely_platform": corr.get("likely_platform"),
+                "title": corr.get("title"),
+                "url": corr.get("url"),
+                "classification": result.get("classification"),
+            }
+            if corr.get("likely_platform"):
+                note = f"likely Fly platform incident: {corr.get('title')} ({corr.get('url')})"
+                if note not in str(c.get("hint") or ""):
+                    c["hint"] = f"{note}; {c.get('hint') or ''}".rstrip("; ")
+            n += 1
+        else:
+            # Always present; null ≠ missing (Gate 0 DRIFT_DIMS_DROPPED).
+            c["platform_correlation"] = None
     return n
 
 
