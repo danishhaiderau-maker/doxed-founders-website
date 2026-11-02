@@ -1,3 +1,8 @@
+import {
+  SHOWCASE_OFFLINE_BY_DESIGN_LABEL,
+  isFlyShowcaseRuntimeRetired,
+} from './canonical-showcase-runtime';
+
 export type PublicBotHealthProbe = {
   ok: boolean;
   url: string;
@@ -224,6 +229,15 @@ export async function probePublicBotHealth(
 ): Promise<PublicBotHealthProbe> {
   const base = baseUrl.trim().replace(/\/$/, '');
   if (!base) return { ok: false, url: baseUrl, error: 'missing URL' };
+  // Fail closed without hammering deleted Fly / dead host.
+  // (FORCE_ACTIVE escape hatch is for legacy unit tests only.)
+  if (isFlyShowcaseRuntimeRetired()) {
+    return {
+      ok: false,
+      url: base,
+      error: SHOWCASE_OFFLINE_BY_DESIGN_LABEL,
+    };
+  }
 
   const attempts = ['/ready', '/api/ping'].map(async (path) => {
     const endpoint = `${base}${path}`;

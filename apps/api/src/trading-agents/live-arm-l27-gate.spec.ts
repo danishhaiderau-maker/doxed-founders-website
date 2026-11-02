@@ -16,6 +16,9 @@ import {
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsController } from './trading-agents.controller';
 
+// Legacy Fly-path unit tests: exercise arm-gate fetch without the retired short-circuit.
+process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = '1';
+
 const ok = { schema: FLY_ARM_GATE_SCHEMA, l27_block: null, live_fences_block: null };
 const blocked = { schema: FLY_ARM_GATE_SCHEMA, l27_block: DENY_L27_LATEST_L };
 

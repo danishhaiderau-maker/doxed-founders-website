@@ -8,7 +8,10 @@ import {
   mapBotStateToDashboard,
 } from './bot-state.mapper';
 import { ShowcaseSnapshotService } from './showcase-snapshot.service';
-import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
+import {
+  CANONICAL_SHOWCASE_BOT_URL,
+  isFlyShowcaseRuntimeRetired,
+} from './canonical-showcase-runtime';
 import {
   FLY_CANONICAL_LOCK_ENFORCED,
   isFlyDeclaredDashboardUrl,
@@ -115,8 +118,27 @@ export class BotBridgeService {
     private readonly showcaseSnapshot: ShowcaseSnapshotService,
   ) {}
 
-  /** Fly is the authoritative 24/7 owner. */
+  /** Fly is the authoritative 24/7 owner (historical). Runtime is retired. */
   private readonly DEFAULT_CANONICAL_URL = CANONICAL_SHOWCASE_BOT_URL;
+
+  /**
+   * HM condition: after Fly delete, never serve a cached armed/live snapshot and
+   * never start another dead-host fetch. Clears in-memory caches and returns true
+   * when the caller must fail closed to offline/disarmed.
+   */
+  private refuseRetiredFlyRuntime(): boolean {
+    if (!isFlyShowcaseRuntimeRetired()) return false;
+    this.cached = null;
+    this.lastFetchAt = 0;
+    this.lastLiveFetchAt = 0;
+    this.execCached = null;
+    this.execFetchAt = 0;
+    this.showcaseFetchCached = null;
+    this.showcaseFetchAt = 0;
+    this.directFlyOwnerProof = null;
+    this.showcaseFetchInFlight.clear();
+    return true;
+  }
 
   getBotUrl(): string {
     return this.DEFAULT_CANONICAL_URL;
@@ -213,6 +235,8 @@ export class BotBridgeService {
    * entry fast path. A stale/foreign/Fly snapshot is never returned.
    */
   getCachedExecutionState(maxAgeMs = 10_000): BotApiState | null {
+    // Fail closed: never return a stale armed/live cache after Fly is gone.
+    if (this.refuseRetiredFlyRuntime()) return null;
     const ageMs = Date.now() - this.execFetchAt;
     const instanceId = this.execCached?.bot_instance_id?.trim();
     if (
@@ -230,6 +254,7 @@ export class BotBridgeService {
   /** Agent Hub showcase desk — canonical Fly bot only.
    *  Uses the fresh signed platform snapshot first, then the same Fly owner. */
   async fetchPublicShowcaseState(force = true): Promise<BotApiState | null> {
+    if (this.refuseRetiredFlyRuntime()) return null;
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
@@ -261,6 +286,8 @@ export class BotBridgeService {
   private pushedCacheDeadWarnAtMs = 0;
 
   private async fetchCachedRelaySnapshot(maxAgeMs = 15_000): Promise<BotApiState | null> {
+    // HM: after Fly delete, never serve a cached armed/live snapshot.
+    if (this.refuseRetiredFlyRuntime()) return null;
     // LIVE-FIX-1330: Fly runs RELAY_STACK_MODE=research_only, so its pusher is
     // off by design and the pushed cache went 7.8 days stale. Every execution
     // read still paid a cache read + WARN before going to Fly. Once the cache is
@@ -386,6 +413,7 @@ export class BotBridgeService {
   }
 
   async fetchStateForExecution(force = true): Promise<BotApiState | null> {
+    if (this.refuseRetiredFlyRuntime()) return null;
     const now = Date.now();
     // `force` bypasses the display cache, not this execution cache. Otherwise
     // every caller in the same relay tick creates an identical tunnel request.
@@ -434,6 +462,7 @@ export class BotBridgeService {
     force = true,
     allowPushedSnapshot = true,
   ): Promise<BotApiState | null> {
+    if (this.refuseRetiredFlyRuntime()) return null;
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
@@ -482,6 +511,7 @@ export class BotBridgeService {
 
   /** Admin panels — canonical Fly owner only. Cache-first, then live Fly state. */
   async fetchStateForAdmin(force = true): Promise<BotApiState | null> {
+    if (this.refuseRetiredFlyRuntime()) return null;
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
@@ -509,6 +539,7 @@ export class BotBridgeService {
   }
 
   async fetchState(force = false, mode: 'full' | 'relay' | 'live' = 'full'): Promise<BotApiState | null> {
+    if (this.refuseRetiredFlyRuntime()) return null;
     const now = Date.now();
     if (!force && this.cached && now - this.lastFetchAt < this.cacheMs) {
       return this.cached;
@@ -550,6 +581,7 @@ export class BotBridgeService {
       lane?: 'shared' | 'execution';
     },
   ): Promise<BotApiState | null> {
+    if (this.refuseRetiredFlyRuntime()) return null;
     const now = Date.now();
     if (
       this.showcaseFetchCached
@@ -652,6 +684,7 @@ export class BotBridgeService {
 
   /** True when either canonical Fly health endpoint responds. */
   async isReachable(force = false): Promise<boolean> {
+    if (this.refuseRetiredFlyRuntime()) return false;
     const pushed = await this.fetchCachedRelaySnapshot(15_000);
     if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) return true;
     if (await this.isFlyHealthReachable()) return true;
@@ -668,6 +701,7 @@ export class BotBridgeService {
    * bridge stays the single owner of canonical-URL resolution.
    */
   async isFlyHealthReachable(): Promise<boolean> {
+    if (this.refuseRetiredFlyRuntime()) return false;
     const pushed = await this.fetchCachedRelaySnapshot(15_000);
     if (pushed && this.isCanonicalPushedSnapshot(pushed, 15_000)) return true;
     const base = await this.resolveShowcaseUrl();
@@ -719,6 +753,9 @@ export class BotBridgeService {
   }
 
   async proxyBotPost(path: string, body: Record<string, unknown> = {}) {
+    if (this.refuseRetiredFlyRuntime()) {
+      return { ok: false, error: 'offline, by design — moving to laptop' };
+    }
     const bases = [await this.resolveShowcaseUrl()];
     if (bases.length === 0 || !bases[0]) {
       return { ok: false, error: 'Bot bridge not configured' };
@@ -765,6 +802,7 @@ export class BotBridgeService {
 
   /** Health probe — race Fly `/api/ping` and `/health`; first 200 wins. */
   async fetchHealth() {
+    if (this.refuseRetiredFlyRuntime()) return null;
     const state = await this.fetchPublicShowcaseState(true);
     if (state) {
       return {

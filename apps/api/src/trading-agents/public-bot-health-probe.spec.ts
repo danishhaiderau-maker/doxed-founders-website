@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+
+process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = '1';
 import {
   isFreshBotSnapshot,
   probePublicBotHealth,
