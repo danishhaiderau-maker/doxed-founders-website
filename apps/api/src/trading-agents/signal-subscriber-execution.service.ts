@@ -105,6 +105,7 @@ import {
   type LiveOrderExitFillInput,
 } from './live-row-countability';
 import { BotBridgeService } from './bot-bridge.service';
+import { shouldDispatchRelayExecutorWake } from './canonical-showcase-runtime';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
@@ -5208,6 +5209,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * Signals can be tens of minutes apart; without this health-only probe the
    * first money-path wake pays DNS + TLS + edge connection setup. */
   private startExecutorConnectionKeepalive(): void {
+    // Drop wake-to-Fly / dead-host keepalive while showcase Fly runtime is retired.
+    if (!shouldDispatchRelayExecutorWake()) return;
     const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
     if (!base) return;
     const probe = () => {
@@ -5757,6 +5760,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   private async dispatchDirectExecutorWake(payload: RelayExecutorWakeRequest): Promise<void> {
+    if (!shouldDispatchRelayExecutorWake()) return;
     const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
     const secret = process.env.BOT_CONTROL_SECRET?.trim();
     if (!base || !secret) return;
@@ -5790,6 +5794,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason,
       });
       return { ...local, requestId: 'local-executor' };
+    }
+    if (!shouldDispatchRelayExecutorWake()) {
+      throw new Error('Relay executor wake retired with Fly showcase runtime (offline, by design)');
     }
     const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
     const secret = process.env.BOT_CONTROL_SECRET?.trim();

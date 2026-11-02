@@ -1,3 +1,5 @@
+import { isFlyShowcaseRuntimeRetired } from './canonical-showcase-runtime';
+
 /**
  * RK L27 on EVERY arm path (#852, 24 Oct). Fly owns the latest real L (persisted from Bitfinex reads) and the ONE shared
  * arm-gate liq check (live_tile_gate.l27_arm_block -> liq_too_close, <= 15 bp past the stop until a new stop amendment
@@ -41,6 +43,8 @@ export async function fetchL27ArmBlock(
   fetchImpl: typeof fetch = fetch,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
+  // Fly deleted — fail closed without hammering the dead host.
+  if (isFlyShowcaseRuntimeRetired(env)) return DENY_L27_GATE_UNREADABLE;
   const headers: Record<string, string> = { Accept: 'application/json' };
   const token = env.BOT_ADMIN_TOKEN?.trim();
   if (token) headers['X-Bot-Admin-Token'] = token;

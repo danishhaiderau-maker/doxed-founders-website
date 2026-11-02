@@ -1,5 +1,9 @@
 import { Injectable, Logger, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  SHOWCASE_OFFLINE_BY_DESIGN_LABEL,
+  isFlyShowcaseRuntimeRetired,
+} from './canonical-showcase-runtime';
 
 /**
  * Remote control for the showcase BTC bot running on Fly.io.
@@ -102,6 +106,9 @@ export class FlyControlService {
   }
 
   async getMachineState(): Promise<FlyMachineState> {
+    if (isFlyShowcaseRuntimeRetired()) {
+      throw new ServiceUnavailableException(SHOWCASE_OFFLINE_BY_DESIGN_LABEL);
+    }
     const { machineId } = this.resolveConfig();
     const body = await this.callFly(`/machines/${machineId}`);
     return (body?.state ?? body?.status ?? 'unknown') as FlyMachineState;
@@ -110,6 +117,9 @@ export class FlyControlService {
   async control(action: FlyControlAction): Promise<FlyControlResult> {
     if (action !== 'start' && action !== 'stop') {
       throw new BadRequestException(`Invalid action: ${action}. Use "start" or "stop".`);
+    }
+    if (isFlyShowcaseRuntimeRetired()) {
+      throw new ServiceUnavailableException(SHOWCASE_OFFLINE_BY_DESIGN_LABEL);
     }
     const { machineId, botUrl } = this.resolveConfig();
     const endpoint = action === 'start' ? 'start' : 'stop';

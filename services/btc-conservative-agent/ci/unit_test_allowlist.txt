@@ -44,6 +44,7 @@ test_analyzer_summary_generation_parity.py
 test_analyzer_sync_retry_backoff.py
 test_analyzer_tile_cohort_accounting.py
 test_analyzer_v3_generation_reader.py
+test_api_fly_offline_by_design.py
 test_api_resume_reset_gate.py
 test_api_state_readiness_timestamp.py
 test_api_state_trade_lock_scope.py

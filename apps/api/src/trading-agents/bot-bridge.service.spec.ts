@@ -4,6 +4,9 @@ import { createHmac } from 'node:crypto';
 import { BotBridgeService } from './bot-bridge.service';
 import { ShowcaseSnapshotService } from './showcase-snapshot.service';
 
+// Legacy Fly-path unit tests: exercise fetch logic without the retired short-circuit.
+process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = '1';
+
 const canonicalState = {
   dashboard_owner: true,
   bot_instance_id: 'dashboard-7002-test-owner',
