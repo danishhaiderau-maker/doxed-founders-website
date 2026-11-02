@@ -24,8 +24,7 @@ param(
   [switch]$NoWait,
   [switch]$CollectorOnly,
   [switch]$InstallAutostart,
-  [switch]$UninstallAutostart,
-  [switch]$SkipHostPreflight
+  [switch]$UninstallAutostart
 )
 
 $ErrorActionPreference = "Stop"
@@ -102,15 +101,16 @@ function Install-LocalPaperAutostart {
     Write-Host "REFUSED: set User or Process LOCAL_FRESH_START_CONFIRM before -InstallAutostart." -ForegroundColor Red
     exit 78
   }
+  # RK 09:12 / HM N2: boot always runs host preflight (NTP/clock). No skip switch.
   $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$thisScript`" -NoWait -SkipHostPreflight"
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$thisScript`" -NoWait"
   $trigger = New-ScheduledTaskTrigger -AtLogOn
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 2)
   $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force | Out-Null
-  Write-Host "OK: Scheduled Task '$taskName' registered (AtLogOn → start-local-paper-bot.ps1 -NoWait)."
+  Write-Host "OK: Scheduled Task '$taskName' registered (AtLogOn → start-local-paper-bot.ps1 -NoWait; preflight ON)."
   Write-Host "Disable later with: -UninstallAutostart"
   exit 0
 }
@@ -148,23 +148,22 @@ if (-not (Test-Path $logsDir)) {
   New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 }
 
-if (-not $SkipHostPreflight) {
-  Write-HostPreflightNotes
-  $ntp = Test-ClockNtp
-  Write-Host ("NTP/clock: ok={0} w32time={1}" -f $ntp.ok, $ntp.w32time_state)
-  if ($ntp.w32tm_snippet) {
-    Write-Host ("w32tm: {0}" -f $ntp.w32tm_snippet)
-  }
-  if (-not $ntp.ok) {
-    Write-Host ("REFUSED: clock/NTP preflight failed: {0}" -f ($ntp.reasons -join ",")) -ForegroundColor Red
-    Write-Host "Fix Windows Time / NTP, or re-run with -SkipHostPreflight only after documenting the waiver on the R12 card." -ForegroundColor Yellow
-    exit 78
-  }
-  # HM laptop scope: powercfg sleep + Windows Update restart changes are STATED on the
-  # R12 REV3 card for the operator — this script does NOT apply them silently.
-  Write-Host "NOTE: powercfg Sleep=Never (AC) and Windows Update pause/reboot deferral are operator actions on the R12 card — not applied by this script."
-  Write-Host "NOTE: laptop writes allowed only under C:\DoxxedCrypto plus one Task Scheduler entry ($taskName). No Bitfinex keys, no live/arm, no deletes, no Windows security/firewall changes."
+# RK 09:12 AEDT / HM N2: host-preflight skip switch removed — boot always runs preflight.
+Write-HostPreflightNotes
+$ntp = Test-ClockNtp
+Write-Host ("NTP/clock: ok={0} w32time={1}" -f $ntp.ok, $ntp.w32time_state)
+if ($ntp.w32tm_snippet) {
+  Write-Host ("w32tm: {0}" -f $ntp.w32tm_snippet)
 }
+if (-not $ntp.ok) {
+  Write-Host ("REFUSED: clock/NTP preflight failed: {0}" -f ($ntp.reasons -join ",")) -ForegroundColor Red
+  Write-Host "Fix Windows Time / NTP, then re-run. (Host-preflight skip switch removed — RK ruled it a violation.)" -ForegroundColor Yellow
+  exit 78
+}
+# HM laptop scope: powercfg sleep + Windows Update restart changes are STATED on the
+# R12 card for the operator — this script does NOT apply them silently.
+Write-Host "NOTE: powercfg Sleep=Never (AC) and Windows Update pause/reboot deferral are operator actions on the R12 card — not applied by this script."
+Write-Host "NOTE: laptop writes allowed only under C:\DoxxedCrypto plus one Task Scheduler entry ($taskName). No Bitfinex keys, no live/arm, no deletes, no Windows security/firewall changes."
 
 # Load vault NAMES only path (values never printed). Default home-bot.env sibling.
 if (-not $VaultEnv) {

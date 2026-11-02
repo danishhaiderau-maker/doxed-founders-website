@@ -219,6 +219,48 @@ def disk_free_bytes(path: str | Path) -> Optional[int]:
         return None
 
 
+def _windows_rss_bytes() -> Optional[int]:
+    """HM N3 — WorkingSetSize via GetProcessMemoryInfo (no psutil required)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    try:
+        psapi = ctypes.WinDLL("psapi")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_mem = psapi.GetProcessMemoryInfo
+        get_mem.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+            wintypes.DWORD,
+        ]
+        get_mem.restype = wintypes.BOOL
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        handle = kernel32.GetCurrentProcess()
+        if not get_mem(handle, ctypes.byref(counters), counters.cb):
+            return None
+        return int(counters.WorkingSetSize)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
 def process_rss_bytes() -> Optional[int]:
     try:
         statm = Path("/proc/self/statm").read_text(encoding="ascii").split()
@@ -233,20 +275,30 @@ def process_rss_bytes() -> Optional[int]:
         # Linux ru_maxrss is KiB; macOS is bytes.
         if sys.platform == "darwin":
             return peak
-        return peak * 1024
+        if sys.platform.startswith("win"):
+            # resource may be absent or meaningless on Windows — fall through.
+            pass
+        else:
+            return peak * 1024
     except (ImportError, OSError, ValueError, AttributeError):
-        return None
+        pass
+    if sys.platform.startswith("win"):
+        return _windows_rss_bytes()
+    return None
 
 
 def ensure_disk_headroom(
     path: str | Path,
     environ: Optional[Mapping[str, str]] = None,
 ) -> tuple[bool, Optional[int], int]:
-    """Return (ok, free_bytes, min_required). Fail closed when free is known and low."""
+    """Return (ok, free_bytes, min_required).
+
+    HM AMBER / RK: **fail closed** when free cannot be measured or is below min.
+    """
     minimum = min_disk_free_bytes(environ)
     free = disk_free_bytes(path)
     if free is None:
-        return True, None, minimum  # cannot measure — do not block (Windows path variance)
+        return False, None, minimum
     return free >= minimum, free, minimum
 
 
@@ -418,7 +470,8 @@ def build_health_payload(
         "gaps_never_filled": True,
     }
     if not disk_ok:
-        payload["reasons"] = list(payload["reasons"]) + ["DISK_FREE_BELOW_MIN"]
+        reason = "DISK_FREE_UNMEASURABLE" if disk_free is None else "DISK_FREE_BELOW_MIN"
+        payload["reasons"] = list(payload["reasons"]) + [reason]
     if extra:
         payload.update(dict(extra))
     return payload

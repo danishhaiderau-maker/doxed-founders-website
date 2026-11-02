@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,8 @@ class TestLocalFreshRuntime(unittest.TestCase):
     def test_health_reads_real_env_and_exposes_tick_disk_rss(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "logs" / "local_fresh_health.json"
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
             env = {
                 "FORCE_PAPER_MODE": "1",
                 "BITFINEX_LIVE_ENABLED": "0",
@@ -82,8 +85,8 @@ class TestLocalFreshRuntime(unittest.TestCase):
             }
             payload = lfr.build_health_payload(
                 ok=True,
-                data_dir=str(Path(tmp) / "data"),
-                gap_log_path=str(Path(tmp) / "data" / "gap_log.jsonl"),
+                data_dir=str(data_dir),
+                gap_log_path=str(data_dir / "gap_log.jsonl"),
                 now=1_700_000_100.0,
                 last_tick_ts=1_700_000_000.0,
                 environ=env,
@@ -129,6 +132,55 @@ class TestLocalFreshRuntime(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 lfr.ensure_series_break(other)
             self.assertIn("SERIES_BREAK_REQUIRED", str(ctx.exception))
+
+    def test_windows_rss_helper_returns_int_or_none(self):
+        # On Linux CI this returns None (no WinDLL); shape must stay Optional[int].
+        value = lfr._windows_rss_bytes()
+        self.assertTrue(value is None or (isinstance(value, int) and value > 0))
+
+    def test_process_rss_bytes_prefers_linux_statm(self):
+        rss = lfr.process_rss_bytes()
+        # Linux agents always have /proc; Windows path covered by _windows_rss_bytes.
+        if sys.platform.startswith("linux"):
+            self.assertIsInstance(rss, int)
+            self.assertGreater(rss, 0)
+
+
+class TestStartLocalPaperAutostartPreflight(unittest.TestCase):
+    def test_skip_host_preflight_removed_entirely(self):
+        # RK 09:12: host-preflight skip switch is a violation — param + flag gone.
+        root = Path(__file__).resolve().parents[2]
+        script = root / "scripts" / "start-local-paper-bot.ps1"
+        text = script.read_text(encoding="utf-8")
+        self.assertNotIn("[switch]$SkipHostPreflight", text)
+        self.assertNotIn("-$SkipHostPreflight", text)
+        self.assertNotRegex(text, r"(?m)^\s*\[switch\]\$SkipHostPreflight\b")
+        # Autostart must invoke boot with -NoWait only (preflight always runs).
+        start = text.index("function Install-LocalPaperAutostart")
+        end = text.index("function Uninstall-LocalPaperAutostart")
+        block = text[start:end]
+        self.assertIn("-NoWait", block)
+        self.assertNotIn("SkipHostPreflight", block)
+        # Param block must not declare the removed switch.
+        param_end = text.index(")", text.index("param("))
+        param_block = text[text.index("param(") : param_end + 1]
+        self.assertNotIn("SkipHostPreflight", param_block)
+
+    def test_disk_headroom_fails_closed_when_unmeasurable(self):
+        ok, free, minimum = lfr.ensure_disk_headroom("/nonexistent/path/that/cannot/stat")
+        # shutil.disk_usage may still resolve a parent on some OSes; force None path:
+        # monkey via missing measure: call with a path that raises — covered by
+        # wrapping disk_free_bytes return.
+        self.assertIsInstance(minimum, int)
+        # Direct fail-closed contract when free is None:
+        original = lfr.disk_free_bytes
+        try:
+            lfr.disk_free_bytes = lambda path: None  # type: ignore[assignment]
+            ok2, free2, _ = lfr.ensure_disk_headroom(".")
+            self.assertFalse(ok2)
+            self.assertIsNone(free2)
+        finally:
+            lfr.disk_free_bytes = original  # type: ignore[assignment]
 
 
 if __name__ == "__main__":
