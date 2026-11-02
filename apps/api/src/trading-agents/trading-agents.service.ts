@@ -68,6 +68,7 @@ import {
   CANONICAL_SHOWCASE_BOT_URL,
   buildShowcaseOfflineByDesignStatus,
   isFlyShowcaseRuntimeRetired,
+  shouldRegisterNeonBackgroundTimers,
 } from './canonical-showcase-runtime';
 import { buildRelayFidelitySnapshot } from './relay-fidelity.mapper';
 import {
@@ -298,6 +299,13 @@ export class TradingAgentsService implements OnModuleInit {
     await this.ensureSeed().catch(() => undefined);
     await this.syncConservativeBtcAgentRecord().catch(() => undefined);
     await this.botBridge.resolveBotUrl().catch(() => null);
+    // R51: gate Neon-chatting 20s position-alert timer at registration only.
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[TRADING-AGENTS] offline, by design — 20s Neon position-alert timer not registered',
+      );
+      return;
+    }
     setInterval(() => void this.pollBotPositionAlerts(), 20_000);
   }
 

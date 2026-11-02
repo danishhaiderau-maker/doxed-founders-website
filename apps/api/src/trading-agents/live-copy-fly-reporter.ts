@@ -11,7 +11,10 @@ import {
 } from './live-copy-approval';
 import { EXIT_FILL_RECONCILED_EVENT, liveExitFillEvidence } from './live-row-countability';
 import { BITFINEX_BTC_PERP_SYMBOL, BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
-import { isFlyShowcaseRuntimeRetired } from './canonical-showcase-runtime';
+import {
+  isFlyShowcaseRuntimeRetired,
+  shouldRegisterNeonBackgroundTimers,
+} from './canonical-showcase-runtime';
 
 /**
  * HM R4 B1 / RK 08:03 / HM R5 C1: close.price is ONLY a real Bitfinex fill (close-order trades or the resident stop's own
@@ -529,8 +532,8 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
   ) {}
 
   onModuleInit(): void {
-    // Fly app deleted — do not start the ~5s report loop against a dead host.
-    if (isFlyShowcaseRuntimeRetired()) {
+    // R51: gate Neon/Fly reporter timer at the single registration site.
+    if (!shouldRegisterNeonBackgroundTimers()) {
       this.logger.log('[LIVE-COPY-REPORTER] offline, by design — Fly reporter loop not started');
       return;
     }

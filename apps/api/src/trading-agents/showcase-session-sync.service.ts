@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { BotBridgeService } from './bot-bridge.service';
 import type { BotApiState } from './bot-state.mapper';
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
+import { shouldRegisterNeonBackgroundTimers } from './canonical-showcase-runtime';
 
 const AGENT_SLUG = 'conservative-btc';
 const SYNC_POLL_MS = 12_000;
@@ -57,6 +58,13 @@ export class ShowcaseSessionSyncService implements OnModuleInit {
 
   onModuleInit() {
     if (!this.botBridge.isEnabled()) return;
+    // R51: gate Neon/Fly showcase session sync timer at registration.
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[SHOWCASE-SESSION-SYNC] offline, by design — Neon session-sync timer not registered',
+      );
+      return;
+    }
     this.logger.log(`Showcase session sync polling every ${SYNC_POLL_MS / 1000}s`);
     setInterval(() => void this.poll(), SYNC_POLL_MS);
     setTimeout(() => void this.poll(), 2_000);

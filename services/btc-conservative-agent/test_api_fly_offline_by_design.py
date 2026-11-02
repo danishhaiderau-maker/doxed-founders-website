@@ -43,8 +43,20 @@ def test_bot_bridge_refuses_retired_fly_without_cache_armed_live():
 
 def test_live_copy_reporter_skips_five_second_loop_when_retired():
     src = _read(REPORTER)
-    assert "isFlyShowcaseRuntimeRetired()" in src
+    assert "shouldRegisterNeonBackgroundTimers()" in src
     assert "Fly reporter loop not started" in src
+
+
+def test_neon_idle_gate_exported_and_used():
+    runtime = _read(RUNTIME)
+    assert "shouldRegisterNeonBackgroundTimers" in runtime
+    assert "R51" in runtime or "registration-site gate" in runtime
+    for path in (
+        API / "trading-agents.service.ts",
+        API / "signal-subscriber-execution.service.ts",
+        API / "signal-cycles.service.ts",
+    ):
+        assert "shouldRegisterNeonBackgroundTimers" in _read(path), path.name
 
 
 def test_offline_by_design_spec_exists_and_is_allowlisted_in_api_package():

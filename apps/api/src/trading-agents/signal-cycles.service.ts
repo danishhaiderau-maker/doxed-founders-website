@@ -31,6 +31,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BotBridgeService } from './bot-bridge.service';
+import { shouldRegisterNeonBackgroundTimers } from './canonical-showcase-runtime';
 import {
   resolveEvmTreasuryAddress,
   resolveSolanaTreasuryAddress,
@@ -123,6 +124,13 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
       this.logger.log('Signal-cycle ingress disabled in isolated executor worker');
+      return;
+    }
+    // R51: gate Neon-chatting 5m idle recovery (and active backstop) at registration.
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[SIGNAL-CYCLES] offline, by design — Neon wake/5m idle recovery timers not registered',
+      );
       return;
     }
     this.backstopEnabled = true;

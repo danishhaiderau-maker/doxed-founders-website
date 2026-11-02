@@ -125,7 +125,7 @@ test('admin-control public agent status is offline-by-design without bridge prob
 
 test('live-copy Fly reporter does not start the 5s loop when retired', () => {
   const src = read('live-copy-fly-reporter.ts');
-  assert.match(src, /onModuleInit\(\): void \{[\s\S]*isFlyShowcaseRuntimeRetired\(\)/);
+  assert.match(src, /onModuleInit\(\): void \{[\s\S]*shouldRegisterNeonBackgroundTimers\(\)/);
   assert.match(src, /Fly reporter loop not started/);
   assert.match(src, /async tick\([\s\S]*isFlyShowcaseRuntimeRetired\(\)\) return;/);
 });
@@ -141,8 +141,13 @@ test('L27 arm-gate and health probe fail closed without dead-host fetch', () => 
 test('wake path and fly-control refuse dead Fly host', () => {
   const exec = read('signal-subscriber-execution.service.ts');
   assert.match(exec, /shouldDispatchRelayExecutorWake/);
+  assert.match(exec, /shouldRegisterNeonBackgroundTimers/);
   assert.match(exec, /startExecutorConnectionKeepalive[\s\S]*shouldDispatchRelayExecutorWake\(\)/);
   assert.match(exec, /dispatchDirectExecutorWake[\s\S]*shouldDispatchRelayExecutorWake\(\)/);
+  assert.match(
+    exec,
+    /requestExecutorEmergencyReconcile[\s\S]*return \{ flattened: 0, requestId: 'offline-by-design' \}/,
+  );
   const fly = read('fly-control.service.ts');
   assert.match(fly, /isFlyShowcaseRuntimeRetired\(\)/);
   assert.match(fly, /SHOWCASE_OFFLINE_BY_DESIGN_LABEL/);
