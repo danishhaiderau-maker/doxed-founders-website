@@ -1,8 +1,9 @@
 """Local self-contained mode: no Railway / Neon coupling (day-1 after Fly delete).
 
 HM + Strategist confirm: no research/monitoring data depends on Neon or Railway.
-Danish via RK t781u: Railway backend + Neon will be removed; Vercel goes static —
-local paper bot must be self-contained.
+Danish via RK t781u (earlier framing): Railway/Neon removal / Vercel static.
+Danish 01:37 AEDT 3 Nov (binding): Railway + Neon stay on basic plans, not deleted;
+local paper must still be self-contained if cloud is unreachable.
 
 When enabled:
 * paper must not stall on ``LIVE_RELAY_COORDINATION_NOT_CONFIRMED_BY_RAILWAY_*``
@@ -26,7 +27,8 @@ COORD_STATE_LOCAL_PAPER_ISOLATED = "LOCAL_PAPER_ISOLATED"
 COORD_REASON_LOCAL_NO_RAILWAY = "LOCAL_PAPER_NO_RAILWAY_NEON_COUPLING"
 HM_STRATEGIST_CITE = (
     "HM + Strategist: no research/monitoring depends on Neon/Railway; "
-    "Danish/RK t781u: Railway+Neon removed, Vercel static — local bot self-contained"
+    "Danish/RK t781u + Danish 01:37 AEDT: keep Railway/Neon basic plans (no delete); "
+    "local bot self-contained if cloud unreachable"
 )
 
 SKIPPED_PLATFORMS = frozenset({"railway", "neon", "fly"})

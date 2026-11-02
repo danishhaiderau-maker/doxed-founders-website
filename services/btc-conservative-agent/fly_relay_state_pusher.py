@@ -77,16 +77,24 @@ def main() -> int:
                 flush=True,
             )
             return 0
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED local_cloud_decouple.relay_pusher_disabled: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
     try:
         from relay_stack_mode import research_only
 
         if research_only():
             print("[fly-relay-pusher] disabled: RELAY_STACK_MODE=research_only", flush=True)
             return 0
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED relay_stack_mode.research_only: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
     if not CONTROL_SECRET:
         print("[fly-relay-pusher] disabled: BOT_CONTROL_SECRET missing", flush=True)
         return 0

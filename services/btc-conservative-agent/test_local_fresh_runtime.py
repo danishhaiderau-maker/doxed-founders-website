@@ -72,14 +72,21 @@ class TestLocalFreshRuntime(unittest.TestCase):
         self.assertTrue(lfr.lane_allowed("FAMILY_GS01_XV_PREMIUM_ATR_TP"))
         self.assertFalse(lfr.lane_allowed("FAMILY_GSB1_CVD_DIV_REGIME"))
 
-    def test_write_health_json_atomic(self):
+    def test_health_reads_real_env_and_exposes_tick_disk_rss(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "logs" / "local_fresh_health.json"
+            env = {
+                "FORCE_PAPER_MODE": "1",
+                "BITFINEX_LIVE_ENABLED": "0",
+                "LOCAL_FRESH_MIN_DISK_FREE_BYTES": "1",
+            }
             payload = lfr.build_health_payload(
                 ok=True,
                 data_dir=str(Path(tmp) / "data"),
                 gap_log_path=str(Path(tmp) / "data" / "gap_log.jsonl"),
-                now=1_700_000_000.0,
+                now=1_700_000_100.0,
+                last_tick_ts=1_700_000_000.0,
+                environ=env,
             )
             written = lfr.write_health_json(path, payload)
             self.assertEqual(written, str(path.resolve()))
@@ -87,9 +94,41 @@ class TestLocalFreshRuntime(unittest.TestCase):
             self.assertEqual(body["schema"], lfr.HEALTH_SCHEMA)
             self.assertTrue(body["ok"])
             self.assertTrue(body["force_paper_mode"])
+            self.assertTrue(body["paper_forced"])
             self.assertFalse(body["bitfinex_live_enabled"])
             self.assertTrue(body["disarmed"])
+            self.assertEqual(body["last_tick_age_s"], 100.0)
+            self.assertIn("disk_free_bytes", body)
+            self.assertIn("rss_bytes", body)
+            self.assertTrue(body["gaps_never_filled"])
             self.assertEqual(body["lane_labels"], ["CTRL", "GS-01"])
+
+    def test_health_disarmed_false_when_live_arm_env_set(self):
+        env = {
+            "FORCE_PAPER_MODE": "1",
+            "BITFINEX_LIVE_ENABLED": "0",
+            "LIVE_COPY_ARMED": "1",
+        }
+        payload = lfr.build_health_payload(ok=True, environ=env, now=1.0)
+        self.assertFalse(payload["disarmed"])
+        self.assertTrue(payload["live_copy_armed"])
+        self.assertFalse(payload["ok"])
+
+    def test_series_break_created_once_and_refuses_unmarked_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = lfr.ensure_series_break(root, now=1_700_000_000.0, source_git_rev="abc123")
+            self.assertEqual(first["schema"], lfr.SERIES_BREAK_SCHEMA)
+            self.assertEqual(first["fly_era_data"], "CLOSED")
+            second = lfr.ensure_series_break(root, now=1_800_000_000.0)
+            self.assertEqual(second["series_break_ts"], first["series_break_ts"])
+            # Unmarked Fly-era sqlite in a fresh dir without series_break → refuse.
+            other = Path(tmp) / "fly_era"
+            other.mkdir()
+            (other / "local_market.sqlite3").write_bytes(b"not-empty")
+            with self.assertRaises(RuntimeError) as ctx:
+                lfr.ensure_series_break(other)
+            self.assertIn("SERIES_BREAK_REQUIRED", str(ctx.exception))
 
 
 if __name__ == "__main__":

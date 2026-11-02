@@ -110,6 +110,7 @@ if _LOCAL_FRESH:
     from local_fresh_runtime import (  # noqa: E402
         apply_local_fresh_environ,
         build_health_payload,
+        ensure_series_break,
         refuse_message,
         resolve_data_dir,
         resolve_health_path,
@@ -152,6 +153,12 @@ if _LOCAL_FRESH:
     _data_dir = resolve_data_dir()
     _data_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("BOT_DATA_DIR", str(_data_dir))
+    # Strategist: SERIES BREAK stamp; Fly-era data stays closed (never joined).
+    try:
+        _series = ensure_series_break(_data_dir, source_git_rev=_read_boot_revision())
+    except RuntimeError as _series_exc:
+        print(refuse_message([str(_series_exc)]), file=sys.stderr)
+        raise SystemExit(78)
     _health_path = resolve_health_path()
     write_health_json(
         _health_path,
@@ -159,8 +166,14 @@ if _LOCAL_FRESH:
             ok=True,
             data_dir=str(_data_dir),
             gap_log_path=str(_data_dir / "gap_log.jsonl"),
-            collector={"entrypoint": "btc_conservative_agent.local_fresh"},
-            extra={"bitfinex_live_policy_gate": dict(_gate)},
+            collector={
+                "entrypoint": "btc_conservative_agent.local_fresh",
+                "gaps_never_filled": True,
+            },
+            extra={
+                "bitfinex_live_policy_gate": dict(_gate),
+                "series_break": dict(_series),
+            },
         ),
     )
 else:

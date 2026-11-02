@@ -1,11 +1,17 @@
 """Bitfinex **public** websocket collector → local MarketStore (SQLite/Parquet + gap log).
 
 Keyless. Never imports bot.py. Never places orders. Day-1 local fresh-start path.
+
+Strategist:
+* Gap log records collector disconnects **and** laptop sleep.
+* Gaps are **never filled** — on a multi-second jump, log the hole and resume at
+  the new second without synthesizing intermediate book rows.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import threading
@@ -15,6 +21,7 @@ from typing import Any, Callable, Optional
 from local_fresh_runtime import (
     apply_local_fresh_environ,
     build_health_payload,
+    ensure_series_break,
     is_local_fresh_start,
     resolve_data_dir,
     resolve_health_path,
@@ -29,6 +36,10 @@ BFX_SYMBOL = os.getenv("LOCAL_FRESH_BFX_SYMBOL") or os.getenv(
 )
 LEVELS = 10
 SCHEMA = "local_public_ws_collector_v1"
+# Wall-clock jump at or above this (seconds) while connected → LAPTOP_SLEEP gap.
+SLEEP_GAP_THRESHOLD_S = int(os.getenv("LOCAL_FRESH_SLEEP_GAP_THRESHOLD_S") or "5")
+
+_LOG = logging.getLogger("local_public_ws_collector")
 
 
 class _Book:
@@ -71,7 +82,10 @@ class _Book:
 
 
 class LocalPublicCollector:
-    """Public book+trades → MarketStore; records gap log on missing book seconds."""
+    """Public book+trades → MarketStore; records gap log on missing book seconds.
+
+    Never fills gaps. Disconnect and laptop-sleep holes are explicit gap kinds.
+    """
 
     def __init__(
         self,
@@ -81,26 +95,42 @@ class LocalPublicCollector:
         ws_factory: Optional[Callable[[str], Any]] = None,
         clock=time.time,
         health_path: Optional[str] = None,
+        sleep_gap_threshold_s: int = SLEEP_GAP_THRESHOLD_S,
     ) -> None:
         self.store = store
         self.symbol = symbol
         self.ws_factory = ws_factory or self._default_ws
         self.clock = clock
         self.health_path = health_path
+        self.sleep_gap_threshold_s = max(2, int(sleep_gap_threshold_s))
         self.stop = threading.Event()
         self.book = _Book()
         self.chans: dict[Any, str] = {}
         self._open_sec: Optional[int] = None
-        self._frozen: dict[int, tuple] = {}
         self._trades: list = []
         self.reconnects = 0
         self.frames = 0
         self.last_error: Optional[str] = None
+        self.last_tick_ts: Optional[float] = None
+        self._awaiting_reconnect = False
 
     @staticmethod
     def _default_ws(url: str):
-        import websocket
-
+        try:
+            import websocket
+        except Exception as exc:  # noqa: BLE001 — HM A2 loud import failure
+            _LOG.error(
+                "LOCAL_FRESH_IMPORT_FAILED websocket-client: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            print(
+                f"LOCAL_FRESH_IMPORT_FAILED websocket-client: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
         return websocket.create_connection(url, timeout=10)
 
     def request_stop(self) -> None:
@@ -109,11 +139,12 @@ class LocalPublicCollector:
     def on_message(self, msg: Any, now: Optional[float] = None) -> None:
         now = self.clock() if now is None else float(now)
         self.frames += 1
+        self.last_tick_ts = now
         sec = int(now)
         if self._open_sec is None:
             self._open_sec = sec
         elif sec > self._open_sec:
-            self._close_seconds(sec)
+            self._advance_to_second(sec)
         if isinstance(msg, dict):
             if msg.get("event") == "subscribed":
                 self.chans[msg.get("chanId")] = str(msg.get("channel") or "")
@@ -138,48 +169,79 @@ class LocalPublicCollector:
 
     def on_disconnect(self, now: Optional[float] = None, reason: str = "disconnect") -> None:
         now = self.clock() if now is None else float(now)
-        if self._open_sec is not None:
-            # Force-close current open second as a gap boundary marker.
-            self.store.log_explicit_gap(
-                "WS_DISCONNECT",
-                int(now),
-                int(now),
-                detail={"reason": reason, "reconnects": self.reconnects},
-            )
+        # Strategist: record disconnect; do not fill any hole.
+        self.store.log_explicit_gap(
+            "COLLECTOR_DISCONNECT",
+            int(now),
+            int(now),
+            detail={
+                "reason": reason,
+                "reconnects": self.reconnects,
+                "filled": False,
+                "open_sec": self._open_sec,
+            },
+        )
         self.last_error = reason
+        self._awaiting_reconnect = True
+        # Drop in-flight open second — do not invent book for the disconnect window.
+        self._open_sec = None
+        self._trades.clear()
 
-    def _close_seconds(self, new_sec: int) -> None:
+    def _advance_to_second(self, new_sec: int) -> None:
+        """Close at most the current open second, then log (never fill) any hole.
+
+        Prior bug: looping ``while open < new`` wrote synthetic book for every
+        slept second. Strategist forbids that — log LAPTOP_SLEEP / BOOK_1S gap
+        and resume at ``new_sec`` without inserting intermediate rows.
+        """
         assert self._open_sec is not None
-        while self._open_sec < new_sec:
-            s = self._open_sec
-            bids, asks = self.book.top10()
-            carried = 0
-            if not bids or not asks:
-                # No book yet — record gap for this second.
-                self.store.log_explicit_gap(
-                    "BOOK_EMPTY", s, s, detail={"reason": "no_top_of_book"}
-                )
-            else:
-                row = {
+        if new_sec <= self._open_sec:
+            return
+        # Persist only the single open second we actually observed.
+        self._flush_open_second()
+        hole_start = self._open_sec  # next second after flushed open
+        hole_end = new_sec - 1
+        if hole_end >= hole_start:
+            missing = hole_end - hole_start + 1
+            kind = "BOOK_1S"
+            detail: dict[str, Any] = {"filled": False}
+            if missing >= self.sleep_gap_threshold_s:
+                kind = "LAPTOP_SLEEP" if not self._awaiting_reconnect else "COLLECTOR_DISCONNECT"
+                detail["sleep_or_disconnect_seconds"] = missing
+                detail["threshold_s"] = self.sleep_gap_threshold_s
+            self.store.log_explicit_gap(kind, hole_start, hole_end, detail=detail)
+        self._awaiting_reconnect = False
+        self._open_sec = new_sec
+
+    def _flush_open_second(self) -> None:
+        assert self._open_sec is not None
+        s = self._open_sec
+        bids, asks = self.book.top10()
+        if not bids or not asks:
+            self.store.log_explicit_gap(
+                "BOOK_EMPTY", s, s, detail={"reason": "no_top_of_book", "filled": False}
+            )
+        else:
+            row = {
+                "s": s,
+                "b": bids,
+                "a": asks,
+                "bid": bids[0][0],
+                "ask": asks[0][0],
+                "receive_ts": self.book.ts or float(s),
+                "carried": 0,
+            }
+            self.store.append_book_second(row)
+        if self._trades:
+            self.store.append_trades_second(
+                {
                     "s": s,
-                    "b": bids,
-                    "a": asks,
-                    "bid": bids[0][0],
-                    "ask": asks[0][0],
-                    "receive_ts": self.book.ts or float(s),
-                    "carried": carried,
+                    "tr": list(self._trades),
+                    "receive_ts": float(s) + 0.999,
                 }
-                self.store.append_book_second(row)
-            if self._trades:
-                self.store.append_trades_second(
-                    {
-                        "s": s,
-                        "tr": list(self._trades),
-                        "receive_ts": float(s) + 0.999,
-                    }
-                )
-                self._trades.clear()
-            self._open_sec = s + 1
+            )
+            self._trades.clear()
+        self._open_sec = s + 1
 
     def write_health(self, *, ok: bool, reasons: Optional[list] = None) -> Optional[str]:
         if not self.health_path:
@@ -189,13 +251,16 @@ class LocalPublicCollector:
             reasons=reasons or [],
             data_dir=str(self.store.root),
             gap_log_path=str(self.store.gap_log_path),
+            last_tick_ts=self.last_tick_ts,
             collector={
                 "schema": SCHEMA,
                 "symbol": self.symbol,
                 "frames": self.frames,
                 "reconnects": self.reconnects,
                 "last_error": self.last_error,
+                "last_tick_ts": self.last_tick_ts,
                 "store": self.store.stats(),
+                "gaps_never_filled": True,
             },
         )
         return write_health_json(self.health_path, payload)
@@ -241,8 +306,8 @@ class LocalPublicCollector:
                     self.on_message(msg)
                 try:
                     ws.close()
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning("ws.close failed: %s: %s", type(exc).__name__, exc)
             except Exception as exc:  # noqa: BLE001 — reconnect loop
                 self.reconnects += 1
                 self.on_disconnect(reason=type(exc).__name__)
@@ -251,9 +316,9 @@ class LocalPublicCollector:
                     break
                 continue
             break
-        # Flush open second if we have book.
+        # Flush open second if we have book — single second only, never a fill loop.
         if self._open_sec is not None:
-            self._close_seconds(self._open_sec + 1)
+            self._flush_open_second()
         self.write_health(ok=True)
         return 0
 
@@ -290,6 +355,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 78
 
     data_dir = resolve_data_dir()
+    ensure_series_break(data_dir)
     health_path = str(resolve_health_path())
     store = MarketStore(data_dir)
     collector = LocalPublicCollector(store, health_path=health_path)

@@ -6539,8 +6539,12 @@ def live_copy_coordination_display_fields() -> dict:
 
         if cloud_coupling_disabled():
             return coordination_display_override()
-    except Exception:
-        pass
+    except Exception as _local_decouple_exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED local_cloud_decouple.coordination: "
+            f"{type(_local_decouple_exc).__name__}: {_local_decouple_exc}",
+            flush=True,
+        )
     enforced = live_copy_coordination_state()
     with state_lock:
         confirmed_at = state.get("live_copy_coordination_updated_at") or None
@@ -10737,7 +10741,12 @@ def _load_local_dotenv():
             pass
         elif os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
             return
-    except Exception:
+    except Exception as _local_decouple_exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED local_cloud_decouple.dotenv: "
+            f"{type(_local_decouple_exc).__name__}: {_local_decouple_exc}",
+            flush=True,
+        )
         if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
             return
     root = os.path.dirname(os.path.abspath(__file__))
@@ -10755,7 +10764,12 @@ def _load_local_dotenv():
     try:
         from local_cloud_decouple import cloud_coupling_disabled as _ccd
         _local_isolated = _ccd()
-    except Exception:
+    except Exception as _local_decouple_exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED local_cloud_decouple.isolated: "
+            f"{type(_local_decouple_exc).__name__}: {_local_decouple_exc}",
+            flush=True,
+        )
         _local_isolated = False
     try:
         with open(path, encoding="utf-8") as f:
@@ -52371,8 +52385,12 @@ def api_live_copy_coordination():
             })
             resp.status_code = 409
             return resp
-    except Exception:
-        pass
+    except Exception as _local_decouple_exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED local_cloud_decouple.live_copy_coordination: "
+            f"{type(_local_decouple_exc).__name__}: {_local_decouple_exc}",
+            flush=True,
+        )
     body = request.get_json(silent=True) or {}
     wanted = str(body.get("state") or body.get("coordination_state") or "").strip().upper()
     reason = str(body.get("reason") or "").strip()

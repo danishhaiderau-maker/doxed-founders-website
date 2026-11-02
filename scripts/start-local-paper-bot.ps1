@@ -3,18 +3,29 @@
 # PAPER ONLY. CTRL + GS-01. Live OFF. No Bitfinex trade keys. Disarmed.
 # R12: do NOT run on Danish's laptop until the R12 card has RK PASS.
 #
-# Usage (after RK PASS on card-r12-laptop-local-fresh-start-20261103.md):
+# Usage (after RK PASS on card-r12-laptop-local-fresh-start-20261103-rev3.md):
 #   powershell -ExecutionPolicy Bypass -File scripts\start-local-paper-bot.ps1 -NoWait
+#   powershell -ExecutionPolicy Bypass -File scripts\start-local-paper-bot.ps1 -InstallAutostart
+#   powershell -ExecutionPolicy Bypass -File scripts\start-local-paper-bot.ps1 -UninstallAutostart
 #
 # Requires exact confirmation:
 #   LOCAL_FRESH_START=1
 #   LOCAL_FRESH_START_CONFIRM=I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE
+#
+# Host soak notes (HM B1 — operator must keep these green for 24–48h paper):
+#   * Disable sleep while plugged in (powercfg / Settings → Power).
+#   * Pause or defer Windows Update reboots during the soak window.
+#   * Keep Windows Time / NTP sync ON (w32tm); this script checks and warns.
+#   * -InstallAutostart registers a Scheduled Task that restarts paper after login.
 param(
   [int]$Port = 7002,
   [string]$VaultEnv = "",
   [string]$DataDir = "",
   [switch]$NoWait,
-  [switch]$CollectorOnly
+  [switch]$CollectorOnly,
+  [switch]$InstallAutostart,
+  [switch]$UninstallAutostart,
+  [switch]$SkipHostPreflight
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,11 +33,104 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $logsDir = Join-Path $repoRoot "logs"
+$taskName = "DoxxedLocalPaperBot"
+$thisScript = $MyInvocation.MyCommand.Path
 
-# Refuse OneDrive checkouts (AGENTS.md / R12 card).
+# HM laptop scope: writes only under C:\DoxxedCrypto (+ one Task Scheduler entry).
+# Refuse OneDrive and any non-DoxxedCrypto checkout (AGENTS.md / R12 card).
 if ($repoRoot -match '(?i)OneDrive') {
   Write-Host "REFUSED: checkout path is under OneDrive. Use C:\DoxxedCrypto\btc-v31-current" -ForegroundColor Red
   exit 78
+}
+if ($env:OS -match '(?i)Windows' -or $repoRoot -match '^[A-Za-z]:\\') {
+  if ($repoRoot -notmatch '(?i)^[A-Za-z]:\\DoxxedCrypto(\\|$)') {
+    Write-Host "REFUSED: laptop checkout must live under C:\DoxxedCrypto (got $repoRoot)." -ForegroundColor Red
+    exit 78
+  }
+}
+
+function Write-HostPreflightNotes {
+  Write-Host ""
+  Write-Host "=== Host soak preflight (HM B1) ===" -ForegroundColor Cyan
+  Write-Host "1) Sleep: keep AC plugged in; set Sleep=Never while plugged (powercfg /change standby-timeout-ac 0)."
+  Write-Host "2) Windows Update: pause updates or block auto-reboot for the soak window (Settings → Windows Update)."
+  Write-Host "3) NTP/clock: Windows Time service Running + w32tm sync; large clock skew breaks fills/gaps."
+  Write-Host "4) Autostart: use -InstallAutostart (Scheduled Task '$taskName' at logon) so paper restarts after reboot."
+  Write-Host ""
+}
+
+function Test-ClockNtp {
+  $status = @{
+    ok = $true
+    reasons = New-Object System.Collections.Generic.List[string]
+    w32time_state = $null
+    w32tm_snippet = $null
+  }
+  try {
+    $svc = Get-Service -Name W32Time -ErrorAction Stop
+    $status.w32time_state = [string]$svc.Status
+    if ($svc.Status -ne "Running") {
+      $status.ok = $false
+      $status.reasons.Add("W32TIME_NOT_RUNNING")
+    }
+  } catch {
+    $status.ok = $false
+    $status.reasons.Add("W32TIME_SERVICE_MISSING")
+  }
+  try {
+    $query = & w32tm /query /status 2>&1 | Out-String
+    $status.w32tm_snippet = ($query -split "`n" | Select-Object -First 8) -join " | "
+    if ($query -match '(?i)error|failed|not running') {
+      $status.ok = $false
+      $status.reasons.Add("W32TM_QUERY_FAILED")
+    }
+  } catch {
+    $status.ok = $false
+    $status.reasons.Add("W32TM_UNAVAILABLE")
+  }
+  return $status
+}
+
+function Install-LocalPaperAutostart {
+  # Scheduled Task at interactive logon — restarts paper after reboot/login.
+  # Does NOT arm live, does NOT elevate Bitfinex, does NOT start without confirm env.
+  $confirm = [Environment]::GetEnvironmentVariable("LOCAL_FRESH_START_CONFIRM", "User")
+  if (-not $confirm) {
+    $confirm = [Environment]::GetEnvironmentVariable("LOCAL_FRESH_START_CONFIRM", "Process")
+  }
+  if ($confirm -cne "I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE") {
+    Write-Host "REFUSED: set User or Process LOCAL_FRESH_START_CONFIRM before -InstallAutostart." -ForegroundColor Red
+    exit 78
+  }
+  $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$thisScript`" -NoWait -SkipHostPreflight"
+  $trigger = New-ScheduledTaskTrigger -AtLogOn
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 2)
+  $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+    -Settings $settings -Principal $principal -Force | Out-Null
+  Write-Host "OK: Scheduled Task '$taskName' registered (AtLogOn → start-local-paper-bot.ps1 -NoWait)."
+  Write-Host "Disable later with: -UninstallAutostart"
+  exit 0
+}
+
+function Uninstall-LocalPaperAutostart {
+  $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if ($existing) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    Write-Host "OK: Scheduled Task '$taskName' removed."
+  } else {
+    Write-Host "No Scheduled Task named '$taskName' (already absent)."
+  }
+  exit 0
+}
+
+if ($UninstallAutostart) {
+  Uninstall-LocalPaperAutostart
+}
+if ($InstallAutostart) {
+  Install-LocalPaperAutostart
 }
 
 # Explicit owner confirmation — never implied by vault alone.
@@ -42,6 +146,24 @@ if ($confirm -cne "I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE") {
 
 if (-not (Test-Path $logsDir)) {
   New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+}
+
+if (-not $SkipHostPreflight) {
+  Write-HostPreflightNotes
+  $ntp = Test-ClockNtp
+  Write-Host ("NTP/clock: ok={0} w32time={1}" -f $ntp.ok, $ntp.w32time_state)
+  if ($ntp.w32tm_snippet) {
+    Write-Host ("w32tm: {0}" -f $ntp.w32tm_snippet)
+  }
+  if (-not $ntp.ok) {
+    Write-Host ("REFUSED: clock/NTP preflight failed: {0}" -f ($ntp.reasons -join ",")) -ForegroundColor Red
+    Write-Host "Fix Windows Time / NTP, or re-run with -SkipHostPreflight only after documenting the waiver on the R12 card." -ForegroundColor Yellow
+    exit 78
+  }
+  # HM laptop scope: powercfg sleep + Windows Update restart changes are STATED on the
+  # R12 REV3 card for the operator — this script does NOT apply them silently.
+  Write-Host "NOTE: powercfg Sleep=Never (AC) and Windows Update pause/reboot deferral are operator actions on the R12 card — not applied by this script."
+  Write-Host "NOTE: laptop writes allowed only under C:\DoxxedCrypto plus one Task Scheduler entry ($taskName). No Bitfinex keys, no live/arm, no deletes, no Windows security/firewall changes."
 }
 
 # Load vault NAMES only path (values never printed). Default home-bot.env sibling.
@@ -86,7 +208,7 @@ $env:LOCAL_FRESH_START = "1"
 $env:LOCAL_FRESH_START_CONFIRM = "I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE"
 $env:FORCE_PAPER_MODE = "1"
 $env:BITFINEX_LIVE_ENABLED = "0"
-# HM + Strategist / RK t781u: self-contained — no Railway/Neon coupling.
+# HM + Strategist / RK t781u (+ Danish 01:37 keep basic plans): self-contained paper.
 $env:DISABLE_RAILWAY_NEON_COUPLING = "1"
 $env:LOCAL_SELF_CONTAINED = "1"
 $env:RELAY_STACK_MODE = "research_only"
@@ -168,6 +290,7 @@ Write-Host "Starting LOCAL paper bot on :$Port (CTRL+GS-01, FORCE_PAPER, disarme
 Write-Host "Data dir: $($env:BOT_DATA_DIR)"
 Write-Host "Health JSON: $($env:LOCAL_FRESH_HEALTH_JSON)"
 Write-Host "Dashboard: http://127.0.0.1:$Port/health"
+Write-Host "Autostart task: use -InstallAutostart / -UninstallAutostart (task name $taskName)"
 
 if ($NoWait) {
   $proc = Start-Process -FilePath $python -ArgumentList @("btc_conservative_agent.py") `
