@@ -20,6 +20,7 @@ test_analyzer_ai_provider_outage_quarantine.py
 test_analyzer_ai_served_model_cohort.py
 test_analyzer_api_generation_truth.py
 test_analyzer_atomic_publication.py
+test_analyzer_bundle_rebuild_pin_2ac0.py
 test_analyzer_canonical_input_binding.py
 test_analyzer_chase_integrity.py
 test_analyzer_compact_summary_provenance.py
@@ -32,6 +33,7 @@ test_analyzer_execution_evidence_ui.py
 test_analyzer_generation_fail_closed.py
 test_analyzer_integrity_reconciliation.py
 test_analyzer_loopback_url_contract.py
+test_analyzer_mirror_status_fix_a.py
 test_analyzer_mobile_access_contract.py
 test_analyzer_once_incumbent.py
 test_analyzer_route_visual_contract.py
@@ -195,6 +197,7 @@ test_exit_report_cohort_integrity.py
 test_exit_reports_validation_current.py
 test_exit_shadow_world_current_stack.py
 test_expired_order_dashboard_contract.py
+test_expired_orders_boot_rebuild.py
 test_family_global_chase_gate.py
 test_family_policy_common.py
 test_family_tile_runtime_peak_persistence.py
@@ -490,6 +493,8 @@ test_runtime_hygiene.py
 test_runtime_identity_incidents.py
 test_runtime_incident_history.py
 test_runtime_liveness_isolation.py
+test_runtime_log_never_drop_r46.py
+test_runtime_log_archive_rename.py
 test_runtime_p0_lifecycle_guards.py
 test_runtime_revision.py
 test_runtime_telemetry.py
@@ -504,8 +509,6 @@ test_script_style_suites.py
 test_seal_past_analysis_fallback.py
 test_session_trade_counts.py
 test_shadow_chase_buckets.py
-test_shadow_exit_path_1s.py
-test_shadow_exit_report.py
 test_shadow_model_publication.py
 test_shadow_outcome_reconstruction.py
 test_shadow_result_stream.py
@@ -568,7 +571,6 @@ tests/test_v3_ledger_index.py
 test_ci_test_inventory.py
 test_showcase_manual_close_generation.py
 test_execution_funnel_corruption_repair.py
-test_shadow_exit_paths.py
 test_experimental_tile_contract.py
 test_clean_epoch_reset_plan.py
 test_research_deletion_preflight_contract.py
@@ -617,7 +619,7 @@ test_disk_alert.py
 test_r5_retention.py
 test_r5_keep.py
 test_rotation_cap.py
-test_taker_counterfactual_r17.py
+test_remaining_deleters_killswitch.py
 test_signal_replay_r17.py
 test_v22_retired_r17.py
 test_delay_pool_f1.py
@@ -628,7 +630,6 @@ test_live_ack_pool.py
 test_first_after_rk3.py
 test_rk1_live_exit_stamps.py
 test_r17_gap_detector.py
-test_shadow_exit_backfill_r3_blocked.py
 test_integration_848_resolution.py
 test_r17_retired_sources.py
 test_live_fences_health.py
