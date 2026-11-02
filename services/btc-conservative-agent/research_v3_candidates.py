@@ -1963,6 +1963,22 @@ STREAM_PARALLEL_MIN_EVENTS = 200
 _CONTROL_LANE_ENTRY_ID = "CONTROL_V1"
 
 
+def _stable_offset_token(offset_pct: Any) -> str | None:
+    """Round-trip token for CONTROL_V1 entry ids (never ``.2f``).
+
+    The collision check compares raw ``offset_pct`` values. Rounding the id to
+    two decimals would map distinct offsets such as ``0.291`` and ``0.294`` onto
+    one id and still raise ``POLICY_ID_SPEC_COLLISION``. ``repr(float(...))``
+    keeps those distinct while staying stable across ordinary float inputs.
+    """
+    if offset_pct is None:
+        return None
+    try:
+        return repr(float(offset_pct))
+    except (TypeError, ValueError):
+        return None
+
+
 def _candidate_entry_id(raw_entry_id: str, offset_pct: Any, chase_id: str) -> str:
     """Make lane-level CONTROL_V1 entry ids unique per (offset, chase).
 
@@ -1973,21 +1989,19 @@ def _candidate_entry_id(raw_entry_id: str, offset_pct: Any, chase_id: str) -> st
     Best-Policy / Safe-Genome. Multiverse children already use
     ``OFFSET_{x}_CHASE_{y}`` and named taker ids (SCORE_LED::..., etc.) are
     left unchanged so existing candidate identities stay byte-identical.
+
+    Missing offsets use the same ``OFFSET_…_CHASE_…`` shape with token
+    ``NONE`` (never bare ``CONTROL_V1``) so id style stays consistent.
     """
     if not raw_entry_id or "_CHASE_" in raw_entry_id:
         return raw_entry_id
     if raw_entry_id != _CONTROL_LANE_ENTRY_ID:
         return raw_entry_id
-    try:
-        off = None if offset_pct is None else float(offset_pct)
-    except (TypeError, ValueError):
-        off = None
     chase = str(chase_id or "no_chase").split("|", 1)[0] or "no_chase"
-    if off is None:
-        if chase in {"", _CONTROL_LANE_ENTRY_ID}:
-            return raw_entry_id
-        return f"{_CONTROL_LANE_ENTRY_ID}_CHASE_{chase}"
-    return f"OFFSET_{off:.2f}_CHASE_{chase}"
+    off_token = _stable_offset_token(offset_pct)
+    if off_token is None:
+        return f"OFFSET_NONE_CHASE_{chase}"
+    return f"OFFSET_{off_token}_CHASE_{chase}"
 
 
 def _protection_specs(entry_id: str, offset_pct: Any, chase_id: str,
