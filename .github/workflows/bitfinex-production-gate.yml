@@ -1,16 +1,26 @@
 name: Bitfinex production gate
-# RETIRED / DISABLED IN PLACE — do NOT delete this file (RK PASS 01:21 AEDT: disable-not-delete).
-# Fly app doxed-btc-bot DELETED 2026-11-03 01:12 AEDT (OBSERVED). Cite R22 + R50(e)/R50c.
-# No push auto-deploy, no schedule probes, every job hard-gated with `if: false`.
-# Manual workflow_dispatch retained only so the file stays a valid Actions workflow; jobs never run.
+# NOT Fly-retired. RK HOLD 02:14 AEDT on #969: keep pull_request + push so
+# bitfinex-policy still runs on every PR (Live-OFF / production lock). Fly-era
+# workflows stay fail-closed elsewhere; this gate has no Fly steps.
 
 on:
-  # FORMER push + pull_request triggers REMOVED (RK PASS disable-not-delete; R22).
-  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths-ignore:
+      # Memory-sync noise from founder-os agent (1-line tasks.json changes)
+      # was burning ~64% of monthly Actions minutes. Skip the gate for these.
+      - '.github/founder-os/**'
+      # Docs and rules don't touch trading code
+      - 'docs/**'
+      - '**/*.md'
+      - '**/.cursor/rules/**'
+      # Bot research artifacts (handled by separate sync workflow)
+      - 'services/btc-conservative-agent/**'
+      - '.edge-analysis/**'
+  pull_request:
 
 jobs:
   bitfinex-policy:
-    if: false  # FLY_RUNTIME_RETIRED — hard fail-closed
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
