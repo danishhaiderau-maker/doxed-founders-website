@@ -98,7 +98,7 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
         "v31-freeze21b-8t-v14",
         # 2026-10-28 (#924): pin moved deliberately — GS-06 R22 retire + FADE3-LOOSE mid-epoch add
         # (score_led = research_freeze.MID_EPOCH_REGISTRY_SIGNATURES["score_led"]).
-        "f241b3d0f7eb3cb4d1364c4f22cf3de804aaa2dabaadb4b3f3f23146e236c01c",
+        "82e8202a639413075762b8b8aec8f752a93876d7e3e613c3cea540d2337b16f4",
     ]
 
 

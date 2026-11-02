@@ -107,10 +107,14 @@ def test_exit_and_dashboard_disclose_inverted_committed_taker():
 
 
 def test_runtime_tile_view_refuses_uncommitted_and_inverts_committed():
-    for raw, expected in ((_ai(62, 38, raw_direction="NO_TRADE"), "NO_TRADE"), (_ai(80, 20), "SHORT")):
-        shared = dict(copy.deepcopy(raw), direction="LONG", decision="APPROVE")
-        snapshot = copy.deepcopy(shared)
-        ai, direction, spread, _ = bot._tile_view_of_shared_call(
-            "FAMILY_GSB2_REGIME_SWITCHER", raw, shared, _admission(raw), "LONG", 4,  # H-A/GS-06 retired; B2 TREND shares invert rule
+    import pytest
+    import combo_pathway_config as _cpc
+    # R22: FAMILY_GSB2_REGIME_SWITCHER retired — inactive lane refused.
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in _cpc.ACTIVE_TILE_REGISTRY
+    assert "FAMILY_GSB2_REGIME_SWITCHER" in _cpc.RETIRED_TILE_LANES
+    raw = _ai(80, 20)
+    shared = dict(copy.deepcopy(raw), direction="LONG", decision="APPROVE")
+    with pytest.raises(ValueError, match="inactive or unknown tile lane"):
+        bot._tile_view_of_shared_call(
+            "FAMILY_GSB2_REGIME_SWITCHER", raw, shared, _admission(raw), "LONG", 4,
         )
-        assert direction == expected and shared == snapshot
