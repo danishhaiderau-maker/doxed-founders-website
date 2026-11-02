@@ -1958,6 +1958,37 @@ def _event_price_path(source: Mapping[str, Any], book_walk: Any) -> dict[str, An
 
 STREAM_PARALLEL_MIN_EVENTS = 200
 
+# Collector v2.2 lane id (collector_v22_schema.POLICY_ID). Reused across distinct
+# entry offsets when synthetic/paper children omit OFFSET_*_CHASE_* identities.
+_CONTROL_LANE_ENTRY_ID = "CONTROL_V1"
+
+
+def _candidate_entry_id(raw_entry_id: str, offset_pct: Any, chase_id: str) -> str:
+    """Make lane-level CONTROL_V1 entry ids unique per (offset, chase).
+
+    ``evaluate_protection_screen`` keys the candidate store by entry_id and
+    requires one ``(offset_pct, chase_id)`` per id. CONTROL_V1 paper/synthetic
+    children reuse the lane id across distinct offsets, which raised
+    ``POLICY_ID_SPEC_COLLISION:CONTROL_V1|ATR_TP_2.5_ATR_SL_1`` and aborted
+    Best-Policy / Safe-Genome. Multiverse children already use
+    ``OFFSET_{x}_CHASE_{y}`` and named taker ids (SCORE_LED::..., etc.) are
+    left unchanged so existing candidate identities stay byte-identical.
+    """
+    if not raw_entry_id or "_CHASE_" in raw_entry_id:
+        return raw_entry_id
+    if raw_entry_id != _CONTROL_LANE_ENTRY_ID:
+        return raw_entry_id
+    try:
+        off = None if offset_pct is None else float(offset_pct)
+    except (TypeError, ValueError):
+        off = None
+    chase = str(chase_id or "no_chase").split("|", 1)[0] or "no_chase"
+    if off is None:
+        if chase in {"", _CONTROL_LANE_ENTRY_ID}:
+            return raw_entry_id
+        return f"{_CONTROL_LANE_ENTRY_ID}_CHASE_{chase}"
+    return f"OFFSET_{off:.2f}_CHASE_{chase}"
+
 
 def _protection_specs(entry_id: str, offset_pct: Any, chase_id: str,
                       protections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2079,6 +2110,9 @@ class _EpisodeReplayer:
                 else str(child.get("chase_id") or entry_id).split("|", 1)[0]
             )
             offset_pct = child.get("offset_pct")
+            # CONTROL_V1 lane ids are not unique entry specs — bind offset/chase
+            # before the cross-episode collision check (see _candidate_entry_id).
+            entry_id = _candidate_entry_id(entry_id, offset_pct, canonical_chase_id)
             if entry_id in kept:
                 records.append((child_index, entry_id, offset_pct, canonical_chase_id, None, None, None))
                 continue
