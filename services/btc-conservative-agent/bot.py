@@ -6529,7 +6529,18 @@ def live_copy_coordination_state() -> str:
 def live_copy_coordination_display_fields() -> dict:
     """Dashboard/API view of coordination. Coordination state is in-memory
     only, so after a Fly restart the RUNNING_TOGETHER boot default is not a
-    Railway-confirmed fact until Railway posts /api/live-copy-coordination."""
+    Railway-confirmed fact until Railway posts /api/live-copy-coordination.
+
+    Local self-contained paper (HM + Strategist / RK t781u): Railway/Neon are
+    not required — never stall on LIVE_RELAY_COORDINATION_NOT_CONFIRMED_BY_RAILWAY.
+    """
+    try:
+        from local_cloud_decouple import cloud_coupling_disabled, coordination_display_override
+
+        if cloud_coupling_disabled():
+            return coordination_display_override()
+    except Exception:
+        pass
     enforced = live_copy_coordination_state()
     with state_lock:
         confirmed_at = state.get("live_copy_coordination_updated_at") or None
@@ -10713,9 +10724,22 @@ MAX_EXPIRED_ORDERS = 20
 
 def _load_local_dotenv():
     """Load .env into os.environ (does not override existing vars).
-    On Railway, Admin Control → Neon → push-showcase-bot is authoritative."""
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-        return
+
+    Legacy Fly/Railway: Admin Control → Neon → push-showcase-bot was authoritative
+    on Railway. Local self-contained paper (HM + Strategist / RK t781u) never uses
+    that path — Railway/Neon coupling is disabled; local env / home-bot.env only.
+    """
+    try:
+        from local_cloud_decouple import cloud_coupling_disabled
+
+        if cloud_coupling_disabled():
+            # Still allow local .env / vault names; never defer to Railway/Neon.
+            pass
+        elif os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            return
+    except Exception:
+        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            return
     root = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(root, ".env")
     if not os.path.isfile(path):
@@ -10729,6 +10753,11 @@ def _load_local_dotenv():
         "HYPERLIQUID_WALLET_ADDRESS", "HYPERLIQUID_PRIVATE_KEY",
     })
     try:
+        from local_cloud_decouple import cloud_coupling_disabled as _ccd
+        _local_isolated = _ccd()
+    except Exception:
+        _local_isolated = False
+    try:
         with open(path, encoding="utf-8") as f:
             for raw in f:
                 line = raw.strip()
@@ -10738,7 +10767,11 @@ def _load_local_dotenv():
                 key, val = key.strip(), val.strip().strip('"').strip("'")
                 if not key or key in os.environ:
                     continue
-                if key in secret_keys and (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CREDENTIALS_FROM")):
+                if (
+                    key in secret_keys
+                    and not _local_isolated
+                    and (os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CREDENTIALS_FROM"))
+                ):
                     continue
                 os.environ[key] = val
     except Exception:
@@ -52316,11 +52349,30 @@ _RESUMABLE_PAUSE_REASONS = frozenset({
 
 @app.route('/api/live-copy-coordination', methods=['POST'])
 def api_live_copy_coordination():
-    """Railway safety-pause / re-arm coordination for Showcase executable entries."""
+    """Railway safety-pause / re-arm coordination for Showcase executable entries.
+
+    Local self-contained paper (HM + Strategist): Railway coordination is disabled —
+    refuse mutating POSTs so the laptop never depends on Neon/Railway live-copy.
+    """
     if not _admin_authed():
         resp = jsonify({"ok": False, "error": "unauthorized"})
         resp.status_code = 401
         return resp
+    try:
+        from local_cloud_decouple import cloud_coupling_disabled, coordination_display_override
+
+        if cloud_coupling_disabled():
+            fields = coordination_display_override()
+            resp = jsonify({
+                "ok": False,
+                "error": "LOCAL_CLOUD_COUPLING_DISABLED",
+                "disabled": True,
+                **fields,
+            })
+            resp.status_code = 409
+            return resp
+    except Exception:
+        pass
     body = request.get_json(silent=True) or {}
     wanted = str(body.get("state") or body.get("coordination_state") or "").strip().upper()
     reason = str(body.get("reason") or "").strip()

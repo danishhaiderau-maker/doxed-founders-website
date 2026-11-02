@@ -344,6 +344,7 @@ test_live_tile_gate.py
 test_live_total_loss_cap.py
 test_live_vs_paper.py
 test_local_bitfinex_live_policy_gate.py
+test_local_cloud_decouple.py
 test_local_dynamic_input.py
 test_local_dynamic_mapping.py
 test_local_fresh_collection.py

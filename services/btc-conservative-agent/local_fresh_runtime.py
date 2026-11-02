@@ -133,6 +133,15 @@ def apply_local_fresh_environ(
     env.setdefault("DASHBOARD_BIND_HOST", "127.0.0.1")
     env["DASHBOARD_PUBLIC_URL"] = f"http://127.0.0.1:{port}/"
     env["RESEARCH_DASHBOARD_PUBLIC_URL"] = f"http://127.0.0.1:{port}/analysis"
+    # HM + Strategist / RK t781u: no Railway/Neon coupling for local paper.
+    try:
+        from local_cloud_decouple import apply_decouple_environ
+
+        apply_decouple_environ(env)
+    except Exception:
+        env["DISABLE_RAILWAY_NEON_COUPLING"] = "1"
+        env["LOCAL_SELF_CONTAINED"] = "1"
+        env["RELAY_STACK_MODE"] = "research_only"
     return dict(env)
 
 

@@ -86,6 +86,20 @@ $env:LOCAL_FRESH_START = "1"
 $env:LOCAL_FRESH_START_CONFIRM = "I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE"
 $env:FORCE_PAPER_MODE = "1"
 $env:BITFINEX_LIVE_ENABLED = "0"
+# HM + Strategist / RK t781u: self-contained — no Railway/Neon coupling.
+$env:DISABLE_RAILWAY_NEON_COUPLING = "1"
+$env:LOCAL_SELF_CONTAINED = "1"
+$env:RELAY_STACK_MODE = "research_only"
+if ($env:CREDENTIALS_FROM -and $env:CREDENTIALS_FROM -match '(?i)railway|neon|push-showcase|admin') {
+  $env:CREDENTIALS_FROM = "local_env"
+}
+Remove-Item Env:RAILWAY_ENVIRONMENT -ErrorAction SilentlyContinue
+Remove-Item Env:RAILWAY_PROJECT_ID -ErrorAction SilentlyContinue
+Remove-Item Env:RAILWAY_API_TOKEN -ErrorAction SilentlyContinue
+Remove-Item Env:RAILWAY_TOKEN -ErrorAction SilentlyContinue
+Remove-Item Env:SHOWCASE_RELAY_WEBHOOK_URL -ErrorAction SilentlyContinue
+Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:NEON_API_KEY -ErrorAction SilentlyContinue
 $env:PORT = "$Port"
 $env:DASHBOARD_PORT = "$Port"
 $env:DASHBOARD_BIND_HOST = "127.0.0.1"
