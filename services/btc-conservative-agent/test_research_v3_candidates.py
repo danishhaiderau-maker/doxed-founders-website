@@ -797,6 +797,136 @@ class V3CandidateTests(unittest.TestCase):
             for candidate in report["candidates"]
         ))
 
+    def test_control_v1_lane_ids_with_distinct_offsets_do_not_collide(self):
+        # Live symptom: POLICY_ID_SPEC_COLLISION:CONTROL_V1|ATR_TP_2.5_ATR_SL_1
+        # when two CONTROL_V1 children carry different offset_pct values.
+        first = source("control-a", "episode-a")
+        second = source("control-b", "episode-b")
+        for row, offset in ((first, 0.29), (second, 0.50)):
+            row["entry_children"][0].update({
+                "entry_policy_id": "CONTROL_V1",
+                "chase_id": "CONTROL_V1",
+                "offset_pct": offset,
+            })
+
+        report = evaluate_protection_screen([first, second])
+
+        self.assertTrue(report["candidates"])
+        entry_ids = {
+            candidate["policy_spec"]["entry"]["entry_policy_id"]
+            for candidate in report["candidates"]
+        }
+        self.assertIn("OFFSET_0.29_CHASE_CONTROL_V1", entry_ids)
+        self.assertIn("OFFSET_0.5_CHASE_CONTROL_V1", entry_ids)
+        self.assertNotIn("CONTROL_V1", entry_ids)
+
+    def test_control_v1_offsets_that_round_equal_under_2f_stay_distinct(self):
+        # HM R2 A1: .2f would map both 0.291 and 0.294 -> "0.29" and still collide.
+        self.assertEqual(f"{0.291:.2f}", f"{0.294:.2f}")
+        first = source("control-291", "episode-291")
+        second = source("control-294", "episode-294")
+        for row, offset in ((first, 0.291), (second, 0.294)):
+            row["entry_children"][0].update({
+                "entry_policy_id": "CONTROL_V1",
+                "chase_id": "CONTROL_V1",
+                "offset_pct": offset,
+            })
+
+        report = evaluate_protection_screen([first, second])
+
+        self.assertTrue(report["candidates"])
+        entry_ids = {
+            candidate["policy_spec"]["entry"]["entry_policy_id"]
+            for candidate in report["candidates"]
+        }
+        self.assertIn("OFFSET_0.291_CHASE_CONTROL_V1", entry_ids)
+        self.assertIn("OFFSET_0.294_CHASE_CONTROL_V1", entry_ids)
+        self.assertEqual(len(entry_ids), 2)
+
+    def test_control_v1_missing_offset_uses_offset_none_form(self):
+        from research_v3_candidates import _candidate_entry_id
+
+        self.assertEqual(
+            _candidate_entry_id("CONTROL_V1", None, "CONTROL_V1"),
+            "OFFSET_NONE_CHASE_CONTROL_V1",
+        )
+        row = source("control-none", "episode-none")
+        row["entry_children"][0].update({
+            "entry_policy_id": "CONTROL_V1",
+            "chase_id": "CONTROL_V1",
+            "offset_pct": None,
+        })
+        report = evaluate_protection_screen([row])
+        entry_ids = {
+            candidate["policy_spec"]["entry"]["entry_policy_id"]
+            for candidate in report["candidates"]
+        }
+        self.assertIn("OFFSET_NONE_CHASE_CONTROL_V1", entry_ids)
+        self.assertNotIn("CONTROL_V1", entry_ids)
+
+    def test_candidate_entry_id_leaves_named_taker_and_multiverse_ids_unchanged(self):
+        from research_v3_candidates import _candidate_entry_id
+
+        self.assertEqual(
+            _candidate_entry_id("OFFSET_0.29_CHASE_patient", 0.29, "patient"),
+            "OFFSET_0.29_CHASE_patient",
+        )
+        score_led = (
+            "SCORE_LED_NON_TIE_PAPER_V2::INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS"
+        )
+        self.assertEqual(_candidate_entry_id(score_led, 0.0, score_led), score_led)
+        self.assertEqual(
+            _candidate_entry_id("CONTROL_V1", 0.29, "CONTROL_V1"),
+            "OFFSET_0.29_CHASE_CONTROL_V1",
+        )
+        self.assertEqual(
+            _candidate_entry_id("CONTROL_V1", 0.291, "CONTROL_V1"),
+            "OFFSET_0.291_CHASE_CONTROL_V1",
+        )
+
+    def test_control_v1_stored_row_maps_to_new_full_precision_id(self):
+        # Optional Strategist: stored CONTROL_V1 row -> new OFFSET_{repr}_CHASE_ id.
+        from research_v3_candidates import _candidate_entry_id
+
+        stored = {
+            "entry_policy_id": "CONTROL_V1",
+            "offset_pct": 0.291,
+            "chase_id": "CONTROL_V1",
+        }
+        mapped = _candidate_entry_id(
+            stored["entry_policy_id"], stored["offset_pct"], stored["chase_id"],
+        )
+        self.assertEqual(mapped, "OFFSET_0.291_CHASE_CONTROL_V1")
+        self.assertNotEqual(mapped, f"OFFSET_{stored['offset_pct']:.2f}_CHASE_CONTROL_V1")
+
+    def test_control_v1_rewrite_does_not_clash_with_multiverse_offset_chase_id(self):
+        # Optional Strategist: CONTROL_V1@0.29 and multiverse OFFSET_0.29_CHASE_patient
+        # must remain distinct candidates (no shared entry_id / no collision).
+        control = source("control-lane", "episode-control")
+        multiverse = source("multi-lane", "episode-multi")
+        control["entry_children"][0].update({
+            "entry_policy_id": "CONTROL_V1",
+            "chase_id": "CONTROL_V1",
+            "offset_pct": 0.29,
+        })
+        multiverse["entry_children"][0].update({
+            "entry_policy_id": "OFFSET_0.29_CHASE_patient",
+            "chase_id": "patient",
+            "offset_pct": 0.29,
+        })
+
+        report = evaluate_protection_screen([control, multiverse])
+
+        entry_ids = {
+            candidate["policy_spec"]["entry"]["entry_policy_id"]
+            for candidate in report["candidates"]
+        }
+        self.assertIn("OFFSET_0.29_CHASE_CONTROL_V1", entry_ids)
+        self.assertIn("OFFSET_0.29_CHASE_patient", entry_ids)
+        self.assertEqual(len(entry_ids & {
+            "OFFSET_0.29_CHASE_CONTROL_V1", "OFFSET_0.29_CHASE_patient",
+        }), 2)
+
     def test_supported_and_unsupported_episodes_share_declared_fill_model(self):
         supported = source("supported-lane")
         unsupported = source("unsupported-lane")
