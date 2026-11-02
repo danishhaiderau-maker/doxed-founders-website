@@ -22,10 +22,10 @@
  * the new model.
  */
 
-import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { DdollarEngineService } from './ddollar-engine.service';
+import { shouldRegisterNeonBackgroundTimers } from '../trading-agents/canonical-showcase-runtime';
 import {
   createDefaultPublishers,
   type MerkleRootPublisher,
@@ -64,11 +64,12 @@ function tokensPerEpoch(): bigint {
 }
 
 @Injectable()
-export class EpochSettlementService {
+export class EpochSettlementService implements OnModuleInit {
   private readonly logger = new Logger(EpochSettlementService.name);
   private readonly models: Record<string, DistributionModel>;
   private readonly merklePublisher: MerkleRootPublisher;
   private readonly proofDataPublisher: ProofDataPublisher;
+  private settlementTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -83,8 +84,20 @@ export class EpochSettlementService {
     this.proofDataPublisher = pubs.proofData;
   }
 
-  /** Cron: every 5 minutes in test mode, otherwise hourly check. */
-  @Cron(CronExpression.EVERY_5_MINUTES)
+  onModuleInit() {
+    // R51: gate Neon-chatting 5m epoch-settlement timer at registration only
+    // (replaces Nest @Cron so retired Fly/showcase idle does not keep Neon awake).
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[EPOCH-SETTLEMENT] offline, by design — 5m Neon settlement timer not registered',
+      );
+      return;
+    }
+    this.settlementTimer = setInterval(() => void this.runSettlementCron(), 5 * 60_000);
+    this.settlementTimer.unref?.();
+  }
+
+  /** Every 5 minutes in test mode; otherwise boundary-check only (no settle until end). */
   async runSettlementCron() {
     if (!isTestEpochMode()) {
       const latest = await this.prisma.epoch.findFirst({

@@ -51,10 +51,14 @@ def test_neon_idle_gate_exported_and_used():
     runtime = _read(RUNTIME)
     assert "shouldRegisterNeonBackgroundTimers" in runtime
     assert "R51" in runtime or "registration-site gate" in runtime
+    root = ROOT / "apps" / "api" / "src"
     for path in (
         API / "trading-agents.service.ts",
         API / "signal-subscriber-execution.service.ts",
         API / "signal-cycles.service.ts",
+        root / "paper-trading" / "paper-limit-order.service.ts",
+        root / "projects" / "metrics-sync.service.ts",
+        root / "founder-economics" / "epoch-settlement.service.ts",
     ):
         assert "shouldRegisterNeonBackgroundTimers" in _read(path), path.name
 

@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ChainSlug, Prisma, ProjectLifecycleStage } from '@prisma/client';
 import { DexscreenerService } from '../dexscreener/dexscreener.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { shouldRegisterNeonBackgroundTimers } from '../trading-agents/canonical-showcase-runtime';
 
 const STALE_MS = 2 * 60 * 1000;
 const SYNC_INTERVAL_MS = 2 * 60 * 1000;
@@ -27,6 +28,13 @@ export class MetricsSyncService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
+    // R51: gate Neon-chatting 2m metrics-sync timer at registration only.
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[METRICS-SYNC] offline, by design — 2m Neon metrics-sync timer not registered',
+      );
+      return;
+    }
     this.syncStaleInBackground();
     setInterval(() => this.syncStaleInBackground(), SYNC_INTERVAL_MS);
   }

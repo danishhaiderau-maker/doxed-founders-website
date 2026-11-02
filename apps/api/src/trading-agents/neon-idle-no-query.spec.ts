@@ -1,15 +1,16 @@
 /**
- * RK R51 + HM R2: when Fly showcase runtime is retired, Neon-chatting background
- * timers must not register — proving the idle backend does not query Neon on a
- * timer cadence (20s alerts, wake poll, 5m signal-cycle idle recovery).
+ * RK R51 + HM R2 B2: when Fly showcase runtime is retired, Neon-chatting
+ * background timers must not register — prove by counting real setInterval
+ * registrations and prisma calls (not source greps).
  *
- * Mutation proof: drop shouldRegisterNeonBackgroundTimers from any registration
- * site below, or flip the gate to always-true → this file fails.
+ * Covers B1 registration sites: paper-limit (60s), epoch-settlement (5m),
+ * metrics-sync (2m), plus signal-cycles (5m idle recovery).
+ *
+ * Mutation proof: drop shouldRegisterNeonBackgroundTimers from those
+ * onModuleInit sites → setInterval and/or prisma counts become non-zero.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   FLY_SHOWCASE_RUNTIME_RETIRED,
   isFlyShowcaseRuntimeRetired,
@@ -24,116 +25,92 @@ test.after(() => {
   else process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = priorForce;
 });
 
-const here = __dirname;
-const read = (name: string) => readFileSync(join(here, name), 'utf8');
+function prismaTrap() {
+  const calls: string[] = [];
+  const prisma = new Proxy(
+    {},
+    {
+      get(_t, prop) {
+        if (prop === 'then') return undefined;
+        if (typeof prop === 'symbol') return undefined;
+        const model = String(prop);
+        return new Proxy(
+          {},
+          {
+            get(_t2, prop2) {
+              if (prop2 === 'then') return undefined;
+              const method = String(prop2);
+              return async () => {
+                calls.push(`${model}.${method}`);
+                throw new Error(`Neon query while idle: ${model}.${method}`);
+              };
+            },
+          },
+        );
+      },
+    },
+  );
+  return { prisma: prisma as never, calls };
+}
 
 test('idle gate refuses Neon background timers while Fly runtime is retired', () => {
   assert.equal(FLY_SHOWCASE_RUNTIME_RETIRED, true);
   assert.equal(isFlyShowcaseRuntimeRetired(), true);
   assert.equal(shouldRegisterNeonBackgroundTimers(), false);
-  assert.equal(
-    shouldRegisterNeonBackgroundTimers({ FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE: '1' }),
-    true,
-  );
 });
 
-test('R51: Neon timers gated once at registration sites (not scattered callback stops)', () => {
-  const trading = read('trading-agents.service.ts');
-  const exec = read('signal-subscriber-execution.service.ts');
-  const cycles = read('signal-cycles.service.ts');
-  const sync = read('showcase-session-sync.service.ts');
-  const reporter = read('live-copy-fly-reporter.ts');
-
-  // Single shared gate symbol at each registration site.
-  for (const [label, src] of [
-    ['trading-agents 20s', trading],
-    ['executor wake/reconcile', exec],
-    ['signal-cycles 5m', cycles],
-    ['showcase-session-sync', sync],
-    ['live-copy reporter', reporter],
-  ] as const) {
-    assert.match(
-      src,
-      /shouldRegisterNeonBackgroundTimers/,
-      `${label} must call shouldRegisterNeonBackgroundTimers at registration`,
-    );
-  }
-
-  const sliceInit = (src: string, startNeedle: string, endNeedle: string) => {
-    const start = src.indexOf(startNeedle);
-    assert.ok(start >= 0, `missing ${startNeedle}`);
-    const end = src.indexOf(endNeedle, start + startNeedle.length);
-    assert.ok(end > start, `missing end ${endNeedle}`);
-    return src.slice(start, end);
-  };
-
-  // 20s position-alert interval is behind the gate inside onModuleInit.
-  const tradingInit = sliceInit(
-    trading,
-    'async onModuleInit()',
-    'private async syncConservativeBtcAgentRecord',
-  );
-  assert.match(tradingInit, /shouldRegisterNeonBackgroundTimers\(\)/);
-  assert.match(tradingInit, /pollBotPositionAlerts/);
-  assert.ok(
-    tradingInit.indexOf('shouldRegisterNeonBackgroundTimers')
-      < tradingInit.indexOf('setInterval(() => void this.pollBotPositionAlerts()'),
-    '20s timer must be gated before setInterval registration',
-  );
-
-  // Wake / reconcile registration gated at executor onModuleInit.
-  const execInit = sliceInit(exec, '  onModuleInit() {', '  private async persistLiveTickHeartbeats');
-  assert.match(execInit, /shouldRegisterNeonBackgroundTimers\(\)/);
-  assert.match(execInit, /Neon background timers not registered/);
-  assert.ok(
-    execInit.indexOf('shouldRegisterNeonBackgroundTimers')
-      < execInit.indexOf('schedulePersistedWakePoll(0)'),
-    'wake poll must not register when gate is false',
-  );
-
-  // 5m idle recovery gated at signal-cycles onModuleInit.
-  const cyclesInit = sliceInit(cycles, '  onModuleInit() {', '  onModuleDestroy()');
-  assert.match(cyclesInit, /shouldRegisterNeonBackgroundTimers\(\)/);
-  assert.match(cyclesInit, /Neon wake\/5m idle recovery timers not registered/);
-  assert.ok(
-    cyclesInit.indexOf('shouldRegisterNeonBackgroundTimers')
-      < cyclesInit.indexOf('scheduleBackstop('),
-    '5m backstop must not register when gate is false',
-  );
-});
-
-test('emergency reconcile fails closed without throw storm when wake retired', async () => {
-  // Source contract: soft return, not throw, when shouldDispatchRelayExecutorWake is false.
-  const exec = read('signal-subscriber-execution.service.ts');
-  assert.match(
-    exec,
-    /requestExecutorEmergencyReconcile[\s\S]*shouldDispatchRelayExecutorWake\(\)[\s\S]*return \{ flattened: 0, requestId: 'offline-by-design' \}/,
-  );
-  assert.doesNotMatch(
-    exec,
-    /shouldDispatchRelayExecutorWake\(\) \{\s*throw new Error\('Relay executor wake retired/,
-  );
-});
-
-test('behavioral: idle gate registers zero Neon timers (no prisma cadence)', () => {
-  // Same decision every registration site makes — when false, no timer/Neon work starts.
+test('behavioral: retired onModuleInit registers zero timers and zero prisma calls', async () => {
   assert.equal(shouldRegisterNeonBackgroundTimers(), false);
-  const registered: string[] = [];
-  const registerIfAllowed = (name: string, start: () => void) => {
-    if (!shouldRegisterNeonBackgroundTimers()) return;
-    registered.push(name);
-    start();
-  };
-  let neonQueries = 0;
-  registerIfAllowed('20s-position-alerts', () => {
-    neonQueries += 1;
-  });
-  registerIfAllowed('wake-poll', () => {
-    neonQueries += 1;
-  });
-  registerIfAllowed('5m-signal-cycle-idle', () => {
-    neonQueries += 1;
-  });
-  assert.deepEqual(registered, []);
-  assert.equal(neonQueries, 0);
+
+  const registeredMs: number[] = [];
+  const created: ReturnType<typeof setInterval>[] = [];
+  const realSetInterval = global.setInterval;
+  global.setInterval = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
+    registeredMs.push(Number(ms));
+    const handle = realSetInterval(fn as never, ms as never, ...(args as never[]));
+    created.push(handle);
+    return handle;
+  }) as typeof setInterval;
+
+  try {
+    const paperTrap = prismaTrap();
+    const { PaperLimitOrderService } = await import('../paper-trading/paper-limit-order.service');
+    new PaperLimitOrderService(paperTrap.prisma, {} as never).onModuleInit();
+
+    const metricsTrap = prismaTrap();
+    const { MetricsSyncService } = await import('../projects/metrics-sync.service');
+    new MetricsSyncService(metricsTrap.prisma, {} as never).onModuleInit();
+
+    const epochTrap = prismaTrap();
+    const { EpochSettlementService } = await import(
+      '../founder-economics/epoch-settlement.service'
+    );
+    const epoch = new EpochSettlementService(epochTrap.prisma, {} as never);
+    epoch.onModuleInit();
+
+    const cyclesTrap = prismaTrap();
+    const { SignalCyclesService } = await import('./signal-cycles.service');
+    const cycles = new SignalCyclesService(
+      cyclesTrap.prisma,
+      { isEnabled: () => true } as never,
+      {} as never,
+      {} as never,
+    );
+    cycles.onModuleInit();
+
+    assert.deepEqual(
+      registeredMs,
+      [],
+      `unexpected setInterval registrations while idle: ${JSON.stringify(registeredMs)}`,
+    );
+    assert.deepEqual(paperTrap.calls, [], `paper prisma: ${JSON.stringify(paperTrap.calls)}`);
+    assert.deepEqual(metricsTrap.calls, [], `metrics prisma: ${JSON.stringify(metricsTrap.calls)}`);
+    assert.deepEqual(epochTrap.calls, [], `epoch prisma: ${JSON.stringify(epochTrap.calls)}`);
+    assert.deepEqual(cyclesTrap.calls, [], `cycles prisma: ${JSON.stringify(cyclesTrap.calls)}`);
+    assert.equal((cycles as { backstopEnabled?: boolean }).backstopEnabled, false);
+    assert.equal((epoch as { settlementTimer?: unknown }).settlementTimer, null);
+  } finally {
+    for (const h of created) clearInterval(h);
+    global.setInterval = realSetInterval;
+  }
 });

@@ -92,11 +92,11 @@ export function shouldDispatchRelayExecutorWake(
 
 /**
  * R51 — single registration-site gate for Neon-chatting background timers.
- * When Fly showcase runtime is retired, do not register the 20s position-alert
- * poll, durable wake poll / keepalive, or 5m signal-cycle idle recovery (and
- * sibling showcase session sync / Fly reporter). Backend stays up for Vercel;
- * Neon can sleep. Call ONLY at timer registration sites — never scatter
- * early-returns inside timer bodies.
+ * When Fly showcase runtime is retired, do not register: 20s position-alert,
+ * durable wake / keepalive, 5m signal-cycle idle recovery, showcase session
+ * sync, live-copy reporter, 60s paper-limit, 2m metrics-sync, or 5m epoch
+ * settlement. Backend stays up for Vercel; Neon can sleep. Call ONLY at timer
+ * registration sites — never scatter early-returns inside timer bodies.
  */
 export function shouldRegisterNeonBackgroundTimers(
   env: NodeJS.ProcessEnv = process.env,
