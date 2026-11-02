@@ -70,7 +70,7 @@ def test_retired_idle_only_when_every_flag_true(tmp_path, monkeypatch):
     _write(tmp_path / "v3" / "ledgers" / "market_segment.jsonl", [{"record_id": "x"}], mtime=SINCE - 100)
     res = mon.check(tmp_path, SINCE)
     assert res["ledgers"]["market_segment"]["status"] == "IDLE" and res["status"] == "IDLE"
-    assert res["idle_ledgers"] == {"market_segment": "MARKET_SEGMENTS_RETIRED_R17"}
+    assert res["idle_ledgers"] == {"market_segment": mon.MARKET_SEGMENT_STATUS_LABEL}
     monkeypatch.setattr(q, "SEGMENT_WRITES_RETIRED_R17", False)
     res = mon.check(tmp_path, SINCE)
     assert res["ledgers"]["market_segment"]["status"] == "RED"

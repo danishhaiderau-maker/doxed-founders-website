@@ -364,77 +364,17 @@ def build_ai_challenger_report(challenger_rows: Iterable[Mapping[str, Any]],
                                compact_rows: Iterable[Mapping[str, Any]] = (),
                                *, epoch_id: Optional[str] = None,
                                dead_input_threshold: int = 20) -> dict:
-    all_calls = assemble_calls(challenger_rows, epoch_id=epoch_id)
-    compact_by_id = {str(r.get("shared_ai_call_id")): r for r in (compact_rows or ())
-                     if isinstance(r, Mapping) and r.get("shared_ai_call_id")}
-    ordered = sorted(all_calls.values(), key=lambda c: _finite(c.get("decision_ts")) or 0.0)
-    cohorts = defaultdict(list)
-    for c in ordered:
-        cohorts[cohort_key(c)].append(c)
-    tests, cohort_payload = [], {}
-    for prompt_id, calls in cohorts.items():
-        local = []
-        cohort_payload[prompt_id] = {
-            "calls": len(calls),
-            "first_decision_utc": calls[0].get("decision_utc"),
-            "last_decision_utc": calls[-1].get("decision_utc"),
-            "llm_behaviour": llm_behaviour_section(calls),
-            "agreement_with_llm": agreement_section(calls),
-            "markouts": markout_section(calls, local),
-            "geometry_proxy": geometry_section(calls),
-            "compact_v5": compact_section(calls, compact_by_id),
-            "dead_inputs": shadow.dead_input_report(
-                (c.get("prompt_payload") for c in calls if isinstance(c.get("prompt_payload"), Mapping)),
-                dead_input_threshold,
-            ),
-        }
-        for t in local:
-            t["prompt_id"] = prompt_id
-        tests.extend(local)
-    for t, q in zip(tests, benjamini_hochberg([t["ref"].get("p") for t in tests])):
-        t["ref"]["q_bh"] = _round(q, 6)
-    comparisons, placebo = [], []
-    for t in tests:
-        ref = t["ref"]
-        if t["family"] == "llm_minus_challenger" and t["horizon_sec"] == PRIMARY_HORIZON_SEC:
-            comparisons.append({
-                "prompt_id": t["prompt_id"], "challenger": t["challenger"],
-                "horizon_sec": t["horizon_sec"], "n": ref["n"], "clusters": ref["clusters"],
-                "mean_diff_net_bp": ref["mean"], "ci95": ref["ci95"], "p": ref["p"],
-                "q_bh": ref.get("q_bh"), "verdict": _verdict(ref),
-            })
-        if t["family"] == "net_vs_zero" and t["challenger"] == "random":
-            significant = ref.get("q_bh") is not None and ref["q_bh"] <= FDR_Q
-            placebo.append({"prompt_id": t["prompt_id"], "horizon_sec": t["horizon_sec"],
-                            "mean": ref["mean"], "q_bh": ref.get("q_bh"),
-                            "flag": "PLACEBO_SIGNIFICANT" if significant else "OK"})
-    if not ordered:
-        status = "NO_DATA"
-    elif all(c["verdict"] == "NOT_ENOUGH_DATA" for c in comparisons):
-        status = "NOT_ENOUGH_DATA"
-    else:
-        status = "OK"
+    # R17/HM: ai_shadow_challengers is ticker/L1-priced — never analyse rows.
+    _ = (challenger_rows, compact_rows, epoch_id, dead_input_threshold)
     return {
         "schema": SCHEMA,
-        "status": status,
-        "mode": "SHADOW_ONLY_NO_ORDERS",
-        "epoch_id": epoch_id,
-        "baseline": BASELINE,
+        "EMPTY_BECAUSE": "R17_RETIRED",
+        "rows_read": 0,
+        "calls": 0,
+        "cohorts": {},
+        "comparisons": [],
+        "placebo_checks": [],
         "challengers": list(shadow.CHALLENGERS),
-        "horizons_sec": list(shadow.MARKOUT_HORIZONS_SEC),
-        "primary_horizon_sec": PRIMARY_HORIZON_SEC,
-        "current_prompt_id": ordered[-1].get("prompt_id") if ordered else None,
-        "current_cohort": cohort_key(ordered[-1]) if ordered else None,
-        "method": {
-            "scoring": ("side * mid-to-mid return from decision+1s; NONE is flat (0); "
-                        "net subtracts half the quoted spread in and out"),
-            "clustering": "UTC decision hour; CR1 cluster-robust t with G-1 df",
-            "ci": f"cluster bootstrap percentile 95%, {BOOTSTRAP_RESAMPLES} resamples, seed {BOOTSTRAP_SEED}",
-            "multiple_testing": f"Benjamini-Hochberg across all {len(tests)} tests in this report, q<={FDR_Q}",
-            "gates": f"verdicts need n>={MIN_CALLS} matured calls and >={MIN_CLUSTERS} hour clusters",
-        },
-        "primary_comparisons": comparisons,
-        "random_placebo": placebo,
-        "cohorts": cohort_payload,
-        "tests_total": len(tests),
+        "status": "RETIRED_R17",
     }
+

@@ -165,8 +165,10 @@ def test_unverified_young_newest_and_changed_rotations_are_kept(venv):
         prune_mod.TIER_B_KEEP_LATEST = original_keep
     with rotated.open("ab") as handle:
         handle.write(b'{"late":1}\n')
+    # PR3: custody execute is never-delete (R22); still refuses unlinks even if plan allowed.
     result = prune_mod.execute({**ready, "segments": []}, runtime_root=venv.runtime)
-    assert result["skipped_changed"] == 1 and rotated.exists()
+    assert result["deleted"] == 0 and result.get("refused") == prune_mod.CUSTODY_PRUNE_RETIRED_REASON
+    assert rotated.exists()
 
 
 def test_tape_rotations_outlive_the_restart_minute_bar_window(venv, monkeypatch):

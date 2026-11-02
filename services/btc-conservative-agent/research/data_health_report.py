@@ -371,21 +371,24 @@ def _not_none(side) -> bool:
 
 
 def repaired_stream_quality(data_dir: str) -> dict:
-    calls = [r for r in _iter_json(_generations(os.path.join(data_dir, "ai_shadow_challengers.jsonl")))
-             if r.get("row_kind") == "CALL"]
-    v2 = [r for r in calls if (r.get("compact") or {}).get("side_rule")]
-    legacy = [r for r in calls if not (r.get("compact") or {}).get("side_rule")]
+    # R17/HM: ai_shadow_challengers is RETIRED — never open the file; EMPTY_BECAUSE stub only.
     out = {
+        "ai_shadow_challengers": {
+            "EMPTY_BECAUSE": "R17_RETIRED",
+            "rows_read": 0,
+        },
         "compact_v5": {
-            "calls": len(calls),
-            "calls_with_side_rule": len(v2),
-            "side_non_none_pct_v2": _round(_pct(sum(1 for r in v2 if _not_none((r.get("sides") or {}).get("compact_v5"))), len(v2))),
-            "side_non_none_pct_legacy": _round(_pct(sum(1 for r in legacy if _not_none((r.get("sides") or {}).get("compact_v5"))), len(legacy))),
+            "calls": 0,
+            "calls_with_side_rule": 0,
+            "side_non_none_pct_v2": None,
+            "side_non_none_pct_legacy": None,
+            "EMPTY_BECAUSE": "R17_RETIRED",
         },
         "win_prob": {
-            "calls": len(calls),
-            "populated_pct": _round(_pct(sum(1 for r in calls if r.get("win_prob") not in (None, 0)), len(calls))),
-            "status_counts": dict(Counter(r.get("win_prob_status") for r in calls)),
+            "calls": 0,
+            "populated_pct": None,
+            "status_counts": {},
+            "EMPTY_BECAUSE": "R17_RETIRED",
         },
     }
     cf = list(_iter_json(_generations(os.path.join(data_dir, "counterfactual.jsonl"))))

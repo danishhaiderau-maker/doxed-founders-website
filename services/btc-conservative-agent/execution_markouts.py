@@ -1,14 +1,10 @@
-"""Fill- and signal-anchored execution markouts (research evidence only).
+"""Fill-anchored execution markouts (research evidence only).
 
-Two append-only evidence streams share one sampler:
+``fill_markouts.jsonl``: every paper fill, marked to the side-correct quote
+at +1s/+10s/+60s/+5m after the fill, so maker adverse selection and taker
+cost can be measured per fill.
 
-* ``fill_markouts.jsonl``: every paper fill, marked to the side-correct quote
-  at +1s/+10s/+60s/+5m after the fill, so maker adverse selection and taker
-  cost can be measured per fill.
-* ``taker_signal_counterfactuals.jsonl``: for every directional shared AI
-  signal, what an immediate taker entry would have paid after each modelled
-  latency, and how that entry marked out afterwards. Nothing here places or
-  changes an order.
+``taker_signal_counterfactuals.jsonl`` writer removed (R22); basename kept for wipe lists.
 """
 from __future__ import annotations
 
@@ -18,12 +14,9 @@ from typing import Any, Mapping
 
 FILL_SCHEMA = "fill_markout_v1"
 FILL_FILE = "fill_markouts.jsonl"
-TAKER_SCHEMA = "taker_signal_counterfactual_v1"
+# Wipe-list basename only (writer deleted R22).
 TAKER_FILE = "taker_signal_counterfactuals.jsonl"
 MARKOUT_HORIZONS_SEC = (1, 10, 60, 300)
-TAKER_LATENCIES_SEC = (0.25, 1.0, 2.0)
-COUNTERFACTUAL_MARGIN_USD = 0.25
-COUNTERFACTUAL_LEVERAGE = 100.0
 # A horizon sampled later than this is recorded but flagged, never silently
 # re-labelled as on-time.
 MAX_SAMPLE_LAG_SEC = 2.5

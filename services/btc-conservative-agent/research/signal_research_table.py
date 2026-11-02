@@ -236,6 +236,11 @@ def _merge(dst: dict[str, Any], src: Mapping[str, Any]) -> None:
             dst[k] = v
 
 
+def retired_stream_read(name: str) -> dict[str, Any]:
+    """Analyzer reader stub for R17-retired streams: 0 rows, EMPTY_BECAUSE."""
+    return {"source": name, "EMPTY_BECAUSE": "R17_RETIRED", "rows_read": 0}
+
+
 def load_signals(data_dir: Path | str) -> list[dict[str, Any]]:
     """All signals found in a runtime folder. Every source is optional; absent files contribute nothing."""
     d = Path(data_dir)
@@ -281,14 +286,12 @@ def load_signals(data_dir: Path | str) -> list[dict[str, Any]]:
                      else _f(r.get("anchor_bucket_ts")), "direction": _side(r.get("side")),
                      "xv_trigger_source": r.get("trigger_source"),
                      "research_lane": "FAMILY_XVENUE_SESSION_FOLLOW_60M"})
-    for r in iter_jsonl(d / "taker_signal_counterfactuals.jsonl"):
-        cid = str(r.get("shared_ai_call_id") or "")
-        if not cid.startswith("scan-"):
-            continue
-        row = ai_row(cid)
-        row["sources"].add("taker_signal_counterfactuals")
-        _merge(row, {"signal_ts": _f(r.get("signal_ts")), "ai_raw_decision": r.get("raw_ai_decision"),
-                     "counterfactual_direction": _side(r.get("direction")), "epoch_id": r.get("data_epoch_id")})
+    # R17 retired readers (ticker/L1): never open these files.
+    _ = retired_stream_read("taker_signal_counterfactuals.jsonl")
+    _ = retired_stream_read("xvp_shadow_signals.jsonl")
+    _ = retired_stream_read("shadow_exit_paths.jsonl")
+    _ = retired_stream_read("fill_markouts.jsonl")
+    _ = retired_stream_read("ai_shadow_challengers.jsonl")
     for r in iter_jsonl(d / "ai_input_log.jsonl"):
         cid = str(r.get("trade_id") or "")
         if cid.startswith("scan-"):
@@ -479,6 +482,12 @@ def manifest(rows: list[dict[str, Any]], tape: Tape, data_dir: Path, table_path:
     return {
         "schema": MANIFEST_SCHEMA, "table_schema": TABLE_SCHEMA, "generated_utc": datetime.now(timezone.utc).isoformat(),
         "data_dir": str(data_dir), "table_path": str(table_path), "rows": len(rows), "by_kind": kinds,
+        "retired_stream_reads": [
+            retired_stream_read(n) for n in (
+                "taker_signal_counterfactuals.jsonl", "xvp_shadow_signals.jsonl",
+                "shadow_exit_paths.jsonl", "fill_markouts.jsonl", "ai_shadow_challengers.jsonl",
+            )
+        ],
         "horizons": [{"label": h, "sec": s} for h, s in HORIZONS],
         "tape": {"schema": TAPE_SCHEMA, "files": [p.name for p in tape_files(data_dir)], "rows": tape.n_rows,
                  "first_utc": datetime.fromtimestamp(tape.t0, tz=timezone.utc).isoformat(),

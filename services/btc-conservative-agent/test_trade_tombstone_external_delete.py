@@ -367,4 +367,15 @@ def test_census_note_has_no_unverifiable_route_count():
     contract = _j.loads((root / "cleanup_characterization_contract.fixture").read_text())
     assert ["POST", "/api/admin/trades/tombstone-external-delete",
             "api_admin_trades_tombstone_external_delete"] in contract["routes"]
-    assert "routes 149 -> 150" in note and len(contract["routes"]) >= 150
+    # Historical #888 / #943 bumps stay in the note; #957 adds retained GET → exact 150.
+    assert "routes 149 -> 150" in note
+    assert "routes 152 -> 149" in note and "#943" in note
+    assert "#957" in note and "/api/runtime_log/retained" in note
+    assert len(contract["routes"]) == 150
+    paths = {r[1] for r in contract["routes"]}
+    assert "/api/monitor/shadow-exits" not in paths
+    assert "/api/research/shadow_exits" not in paths
+    assert "/api/shadow_exits/summary" not in paths
+    assert "/api/runtime_log/retained" in paths
+    assert ["GET", "/api/runtime_log/retained",
+            "api_runtime_log_retained"] in contract["routes"]

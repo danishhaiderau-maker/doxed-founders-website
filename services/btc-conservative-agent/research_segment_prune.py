@@ -1,16 +1,15 @@
 """Pruning of the Fly segment store and shipped runtime rotations.
 
-R5 (2026-10-23): the segment store is pruned by age/cap with NO custody or ACK
-gate (``plan_r5_segment_prune`` at the bottom; the shipper's
-``r5_segment_pass``), and runtime rotations by ``rotation_cap``.
+PR3 (2026-10-31): segment-store ``r5_segment_pass`` is **never-delete** — R5a
+eligibility + tripwires + stop-write only. ``execute_r5_segment_prune`` is
+R22-deleted. Runtime rotations use ``rotation_cap`` never-delete (PR2).
 
 HM C4 (23 Oct): the custody-gated prune below is RETIRED (``CUSTODY_PRUNE_RETIRED``):
 the shipper no longer calls ``plan_prune``/``execute``, ``read_mode`` always
 answers ``("off", "CUSTODY_PRUNE_RETIRED_R5")`` and the server refuses a mode
-change with 409. A custody stall is an alert only
-(``monitor_gaps.custody_stall``: custody_through_seq not advancing while shipped_seq is
-ahead). The plan/execute code is kept, uncalled, for audit of the old ledger
-format. Historical description of the retired path:
+change with 409. ``execute`` itself is never-delete (returns refused). A custody
+stall is an alert only (``monitor_gaps.custody_stall``). Historical description
+of the retired path:
 
 Runs inside the segment shipper process, strictly between cycles (never
 between ``write_intent`` and ``complete_intent``). Nothing is deleted unless
@@ -310,36 +309,14 @@ def _append_ledger(path: Path, row: dict) -> None:
 
 def execute(plan: dict, *, runtime_root: Path, clock=time.time,
             max_bytes: int = MAX_DELETE_BYTES_PER_PASS) -> dict:
-    """Delete the plan's candidates (re-checking identity), ledgering each one."""
-    ledger = Path(runtime_root).joinpath(*LEDGER_RELPATH.split("/"))
-    result = {"deleted": 0, "deleted_bytes": 0, "segment_bytes": 0, "runtime_bytes": 0,
-              "skipped_changed": 0, "max_segment_seq": 0}
-    if not plan.get("allowed"):
-        return result
-    common = {"bound_seq": plan["bound_seq"], "custody_through_seq": plan["custody_through_seq"],
-              "acked_seq": plan["acked_seq"]}
-    for item in plan["segments"] + plan["runtime"]:
-        if result["deleted_bytes"] >= max_bytes:
-            break
-        path = Path(item["path"])
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            continue
-        if item["kind"] == "runtime" and [int(stat.st_size), int(stat.st_ino), int(stat.st_mtime_ns)] \
-                != item["identity"]:
-            result["skipped_changed"] += 1
-            continue
-        path.unlink()
-        _append_ledger(ledger, {"deleted_at": _iso(clock()), "kind": item["kind"], "relpath": item["relpath"],
-                                "bytes": item["size"], "sha256": item.get("sha256"), "seq": item.get("seq"),
-                                "shipped_seq": item.get("shipped_seq"), "tier": item.get("tier"), **common})
-        result["deleted"] += 1
-        result["deleted_bytes"] += item["size"]
-        result[f"{item['kind']}_bytes"] += item["size"]
-        if item["kind"] == "segment":
-            result["max_segment_seq"] = max(result["max_segment_seq"], int(item["seq"]))
-    return result
+    """RETIRED / never-delete (PR3): refuse all unlinks. Kept for audit callers only."""
+    del runtime_root, clock, max_bytes  # unused — never deletes
+    return {"deleted": 0, "deleted_bytes": 0, "segment_bytes": 0, "runtime_bytes": 0,
+            "skipped_changed": 0, "max_segment_seq": 0, "refused": CUSTODY_PRUNE_RETIRED_REASON,
+            "allowed": bool(plan.get("allowed"))}
+    # unreachable historical body retained only as comment for audit:
+    # path.unlink() was here; R22-removed so no env (incl. RESEARCH_SEGMENTS_PRUNE_ENABLED=1)
+    # can reach a delete from this module.
 
 
 def summarize(plan: dict, limit: int = 20) -> dict:
@@ -354,31 +331,28 @@ def summarize(plan: dict, limit: int = 20) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# R5 segment-store retention (RK 2026-10-23 18:10/18:11, HM 18:05 addendum).
+# R5 / R5a segment-store retention (PR3 URGENT 2026-10-31).
 #
-# The custody-gated plan above (``plan_prune``/``execute``) still governs the
-# runtime rotations. The Fly *segment store* no longer waits on custody or the
-# laptop ACK: before this, a custody stall froze pruning and the store ran into
-# ``STORE_CAP_REACHED`` (shipper fails closed, nothing ships at all). The pass
-# below is LIVE in code (no prune-mode / dry_run, no env switch) and only ever
-# touches committed segment tarballs (``seq <= shipped_seq``); manifests (the
-# hash chain) stay, the server answers ``410 PRUNED`` for pruned bytes.
+# Never-delete: ``r5_segment_pass`` only reports R5a eligibility + tripwires +
+# stop-write pressure. ``execute_r5_segment_prune`` is R22-deleted. Fly segment
+# bytes leave only via a later R21 after R5a. No env value (including ``1``)
+# can arm an unlink on this path.
 #
-# * Below the cap: segments older than ``R5_SEGMENT_MAX_AGE_HOURS`` are
-#   deleted, except a segment the laptop has not ACKed yet whose seq is in
-#   ``keep_seqs`` (needed by an open lifecycle or a pre-registered test).
-# * At/over the cap: oldest first, regardless of ACK or keep, until the store
-#   is back under ``R5_SEGMENT_CAP_TARGET`` x cap; the dropped seqs go into a
-#   capped receipt (``cap_receipts.jsonl``, 1 MB single rotation, wiped at
-#   reset) and the result carries a RED reason for the shipper status.
-# * A custody stall is an alert (monitor_gaps.custody_stall), never a gate.
+# ``plan_r5_segment_prune`` remains a pure pressure/shadow planner (what age/cap
+# *would* have dropped) for telemetry; it never deletes.
 # ---------------------------------------------------------------------------
 R5_SEGMENT_SCHEMA = "fly_segment_r5_prune_v1"
+R5A_ELIGIBILITY_SCHEMA = "r5a_segment_eligibility_v1"
 R5_SEGMENT_MAX_AGE_HOURS = 7 * 24.0
 R5_SEGMENT_CAP_TARGET = 0.90
 R5_RECEIPT_MAX_IDS = 200
 R5_RED_CAP = "SEGMENT_STORE_CAP_REACHED"
-R5_RED_UNACKED = "SEGMENT_PRUNED_BEFORE_LAPTOP_ACK"
+R5_RED_UNACKED = "SEGMENT_PRUNED_BEFORE_LAPTOP_ACK"  # historical; never raised by never-delete pass
+R5_RED_STATUS_FAIL_CLOSED = "SEGMENT_STATUS_FAIL_CLOSED"
+R5_RED_ACK_STALE = "SEGMENT_ACK_STALE"
+R5_RED_TRIPWIRE_SEQ = "SEGMENT_ACK_CATCHUP_TRIPWIRE"
+ACK_STALE_SECONDS = 2 * 3600.0
+TRIPWIRE_SEQ_MARGIN = 500
 
 
 def _store_segments(store_root: Path, prefix: str, shipped_seq: int) -> list[dict]:
@@ -403,10 +377,9 @@ def plan_r5_segment_prune(store_root: Path, prefix: str, *, shipped_seq: int, ac
                           max_store_bytes: int, now: float, keep_seqs=(), accounted_bytes: int = 0,
                           max_age_hours: float = R5_SEGMENT_MAX_AGE_HOURS,
                           cap_target: float = R5_SEGMENT_CAP_TARGET, exclude_seqs=()) -> dict:
-    """Pure plan: which committed segments go by age and which by the cap.
+    """Pure pressure/shadow plan: which committed segments *would* drop by age/cap.
 
-    HM C3-R: ``exclude_seqs`` (a pending ship intent's seq) is never deleted by
-    either pass; everything else is planned as usual, so the prune never waits.
+    Never deletes. ``exclude_seqs`` (pending ship intent) stay out of the shadow.
     """
     excluded = {int(s) for s in exclude_seqs or ()}
     segments = [item for item in _store_segments(store_root, prefix, shipped_seq)
@@ -440,46 +413,133 @@ def plan_r5_segment_prune(store_root: Path, prefix: str, *, shipped_seq: int, ac
             "store_bytes": total, "max_store_bytes": int(max_store_bytes), "over_cap": over_cap,
             "max_age_hours": max_age_hours, "age_drop": age_drop, "cap_drop": cap_drop,
             "kept_needed_unacked": [item["seq"] for item in kept_needed],
-            "excluded_seqs": sorted(excluded)}
+            "excluded_seqs": sorted(excluded),
+            "fly_oldest_seq": segments[0]["seq"] if segments else None,
+            "fly_newest_seq": segments[-1]["seq"] if segments else None}
 
 
-def execute_r5_segment_prune(plan: dict, *, receipt_dir: Path | None, clock=time.time,
-                             receipt_writer=None) -> dict:
-    """Delete the plan's segments; one capped receipt row per pass that deleted anything."""
-    acked = int(plan.get("acked_seq") or 0)
-    result = {"deleted": 0, "deleted_bytes": 0, "age_dropped_seqs": [], "cap_dropped_seqs": [],
-              "unacked_dropped_seqs": [], "red": []}
-    for kind, items in (("age", plan.get("age_drop") or []), ("cap", plan.get("cap_drop") or [])):
-        for item in items:
+def _manifest_sha256_at(store_root: Path, prefix: str, seq: int) -> str | None:
+    path = Path(store_root).joinpath(*fmt.validate_prefix(prefix).split("/"), "man",
+                                     f"{fmt.seq_token(seq)}.json")
+    try:
+        return fmt.sha256_bytes(path.read_bytes())
+    except OSError:
+        return None
+
+
+def evaluate_r5a_segment_eligibility(*, store_root: Path, prefix: str, shipped_seq: int,
+                                     status: dict | None, status_readable: bool, now: float,
+                                     fly_oldest_seq: int | None = None) -> dict:
+    """R5a eligibility telemetry only — never deletes (PR3 / HM-3 / HM-4 / HM-5).
+
+    Bound = min(custody.through_seq, acked_seq, analyzer_consumed_seq).
+    ACK alone is never enough. Missing/corrupt status, stale ACK (>2 h), invalid
+    custody, or tripwire (oldest within 500 of ACK) → NOT eligible + alarm codes.
+    """
+    reasons: list[str] = []
+    red: list[str] = []
+    amber: list[str] = []
+    acked_seq = None
+    ack_age_s = None
+    custody_through = None
+    analyzer_consumed = None
+    proven_ack_cycles = 0
+    custody_error = None
+    bound = 0
+
+    if not status_readable or not isinstance(status, dict):
+        reasons.append("STATUS_MISSING_OR_CORRUPT")
+        red.append(R5_RED_STATUS_FAIL_CLOSED)
+    else:
+        raw_ack = status.get("laptop_acked_seq")
+        if raw_ack is None:
+            reasons.append("ACKED_SEQ_NONE")
+            red.append(R5_RED_STATUS_FAIL_CLOSED)
+        else:
             try:
-                Path(item["path"]).unlink()
-            except FileNotFoundError:
-                continue
-            result["deleted"] += 1
-            result["deleted_bytes"] += int(item["size"])
-            result[f"{kind}_dropped_seqs"].append(int(item["seq"]))
-            if int(item["seq"]) > acked:
-                result["unacked_dropped_seqs"].append(int(item["seq"]))
-    if result["cap_dropped_seqs"]:
-        result["red"].append(R5_RED_CAP)
-    if result["unacked_dropped_seqs"]:
-        result["red"].append(R5_RED_UNACKED)
-    if result["deleted"] and receipt_dir is not None:
-        if receipt_writer is None:
-            import rotation_cap
-            receipt_writer = rotation_cap.write_cap_receipt
-        row = {"ts": clock(), "kind": "r5_segment_store", "schema": R5_SEGMENT_SCHEMA,
-               "store_bytes_before": plan.get("store_bytes"), "max_store_bytes": plan.get("max_store_bytes"),
-               "deleted": result["deleted"], "deleted_bytes": result["deleted_bytes"],
-               "acked_seq": acked, "shipped_seq": plan.get("shipped_seq"), "red": result["red"],
-               "cap_dropped_seqs": result["cap_dropped_seqs"][:R5_RECEIPT_MAX_IDS],
-               "age_dropped_seqs": result["age_dropped_seqs"][:R5_RECEIPT_MAX_IDS],
-               "unacked_dropped_seqs": result["unacked_dropped_seqs"][:R5_RECEIPT_MAX_IDS],
-               "ids_truncated": max(len(result["cap_dropped_seqs"]), len(result["age_dropped_seqs"]))
-               > R5_RECEIPT_MAX_IDS}
-        try:
-            Path(receipt_dir).mkdir(parents=True, exist_ok=True)
-            receipt_writer(str(receipt_dir), row)
-        except Exception:  # noqa: BLE001 - a receipt never blocks the cap
-            pass
-    return result
+                acked_seq = int(raw_ack)
+            except (TypeError, ValueError):
+                reasons.append("ACKED_SEQ_INVALID")
+                red.append(R5_RED_STATUS_FAIL_CLOSED)
+                acked_seq = None
+        advanced_at = status.get("laptop_ack_advanced_at")
+        if acked_seq is not None:
+            if advanced_at is None:
+                reasons.append("ACK_ADVANCED_AT_MISSING")
+                red.append(R5_RED_ACK_STALE)
+            else:
+                try:
+                    ack_age_s = float(now) - float(advanced_at)
+                except (TypeError, ValueError):
+                    reasons.append("ACK_ADVANCED_AT_INVALID")
+                    red.append(R5_RED_ACK_STALE)
+                    ack_age_s = None
+                if ack_age_s is not None and ack_age_s > ACK_STALE_SECONDS:
+                    reasons.append("ACK_STALE_OVER_2H")
+                    red.append(R5_RED_ACK_STALE)
+
+    receipts = ack_receipts(store_root, prefix)
+    advancing = [r for i, r in enumerate(receipts)
+                 if i == 0 or r["through_seq"] > receipts[i - 1]["through_seq"]]
+    proven_ack_cycles = len(advancing)
+    if proven_ack_cycles < REQUIRED_PROVEN_ACK_CYCLES:
+        reasons.append("INSUFFICIENT_PROVEN_ACK_CYCLES")
+
+    custody = latest_custody(store_root, prefix)
+    if not custody:
+        reasons.append("NO_LAPTOP_CUSTODY_RECEIPT")
+    elif acked_seq is None:
+        reasons.append("CUSTODY_SKIPPED_NO_ACK")
+    else:
+        custody_error = validate_custody(
+            custody, prefix=prefix,
+            manifest_sha256_at=lambda seq: _manifest_sha256_at(store_root, prefix, seq),
+            acked_seq=acked_seq,
+        )
+        if custody_error:
+            reasons.append(custody_error)
+        else:
+            custody_through = int(custody["through_seq"])
+            analyzer_consumed = custody.get("analyzer_consumed_seq")
+            if not isinstance(analyzer_consumed, int):
+                reasons.append("ANALYZER_CONSUMED_SEQ_INVALID")
+                analyzer_consumed = None
+            elif analyzer_consumed < custody_through:
+                reasons.append("ANALYZER_CONSUMED_SEQ_BELOW_THROUGH")
+            if custody.get("parity_verdict") != "GREEN":
+                reasons.append("CUSTODY_PARITY_NOT_GREEN")
+
+    if fly_oldest_seq is None:
+        segs = _store_segments(store_root, prefix, shipped_seq)
+        fly_oldest_seq = segs[0]["seq"] if segs else None
+    if (acked_seq is not None and fly_oldest_seq is not None
+            and int(fly_oldest_seq) >= int(acked_seq) - TRIPWIRE_SEQ_MARGIN):
+        reasons.append("TRIPWIRE_SEQ_WITHIN_500")
+        red.append(R5_RED_TRIPWIRE_SEQ)
+        amber.append(R5_RED_TRIPWIRE_SEQ)
+
+    if (not reasons and acked_seq is not None and isinstance(custody_through, int)
+            and isinstance(analyzer_consumed, int)):
+        bound = min(custody_through, acked_seq, analyzer_consumed)
+
+    eligible = bound > 0 and not reasons
+    return {
+        "schema": R5A_ELIGIBILITY_SCHEMA,
+        "eligible": eligible,
+        "deny_reasons": reasons,
+        "bound_seq": bound,
+        "acked_seq": acked_seq,
+        "custody_through_seq": custody_through,
+        "analyzer_consumed_seq": analyzer_consumed,
+        "proven_ack_cycles": proven_ack_cycles,
+        "ack_age_s": ack_age_s,
+        "fly_oldest_seq": fly_oldest_seq,
+        "tripwire_seq_margin": TRIPWIRE_SEQ_MARGIN,
+        "ack_stale_seconds": ACK_STALE_SECONDS,
+        "custody_error": custody_error,
+        "status_readable": bool(status_readable),
+        "red": sorted(set(red)),
+        "amber": sorted(set(amber)),
+        "evaluated_at": float(now),
+        "shipped_seq": int(shipped_seq),
+    }

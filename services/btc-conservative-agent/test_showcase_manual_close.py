@@ -21,8 +21,12 @@ def test_manual_close_endpoint_is_single_position_and_paper_only():
     endpoint = BOT_SOURCE[
         BOT_SOURCE.index("def api_close_showcase_position"):
         BOT_SOURCE.index("@app.route('/api/toggle_early_fail")
-    ].lower()
-    assert "close all" not in endpoint
+    ]
+    assert "close all" not in endpoint.lower()
+    # deploy 41050904036: never Flask HTML 500 — JSON body names trade_id + exception_type
+    assert "logger.exception(" in endpoint
+    assert '"exception_type": type(exc).__name__' in endpoint
+    assert '"), 500' in endpoint or "), 500" in endpoint
 
 
 def test_terminal_close_zeros_protected_runner_fraction_before_trade_row():

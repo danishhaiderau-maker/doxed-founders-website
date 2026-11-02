@@ -78,6 +78,7 @@ import thread_health as _thread_health
 import monitor_gaps as _monitor_gaps
 import relay_delivery_guard as _relay_guard
 import ai_call_cost as _ai_call_cost
+import expired_orders_boot_rebuild as _expired_boot
 
 _THREAD_HEALTH = _thread_health.ThreadHealthRegistry()
 _FILL_SIM_COUNTERS = _monitor_gaps.FillSimCounters()
@@ -204,6 +205,7 @@ from combo_pathway_config import (
 import shadow_chase_buckets
 import rotation_cap
 import disk_alert
+import retention_stop_write
 from normalized_market_indicators import (
     normalize_market_indicators,
 )
@@ -368,6 +370,219 @@ _AGENT_DEBUG_LOG_ALT = os.path.join(os.getenv("AGENT_DEBUG_LOG_DIR", "/tmp"), "a
 AGENT_DEBUG_LOG_MAX_BYTES = int(os.getenv("AGENT_DEBUG_LOG_MAX_BYTES", str(20 * 1024 * 1024)))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(50 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+# R46 never-drop + archive-rename: overflow spool after STOP_WRITE latch fallback.
+# part_cap is an AMBER threshold for archived segments (never a hard delete/refuse).
+LOG_SPOOL_MAX_BYTES = int(os.getenv("LOG_SPOOL_MAX_BYTES", str(LOG_MAX_BYTES)))  # 50 MiB / active spool
+# Effective part_cap is ALWAYS >= 1 (Fly may set LOG_BACKUP_COUNT / LOG_SPOOL_PART_CAP to 0).
+_raw_spool_part_cap = int(os.getenv("LOG_SPOOL_PART_CAP", str(LOG_BACKUP_COUNT)))
+LOG_SPOOL_PART_CAP = max(1, _raw_spool_part_cap if _raw_spool_part_cap > 0 else max(1, LOG_BACKUP_COUNT, 1))
+# AMBER when total archived bytes >= this (default: part_cap × primary size cap).
+LOG_ARCHIVE_AMBER_BYTES = int(
+    os.getenv("LOG_ARCHIVE_AMBER_BYTES", str(max(1, LOG_SPOOL_PART_CAP) * max(1, LOG_MAX_BYTES)))
+)
+# RUNTIME_LOG_ARCHIVE_RENAME AMBER is process-local (disk_alert.raise_amber); a restart clears it.
+RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED = False
+_RUNTIME_LOG_SPOOL_STATS = {
+    "diverted_records": 0,
+    "spool_bytes": 0,
+    "spool_parts_used": 0,
+    "archived_parts": 0,
+    "archive_bytes": 0,
+    "archive_renames": 0,
+    "cap_refusals": 0,
+    "spool_cap_red": False,
+    "archive_amber": False,
+    "last_divert_ts": None,
+    "last_archive_ts": None,
+    "last_error": None,
+}
+_RUNTIME_LOG_SPOOL_STATS_LOCK = threading.Lock()
+
+
+def _runtime_log_effective_part_cap() -> int:
+    """Never expose raw 0 — Fly env may set LOG_*_PART_CAP to 0 (HM e01b7073feb9)."""
+    return max(1, int(LOG_SPOOL_PART_CAP or 1))
+
+
+def _runtime_log_retention_status() -> dict:
+    """Spool / archive / drop counters for /api/status (R46)."""
+    with _RUNTIME_LOG_SPOOL_STATS_LOCK:
+        snap = dict(_RUNTIME_LOG_SPOOL_STATS)
+    # Refresh archive_bytes from disk when a base path is known via LOG_FILE / BOT_LOG_FILE.
+    try:
+        base = os.getenv("BOT_LOG_FILE") or (LOG_FILE if "LOG_FILE" in globals() else None)
+        if base:
+            snap["archive_bytes"] = int(_runtime_log_archive_bytes(base))
+            snap["archived_parts"] = int(_runtime_log_count_archived(base))
+    except Exception:
+        pass
+    snap.update({
+        "schema": "runtime_log_retention_v1",
+        "size_cap_bytes": int(LOG_SPOOL_MAX_BYTES),
+        # Corrected part_cap: effective AMBER threshold (>=1); never raw 0.
+        "part_cap": _runtime_log_effective_part_cap(),
+        "part_cap_means": "amber_threshold_archived_segments",
+        "archive_amber_bytes_threshold": int(LOG_ARCHIVE_AMBER_BYTES),
+        "archive_amber_persisted": bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
+        "archive_amber_clears_on_restart": not bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
+        "primary_size_cap_bytes": int(LOG_MAX_BYTES),
+        "stop_write_latched": bool(retention_stop_write.is_stopped("runtime_log")),
+    })
+    # Guarantee keys exist even before first archive.
+    snap.setdefault("archive_bytes", 0)
+    snap.setdefault("archived_parts", 0)
+    return snap
+
+
+def _runtime_log_next_archive_path(base_path: str) -> str:
+    """Next never-delete archive path: ``base.N`` with N = max existing + 1.
+
+    When ``base_path`` is the primary log, ignore the spool tree
+    (``base.spool`` / ``base.spool.N``) so primary and spool sequences stay
+    independent.
+    """
+    import glob as _glob
+    base_name = os.path.basename(base_path)
+    suffixes = []
+    for p in _glob.glob(base_path + ".*"):
+        suffix = p.rsplit(".", 1)[-1]
+        if not suffix.isdigit():
+            continue
+        if not base_path.endswith(".spool") and os.path.basename(p).startswith(base_name + ".spool"):
+            continue
+        suffixes.append(int(suffix))
+    return f"{base_path}.{max(suffixes, default=0) + 1}"
+
+
+def _runtime_log_archived_paths(base_filename: str) -> list[str]:
+    """Numeric archive paths for primary + spool (never-delete parts)."""
+    import glob as _glob
+    out: list[str] = []
+    base_name = os.path.basename(base_filename)
+    for p in _glob.glob(base_filename + ".*"):
+        suffix = p.rsplit(".", 1)[-1]
+        if not suffix.isdigit():
+            continue
+        if os.path.basename(p).startswith(base_name + ".spool"):
+            continue
+        out.append(p)
+    for p in _glob.glob(base_filename + ".spool.*"):
+        if p.rsplit(".", 1)[-1].isdigit():
+            out.append(p)
+    return out
+
+
+def _runtime_log_count_archived(base_filename: str) -> int:
+    """Count archived numeric segments for primary + spool (never-delete parts)."""
+    return len(_runtime_log_archived_paths(base_filename))
+
+
+def _runtime_log_archive_bytes(base_filename: str) -> int:
+    """Total bytes in archived numeric segments (primary + spool)."""
+    total = 0
+    for p in _runtime_log_archived_paths(base_filename):
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    return total
+
+
+def _runtime_log_spool_paths(base_filename: str) -> list[str]:
+    """Active spool + archived ``.spool.N`` parts (discovered; never capped by delete).
+
+    part_cap is an AMBER threshold only — archived parts accumulate via rename.
+    """
+    import glob as _glob
+    active = f"{base_filename}.spool"
+    archived = []
+    for p in _glob.glob(active + ".*"):
+        if p.rsplit(".", 1)[-1].isdigit():
+            archived.append(p)
+    archived.sort(key=lambda p: int(p.rsplit(".", 1)[-1]))
+    return [active] + archived
+
+
+def _runtime_log_raise_archive_amber(
+    *, base: str, archived_to: str, archived_count: int, archive_bytes: int | None = None,
+) -> None:
+    """Loud AMBER on archive-rename / over part_cap / over byte threshold.
+
+    AMBER is process-local (``disk_alert.raise_amber``); a restart clears it
+    (``RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED=False``).
+    """
+    part_cap = _runtime_log_effective_part_cap()
+    if archive_bytes is None:
+        # Prefer bytes for the owning primary path when ``base`` is a spool.
+        root = base[: -len(".spool")] if base.endswith(".spool") else base
+        try:
+            archive_bytes = _runtime_log_archive_bytes(root)
+        except Exception:
+            archive_bytes = 0
+    over_part_cap = archived_count >= part_cap
+    over_bytes = int(archive_bytes or 0) >= max(1, int(LOG_ARCHIVE_AMBER_BYTES or 1))
+    should_amber = over_part_cap or over_bytes
+    _bump_runtime_log_spool_stats(
+        archive_renames=1,
+        archived_parts=archived_count,
+        archive_bytes=int(archive_bytes or 0),
+        archive_amber=bool(should_amber),
+        last_archive_ts=time.time(),
+        last_error=None,
+    )
+    if not should_amber:
+        # Still loud on stderr for every rename (operator visibility), without AMBER latch.
+        try:
+            sys.stderr.write(
+                f"[RUNTIME_LOG_ARCHIVE_RENAME] base={base} -> {archived_to} "
+                f"archived_parts={archived_count} part_cap={part_cap} "
+                f"archive_bytes={int(archive_bytes or 0)} "
+                f"(below AMBER thresholds)\n"
+            )
+        except Exception:
+            pass
+        return
+    try:
+        import disk_alert as _disk_alert
+        _disk_alert.raise_amber(
+            "RUNTIME_LOG_ARCHIVE_RENAME",
+            {
+                "path": base,
+                "archived_to": archived_to,
+                "archived_parts": archived_count,
+                "archive_bytes": int(archive_bytes or 0),
+                "part_cap": part_cap,
+                "archive_amber_bytes_threshold": int(LOG_ARCHIVE_AMBER_BYTES),
+                "over_part_cap": over_part_cap,
+                "over_archive_bytes": over_bytes,
+                "persisted": bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
+                "clears_on_restart": not bool(RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED),
+                "rule": "R25_ARCHIVE_RENAME_NEVER_DELETE",
+            },
+        )
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(
+            f"[RUNTIME_LOG_ARCHIVE_RENAME] AMBER base={base} -> {archived_to} "
+            f"archived_parts={archived_count} part_cap={part_cap} "
+            f"archive_bytes={int(archive_bytes or 0)} "
+            f"bytes_threshold={int(LOG_ARCHIVE_AMBER_BYTES)} "
+            f"over_part_cap={over_part_cap} over_bytes={over_bytes} "
+            f"clears_on_restart={not RUNTIME_LOG_ARCHIVE_AMBER_PERSISTED}\n"
+        )
+    except Exception:
+        pass
+
+
+def _bump_runtime_log_spool_stats(**kwargs) -> None:
+    with _RUNTIME_LOG_SPOOL_STATS_LOCK:
+        for key, value in kwargs.items():
+            if key in ("diverted_records", "cap_refusals", "archive_renames") and isinstance(value, int):
+                _RUNTIME_LOG_SPOOL_STATS[key] = int(_RUNTIME_LOG_SPOOL_STATS.get(key) or 0) + value
+            else:
+                _RUNTIME_LOG_SPOOL_STATS[key] = value
+
 
 class AsciiSafeFormatter(logging.Formatter):
     """Windows consoles (cp1252) choke on unicode arrows in log lines."""
@@ -378,23 +593,285 @@ class AsciiSafeFormatter(logging.Formatter):
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
+    """Rotating file handler that never deletes log segments (R25/R34) and never
+    silently discards records after STOP_WRITE (R46).
+
+    Stdlib ``RotatingFileHandler.doRollover`` unlinks the oldest backup when
+    ``backupCount > 0``. Here, size pressure **archive-renames** the full
+    primary to ``base.N`` (never unlink) and raises **AMBER**. The legacy
+    STOP_WRITE latch + bounded spool remains as a **fallback** when rename
+    fails. Under latch, full spool segments are also archive-renamed
+    (``.spool`` → ``.spool.N``); ``part_cap`` is an AMBER threshold only.
+    Console / stderr handlers stay unaffected so force-flat, disarm, and R20
+    keep logging.
+    """
+
     def __init__(self, *args, **kwargs):
         kwargs.setdefault('delay', True)
+        # Preserve configured count for telemetry; force 0 so stdlib never drops.
+        self._configured_backup_count = int(kwargs.get("backupCount") or 0)
+        kwargs["backupCount"] = 0
         super().__init__(*args, **kwargs)
         self._rollover_failed = False
+        self._stop_write = False
+        self._spool_cap_latched = False
+        # Boot path: primary already over the cap → archive-rename once (never latch).
+        self._archive_primary_if_over_cap_at_boot()
+
+    def _archive_primary_if_over_cap_at_boot(self) -> None:
+        """HM R2: primary over cap at init → archive same bytes, fresh primary, no latch."""
+        try:
+            path = self.baseFilename
+            if not path or not os.path.exists(path):
+                return
+            size = os.path.getsize(path)
+            cap = max(1, int(self.maxBytes or LOG_MAX_BYTES or 1))
+            if size < cap:
+                return
+            dest = self._archive_rename_segment(path)
+            if dest is None:
+                return
+            archived_count = _runtime_log_count_archived(path)
+            archive_bytes = _runtime_log_archive_bytes(path)
+            _runtime_log_raise_archive_amber(
+                base=path, archived_to=dest,
+                archived_count=archived_count, archive_bytes=archive_bytes,
+            )
+            # Explicit: boot archive must not latch STOP_WRITE.
+            self._stop_write = False
+            self._rollover_failed = False
+        except (PermissionError, OSError) as exc:
+            # Boot rename failure: leave file in place; do not block boot with latch.
+            try:
+                sys.stderr.write(
+                    f"[RUNTIME_LOG_BOOT_ARCHIVE] rename failed ({type(exc).__name__}); "
+                    f"leaving primary in place base={getattr(self, 'baseFilename', None)}\n"
+                )
+            except Exception:
+                pass
 
     def shouldRollover(self, record):
-        if self._rollover_failed:
+        if self._rollover_failed or self._stop_write:
             return False
         return super().shouldRollover(record)
 
-    def doRollover(self):
-        if self._rollover_failed:
+    def emit(self, record):
+        if self._stop_write or self._rollover_failed:
+            self._emit_to_spool(record)
             return
         try:
-            super().doRollover()
+            super().emit(record)
+        except Exception:
+            # Write failure: fail loud via handleError, latch fallback, spool the line.
+            self.handleError(record)
+            try:
+                retention_stop_write.latch(
+                    "runtime_log", reason="RUNTIME_LOG_EMIT_WRITE_FAILURE",
+                    used=0, cap=int(self.maxBytes or LOG_MAX_BYTES or 1),
+                    detail={"path": self.baseFilename, "rule": "R46_NEVER_SILENT_DROP"},
+                )
+            except Exception:
+                pass
+            self._stop_write = True
+            self._emit_to_spool(record)
+
+    def _archive_rename_segment(self, path: str) -> str | None:
+        """Archive-rename full ``path`` to ``path.N`` via ``os.replace`` (never unlink).
+
+        Return dest or None. Never calls ``os.unlink`` / ``os.remove`` / ``Path.unlink``.
+        """
+        if not path or not os.path.exists(path):
+            return None
+        dest = _runtime_log_next_archive_path(path)
+        # Close our stream if it points at this path before rename.
+        if self.stream and os.path.abspath(getattr(self, "baseFilename", "") or "") == os.path.abspath(path):
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        # os.replace = atomic rename; never delete (R25). Dest must not already exist
+        # (next-N path is unique); replace still does not unlink other archives.
+        os.replace(path, dest)
+        return dest
+
+    def _emit_to_spool(self, record):
+        """Append ``record`` to the overflow spool (R46). Archive-rename when full; never unlink."""
+        try:
+            msg = self.format(record)
+            if not msg.endswith("\n"):
+                msg += "\n"
+            payload = msg.encode(self.encoding or "utf-8", errors="replace")
+        except Exception:
+            self.handleError(record)
+            _bump_runtime_log_spool_stats(
+                cap_refusals=1, last_error="FORMAT_FAILED", last_divert_ts=time.time(),
+            )
+            try:
+                sys.stderr.write(
+                    f"[RUNTIME_LOG_SPOOL] FORMAT_FAILED base={self.baseFilename}\n"
+                )
+            except Exception:
+                pass
+            return
+
+        size_cap = max(1, int(LOG_SPOOL_MAX_BYTES or LOG_MAX_BYTES or 1))
+        active = f"{self.baseFilename}.spool"
+        try:
+            with self.lock:
+                try:
+                    cur = os.path.getsize(active) if os.path.exists(active) else 0
+                except OSError:
+                    cur = 0
+                if cur > 0 and cur + len(payload) > size_cap:
+                    # Full segment: archive-RENAME (never delete), then write to fresh active.
+                    try:
+                        dest = self._archive_rename_segment(active)
+                        if dest is None:
+                            raise OSError("archive rename returned None")
+                        archived_count = _runtime_log_count_archived(self.baseFilename)
+                        archive_bytes = _runtime_log_archive_bytes(self.baseFilename)
+                        _runtime_log_raise_archive_amber(
+                            base=active, archived_to=dest,
+                            archived_count=archived_count, archive_bytes=archive_bytes,
+                        )
+                        cur = 0
+                    except OSError as exc:
+                        # Fallback: existing STOP_WRITE latch + refuse this write loudly.
+                        self._spool_cap_latched = True
+                        try:
+                            retention_stop_write.latch(
+                                "runtime_log",
+                                reason="RUNTIME_LOG_SPOOL_ARCHIVE_FAILED",
+                                used=cur,
+                                cap=size_cap,
+                                detail={
+                                    "path": self.baseFilename,
+                                    "error": type(exc).__name__,
+                                    "part_cap": _runtime_log_effective_part_cap(),
+                                    "rule": "R46_LATCH_FALLBACK",
+                                },
+                            )
+                        except Exception:
+                            pass
+                        _bump_runtime_log_spool_stats(
+                            cap_refusals=1,
+                            spool_cap_red=True,
+                            last_error=f"ARCHIVE_FAILED:{type(exc).__name__}",
+                            last_divert_ts=time.time(),
+                        )
+                        try:
+                            sys.stderr.write(
+                                f"[RUNTIME_LOG_SPOOL_CAP] RED latch-fallback base={self.baseFilename} "
+                                f"part_cap={_runtime_log_effective_part_cap()} err={type(exc).__name__}\n"
+                            )
+                        except Exception:
+                            pass
+                        return
+
+                parent = os.path.dirname(active) or "."
+                os.makedirs(parent, exist_ok=True)
+                with open(active, "ab") as fh:
+                    fh.write(payload)
+                    fh.flush()
+                paths = _runtime_log_spool_paths(self.baseFilename)
+                parts_used = 0
+                total_bytes = 0
+                for path in paths:
+                    if os.path.exists(path):
+                        parts_used += 1
+                        try:
+                            total_bytes += os.path.getsize(path)
+                        except OSError:
+                            pass
+                _bump_runtime_log_spool_stats(
+                    diverted_records=1,
+                    spool_bytes=total_bytes,
+                    spool_parts_used=parts_used,
+                    archived_parts=_runtime_log_count_archived(self.baseFilename),
+                    last_divert_ts=time.time(),
+                    last_error=None,
+                )
+        except Exception as exc:
+            self.handleError(record)
+            _bump_runtime_log_spool_stats(
+                cap_refusals=1,
+                last_error=type(exc).__name__,
+                last_divert_ts=time.time(),
+            )
+            try:
+                retention_stop_write.latch(
+                    "runtime_log", reason="RUNTIME_LOG_SPOOL_WRITE_FAILURE",
+                    used=0, cap=size_cap,
+                    detail={"path": self.baseFilename, "error": type(exc).__name__},
+                )
+            except Exception:
+                pass
+            try:
+                sys.stderr.write(
+                    f"[RUNTIME_LOG_SPOOL] WRITE_FAILURE {type(exc).__name__} "
+                    f"base={self.baseFilename}\n"
+                )
+            except Exception:
+                pass
+
+    def doRollover(self):
+        if self._rollover_failed or self._stop_write:
+            return
+        try:
+            # Never call super().doRollover() — it truncates when backupCount==0
+            # and unlinks oldest backups when backupCount>0.
+            try:
+                size = os.path.getsize(self.baseFilename) if os.path.exists(self.baseFilename) else 0
+            except OSError:
+                size = 0
+            cap = int(self.maxBytes or LOG_MAX_BYTES or 1)
+            # Preferred path: archive-RENAME the full primary segment (R25/R34).
+            try:
+                with self.lock:
+                    dest = self._archive_rename_segment(self.baseFilename)
+                    if dest is None and size > 0:
+                        raise OSError("primary archive rename returned None")
+                    # Fresh primary will be opened on next emit (delay=True).
+                    archived_count = _runtime_log_count_archived(self.baseFilename)
+                    archive_bytes = _runtime_log_archive_bytes(self.baseFilename)
+                    if dest is not None:
+                        _runtime_log_raise_archive_amber(
+                            base=self.baseFilename, archived_to=dest,
+                            archived_count=archived_count, archive_bytes=archive_bytes,
+                        )
+                    return
+            except (PermissionError, OSError) as exc:
+                # Fallback: existing STOP_WRITE latch (keep spool path alive).
+                try:
+                    sys.stderr.write(
+                        f"[RUNTIME_LOG_ROLLOVER] archive-rename failed "
+                        f"({type(exc).__name__}); latch STOP_WRITE fallback "
+                        f"base={self.baseFilename}\n"
+                    )
+                except Exception:
+                    pass
+            retention_stop_write.evaluate_and_latch(
+                "runtime_log",
+                used=size,
+                cap=cap,
+                reason="RUNTIME_LOG_ROLLOVER_STOP_WRITE",
+                detail={
+                    "path": self.baseFilename,
+                    "configured_backup_count": self._configured_backup_count,
+                    "part_cap": _runtime_log_effective_part_cap(),
+                    "rule": "R25_NEVER_DELETE_LATCH_FALLBACK",
+                },
+            )
+            self._stop_write = True
+            retention_stop_write.latch(
+                "runtime_log", reason="RUNTIME_LOG_ROLLOVER_STOP_WRITE",
+                used=size, cap=cap,
+                detail={"path": self.baseFilename, "fallback": True},
+            )
         except (PermissionError, OSError):
             self._rollover_failed = True
+            self._stop_write = True
 
 NEAR_EDGE_LOG_MAX_BYTES = int(os.getenv("NEAR_EDGE_LOG_MAX_BYTES", str(100 * 1024 * 1024)))
 WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "45"))
@@ -817,9 +1294,24 @@ def evaluate_momentum_alignment(direction: str, features: dict) -> tuple:
     return False, None
 
 def _trim_oversized_log(path: str, max_bytes: int):
+    """PR2: never truncate/delete. At size pressure → stop-write + 70/85 RED."""
     try:
-        if max_bytes > 0 and os.path.exists(path) and os.path.getsize(path) > max_bytes:
-            os.remove(path)
+        if max_bytes <= 0 or not os.path.exists(path):
+            return
+        size = os.path.getsize(path)
+        if size <= max_bytes and size < max_bytes * retention_stop_write.AMBER_RATIO:
+            return
+        family = f"aux_log:{os.path.basename(path)}"
+        retention_stop_write.evaluate_and_latch(
+            family, used=size, cap=max_bytes,
+            reason="AUX_LOG_SIZE_STOP_WRITE",
+            detail={"path": path, "rule": "R25_NEVER_DELETE"},
+        )
+        if size > max_bytes:
+            retention_stop_write.latch(
+                family, reason="AUX_LOG_SIZE_STOP_WRITE", used=size, cap=max_bytes,
+                detail={"path": path},
+            )
     except Exception:
         pass
 
@@ -6569,11 +7061,8 @@ _TAPE_CONTINUITY = _monitor_integrity.TapeContinuityTracker() if _monitor_integr
 _AI_CALL_WINDOW = _monitor_integrity.AiCallWindow() if _monitor_integrity else None
 _FILL_MARKOUT_AGG = _monitor_integrity.FillMarkoutAggregator() if _monitor_integrity else None
 _fill_markout_book = execution_markouts.MarkoutBook()
-_taker_counterfactual_book = execution_markouts.MarkoutBook()
 _execution_markout_counters = {
-    "fill_rows_written": 0, "taker_rows_written": 0, "write_failures": 0,
-    "taker_signals_scheduled": 0, "taker_capture_failures": 0,
-    "taker_r17_skipped": 0,
+    "fill_rows_written": 0, "write_failures": 0,
 }
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
 _adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "by_lane": {}, "last": None}
@@ -8047,7 +8536,9 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         return out, {**base, **marks}
     model_fill = t0 + float(delay_s)
     while time.time() < model_fill:
-        time.sleep(min(model_fill - time.time(), 3.0))
+        # Clamp to >=0: the while check and the sleep-arg read are two clock samples.
+        # Crossing model_fill between them used to raise ValueError (deploy 41050904036).
+        time.sleep(max(0.0, min(model_fill - time.time(), 3.0)))
     if cls == _om.BOT_SENT and not stop_rule and _is_paper_book_lane(pos):
         # race: did the resident stop trigger while this bot order was in flight (t0, t0 + delay]?
         hit = _exchange_stop_trigger(dict(pos), t0, model_fill)
@@ -13681,19 +14172,8 @@ def update_debug_state_always(stage=None, extra=None, *args, **kwargs):
     except Exception as e:
         logger.error(f"[DEBUG STATE ERROR] {e} [PIPELINE ENFORCEMENT]")
 
-def reset_all_csv():
-    logger.warning("[RESET] Deleting all CSV files for fresh session [PIPELINE ENFORCEMENT]")
-    files = [
-        CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
-        CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
-    ]
-    for f in files:
-        try:
-            if os.path.exists(f):
-                os.remove(f)
-                logger.info(f"[RESET] Deleted {f} [PIPELINE ENFORCEMENT]")
-        except Exception as e:
-            logger.error(f"[RESET ERROR] Failed to delete {f}: {e} [PIPELINE ENFORCEMENT]")
+# R22 (PR2): reset_all_csv removed. Fresh CSV epoch only via sanctioned R21.
+# validate_startup must not delete or recreate anything after this removal.
 
 def update_logger_level():
     try:
@@ -14698,10 +15178,17 @@ def _finalize_position_open_lifecycle(pos, master, signal, order, fill_px, opene
 
 
 def validate_startup():
-    required = ["reset_all_csv","update_logger_level","prune_signals","process_signal","evaluate_signal_with_ai","execute_order","pipeline_state_sync","persist_signal","compute_edge_score","update_debug_state_always"]
+    """Verify critical callables exist. Never deletes or recreates files (PR2 / RK)."""
+    required = [
+        "update_logger_level", "prune_signals", "process_signal",
+        "evaluate_signal_with_ai", "execute_order", "pipeline_state_sync",
+        "persist_signal", "compute_edge_score", "update_debug_state_always",
+    ]
     for fn in required:
         if fn not in globals():
             raise Exception(f"[STARTUP ERROR] Missing function: {fn}")
+    if "reset_all_csv" in globals():
+        raise Exception("[STARTUP ERROR] reset_all_csv must stay deleted (R22/PR2)")
     logger.info("[STARTUP] All critical functions verified [PIPELINE ENFORCEMENT]")
 
 def track_event(trade_id, stage):
@@ -16888,25 +17375,19 @@ _R5_PROCESS_BOOT_TS = time.time()
 _r5_retention_status: dict = {"alive": False}
 
 
-def _r5_v22_drain_probe(started_ts: float):
-    """Pending marker for the bounded v22 drain (reads the reconcile loop's status only)."""
-    def drain():
-        status = _collector_v3_reconcile_status
-        finished = float(status.get("last_finished_ts") or 0.0)
-        if finished >= started_ts and status.get("last_passed"):
-            return []
-        detail = str(status.get("last_error") or "RECONCILE_NOT_CAUGHT_UP")[:200]
-        return [f"RECONCILE_PENDING:{detail}"]
-    return drain
-
-
 def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
-    """One R5 retention pass; each step is independent and never raises."""
+    """One R5 retention pass; each step is independent and never raises.
+
+    PR4: lifecycle / transfer / v22 never delete (stop-write + 70/85).
+    ``cap_market_segments`` is PR2 never-delete (do not reintroduce unlinks).
+    ``wipe_stale_locks`` remains the only unlink path reachable from this once.
+    """
     import r5_keep
     import r5_retention
+    import retention_stop_write
     now = time.time() if now is None else float(now)
     runtime_root = _data_sync_runtime_root()
-    out: dict = {"ts": now}
+    out: dict = {"ts": now, "stop_write": retention_stop_write.latch_state()}
     # HM C7 (RK: keep only for open lifecycles or prereg tests): one read-only keep set.
     try:
         keep_info = r5_keep.open_lifecycles(runtime_root)
@@ -16916,21 +17397,19 @@ def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
         out["keep"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     steps = [
         ("locks", lambda: r5_retention.wipe_stale_locks(runtime_root, boot_ts=_R5_PROCESS_BOOT_TS, now=now)),
-        ("market_segments", lambda: r5_retention.cap_market_segments(
-            runtime_root, referenced=keep_info.get("segment_shas") or (), now=now)),
+        ("market_segments", lambda: r5_retention.cap_market_segments(runtime_root, now=now)),
         ("lifecycle_bundles", lambda: r5_retention.cap_lifecycle_bundles(
             runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", now=now)),
         ("retired_transfer_bundles", lambda: r5_retention.purge_retired_transfer_bundles(runtime_root, now=now)),
     ]
     if v22:
-        steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(
-            os.getcwd(), drain=_r5_v22_drain_probe(time.time()),
-            sleep=lambda sec: shutdown_event.wait(sec))))
+        steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(os.getcwd())))
     for name, step in steps:
         try:
             out[name] = step()
         except Exception as exc:
             out[name] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    out["stop_write"] = retention_stop_write.latch_state()
     return out
 
 
@@ -22921,8 +23400,6 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         and not score_led_admission.get("accepted")
         else int(compute_directional_spread(final_direction, lane_ai))
     )
-    if str(lane_ai.get("decision") or "").upper() == "APPROVE":
-        _schedule_taker_signal_counterfactual(ctx, ai, final_direction)
     enriched = _enrich_combo_lane_features(features, ctx)
     for lane in COMBO_EXECUTION_LANES:
         # Shared-direction policy lanes are routed explicitly so their own
@@ -30153,9 +30630,6 @@ def microstructure_capture_loop():
 
 def _sample_execution_markouts(bid, ask, last, quote_ts) -> None:
     now = time.time()
-    # R17 (23 Oct): the taker-signal counterfactual book is no longer sampled
-    # or written (see TAKER_SIGNAL_COUNTERFACTUAL_ENABLED). Fill markouts are
-    # unchanged.
     for book, path, label, counter in (
         (_fill_markout_book, execution_markouts.FILL_FILE, "FILL_MARKOUT", "fill_rows_written"),
     ):
@@ -30206,108 +30680,9 @@ def _register_fill_markout(order: dict, fill_price, signal: dict = None) -> None
     )
 
 
-# R17 (23 Oct): taker_signal_counterfactuals.jsonl is retired. Its touch and
-# marketable limit came from the ticker BBO (state bid/ask), its latencies were
-# fixed modelled values rather than measured order round-trips, and its
-# markouts were sampled from ticker/L1 tape marks. None of that can be checked
-# against the real Bitfinex book, so the PRIME RULE cannot verify a row. The
-# writer stays off until it is rebuilt on a bfx_book_10l walk with measured
-# delay. The file name stays declared so reset/wipe lists still find old copies.
-TAKER_SIGNAL_COUNTERFACTUAL_ENABLED = False
-
-
-def _capture_taker_signal_counterfactual(call_id: str, direction: str, signal_ts: float,
-                                         latency: float, context: dict) -> None:
-    if not TAKER_SIGNAL_COUNTERFACTUAL_ENABLED:
-        _execution_markout_counters["taker_r17_skipped"] += 1
-        return
-    try:
-        now = time.time()
-        with state_lock:
-            bid = _buf_float(state.get("bid"), 0.0)
-            ask = _buf_float(state.get("ask"), 0.0)
-            bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
-            book = copy.deepcopy(state.get("order_book") or {})
-            book_ts = state.get("book_ts")
-        sign = execution_markouts.direction_sign(direction)
-        touch = ask if sign > 0 else bid
-        side = "buy" if sign > 0 else "sell"
-        notional = (
-            execution_markouts.COUNTERFACTUAL_MARGIN_USD
-            * execution_markouts.COUNTERFACTUAL_LEVERAGE
-        )
-        qty = notional / touch if touch > 0 else 0.0
-        sim = (
-            simulate_marketable_limit_fill(
-                side, qty, touch * (1.005 if sign > 0 else 0.995),
-                book.get("asks") if sign > 0 else book.get("bids"),
-                book_observed_ts=book_ts,
-            )
-            if touch > 0 else {}
-        )
-        vwap = _buf_float(sim.get("avg_price"), 0.0)
-        entry = vwap if vwap > 0 and sim.get("fully_filled") else None
-        row = {
-            "schema": execution_markouts.TAKER_SCHEMA,
-            "shared_ai_call_id": call_id,
-            "direction": direction,
-            "signal_ts": round(signal_ts, 3),
-            "latency_sec": latency,
-            "observed_ts": round(now, 3),
-            "bid": bid or None, "ask": ask or None,
-            "bbo_age_sec": None if not bbo_ts else round(now - bbo_ts, 3),
-            "touch_price": touch or None,
-            "depth_vwap": vwap or None,
-            "requested_notional_usd": notional,
-            "requested_qty": qty,
-            "filled_qty": sim.get("filled_qty"),
-            "levels_consumed": sim.get("levels_consumed"),
-            "book_observed_ts": book_ts,
-            "entry_price": entry,
-            "entry_basis": "DEPTH_VWAP" if entry else "UNAVAILABLE",
-            "fee_profile": EXCHANGE_FEE_PROFILE,
-            "taker_fee_usd": bitfinex_cost_profile.fee_usd(notional, maker=False),
-            **context,
-        }
-        if not entry:
-            row["markouts"] = {}
-            row["markouts_complete"] = False
-            _safe_append_jsonl(
-                execution_markouts.TAKER_FILE, row,
-                label="TAKER_SIGNAL_COUNTERFACTUAL", fallback_on_error=False,
-            )
-            return
-        _taker_counterfactual_book.register(
-            f"taker:{call_id}:{latency:g}", anchor_ts=now, entry_price=entry,
-            direction=direction, row=row,
-        )
-    except Exception as exc:
-        _execution_markout_counters["taker_capture_failures"] += 1
-        logger.warning(f"[TAKER CF] capture failed call={call_id}: {exc} [PIPELINE ENFORCEMENT]")
-
-
-def _schedule_taker_signal_counterfactual(ctx: dict, ai: dict, direction: str) -> None:
-    """Price an immediate taker entry for every directional signal at each modelled latency."""
-    if execution_markouts.direction_sign(direction) == 0:
-        return
-    if not TAKER_SIGNAL_COUNTERFACTUAL_ENABLED:
-        # R17: no timers, no rows. Count the skip so the monitor shows the stop.
-        _execution_markout_counters["taker_r17_skipped"] += 1
-        return
-    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
-    signal_ts = time.time()
-    context = {
-        "raw_ai_decision": (ai or {}).get("raw_decision") or (ai or {}).get("decision"),
-        "tile_registry_signature": active_tile_registry_signature(),
-    }
-    for latency in execution_markouts.TAKER_LATENCIES_SEC:
-        timer = threading.Timer(
-            latency, _capture_taker_signal_counterfactual,
-            args=(call_id, direction, signal_ts, latency, context),
-        )
-        timer.daemon = True
-        timer.start()
-    _execution_markout_counters["taker_signals_scheduled"] += 1
+# Wipe-list filename only (R22): taker_signal_counterfactuals writer deleted;
+# keep the basename so reset/wipe lists still find old copies.
+TAKER_SIGNAL_COUNTERFACTUAL_FILE = "taker_signal_counterfactuals.jsonl"
 
 
 def _record_adaptive_entry_decision(lane: str, decision: dict, *, quote_ctx: dict | None = None) -> None:
@@ -30361,36 +30736,17 @@ def adaptive_entry_status_snapshot() -> dict:
         return copy.deepcopy(_adaptive_entry_stats)
 
 
-# R17 (23 Oct): the shadow-exit recorder is retired. It replayed exits over
-# ticker/L1 marks with no depth, which the PRIME RULE cannot verify. The file
-# name stays declared so reset/wipe lists still remove any old copy.
+# Wipe-list filename only (R22): shadow_exit_paths recorder deleted;
+# keep the basename so reset/wipe lists still remove any old copy.
 SHADOW_EXIT_PATH_FILE = "shadow_exit_paths.jsonl"
-SHADOW_EXIT_RECORDER_ENABLED = False
-R17_RETIRED_STATUS = "disabled: R17"
-
-
-def _r17_retired_view(source: str) -> dict:
-    return {"source": source, "enabled": False, "retired": "R17", "status": R17_RETIRED_STATUS,
-            "detail": "source retired (R17)"}
-
-
-def shadow_exit_recorder_status_snapshot() -> dict:
-    return _r17_retired_view("shadow_exit_paths")
 
 
 def execution_markout_status_snapshot() -> dict:
     return {
         **dict(_execution_markout_counters),
         "fill_pending": _fill_markout_book.pending_count(),
-        "taker_pending": _taker_counterfactual_book.pending_count(),
-        "dropped": _fill_markout_book.dropped + _taker_counterfactual_book.dropped,
+        "dropped": _fill_markout_book.dropped,
         "horizons_sec": list(execution_markouts.MARKOUT_HORIZONS_SEC),
-        "taker_latencies_sec": list(execution_markouts.TAKER_LATENCIES_SEC),
-        "taker_signal_counterfactual": (
-            {"source": "taker_signal_counterfactuals", "enabled": True}
-            if TAKER_SIGNAL_COUNTERFACTUAL_ENABLED
-            else _r17_retired_view("taker_signal_counterfactuals")
-        ),
     }
 
 
@@ -31716,6 +32072,7 @@ def _record_expired_order(source: dict, reason: str):
         _count_fill_revalidation_cancel(
             fill_revalidation_cancel_counts, row.get("research_lane"), reason
         )
+        _note_live_expired_toward_durable_total(row)
     _relay_mirror(
         "EXPIRED",
         {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
@@ -35060,6 +35417,18 @@ expired_orders: List[Dict] = []
 # expired_orders tail above is capped at MAX_EXPIRED_ORDERS, so it cannot
 # back a truthful count. Guarded by trade_lock.
 fill_revalidation_cancel_counts: Dict[str, Dict[str, int]] = {}
+# R34 boot-rebuild: CSV-backed durable in-scope total (display tail stays capped).
+# None + total_status UNKNOWN = missing/unreadable CSV (R36 — never silent 0).
+expired_orders_durable_total: Optional[int] = None
+expired_orders_rebuild_receipt: Dict[str, Any] = {
+    "schema": _expired_boot.SCHEMA,
+    "status": "UNKNOWN",
+    "total_status": "UNKNOWN",
+    "expired_orders_total": None,
+    "skipped_rows": 0,
+    "epoch_marker": _expired_boot.EPOCH_MARKER,
+    "strategy_evidence": "never",
+}
 open_positions: List[Dict] = []
 trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
@@ -35114,7 +35483,6 @@ _READ_ONLY_GET_PATHS = {
     "/api/system-health", "/api/system-health/alerts", "/alerts",
     "/api/analyzer/genome", "/api/download_debug_config",
     "/api/monitor/summary", "/api/monitor/lanes", "/static/dashboard.js",
-    "/api/shadow_exits/summary",
     "/restart-cause", "/api/restart-cause",
 }
 # Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
@@ -35137,11 +35505,12 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/fresh-start", "/api/monitor/full-reset", "/api/monitor/full-reset/receipt",
     "/api/monitor/fills/by-model",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
+    "/api/runtime_log/retained",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
     "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
     "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
-    "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
+    "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
     "/api/monitor/reconcile", "/api/monitor/tile-integrity", "/api/monitor/fill-provenance",
     "/api/monitor/nonaccum-plans",
     # R16 (RK 24 Oct): V3 ledger rows written without a countable stamp since ?since=TS
@@ -36303,22 +36672,30 @@ def _delete_paths(paths) -> tuple:
     return deleted, errors
 
 def _reset_runtime_log_handlers():
-    """Truncate the rotating runtime log without restarting the process."""
+    """PR2: never delete runtime log parts. Latch stop-write + 70/85 instead."""
     for h in logger.handlers:
         if not isinstance(h, RotatingFileHandler):
             continue
         try:
             with h.lock:
+                try:
+                    size = os.path.getsize(h.baseFilename) if os.path.exists(h.baseFilename) else 0
+                except OSError:
+                    size = 0
+                cap = int(getattr(h, "maxBytes", None) or LOG_MAX_BYTES or 1)
+                retention_stop_write.evaluate_and_latch(
+                    "runtime_log", used=size, cap=cap,
+                    reason="RUNTIME_LOG_RESET_STOP_WRITE",
+                    detail={"path": getattr(h, "baseFilename", LOG_FILE), "rule": "R25_NEVER_DELETE"},
+                )
+                if isinstance(h, SafeRotatingFileHandler):
+                    h._stop_write = True
+                # Close the file stream so we stop appending; do not unlink parts.
                 if h.stream:
                     h.stream.close()
                     h.stream = None
-                for i in range(LOG_BACKUP_COUNT + 5, -1, -1):
-                    path = h.baseFilename if i == 0 else f"{h.baseFilename}.{i}"
-                    if os.path.exists(path):
-                        os.remove(path)
-                h.stream = h._open()
         except Exception as e:
-            logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
+            logger.error(f"[FRESH COLLECTION] Log handler stop-write failed: {e} [PIPELINE ENFORCEMENT]")
 
 def reset_all_research_files(*, archive_path: str = None) -> dict:
     """Delete live epoch research files AND permanently purge quarantine trees.
@@ -36376,10 +36753,20 @@ def reset_all_research_files(*, archive_path: str = None) -> dict:
     }
 
 def maintain_fresh_collection_files():
-    """Periodic trim when fresh-collection mode is on (prevents silent re-accumulation)."""
+    """Periodic size pressure check when fresh-collection mode is on (PR2: never delete)."""
     prune_aux_logs_on_startup()
     log_path = os.getenv("BOT_LOG_FILE", "bot_runtime.log")
-    if os.path.exists(log_path) and os.path.getsize(log_path) > LOG_MAX_BYTES:
+    try:
+        size = os.path.getsize(log_path) if os.path.exists(log_path) else 0
+    except OSError:
+        size = 0
+    if size > 0:
+        retention_stop_write.evaluate_and_latch(
+            "runtime_log", used=size, cap=LOG_MAX_BYTES,
+            reason="FRESH_COLLECTION_LOG_PRESSURE",
+            detail={"path": log_path, "rule": "R25_NEVER_DELETE"},
+        )
+    if size > LOG_MAX_BYTES:
         _reset_runtime_log_handlers()
 
 _FRESH_RESET_RETRYABLE_PREMUTATION_ERRORS = frozenset({
@@ -45133,7 +45520,10 @@ def _build_relay_execution_state_snapshot() -> dict:
     ]
     snapshot["fidelity_trades"] = fidelity_trades
     snapshot["expired_orders"] = _dashboard_expired_order_rows(recent_expired)
-    snapshot["expired_orders_total"] = expired_orders_total
+    snapshot.update(_expired_orders_public_fields())
+    # Keep snapshot key when durable total is known; public helper already set it.
+    if expired_orders_total is not None and snapshot.get("expired_orders_total") is None:
+        snapshot["expired_orders_total"] = expired_orders_total
     snapshot["signal_info"] = {
         "active": bool(active_list),
         "count": len(active_list),
@@ -45788,10 +46178,10 @@ def _balance_reconcile_block(balance, session_pnl, forced_pnl) -> dict:
     }
 
 
-def _snapshot_expired_rows_locked(limit: int, expired_src=None) -> tuple[list, int]:
-    """Copy a bounded tail while returning the exact visible-row count."""
+def _snapshot_expired_rows_locked(limit: int, expired_src=None) -> tuple[list, int | None]:
+    """Copy a bounded display tail; total is CSV-backed durable count when rebuilt (R34)."""
     selected = []
-    total = 0
+    memory_total = 0
     bounded_limit = max(0, int(limit))
     for row in (expired_orders if expired_src is None else expired_src):
         if (
@@ -45799,12 +46189,112 @@ def _snapshot_expired_rows_locked(limit: int, expired_src=None) -> tuple[list, i
             or str(row.get("research_lane") or "").upper() == "AI_SCAN"
         ):
             continue
-        total += 1
+        memory_total += 1
         if bounded_limit:
             selected.append(row)
             if len(selected) > bounded_limit:
                 del selected[0]
+    # Durable total changes meaning under boot-rebuild (R40): unique in-scope CSV
+    # ids for the current epoch, not process-lifetime capped list length.
+    durable = expired_orders_durable_total
+    receipt = expired_orders_rebuild_receipt or {}
+    if receipt.get("total_status") == "UNKNOWN" or durable is None:
+        total: int | None = None
+    else:
+        total = int(durable)
     return copy.deepcopy(selected), total
+
+
+def _expired_orders_public_fields() -> dict:
+    """Shared GET fields for /api/state and /api/status (R34/R36/R40/R41)."""
+    receipt = dict(expired_orders_rebuild_receipt or {})
+    total = expired_orders_durable_total
+    total_status = receipt.get("total_status") or ("OK" if total is not None else "UNKNOWN")
+    return {
+        # Meaning (R40): unique in-scope CSV-backed durable total for the current
+        # epoch marker ``_current_epoch_boundary`` — not the capped memory tail.
+        "expired_orders_total": total,
+        "expired_orders_total_status": total_status,
+        # T7 / RK required: counted-skip count on a GET surface.
+        "expired_orders_rebuild_skipped_rows": int(receipt.get("skipped_rows") or 0),
+        "expired_orders_rebuild": receipt,
+    }
+
+
+def rebuild_expired_orders_from_csv(*, reason: str = "boot") -> dict:
+    """Rebuild in-memory expired tail + durable total from CSV (read-only, R25/R34)."""
+    global expired_orders_durable_total, expired_orders_rebuild_receipt
+    cutoff_ts, cutoff_source = _current_epoch_boundary(force=True)
+    # HM fold (a): named epoch marker matches the reset-facing boundary helper.
+    path = CSV_EXPIRED
+    try:
+        outcome = _expired_boot.apply_boot_rebuild(
+            csv_path=path,
+            epoch_cutoff_ts=float(cutoff_ts) if cutoff_ts else None,
+            display_cap=MAX_EXPIRED_ORDERS,
+        )
+    except Exception as exc:
+        logger.error(
+            f"[STARTUP] expired CSV boot-rebuild failed closed: {exc} [PIPELINE ENFORCEMENT]"
+        )
+        receipt = {
+            "schema": _expired_boot.SCHEMA,
+            "status": "RED",
+            "total_status": "UNKNOWN",
+            "expired_orders_total": None,
+            "skipped_rows": 0,
+            "epoch_marker": _expired_boot.EPOCH_MARKER,
+            "epoch_cutoff_ts": float(cutoff_ts) if cutoff_ts else None,
+            "epoch_cutoff_source": cutoff_source,
+            "error": f"EXPIRED_REBUILD_EXCEPTION:{type(exc).__name__}",
+            "strategy_evidence": "never",
+            "reason": reason,
+        }
+        with trade_lock:
+            expired_orders.clear()
+            fill_revalidation_cancel_counts.clear()
+            expired_orders_durable_total = None
+            expired_orders_rebuild_receipt = receipt
+        return receipt
+
+    receipt = dict(outcome["receipt"])
+    receipt["epoch_cutoff_source"] = cutoff_source
+    receipt["reason"] = reason
+    with trade_lock:
+        expired_orders.clear()
+        expired_orders.extend(outcome["display_tail"])
+        fill_revalidation_cancel_counts.clear()
+        fill_revalidation_cancel_counts.update(
+            outcome.get("fill_revalidation_cancel_counts") or {}
+        )
+        if receipt.get("total_status") == "UNKNOWN":
+            expired_orders_durable_total = None
+        else:
+            expired_orders_durable_total = int(receipt.get("expired_orders_total") or 0)
+        expired_orders_rebuild_receipt = receipt
+    logger.info(
+        f"[STARTUP] expired CSV boot-rebuild status={receipt.get('status')} "
+        f"total={receipt.get('expired_orders_total')} "
+        f"skipped={receipt.get('skipped_rows')} "
+        f"epoch_marker={receipt.get('epoch_marker')} "
+        f"cutoff_source={cutoff_source} reason={reason} [PIPELINE ENFORCEMENT]"
+    )
+    return receipt
+
+
+def _note_live_expired_toward_durable_total(row: dict) -> None:
+    """Increment CSV-backed durable total for a newly recorded non-AI_SCAN expiry."""
+    global expired_orders_durable_total
+    if not isinstance(row, dict):
+        return
+    if str(row.get("research_lane") or "").upper() == "AI_SCAN":
+        return
+    if expired_orders_durable_total is None:
+        # Rebuild never completed truthfully — do not invent a silent 0 (R36).
+        return
+    expired_orders_durable_total = int(expired_orders_durable_total) + 1
+    if isinstance(expired_orders_rebuild_receipt, dict):
+        expired_orders_rebuild_receipt["expired_orders_total"] = expired_orders_durable_total
 
 
 def _count_fill_revalidation_cancel(counts: dict, lane, reason) -> None:
@@ -46730,7 +47220,9 @@ def _build_api_state_snapshot():
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total
         snapshot["tile_route_counts"] = tile_route_counts
-        snapshot["expired_orders_total"] = expired_orders_total
+        snapshot.update(_expired_orders_public_fields())
+        if expired_orders_total is not None and snapshot.get("expired_orders_total") is None:
+            snapshot["expired_orders_total"] = expired_orders_total
         snapshot["dashboard_history_limit"] = _DASHBOARD_HISTORY_MAX
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
         phase_timings["signal_history_projection"] = (time.perf_counter() - phase_started) * 1000
@@ -47255,11 +47747,10 @@ def _api_state_cache_refresher_loop():
                 snap["expired_orders"] = copy.deepcopy(
                     relay_expired[-_DASHBOARD_HISTORY_MAX:]
                 )
-                snap["expired_orders_total"] = int(
-                    relay.get("expired_orders_total")
-                    if relay.get("expired_orders_total") is not None
-                    else len(relay_expired)
-                )
+                # Prefer live durable rebuild fields (R34/R36); never coerce UNKNOWN→0.
+                snap.update(_expired_orders_public_fields())
+                if snap.get("expired_orders_total") is None and relay.get("expired_orders_total") is not None:
+                    snap["expired_orders_total"] = relay.get("expired_orders_total")
                 with state_lock:
                     ai_history_all = _session_ai_history(
                         list(state.get("ai_history") or []),
@@ -49600,15 +50091,6 @@ def monitor_alerts_full():
     return _monitor_tiles_guard(build, 1_500_000)
 
 
-@app.route('/api/monitor/shadow-exits', methods=["GET"])
-def monitor_shadow_exits():
-    """Shadow-exit recorder status + aggregates (was admin-only /api/research/shadow_exits)."""
-    def build(now):
-        return {"schema": "shadow_exit_runtime_view_v1", **_monitor_tiles_common(now),
-                **_r17_retired_view("shadow_exit_paths"), "observation_only": True}
-    return _monitor_tiles_guard(build, 1_000_000)
-
-
 @app.route('/api/monitor/chase_buckets', methods=["GET"])
 def monitor_chase_buckets():
     """Chase-window table, recomputed on every request (Strategist CHASE-GAP). ?since=<epoch ts>."""
@@ -49798,18 +50280,6 @@ def monitor_streams_page(name):
         resp.headers["X-Stream-" + key.replace("_", "-").title()] = str(value)
     resp.headers["Cache-Control"] = "no-store"
     return resp
-
-
-@app.route('/api/research/shadow_exits')
-def research_shadow_exits():
-    """Admin-only (not in _READ_ONLY_GET_PATHS). Retired (R17): no recorder runs."""
-    return jsonify({"schema": "shadow_exit_runtime_view_v1", **_r17_retired_view("shadow_exit_paths"),
-                    "observation_only": True})
-
-
-@app.route('/api/shadow_exits/summary')
-def shadow_exits_public_summary():
-    return jsonify({"schema": "shadow_exit_public_summary_v1", **_r17_retired_view("shadow_exit_paths")})
 
 
 
@@ -50921,6 +51391,43 @@ def api_runtime_headroom_alias():
     return _lcm.live_headroom()
 
 
+@app.route('/api/runtime_log/retained', methods=["GET"])
+def api_runtime_log_retained():
+    """R46 GET read-back: primary + bounded spool tails after STOP_WRITE (monitor token)."""
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    log_path = os.getenv("BOT_LOG_FILE", LOG_FILE if "LOG_FILE" in globals() else "bot_runtime.log")
+    max_bytes = 65536
+    try:
+        primary_tail = _read_log_tail(log_path, max_lines=200, max_bytes=max_bytes)
+    except Exception as exc:  # noqa: BLE001
+        primary_tail = f"<unreadable:{type(exc).__name__}>"
+    spool_parts = []
+    for path in _runtime_log_spool_paths(log_path):
+        try:
+            exists = os.path.exists(path)
+            size = os.path.getsize(path) if exists else 0
+            tail = _read_log_tail(path, max_lines=200, max_bytes=max_bytes) if exists and size else ""
+        except Exception as exc:  # noqa: BLE001
+            exists, size, tail = False, 0, f"<unreadable:{type(exc).__name__}>"
+        spool_parts.append({
+            "path": path,
+            "exists": bool(exists),
+            "size_bytes": int(size),
+            "tail": tail,
+        })
+    payload = {
+        "schema": "runtime_log_retained_v1",
+        "primary_path": log_path,
+        "primary_tail": primary_tail,
+        "spool_parts": spool_parts,
+        "retention": _runtime_log_retention_status(),
+        "size_cap_bytes": int(LOG_SPOOL_MAX_BYTES),
+        "part_cap": _runtime_log_effective_part_cap(),
+    }
+    return _monitor_response(payload, max_bytes=256 * 1024)
+
+
 
 @app.after_request
 def _inject_system_health_banner(response):
@@ -51250,10 +51757,8 @@ def status():
             },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
-                "taker_counterfactual_file": execution_markouts.TAKER_FILE,
                 **execution_markout_status_snapshot(),
             },
-            "shadow_exit_recorder": shadow_exit_recorder_status_snapshot(),
             "adaptive_entry": {
                 "file": ADAPTIVE_ENTRY_DECISIONS_FILE,
                 **adaptive_entry_status_snapshot(),
@@ -51291,6 +51796,16 @@ def status():
         **_runtime_blindspot_status_fields(now),
     }
     payload["collection_epoch_parity"] = _collection_epoch_parity(payload["lifecycle_pipeline"])
+    # HM fold (b): publish expired_orders_total on /api/status on purpose (R40) so
+    # T6 / post-deploy GET read-back can use status without relying only on /api/state.
+    payload.update(_expired_orders_public_fields())
+    try:
+        payload["runtime_log_retention"] = _runtime_log_retention_status()
+    except Exception as exc:  # noqa: BLE001 - status must never fail on retention telemetry
+        payload["runtime_log_retention"] = {
+            "schema": "runtime_log_retention_v1",
+            "error": type(exc).__name__,
+        }
     return jsonify(payload)
 
 
@@ -52022,27 +52537,38 @@ def api_close_showcase_position():
     # DEPLOY_FORCE_FLAT tags the pre-deploy flatten (stats-excluded like every forced close).
     close_reason = "DEPLOY_FORCE_FLAT" if str(body.get("reason") or "").upper() == "DEPLOY_FORCE_FLAT" else "ADMIN_MANUAL_CLOSE"
     close_origin = _forced_close_origin(close_reason)
-    with trade_lock:
-        _stamp_admin_close_trigger(matches[0], close_reason, time.time())
-    close_position(matches[0], close_reason)
-    with state_lock:
-        still_open = any(
-            str(pos.get("trade_id") or "") == trade_id
-            and pos.get("status") != "CLOSED"
-            for pos in open_positions
+    try:
+        with trade_lock:
+            _stamp_admin_close_trigger(matches[0], close_reason, time.time())
+        close_position(matches[0], close_reason)
+        with state_lock:
+            still_open = any(
+                str(pos.get("trade_id") or "") == trade_id
+                and pos.get("status") != "CLOSED"
+                for pos in open_positions
+            )
+        if still_open:
+            return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
+        with trade_lock:
+            paper_orders = _fast_state_copy(pending_orders)
+            paper_positions = _fast_state_copy(open_positions)
+            paper_trades = _fast_state_copy(trades[-50:])
+        _patch_api_state_cache_fields(
+            orders=paper_orders,
+            positions=paper_positions,
+            trades=paper_trades,
         )
-    if still_open:
-        return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
-    with trade_lock:
-        paper_orders = _fast_state_copy(pending_orders)
-        paper_positions = _fast_state_copy(open_positions)
-        paper_trades = _fast_state_copy(trades[-50:])
-    _patch_api_state_cache_fields(
-        orders=paper_orders,
-        positions=paper_positions,
-        trades=paper_trades,
-    )
-    cache_generation = _invalidate_relay_execution_snapshot()
+        cache_generation = _invalidate_relay_execution_snapshot()
+    except Exception as exc:
+        # Never return Flask's unhandled HTML 500: maintenance needs trade_id + exception type.
+        logger.exception(
+            "[ADMIN] Showcase paper position close failed trade_id=%s", trade_id,
+        )
+        return jsonify({
+            "error": "showcase close failed",
+            "trade_id": trade_id,
+            "exception_type": type(exc).__name__,
+        }), 500
     logger.warning("[ADMIN] Showcase paper position closed trade_id=%s origin=%s", trade_id, close_origin)
     return jsonify({
         "status": "closed",
@@ -55478,12 +56004,188 @@ def _analyzer_current_pointer_path() -> Path:
 # placed every row. fresh_epoch.cutoff_utc earlier than the floor (or missing), or any straddle/unstamped row left
 # unguarded in the generation receipt, rejects the bundle at install AND at serve (/analysis, /api/analyzer/summary
 # then answer 503 "no valid bundle"). Fail closed.
-_ANALYZER_BUNDLE_FRESH_FLOOR_TS = 1792263671  # 2026-10-18 06:01:11 AEDT, the real fresh start
+# Epoch floor / rebuild tip / AMEND2 method ids — single source in analyzer_book10_regime (R4; no duplicate literals).
+import analyzer_book10_regime as _abr_rebuild_pin  # noqa: E402  — late import beside mirror helpers
+
+_ANALYZER_BUNDLE_FRESH_FLOOR_TS = int(_abr_rebuild_pin.EPOCH_FLOOR_TS)
 # RK PASS 12:48 (R8 B): the operator-facing "data epoch started" / session start is the real fresh start, not the
 # 4 Oct DATA_EPOCH manifest stamp (DATA_EPOCH_ID itself is unchanged; the manifest stamp stays visible beside it).
 FRESH_START_TS = _ANALYZER_BUNDLE_FRESH_FLOOR_TS
 FRESH_START_UTC = datetime.fromtimestamp(FRESH_START_TS, timezone.utc).isoformat()
 _ANALYZER_BUNDLE_NO_VALID = "no valid bundle"
+# Fix A (plan sha e448f5f67f8a): mirror status must advertise an explicit RED label —
+# never HTTP 404 — when no validated analyzer_mirror_bundle_v2 is installed.
+_ANALYZER_BUNDLE_NO_VALIDATED_REASON = "NO_VALIDATED_ANALYZER_BUNDLE"
+
+# Seal 2ac09364eb63 B1 — install/serve pin (COMPLETED @ e70bac80 + AMEND2 + method).
+_ANALYZER_REBUILD_PIN_TIP = str(_abr_rebuild_pin.ANALYZER_COMPLETED_TIP)
+_ANALYZER_REBUILD_PIN_TIP_SHORT = str(_abr_rebuild_pin.ANALYZER_COMPLETED_TIP_SHORT)
+_ANALYZER_REBUILD_AMEND2_SHA12 = str(_abr_rebuild_pin.AMEND2_SPEC_SHA12)
+_ANALYZER_REBUILD_METHOD_ID = str(_abr_rebuild_pin.REGIME_METHOD_ID)
+
+
+def _analyzer_mirror_no_validated_bundle_payload(*, legacy_preserved: bool) -> dict:
+    """Honest no-bundle body for /api/analyzer-mirror/status (status/health/alarm RED)."""
+    detail = "no complete validated analyzer bundle is installed"
+    return {
+        "available": False,
+        "status": "RED",
+        "health": "RED",
+        "reason": _ANALYZER_BUNDLE_NO_VALIDATED_REASON,
+        "detail": detail,
+        "required_schema": _ANALYZER_BUNDLE_SCHEMA,
+        "legacy_data_preserved": bool(legacy_preserved),
+        "alarms": [{
+            "code": _ANALYZER_BUNDLE_NO_VALIDATED_REASON,
+            "severity": "critical",
+            "detail": detail,
+        }],
+    }
+
+
+def _analyzer_rebuild_expected_prereg_hash() -> str:
+    """Shared prereg hash of the frozen AMEND2 constant block (N=1)."""
+    import analyzer_book10_regime as abr
+    return str(abr.PARAMS_PREREG_HASH)
+
+
+def _analyzer_bundle_rebuild_pin_gate(report_manifest) -> None:
+    """Seal 2ac09364eb63 B1: reject install/serve unless COMPLETED@e70bac80 + AMEND2 + method pin.
+
+    Fail closed on empty/short git rev (HM R2 d7570845a12b): require len>=12 and
+    rev[:12] == tip_short. No tip.startswith(short-prefix) bypass.
+    """
+    if not isinstance(report_manifest, dict):
+        raise ValueError("analyzer bundle report manifest missing for rebuild pin")
+    pin = report_manifest.get("rebuild_pin") or report_manifest.get("regime_derivation") or {}
+    if not isinstance(pin, dict):
+        raise ValueError("analyzer bundle rebuild_pin missing")
+    status = str(pin.get("run_status") or pin.get("analyzer_run_status") or "").strip().upper()
+    if status != "COMPLETED":
+        raise ValueError(f"analyzer bundle rebuild_pin run_status not COMPLETED: {status!r}")
+    rev = str(pin.get("analyzer_git_rev") or pin.get("git_rev") or "").strip().lower()
+    tip = _ANALYZER_REBUILD_PIN_TIP.lower()
+    tip_short = _ANALYZER_REBUILD_PIN_TIP_SHORT.lower()
+    if not rev:
+        raise ValueError("analyzer bundle rebuild_pin analyzer_git_rev empty")
+    # Exact pin match only: full tip or exact tip_short (12-char health form). No partial/extra suffix.
+    if len(rev) < 12 or rev not in (tip, tip_short):
+        raise ValueError(f"analyzer bundle rebuild_pin analyzer_git_rev mismatch: {rev!r}")
+    amend2 = str(pin.get("amend2_sha12") or "").strip().lower()
+    if amend2 != _ANALYZER_REBUILD_AMEND2_SHA12:
+        raise ValueError(f"analyzer bundle rebuild_pin amend2_sha12 mismatch: {amend2!r}")
+    method = str(pin.get("regime_method_id") or pin.get("method_id") or "").strip()
+    if method != _ANALYZER_REBUILD_METHOD_ID:
+        raise ValueError(f"analyzer bundle rebuild_pin regime_method_id mismatch: {method!r}")
+    expected = _analyzer_rebuild_expected_prereg_hash()
+    got = str(pin.get("params_prereg_hash") or "").strip().lower()
+    if got != expected.lower():
+        raise ValueError("analyzer bundle rebuild_pin params_prereg_hash mismatch")
+
+
+def _analyzer_bundle_inventory_metrics(report_manifest) -> dict:
+    """Rows / regimes / cutoff used by the R34 no-shrink gate (B3).
+
+    Missing/unreadable counts are flagged — callers must fail closed (not treat as 0).
+    """
+    if not isinstance(report_manifest, dict):
+        return {
+            "rows": 0,
+            "regimes": 0,
+            "cutoff_ts": 0.0,
+            "rows_missing": True,
+            "regimes_missing": True,
+            "cutoff_missing": True,
+        }
+    rows = None
+    for key in ("row_count", "trade_count", "n_rows", "counted_rows"):
+        if key not in report_manifest:
+            continue
+        try:
+            rows = int(report_manifest.get(key))
+            break
+        except (TypeError, ValueError):
+            rows = None
+            break
+    if rows is None:
+        receipt = report_manifest.get("generation_receipt")
+        if isinstance(receipt, dict) and "row_count" in receipt:
+            try:
+                rows = int(receipt.get("row_count"))
+            except (TypeError, ValueError):
+                rows = None
+    regimes = None
+    for key in ("regime_count", "n_regimes", "regimes_labeled"):
+        if key not in report_manifest:
+            continue
+        try:
+            regimes = int(report_manifest.get(key))
+            break
+        except (TypeError, ValueError):
+            regimes = None
+            break
+    raw = (report_manifest.get("fresh_epoch") or {}).get("cutoff_utc") if isinstance(
+        report_manifest.get("fresh_epoch"), dict
+    ) else None
+    cutoff_ts = None
+    if raw not in (None, ""):
+        try:
+            cutoff = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if cutoff.tzinfo is None:
+                raise ValueError("naive")
+            cutoff_ts = float(cutoff.timestamp())
+        except (TypeError, ValueError):
+            cutoff_ts = None
+    return {
+        "rows": 0 if rows is None else max(0, rows),
+        "regimes": 0 if regimes is None else max(0, regimes),
+        "cutoff_ts": 0.0 if cutoff_ts is None else cutoff_ts,
+        "rows_missing": rows is None,
+        "regimes_missing": regimes is None,
+        "cutoff_missing": cutoff_ts is None,
+    }
+
+
+def _analyzer_bundle_no_shrink_gate(prior_manifest, new_manifest) -> None:
+    """Seal 2ac09364eb63 B3 / R34: reject silent shrink of rows/regimes/cutoff vs prior generation.
+
+    First install (prior_manifest is None) is allowed. A present-but-unreadable prior,
+    or missing inventory counts on either side, fails closed (HM R2 d7570845a12b).
+    """
+    if prior_manifest is None:
+        return
+    if not isinstance(prior_manifest, dict):
+        raise ValueError("analyzer bundle R34 prior generation unreadable")
+    if not isinstance(new_manifest, dict):
+        raise ValueError("analyzer bundle R34 new generation unreadable")
+    prior = _analyzer_bundle_inventory_metrics(prior_manifest)
+    new = _analyzer_bundle_inventory_metrics(new_manifest)
+    for label, metrics in (("prior", prior), ("new", new)):
+        missing = [
+            name
+            for name, flag in (
+                ("rows", metrics["rows_missing"]),
+                ("regimes", metrics["regimes_missing"]),
+                ("cutoff", metrics["cutoff_missing"]),
+            )
+            if flag
+        ]
+        if missing:
+            raise ValueError(
+                f"analyzer bundle R34 inventory incomplete ({label}): missing {', '.join(missing)}"
+            )
+    reasons = []
+    if new["rows"] < prior["rows"]:
+        reasons.append(f"rows {new['rows']} < prior {prior['rows']}")
+    if new["regimes"] < prior["regimes"]:
+        reasons.append(f"regimes {new['regimes']} < prior {prior['regimes']}")
+    if new["cutoff_ts"] < prior["cutoff_ts"]:
+        reasons.append(f"cutoff {new['cutoff_ts']} < prior {prior['cutoff_ts']}")
+    if reasons:
+        raise ValueError(
+            "analyzer bundle R34 shrink rejected (needs separate RK reason card): "
+            + "; ".join(reasons)
+        )
 
 
 def _analyzer_bundle_fresh_gate(report_manifest) -> None:
@@ -55526,8 +56228,11 @@ def _valid_analyzer_generation(candidate: Path) -> bool:
             and isinstance(manifest.get("files"), list)
         ):
             return False
-        _analyzer_bundle_fresh_gate(
-            json.loads((candidate / "report_manifest.json").read_text(encoding="utf-8")))
+        report_manifest = json.loads(
+            (candidate / "report_manifest.json").read_text(encoding="utf-8")
+        )
+        _analyzer_bundle_fresh_gate(report_manifest)
+        _analyzer_bundle_rebuild_pin_gate(report_manifest)
         declared = {}
         for row in manifest["files"]:
             rel = str((row or {}).get("path") or "").replace("\\", "/")
@@ -55607,7 +56312,7 @@ def _active_analyzer_mirror_dir() -> Path | None:
 
 
 def _prune_analyzer_generations(active_generation: str, keep: int = 3) -> None:
-    """Bound immutable snapshot storage while never deleting the active tree."""
+    """PR2: never rmtree generation trees. At would-exceed keep-N → stop-publish + receipt."""
     root = _analyzer_generations_dir()
     try:
         generations = sorted(
@@ -55617,11 +56322,51 @@ def _prune_analyzer_generations(active_generation: str, keep: int = 3) -> None:
         )
     except OSError:
         return
-    retained = {path.name for path in generations[:max(1, keep)]}
-    retained.add(active_generation)
-    for path in generations:
-        if path.name not in retained:
-            shutil.rmtree(path, ignore_errors=True)
+    retained_names = [path.name for path in generations[:max(1, keep)]]
+    if active_generation not in retained_names:
+        retained_names.append(active_generation)
+    retained = set(retained_names)
+    would_drop = [path.name for path in generations if path.name not in retained]
+    used = len(generations)
+    cap = max(1, int(keep))
+    receipt_dir = _data_sync_runtime_root() / "retention"
+    try:
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    # Treat generation count vs keep as the binding cap for 70/85.
+    decision = retention_stop_write.evaluate_and_latch(
+        "analyzer_generations",
+        used=used,
+        cap=cap,
+        reason="GENERATION_CAP_STOP_WRITE" if would_drop else "GENERATION_CAP_OK",
+        receipt_dir=receipt_dir,
+        detail={
+            "active_generation": active_generation,
+            "keep": keep,
+            "retained_names": retained_names,
+            "would_have_dropped_names": would_drop,
+        },
+    )
+    if would_drop or decision.get("stop_write") or decision.get("alarm_level") in ("AMBER", "RED"):
+        receipt = {
+            "schema": retention_stop_write.ANALYZER_GENERATION_RECEIPT_SCHEMA,
+            "ts": time.time(),
+            "active_generation": active_generation,
+            "keep": keep,
+            "retained_names": retained_names,
+            "would_have_dropped_names": would_drop,
+            "alarm_level": "RED" if would_drop else (decision.get("alarm_level") or "GREEN"),
+            "used_ratio": decision.get("used_ratio"),
+            "reason": "GENERATION_CAP_STOP_WRITE" if would_drop else "DISK_PRESSURE_STOP_WRITE",
+        }
+        retention_stop_write.write_receipt(receipt_dir, receipt)
+        if would_drop:
+            retention_stop_write.latch(
+                "analyzer_generations", reason="GENERATION_CAP_STOP_WRITE",
+                used=used, cap=cap, detail={"would_have_dropped_names": would_drop},
+            )
+    # Never rmtree. Old keep-N delete path removed (R22).
 
 
 def _safe_analyzer_bundle_members(archive: zipfile.ZipFile) -> list:
@@ -55739,6 +56484,7 @@ def _validated_analyzer_bundle_manifest(archive: zipfile.ZipFile, members: list)
     if hashlib.sha256(report_payload).hexdigest() != str(manifest["source_report_manifest_sha256"]).lower():
         raise ValueError("source report manifest hash does not match bundle provenance")
     _analyzer_bundle_fresh_gate(report_manifest)
+    _analyzer_bundle_rebuild_pin_gate(report_manifest)
     provenance = report_manifest.get("analysis_provenance") or {}
     comparisons = {
         "analyzer_run_id": report_manifest.get("analyzer_sync_id"),
@@ -55785,6 +56531,26 @@ def _install_analyzer_bundle(payload: bytes, meta: dict) -> dict:
             with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
                 members = _safe_analyzer_bundle_members(archive)
                 manifest = _validated_analyzer_bundle_manifest(archive, members)
+                # R34 no-shrink vs prior active generation (seal 2ac09364eb63 B3).
+                # Prior present but unreadable → fail closed (HM R2 d7570845a12b).
+                prior_manifest = None
+                prior_dir = _active_analyzer_mirror_dir()
+                if prior_dir is not None:
+                    try:
+                        prior_manifest = json.loads(
+                            (prior_dir / "report_manifest.json").read_text(encoding="utf-8")
+                        )
+                    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                        raise ValueError(
+                            "analyzer bundle R34 prior generation unreadable"
+                        ) from exc
+                    if not isinstance(prior_manifest, dict):
+                        raise ValueError("analyzer bundle R34 prior generation unreadable")
+                try:
+                    new_report = json.loads(archive.read("report_manifest.json").decode("utf-8"))
+                except (KeyError, UnicodeDecodeError, ValueError, TypeError) as exc:
+                    raise ValueError(f"invalid source report manifest on install: {exc}") from exc
+                _analyzer_bundle_no_shrink_gate(prior_manifest, new_report)
                 staging.mkdir(parents=True, exist_ok=False)
                 declared = {
                     str(row["path"]).replace("\\", "/").casefold(): row
@@ -55891,13 +56657,13 @@ def api_analyzer_mirror_status():
         return jsonify({"error": "unauthorized"}), 401
     active = _active_analyzer_mirror_dir()
     if active is None:
+        # Fix A: non-404 RED — 404 was misread as "route missing" (R36).
         legacy_preserved = _analyzer_mirror_dir().exists()
-        return jsonify({
-            "available": False,
-            "reason": "no complete validated analyzer bundle is installed",
-            "required_schema": _ANALYZER_BUNDLE_SCHEMA,
-            "legacy_data_preserved": legacy_preserved,
-        }), 404
+        resp = jsonify(_analyzer_mirror_no_validated_bundle_payload(
+            legacy_preserved=legacy_preserved,
+        ))
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
     try:
         payload = json.loads(
             (active / "status.json").read_text(encoding="utf-8")
@@ -55906,6 +56672,7 @@ def api_analyzer_mirror_status():
         resp.headers['Cache-Control'] = 'no-store'
         return resp
     except (OSError, ValueError, TypeError):
+        # Plan Fix A covers only `active is None` (R38). Unreadable status.json stays 404.
         return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
 
 
@@ -56633,12 +57400,28 @@ def reset_session_risk_state():
 def reset_runtime_state(*, preserve_execution_pause: bool = False):
     global bot_start_time, trades, pending_orders, expired_orders, open_positions, trades_map
     global _LANE_OPPORTUNITY_COUNTERS_SINCE_TS
+    global expired_orders_durable_total, expired_orders_rebuild_receipt
     logger.warning("[RESET] HARD RESET START - clearing all in-memory state for true clean slate")
     bot_start_time = time.time()
     _LANE_OPPORTUNITY_COUNTERS_SINCE_TS = bot_start_time
     trades.clear()
     pending_orders.clear()
     expired_orders.clear()
+    fill_revalidation_cancel_counts.clear()
+    # After reset the epoch marker advances via the same _current_epoch_boundary
+    # helper the boot rebuild filters on (HM fold a). Rebuild from CSV so the
+    # durable total matches the new in-scope set (usually empty right after reset).
+    expired_orders_durable_total = 0
+    expired_orders_rebuild_receipt = {
+        "schema": _expired_boot.SCHEMA,
+        "status": "GREEN",
+        "total_status": "OK",
+        "expired_orders_total": 0,
+        "skipped_rows": 0,
+        "epoch_marker": _expired_boot.EPOCH_MARKER,
+        "strategy_evidence": "never",
+        "reason": "reset_runtime_state_cleared",
+    }
     open_positions.clear()
     trades_map.clear()
     with state_lock:
@@ -58660,7 +59443,6 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
             # not file appends (HM E1.1).
             del post_ticks, censored
             write_counter += 1
-            # R17 (23 Oct): the shadow_exit_paths recorder is retired.
             if replay_complete:
                 paper_tid = paper_multiverse_trade_id(
                     trade_id,
@@ -59635,11 +60417,23 @@ def _persistent_config_keys():
 
 def enforce_clean_research_session():
     """Research sim always starts at STARTING_BALANCE with no carry-over trades."""
-    global bot_start_time
+    global bot_start_time, expired_orders_durable_total, expired_orders_rebuild_receipt
     with trade_lock:
         trades.clear()
         pending_orders.clear()
         expired_orders.clear()
+        fill_revalidation_cancel_counts.clear()
+        expired_orders_durable_total = 0
+        expired_orders_rebuild_receipt = {
+            "schema": _expired_boot.SCHEMA,
+            "status": "GREEN",
+            "total_status": "OK",
+            "expired_orders_total": 0,
+            "skipped_rows": 0,
+            "epoch_marker": _expired_boot.EPOCH_MARKER,
+            "strategy_evidence": "never",
+            "reason": "enforce_clean_research_session_cleared",
+        }
         open_positions.clear()
         trades_map.clear()
         recent_trades.clear()
@@ -59790,26 +60584,35 @@ def save_persistent_config():
         logger.debug(f"Saved persistent config -> {config_path}")
 
 def rotate_log(file, max_rotations=None, max_bytes=None):
-    """Rotate at 20 MB, then enforce the per-family rotation cap.
+    """Rotate at 20 MB, then check the per-family rotation cap (PR2: never delete).
 
-    DISK-CAP (23 Oct): ``rotation_cap.CAP_ALLOW`` is the per-family table
-    (default 10 rotations / <=500 MB; the count binds). Only ``^base\\.(\\d+)$``
-    siblings are candidates, oldest first (``.1`` is the OLDEST); never the
-    active file, never PROTECTED or exempt bases, at most 3 unlinks per call.
+    DISK-CAP: ``rotation_cap.CAP_ALLOW`` is the per-family table (default 10
+    rotations / <=500 MB). Only ``^base\\.(\\d+)$`` siblings are candidates;
+    oldest first (``.1`` is the OLDEST); never the active file; never PROTECTED
+    or exempt bases. At pressure: stop-write + 70/85 — no unlinks (R25).
     R5: never gated on custody or ack. PRIME RULE: neutral (retention only).
     """
+    family = f"rotation:{os.path.basename(file)}"
+    if retention_stop_write.is_stopped(family):
+        return
     rotated = False
     try:
         if os.path.exists(file) and os.path.getsize(file) > 20 * 1024 * 1024:
-            # Retention may remove older siblings and leave gaps. Counting the
-            # files can then collide with a surviving suffix, so always advance
-            # from the greatest numeric rotation.
+            # Rename-only; never unlink older siblings (PR2). Advance from the
+            # greatest numeric rotation so surviving suffixes never collide.
             suffixes = []
             for path in glob.glob(file + ".*"):
                 suffix = path.rsplit(".", 1)[-1]
                 if suffix.isdigit():
                     suffixes.append(int(suffix))
             next_index = max(suffixes, default=0) + 1
+            # Probe cap first: if rename would require a drop under old policy,
+            # latch stop-write and refuse the rename.
+            probe = rotation_cap.enforce_cap(
+                file, max_rotations=max_rotations, max_bytes=max_bytes,
+            )
+            if probe.get("stop_write") or probe.get("would_have_dropped"):
+                return
             os.rename(file, f"{file}.{next_index}")
             rotated = True
     except OSError as e:
@@ -61576,6 +62379,10 @@ def main():
     except Exception as exc:
         logger.error(f"[STARTUP] CSV fallback replay failed: {exc} [PIPELINE ENFORCEMENT]")
     load_session_trades_from_csv()
+    try:
+        rebuild_expired_orders_from_csv(reason="boot")
+    except Exception as exc:
+        logger.error(f"[STARTUP] expired CSV boot-rebuild outer fail: {exc} [PIPELINE ENFORCEMENT]")
     _recompute_research_balance_from_trades()
     try:
         _segregate_lane_pnl_ledger_for_epoch()

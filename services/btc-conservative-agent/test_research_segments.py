@@ -737,9 +737,9 @@ def test_shipper_has_no_bot_http_lock_or_prune_surface():
                            "shutil", "requests", "ccxt"}
     assert "trade_lock" not in source
     assert "rmtree" not in source
-    # HM C4: the custody-gated prune is retired; the shipper never calls prune.execute. Deletion is R5 only
-    # (r5_segment_pass: cap/age, no custody gate).
+    # HM C4 + PR3: custody prune retired; r5_segment_pass never-delete (no execute_r5).
     assert source.count("prune.execute(") == 0
+    assert "execute_r5_segment_prune" not in source
     assert "def prune_pass" not in source and "r5_segment_pass(" in source
 
 

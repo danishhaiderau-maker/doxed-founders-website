@@ -61,8 +61,14 @@ def test_stale_retired_pointer_passes_and_is_unreadable_retired(tmp_path, monkey
     with pytest.raises(ValueError):
         ro.ledger_generation_paths("market_segment")
     v = ro.verify()
-    assert v["ledger_status"]["market_segment"] == "RETIRED"
-    assert v["retired_streams"] == {"market_segment": {"status": "RETIRED", "reason": "MARKET_SEGMENTS_RETIRED_R17"}}
+    assert v["ledger_status"]["market_segment"] == retired_streams.MARKET_SEGMENT_STATUS_LABEL
+    assert v["retired_streams"] == {
+        "market_segment": {
+            "status": "RETIRED",
+            "reason": "MARKET_SEGMENTS_RETIRED_R17",
+            "status_label": retired_streams.MARKET_SEGMENT_STATUS_LABEL,
+        }
+    }
     assert v["ledger_counts"]["market_segment"] == 0
     assert v["ledger_status"]["decision"] == "GREEN" and v["ledger_counts"]["decision"] == 4
     # stale pointer is not republished, ledger untouched
@@ -162,7 +168,13 @@ def test_unchanged_identity_retired_stream_still_normal(tmp_path, monkeypatch):
     _store(tmp_path)
     ro = V3EvidenceStore.open_read_only(tmp_path)  # no stale pointer: nothing excluded
     assert ro._retired_excluded == {}
-    assert ro.verify()["ledger_status"]["market_segment"] == "GREEN"
+    # H4 / AMEND2 C3: allowlisted market_segment is never GREEN — exact C3 status label.
+    v = ro.verify()
+    assert v["ledger_status"]["market_segment"] == retired_streams.MARKET_SEGMENT_STATUS_LABEL
+    assert v["ledger_status"]["market_segment"] != "GREEN"
+    assert v["retired_streams"]["market_segment"]["status_label"] == (
+        retired_streams.MARKET_SEGMENT_STATUS_LABEL
+    )
 
 
 def test_boot_recover_and_snapshot_delete_with_stale_retired_pointer(tmp_path, monkeypatch):

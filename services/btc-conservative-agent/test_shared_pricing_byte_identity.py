@@ -26,12 +26,13 @@ BASE = "the reviewed pins (first set at 51d926f93, last moved by R22 PR-A)"
 # #842 HM 02:55 / RK (2) (24 Oct 2026): intentional pin move for bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay (paper BOT_SENT exits: own trigger -> send code point measured per row via the shared _paper_own_s2s_exit + pooled EXIT_RO_MKT send->ack; resident stays 0; missing -> fail closed).
 # R22 PR-A (25 Oct 2026): intentional pin move for bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_paper_delay (pure rename _disloc_delay->_paper_delay, _DISLOC_DELAYS->_PAPER_DELAYS; no behaviour change: each new source == the old source with only those identifiers renamed).
 # R0/R3 exit-truth RED (25 Oct 2026): intentional pin move for bot.py:_paper_lane_exit (paper STOP fills use FIRST_AFTER + STOP_RULE_NO_POOL; exit-book-top stamp prefers fill snapshot; hash recomputed after #879 rename rebase).
+# Close-500 (30 Oct 2026): intentional pin move for bot.py:_paper_lane_exit (clamp model-fill wait sleep to >=0 so a clock race cannot ValueError).
 PINNED = {
     "bot.py": {
         "get_mark_price": "b03f13d6030996983221371bede76b67fd2f610c03922e9aa3f142ece840b9c6",
         "_paper_lane_entry_result": "a227911677f4b9c9f80b0bec463171fe9e06e4190d2ddac5e1d51005193ef05d",
         "_tp1_gate": "620841b04d0204973ece88513166af9c2439adc4ad81f43e51f4f22c2e52a42d",
-        "_paper_lane_exit": "650b499d2c7d6773667f0e7286e1b5c52bb4c2fe73f6d4368164c415c1ad8b13",
+        "_paper_lane_exit": "ef700d7f6190937ead890a774477b2258505c0cf768eee9ec9adb997fc4a7f03",
         "_paper_delay": "4cd4b08d3dedb3233d84bd7a167985841e338105937baa1af4a3b908b1de5254"
     },
     "paper_fill.py": {

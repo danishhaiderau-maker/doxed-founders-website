@@ -269,3 +269,241 @@ def test_provenance_journal_is_non_evidence_for_the_purity_audit():
     assert de.non_evidence("canonical_dataset_manifest.jsonl")
     assert "canonical_dataset_manifest.jsonl" in de.NON_EVIDENCE_BASES
     assert not de.non_evidence("v3/canonical_dataset_manifest.jsonl")
+
+
+def test_epoch_purity_audit_skips_retired_market_segment_ledger(tmp_path, guard, monkeypatch):
+    """Strategist / RK: _epoch_receipt_block must not open retired market_segment.
+
+    HM 3dd1d520a888: monkeypatch builtins.open AND io.open only around the single
+    _epoch_receipt_block call (monkeypatch.context restores). Kills a plain open()
+    of market_segment.jsonl inside the receipt path. Assert spy fired; no
+    lower-cased market_segment path; rotated market_segment.jsonl.1 skipped.
+    """
+    import builtins
+    import io
+
+    _g, _monitor = guard
+    engine = _engine()
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BTC_DATA_EPOCH_DIR", str(tmp_path))
+    monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
+    monkeypatch.setattr(engine, "_EPOCH_MANIFEST_DIR", None)
+    monkeypatch.setattr(engine, "_ANALYZER_REPORT_SUBDIR", str(tmp_path))
+    # Point purity/unplaced audit root at tmp (default TRADES_FILE resolves beside the package).
+    monkeypatch.setattr(engine, "_analyzer_data_root", lambda: str(tmp_path))
+    de.write_json_atomic(tmp_path / de.MANIFEST_NAME, de.new_manifest(EPOCH, started_at_ts=START))
+    de.write_json_atomic(tmp_path / "fresh_start_epoch.json", {"epoch_ts": START})
+
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    _write_jsonl(led / "market_segment.jsonl", [
+        {"record_id": "seg-old", "ts": PRE, "data_epoch_id": OLD},
+        {"record_id": "seg-old2", "ts": PRE - 10},
+    ])
+    _write_jsonl(led / "decision.jsonl", [
+        {"record_id": "dec-cur", "ts": POST, "data_epoch_id": EPOCH},
+    ])
+    _write_jsonl(led / "market_segment.jsonl.1", [
+        {"record_id": "seg-rot", "ts": PRE},
+    ])
+    # Case-insensitive skip + rotated-file skip (ba93b912).
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/Market_Segment.jsonl") is True
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl") is True
+    assert engine._epoch_audit_stream_is_retired("v3/ledgers/market_segment.jsonl.1") is True
+
+    opened_paths: list[str] = []
+    real_open = builtins.open
+
+    def spy_open(file, *args, **kwargs):
+        opened_paths.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    # Active only for the single receipt call; fixture monkeypatch.context restores both.
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", spy_open)
+        m.setattr(io, "open", spy_open)
+        block = engine._epoch_receipt_block()
+
+    assert block is not None
+    assert opened_paths, "open spy must fire during _epoch_receipt_block"
+    assert any(Path(p).name.lower() == "decision.jsonl" for p in opened_paths), opened_paths
+    assert not any("market_segment" in p.lower() for p in opened_paths), opened_paths
+    unplaced = block.get("unplaced_rows_list") or {}
+    by_stream = unplaced.get("by_stream") or {}
+    assert not any("market_segment" in str(k).lower() for k in by_stream), by_stream
+
+
+def test_named_purity_audit_belt_guard_blocks_slipped_market_segment(tmp_path, guard, monkeypatch):
+    """Behavioral: fails when analyzer_research_engine_v62.py:1312-1313 belt guard is removed.
+
+    Force a market_segment slip-through past _epoch_audit_streams skip; the belt
+    abr.guard_no_market_segment_open calls must raise before any open. No source-text.
+    """
+    g, _monitor = guard
+    engine = _engine()
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    _write_jsonl(seg, [{"record_id": "seg-slip", "ts": PRE, "data_epoch_id": OLD}])
+
+    def slipped(_data_root):
+        yield seg, "v3/ledgers/market_segment.jsonl"
+
+    monkeypatch.setattr(engine, "_epoch_audit_streams", slipped)
+    with pytest.raises(RuntimeError, match="market_segment"):
+        engine._epoch_purity_audit(g, str(tmp_path))
+
+
+def test_named_backup_guard_mutant_killed():
+    """HM (b): named backup-guard assert — kills surviving mutant that drops guard before open.
+
+    file_unplaced_rows and StreamReadMonitor.report must call guard_no_market_segment_open
+    before their open / file_epoch_row_counts sites. Source-text checks kept as extra.
+    """
+    src = Path(eg.__file__).read_text(encoding="utf-8")
+
+    unplaced = src[src.index("def file_unplaced_rows"): src.index("\ndef unplaced_rows_document")]
+    assert "guard_no_market_segment_open" in unplaced
+    assert unplaced.index("guard_no_market_segment_open") < unplaced.index('open(path, "rb")')
+    mutant_u = unplaced.replace("abr.guard_no_market_segment_open(path)", "pass  # mutant")
+    mutant_u = mutant_u.replace("abr.guard_no_market_segment_open(relpath)", "pass  # mutant")
+    with pytest.raises(AssertionError):
+        assert "guard_no_market_segment_open" in mutant_u
+
+    rstart = src.index("def report(self, manifest")
+    rend = src.index('return {"active": True', rstart)
+    report_block = src[rstart:rend]
+    assert "guard_no_market_segment_open" in report_block
+    assert "stream_is_retired_allowlisted" in report_block
+    mutant_r = report_block.replace("abr.guard_no_market_segment_open(path)", "pass  # mutant")
+    mutant_r = mutant_r.replace("abr.guard_no_market_segment_open(stream)", "pass  # mutant")
+    with pytest.raises(AssertionError):
+        assert "abr.guard_no_market_segment_open(path)" in mutant_r
+
+
+def test_unplaced_rows_document_excludes_market_segment_variants(tmp_path, guard, monkeypatch):
+    """HM 8f785b4bd03d (1): unplaced_rows_document excludes market_segment .jsonl / .jsonl.1 / Market_Segment.
+
+    Open spy must fire (non-retired ledger) and must never see a lower-cased market_segment path.
+    Fails when the retired-stream filter in unplaced_rows_document is removed.
+    """
+    import builtins
+    import io
+
+    g, _monitor = guard
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    _write_jsonl(led / "market_segment.jsonl", [
+        {"record_id": "seg-old", "ts": PRE, "data_epoch_id": OLD},
+    ])
+    _write_jsonl(led / "market_segment.jsonl.1", [
+        {"record_id": "seg-rot", "ts": PRE},
+    ])
+    _write_jsonl(led / "Market_Segment.jsonl", [
+        {"record_id": "seg-case", "ts": PRE, "data_epoch_id": OLD},
+    ])
+    _write_jsonl(led / "decision.jsonl", [
+        {"record_id": "dec-pre", "ts": PRE},
+    ])
+
+    opened: list[str] = []
+    real_open = builtins.open
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", spy_open)
+        m.setattr(io, "open", spy_open)
+        doc = eg.unplaced_rows_document(tmp_path, g.manifest, floor_ts=START)
+
+    assert opened, "open spy must fire during unplaced_rows_document"
+    assert any(Path(p).name.lower() == "decision.jsonl" for p in opened), opened
+    assert not any("market_segment" in p.lower() for p in opened), opened
+    assert not any("market_segment" in str(k).lower() for k in (doc.get("by_stream") or {})), doc
+
+
+def test_stream_read_monitor_report_skips_recorded_market_segment(tmp_path, guard, monkeypatch):
+    """HM 8f785b4bd03d (2): StreamReadMonitor.report skips a recorded market_segment raw read.
+
+    Fails when the stream_is_retired_allowlisted skip in report() is removed.
+    """
+    import builtins
+    import io
+
+    g, monitor = guard
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    dec = led / "decision.jsonl"
+    _write_jsonl(seg, [{"record_id": "seg-raw", "ts": PRE, "data_epoch_id": OLD}])
+    _write_jsonl(dec, [{"record_id": "dec-raw", "ts": PRE}])
+
+    # Record raw opens into the installed monitor (audit hook).
+    open(seg, encoding="utf-8").close()
+    open(dec, encoding="utf-8").close()
+    assert any("market_segment" in Path(p).name.lower() for p in monitor.files), monitor.files
+
+    opened: list[str] = []
+    real_open = builtins.open
+
+    def spy_open(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(builtins, "open", spy_open)
+        m.setattr(io, "open", spy_open)
+        report = monitor.report(g.manifest, floor_ts=START)
+
+    assert not any("market_segment" in str(k).lower() for k in report["pre_epoch_rows_admitted_by_stream"]), report
+    assert not any("market_segment" in str(k).lower() for k in report["unguarded_stream_reads"]), report
+    assert not any("market_segment" in p.lower() for p in opened), opened
+    # Non-retired recorded read still counted (spy may open decision during recount).
+    assert "v3/ledgers/decision.jsonl" in report["unguarded_stream_reads"]
+
+
+def test_stream_is_retired_allowlisted_case_and_rotation():
+    """HM 8f785b4bd03d (3): stream_is_retired_allowlisted covers case fold and numeric rotation."""
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/market_segment.jsonl") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/Market_Segment.jsonl") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/MARKET_SEGMENT.jsonl") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/market_segment.jsonl.1") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/Market_Segment.jsonl.2") is True
+    assert eg.stream_is_retired_allowlisted("v3/ledgers/decision.jsonl") is False
+    assert eg.stream_is_retired_allowlisted("decision.jsonl") is False
+
+
+def test_named_g4_file_unplaced_rows_guard_raises_when_retired_forced_false(tmp_path, monkeypatch):
+    """G4 / Strategist 1fc3b61cbd4a: file_unplaced_rows belt at analyzer_epoch_guard.py:361-362.
+
+    Force stream_is_retired_allowlisted False (slip-through); guard_no_market_segment_open must raise.
+    Fails when those guard calls are removed.
+    """
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    _write_jsonl(seg, [{"record_id": "g4", "ts": PRE, "data_epoch_id": OLD}])
+    monkeypatch.setattr(eg, "stream_is_retired_allowlisted", lambda *_a, **_k: False)
+    with pytest.raises(RuntimeError, match="market_segment"):
+        list(eg.file_unplaced_rows(seg, "v3/ledgers/market_segment.jsonl",
+                                   de.new_manifest(EPOCH, started_at_ts=START), floor_ts=START))
+
+
+def test_named_g6_monitor_report_guard_raises_when_retired_forced_false(tmp_path, guard, monkeypatch):
+    """G6 / Strategist 1fc3b61cbd4a: StreamReadMonitor.report belt at analyzer_epoch_guard.py:650-651.
+
+    Force stream_is_retired_allowlisted False after recording a market_segment raw open;
+    guard_no_market_segment_open must raise. Fails when those guard calls are removed.
+    """
+    g, monitor = guard
+    led = tmp_path / "v3" / "ledgers"
+    led.mkdir(parents=True)
+    seg = led / "market_segment.jsonl"
+    _write_jsonl(seg, [{"record_id": "g6", "ts": PRE, "data_epoch_id": OLD}])
+    open(seg, encoding="utf-8").close()
+    assert any("market_segment" in Path(p).name.lower() for p in monitor.files), monitor.files
+    monkeypatch.setattr(eg, "stream_is_retired_allowlisted", lambda *_a, **_k: False)
+    with pytest.raises(RuntimeError, match="market_segment"):
+        monitor.report(g.manifest, floor_ts=START)

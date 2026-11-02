@@ -17,7 +17,7 @@ def seg(start, end, rid):
 def make_root(tmp_path):
     ledgers = tmp_path / "v3" / "ledgers"
     ledgers.mkdir(parents=True)
-    (ledgers / "market_segment.jsonl").write_text("\n".join(json.dumps(r) for r in [
+    (ledgers / "signal_snapshot.jsonl").write_text("\n".join(json.dumps(r) for r in [
         seg(FLOOR + 10, FLOOR + 70, "ok-1"), seg(FLOOR - 10, FLOOR + 50, "str-1"), {"record_id": "uns-1"}]) + "\n")
     (ledgers / "decision.jsonl").write_text(json.dumps({"record_id": "uns-2", "epoch_id": EPOCH_ID}) + "\n")
     return tmp_path
@@ -28,9 +28,9 @@ def test_unplaced_list_names_each_row_and_is_deterministic(tmp_path):
     doc = eg.unplaced_rows_document(root, MANIFEST, FLOOR)
     assert doc["count"] == 3
     assert doc["by_stream"] == {"v3/ledgers/decision.jsonl": {"unstamped": 1},
-                                "v3/ledgers/market_segment.jsonl": {"straddle": 1, "unstamped": 1}}
+                                "v3/ledgers/signal_snapshot.jsonl": {"straddle": 1, "unstamped": 1}}
     ids = {(r["stream"], r["line_no"], r["row_id"], r["kind"]) for r in doc["rows"]}
-    assert ("v3/ledgers/market_segment.jsonl", 2, "str-1", "straddle") in ids
+    assert ("v3/ledgers/signal_snapshot.jsonl", 2, "str-1", "straddle") in ids
     assert ("v3/ledgers/decision.jsonl", 1, "uns-2", "unstamped") in ids
     assert all(len(r["row_sha256"]) == 64 for r in doc["rows"])
     assert eg.unplaced_rows_document(root, MANIFEST, FLOOR)["list_sha256"] == doc["list_sha256"]
@@ -39,7 +39,7 @@ def test_unplaced_list_names_each_row_and_is_deterministic(tmp_path):
 
 def test_guard_never_admits_straddle_or_unstamped_rows():
     g = eg.EpochGuard(MANIFEST, floor_ts=FLOOR)
-    rel = "v3/ledgers/market_segment.jsonl"
+    rel = "v3/ledgers/signal_snapshot.jsonl"
     assert g.admit_v3_ledger_row(rel, seg(FLOOR + 10, FLOOR + 70, "ok")) is True
     assert g.admit_v3_ledger_row(rel, seg(FLOOR - 10, FLOOR + 50, "s")) is False
     assert g.admit_v3_ledger_row(rel, {"record_id": "u"}) is False
@@ -52,7 +52,7 @@ def test_ledger_readers_are_guarded_and_exclude_unplaced_rows(tmp_path):
     mon = eg.StreamReadMonitor([str(root)]).install()
     eg.set_process_guard(eg.EpochGuard(MANIFEST, floor_ts=FLOOR))
     try:
-        path = root / "v3" / "ledgers" / "market_segment.jsonl"
+        path = root / "v3" / "ledgers" / "signal_snapshot.jsonl"
         got = [r.get("record_id") for r in _iter_jsonl(path)]
         got2 = [r.get("record_id") for r in _iter_ledger(path)]
         rep = mon.report(MANIFEST, FLOOR)

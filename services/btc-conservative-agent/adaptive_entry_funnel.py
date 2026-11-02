@@ -199,15 +199,16 @@ def _admitted(admit, path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_report_from_paths(*, decisions_path, counterfactual_path, trades_path,
                             expired_path, current_version, admit=None) -> dict[str, Any]:
-    # ``admit`` is the analyzer's clean-epoch guard: these streams survive the boundary reset
-    # with pre-epoch rows (data_epoch.READ_GUARDED_BASES), so every row passes it (#420).
+    # R17: taker_signal_counterfactuals is retired — never read rows (EMPTY_BECAUSE).
     report = build_report(
         decisions=_admitted(admit, decisions_path, _read_jsonl(decisions_path)),
-        taker_counterfactuals=_admitted(admit, counterfactual_path, _read_jsonl(counterfactual_path)),
+        taker_counterfactuals=[],
         trades=_admitted(admit, trades_path, _read_csv(trades_path)),
         expired=_admitted(admit, expired_path, _read_csv(expired_path)),
         current_version=current_version,
     )
+    report["EMPTY_BECAUSE"] = "R17_RETIRED"
+    report["taker_rows_read"] = 0
     report["inputs"] = {
         "decisions": os.path.abspath(decisions_path),
         "taker_counterfactuals": os.path.abspath(counterfactual_path),

@@ -3,14 +3,26 @@ import ast
 from datetime import datetime, timezone
 from pathlib import Path
 
+import analyzer_book10_regime as abr
+
 SRC = (Path(__file__).with_name("bot.py")).read_text()
 TREE = ast.parse(SRC)
 
 
 def _ns():
+    """Load FRESH_START_* from bot.py AST.
+
+    Rebuild pin binds the floor via ``import analyzer_book10_regime as _abr_rebuild_pin``
+    immediately before the Assigns (R4 single source). The harness must exec that Import
+    first or Assigns raise NameError (CI fail on tip c9b7f3e3e).
+    """
     ns = {"datetime": datetime, "timezone": timezone}
     want = {"_ANALYZER_BUNDLE_FRESH_FLOOR_TS", "FRESH_START_TS", "FRESH_START_UTC"}
     for node in TREE.body:
+        if isinstance(node, ast.Import) and any(
+            alias.name == "analyzer_book10_regime" for alias in node.names
+        ):
+            exec(compile(ast.Module([node], []), "bot.py", "exec"), ns)
         if isinstance(node, ast.Assign) and any(getattr(t, "id", None) in want for t in node.targets):
             exec(compile(ast.Module([node], []), "bot.py", "exec"), ns)
         if isinstance(node, ast.FunctionDef) and node.name == "_data_epoch_public":
@@ -22,6 +34,12 @@ def test_fresh_start_constant_is_18_oct_0601_aedt():
     ns = _ns()
     assert ns["FRESH_START_TS"] == 1792263671
     assert ns["FRESH_START_UTC"] == "2026-10-17T19:01:11+00:00"
+    # R4 single-source: bot floor must equal analyzer_book10_regime.EPOCH_FLOOR_TS
+    assert ns["FRESH_START_TS"] == abr.EPOCH_FLOOR_TS
+    assert ns["_ANALYZER_BUNDLE_FRESH_FLOOR_TS"] == abr.EPOCH_FLOOR_TS
+    # Mutation: skipping the abr Import in the harness would NameError — prove import is present.
+    assert "_abr_rebuild_pin" in ns
+    assert "import analyzer_book10_regime as _abr_rebuild_pin" in SRC
 
 
 def test_status_data_epoch_started_is_fresh_start_and_epoch_id_unchanged():

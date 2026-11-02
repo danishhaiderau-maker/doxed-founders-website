@@ -21,18 +21,29 @@ def _make(tmp_path, base, n, size=10):
     return active
 
 
+def _family_bytes(tmp_path, base):
+    import re
+    out = {}
+    for p in tmp_path.iterdir():
+        if p.name == base or re.match(rf"^{re.escape(base)}\.\d+$", p.name):
+            out[p.name] = p.read_bytes()
+    return out
+
+
 def test_oldest_first_active_never_and_three_unlinks_per_call(tmp_path):
+    """PR2: never-delete. Over keep-N → would_have_dropped (.1 oldest) + stop-write; files stay."""
     active = _make(tmp_path, FAM, 15)
     (tmp_path / f"{FAM}.bak").write_text("not a rotation")
     (tmp_path / f"{FAM}.1.tmp").write_text("not a rotation")
+    before = _family_bytes(tmp_path, FAM)
     res = rotation_cap.enforce_cap(str(active), now=1.0)
-    assert res["deleted"] == [f"{FAM}.1", f"{FAM}.2", f"{FAM}.3"]  # .1 is the OLDEST
-    assert res["backlog"] is True
-    rotation_cap.enforce_cap(str(active))
-    res = rotation_cap.enforce_cap(str(active))
-    assert res["remaining_rotations"] == 10 and res["backlog"] is False
+    assert res["deleted"] == []
+    assert res["would_have_dropped"][:3] == [f"{FAM}.1", f"{FAM}.2", f"{FAM}.3"]  # .1 is the OLDEST
+    assert res["stop_write"] is True and res["backlog"] is True
+    assert _family_bytes(tmp_path, FAM) == before
+    assert res["remaining_rotations"] == 15
     assert active.exists() and (tmp_path / f"{FAM}.bak").exists() and (tmp_path / f"{FAM}.1.tmp").exists()
-    assert [p for _, p in rotation_cap.list_rotations(str(active))][0].endswith(f"{FAM}.6")
+    assert [p for _, p in rotation_cap.list_rotations(str(active))][0].endswith(f"{FAM}.1")
 
 
 def test_custody_stalled_still_caps(tmp_path, monkeypatch):
@@ -40,13 +51,16 @@ def test_custody_stalled_still_caps(tmp_path, monkeypatch):
     (tmp_path / "custody_stalled.flag").write_text("1")
     monkeypatch.setenv("ARCHIVE_CUSTODY_STALLED", "1")
     active = _make(tmp_path, FAM, 12)
-    assert len(rotation_cap.enforce_cap(str(active))["deleted"]) == 2
+    res = rotation_cap.enforce_cap(str(active))
+    assert res["deleted"] == [] and len(res["would_have_dropped"]) == 2 and res["stop_write"] is True
 
 
 def test_byte_backstop(tmp_path):
     active = _make(tmp_path, FAM, 4, size=100)
+    before = _family_bytes(tmp_path, FAM)
     res = rotation_cap.enforce_cap(str(active), max_bytes=250)
-    assert res["deleted"] == [f"{FAM}.1", f"{FAM}.2"]
+    assert res["deleted"] == [] and res["would_have_dropped"] == [f"{FAM}.1", f"{FAM}.2"]
+    assert _family_bytes(tmp_path, FAM) == before
 
 
 def test_protected_exempt_and_unclassified_untouched(tmp_path):
@@ -69,12 +83,13 @@ def test_cap_receipts_self_capped_and_failure_never_blocks(tmp_path):
     files = [p for p in tmp_path.iterdir() if p.name.startswith(rotation_cap.CAP_RECEIPTS_FILE)]
     assert {p.name for p in files} <= {rotation_cap.CAP_RECEIPTS_FILE, rotation_cap.CAP_RECEIPTS_FILE + ".1"}
     assert sum(p.stat().st_size for p in files) <= 2 * rotation_cap.MB + 8192
-    # A failing receipt writer never blocks the cap.
+    # A failing receipt writer never blocks the stop-write decision.
     active = _make(tmp_path, FAM, 12)
 
     def boom(*_a, **_k):
         raise OSError("disk full")
-    assert len(rotation_cap.enforce_cap(str(active), receipt_writer=boom)["deleted"]) == 2
+    res = rotation_cap.enforce_cap(str(active), receipt_writer=boom)
+    assert res["deleted"] == [] and len(res["would_have_dropped"]) == 2 and res["stop_write"] is True
     assert rotation_cap.write_cap_receipt(str(tmp_path / "missing" / "dir"), {}) is False
 
 
@@ -82,7 +97,8 @@ def test_cap_writes_receipt(tmp_path):
     active = _make(tmp_path, FAM, 11)
     rotation_cap.enforce_cap(str(active), now=5.0)
     rows = [json.loads(l) for l in (tmp_path / rotation_cap.CAP_RECEIPTS_FILE).read_text().splitlines()]
-    assert rows[-1]["deleted"] == [f"{FAM}.1"] and rows[-1]["rule"] == "R5"
+    assert rows[-1]["deleted"] == [] and rows[-1]["would_have_dropped"] == [f"{FAM}.1"]
+    assert rows[-1]["rule"] == "R25_NEVER_DELETE" and rows[-1]["stop_write"] is True
 
 
 def test_reset_lists_clear_cap_receipts():
@@ -181,20 +197,22 @@ def test_tape_cap_comment_names_the_fade3_prereg_set():
 
 
 def test_tape_keeps_14_days_of_rotations_and_drops_older(tmp_path):
+    """PR2: age pressure → would_have_dropped telemetry + stop-write; no unlinks."""
     now = 100 * DAY
     active = _make(tmp_path, TAPE, 20)
     for i in range(1, 21):  # .1 oldest: 20 days old ... .20: 1 day old
         os.utime(tmp_path / f"{TAPE}.{i}", (now - (21 - i) * DAY, now - (21 - i) * DAY))
-    deleted = []
-    for _ in range(5):
-        deleted += rotation_cap.enforce_cap(str(active), now=now)["deleted"]
-    # rotations older than 14 days (ages 20..15 d -> .1-.6) go; 14 d and younger stay
-    assert deleted == [f"{TAPE}.{i}" for i in range(1, 7)]
-    assert len(rotation_cap.list_rotations(str(active))) == 14
+    before = _family_bytes(tmp_path, TAPE)
+    would = rotation_cap.enforce_cap(str(active), now=now)["would_have_dropped"]
+    # rotations older than 14 days (ages 20..15 d -> .1-.6) would have gone
+    assert would == [f"{TAPE}.{i}" for i in range(1, 7)]
+    assert len(rotation_cap.list_rotations(str(active))) == 20
+    assert _family_bytes(tmp_path, TAPE) == before
 
 
 def test_tape_byte_backstop_still_binds_when_young(tmp_path):
     now = 100 * DAY
     active = _make(tmp_path, TAPE, 4, size=100)
     res = rotation_cap.enforce_cap(str(active), max_bytes=250, now=now)
-    assert res["deleted"] == [f"{TAPE}.1", f"{TAPE}.2"] and res["cap_days"] == 14.0
+    assert res["deleted"] == [] and res["would_have_dropped"] == [f"{TAPE}.1", f"{TAPE}.2"]
+    assert res["cap_days"] == 14.0 and res["stop_write"] is True

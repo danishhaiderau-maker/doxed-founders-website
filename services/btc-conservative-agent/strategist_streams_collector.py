@@ -18,8 +18,11 @@ change or cancel an order. Writes three lean append-only JSONL streams in the ru
 * ``venue_bbo_1m.jsonl``     - Lighter + Paradex BTC perp best bid/ask, 60 per-second samples per
   UTC-minute row {"m": minute_ts, "lighter": [[bid, ask] | null x60], "paradex": [...]}.
 
-Each file rotates at ROTATE_BYTES to ``<file>.N`` and only KEEP_ROTATIONS rotated files are kept
-locally (the segment shipper mirrors them), so on-disk use stays bounded.
+Each file rotates at ROTATE_BYTES to ``<file>.N`` (rename only). Rotated segments are never
+unlinked here (R25/R34): deletion is R21-only. Per-stream byte pressure uses a **running total**
+(R43/R0c: no glob/stat of every ``.N`` on each write): AMBER at 70%, RED ``STREAM_SIZE_CAP`` at
+85% (monitor/status, not log-only), hard stop at 100% of ``MAX_TOTAL_BYTES``. Card: 5 sinks ×
+8 GiB = 40 GiB total across all strategist streams — check against Fly volume free space.
 
 No look-ahead (RK, 24 Oct): second ``s`` is closed ~1.3-1.5 s after it starts. Every 1 s row describes the state as
 of the END of second ``s`` (receive time <= s+1): the book is frozen at the second boundary before later deltas are
@@ -72,6 +75,8 @@ PARADEX_BBO = "https://api.prod.paradex.trade/v1/bbo/BTC-USD-PERP"  # WS needs S
 BOOK_FILE, TRADES_FILE, VENUE_FILE = "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "venue_bbo_1m.jsonl"
 DERIV_FILE = "bfx_deriv_status_1s.jsonl"
 EVENTS_FILE = "bfx_ws_events.jsonl"
+# Locked expected Sink roster (plan size_cap; Collector opens exactly these five).
+EXPECTED_STREAM_SINKS = (BOOK_FILE, TRADES_FILE, VENUE_FILE, DERIV_FILE, EVENTS_FILE)
 HIST_SEC = 15  # per-source history: last value per receive second, kept this long (close lags <= ~10 s catch-up)
 DERIV_KEY = "deriv:" + BFX_SYMBOL
 MAX_DERIV_AGE_SEC = 10.0  # Bitfinex pushes deriv status every ~1-4 s; rows carry age_s
@@ -90,7 +95,17 @@ def parse_deriv_status(body) -> Optional[dict]:
     return out if out["mark"] or out["fund_cur"] is not None else None
 LEVELS = 10
 ROTATE_BYTES = int(os.getenv("STRATEGIST_STREAM_ROTATE_BYTES", str(32 * 1024 * 1024)))
-KEEP_ROTATIONS = int(os.getenv("STRATEGIST_STREAM_KEEP_ROTATIONS", "6"))
+# Hard stop per stream family (active + .N parts). Override via env; never used to delete.
+MAX_TOTAL_BYTES = int(os.getenv("STRATEGIST_STREAM_MAX_TOTAL_BYTES", str(8 * 1024 * 1024 * 1024)))
+# Collector opens five Sinks (book, trades, venue, deriv, events).
+STREAM_SINK_COUNT = 5
+TOTAL_ALL_STREAMS_CAP_BYTES = MAX_TOTAL_BYTES * STREAM_SINK_COUNT  # 40 GiB default
+SIZE_CAP_STATUS_FILE = "strategist_stream_size_cap.json"
+SIZE_CAP_REASON = "STREAM_SIZE_CAP"
+SIZE_CAP_SCHEMA = "strategist_stream_size_cap_v1"
+# WORST fold: RED > UNKNOWN > AMBER > GREEN (absent expected sink → UNKNOWN).
+_LEVEL_RANK = {"GREEN": 0, "AMBER": 1, "UNKNOWN": 2, "RED": 3}
+_size_cap_publish_lock = threading.Lock()
 SILENT_RECONNECT_SEC = 30.0
 MAX_QUOTE_AGE_SEC = 2.0
 # A quiet book sends no delta; Bitfinex guarantees a heartbeat at least every 15 s on a live connection. While ANY message
@@ -111,15 +126,252 @@ def _f(v) -> Optional[float]:
     return out if out == out and out not in (float("inf"), float("-inf")) else None
 
 
-class Sink:
-    """Append-only JSONL with bounded rotation."""
+def size_cap_card() -> dict:
+    """Operator card: total cap across all strategist streams (HM checks vs Fly free space)."""
+    gib = 1024 ** 3
+    per_gib = MAX_TOTAL_BYTES / gib
+    total_gib = TOTAL_ALL_STREAMS_CAP_BYTES / gib
+    return {
+        "title": "URGENT partial 1 of 5",
+        "per_stream_cap_bytes": MAX_TOTAL_BYTES,
+        "per_stream_cap_gib": per_gib,
+        "stream_sink_count": STREAM_SINK_COUNT,
+        "total_all_streams_cap_bytes": TOTAL_ALL_STREAMS_CAP_BYTES,
+        "total_all_streams_cap_gib": total_gib,
+        "total_cap_formula": f"{per_gib:g} GiB × {STREAM_SINK_COUNT} streams = {total_gib:g} GiB",
+        "amber_at": 0.70,
+        "red_at": 0.85,
+        "hard_stop_at": 1.0,
+        "note": (
+            f"8 GiB × 5 streams = 40 GiB total hard stop "
+            f"({per_gib:g} GiB × {STREAM_SINK_COUNT} = {total_gib:g} GiB); compare to Fly volume free"
+        ),
+        "rules_sha_prefix": "10f0b8daa510",
+    }
 
-    def __init__(self, path: str, rotate_bytes: int = ROTATE_BYTES, keep: int = KEEP_ROTATIONS) -> None:
-        self.path, self.rotate_bytes, self.keep = path, rotate_bytes, keep
+
+def _measure_total_bytes(path: str) -> int:
+    """One-shot seed (init only). Not called from the write hot path (R43)."""
+    total = 0
+    try:
+        if os.path.exists(path):
+            total += os.path.getsize(path)
+    except OSError:
+        pass
+    for p in glob.glob(path + ".*"):
+        if not p.rsplit(".", 1)[-1].isdigit():
+            continue
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    return total
+
+
+def _normalize_size_cap_level(level) -> str:
+    text = str(level or "").strip().upper()
+    return text if text in _LEVEL_RANK else "UNKNOWN"
+
+
+def worst_size_cap_level(*levels) -> str:
+    """Aggregate WORST: RED > UNKNOWN > AMBER > GREEN."""
+    worst = "GREEN"
+    for level in levels:
+        cand = _normalize_size_cap_level(level)
+        if _LEVEL_RANK[cand] > _LEVEL_RANK[worst]:
+            worst = cand
+    return worst
+
+
+def _pressure_level(projected: int, max_total_bytes: int) -> tuple[str, float, bool]:
+    """AMBER@70%, RED@85%, hard stop when projected exceeds cap. stop is measured-only (F1)."""
+    cap = max(1, int(max_total_bytes))
+    ratio = float(projected) / float(cap)
+    stop = projected > int(max_total_bytes)
+    if stop or ratio >= 0.85:
+        level = "RED"
+    elif ratio >= 0.70:
+        level = "AMBER"
+    else:
+        level = "GREEN"
+    return level, ratio, stop
+
+
+class Sink:
+    """Append-only JSONL with size-based rename rotation (never unlinks)."""
+
+    def __init__(
+        self,
+        path: str,
+        rotate_bytes: int = ROTATE_BYTES,
+        max_total_bytes: int = MAX_TOTAL_BYTES,
+    ) -> None:
+        self.path, self.rotate_bytes, self.max_total_bytes = path, rotate_bytes, max_total_bytes
         self.rows = self.failures = 0
+        self.size_cap_hits = 0
+        self._alarm_level = "GREEN"
+        # Running total: seed once; add need on write; rename leaves total unchanged (R43/R0c).
+        self._bytes = _measure_total_bytes(path)
         self._lock = threading.Lock()
+        self._ensure_disk_alert()
+        # Publish once at Sink init (need=0); required ALARM when not GREEN / stop.
+        level, ratio, stop = _pressure_level(self._bytes, self.max_total_bytes)
+        self._alarm_level = level if not stop else "RED"
+        if level != "GREEN" or stop:
+            _log(
+                f"ALARM {SIZE_CAP_REASON} level={self._alarm_level} stop_writing={stop} "
+                f"path={self.path} used_bytes={self._bytes} need=0 "
+                f"cap={self.max_total_bytes} ratio={ratio:.4f}"
+            )
+        self._publish_status(self._alarm_level, ratio, stop_writing=stop, need=0)
+        if stop:
+            self.size_cap_hits += 1
+
+    @staticmethod
+    def _ensure_disk_alert() -> None:
+        try:
+            import disk_alert
+            # Same retention state file the bot loads so STREAM_SIZE_CAP is visible on /health.
+            root = os.environ.get("BOT_DATA_DIR") or os.getcwd()
+            disk_alert.configure(os.path.join(root, "retention", "disk_alert_red.json"))
+        except Exception:  # noqa: BLE001 — alarm path must not crash the collector
+            pass
+
+    def _sink_key(self) -> str:
+        return os.path.basename(self.path)
+
+    def _publish_status(self, level: str, ratio: float, *, stop_writing: bool, need: int) -> None:
+        """RMW per-sink status under module lock; WORST across expected roster (H2 tmp under lock)."""
+        sink_row = {
+            "level": level,
+            "path": self.path,
+            "used_bytes": self._bytes,
+            "need": need,
+            "cap_bytes": self.max_total_bytes,
+            "ratio": round(ratio, 4),
+            "stop_writing": bool(stop_writing),
+            "ts": time.time(),
+        }
+        directory = os.path.dirname(self.path) or "."
+        dest = os.path.join(directory, SIZE_CAP_STATUS_FILE)
+        with _size_cap_publish_lock:
+            existing: dict = {}
+            try:
+                with open(dest, "r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, ValueError, TypeError):
+                existing = {}
+            sinks = dict(existing.get("sinks") or {}) if isinstance(existing.get("sinks"), dict) else {}
+            # Migrate legacy one-sink row into sinks map when present.
+            if not sinks and existing.get("path"):
+                legacy_key = os.path.basename(str(existing.get("path")))
+                sinks[legacy_key] = {
+                    "level": existing.get("level") or "UNKNOWN",
+                    "path": existing.get("path"),
+                    "used_bytes": existing.get("used_bytes"),
+                    "need": existing.get("need"),
+                    "cap_bytes": existing.get("cap_bytes"),
+                    "ratio": existing.get("ratio"),
+                    "stop_writing": bool(existing.get("stop_writing")),
+                    "ts": existing.get("ts"),
+                }
+            sinks[self._sink_key()] = sink_row
+            # Roster mode (Collector / any expected basename): missing expected key → UNKNOWN.
+            # Non-roster single-sink tests fold only published sinks (no invented UNKNOWNs).
+            roster_active = (
+                self._sink_key() in EXPECTED_STREAM_SINKS
+                or any(name in sinks for name in EXPECTED_STREAM_SINKS)
+            )
+            levels = []
+            if roster_active:
+                for name in EXPECTED_STREAM_SINKS:
+                    entry = sinks.get(name)
+                    if not isinstance(entry, dict):
+                        levels.append("UNKNOWN")
+                    else:
+                        levels.append(_normalize_size_cap_level(entry.get("level")))
+            for key, entry in sinks.items():
+                if roster_active and key in EXPECTED_STREAM_SINKS:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                levels.append(_normalize_size_cap_level(entry.get("level")))
+            aggregate = worst_size_cap_level(*levels) if levels else "UNKNOWN"
+            any_stop = any(bool((sinks.get(n) or {}).get("stop_writing")) for n in sinks)
+            # Legacy top-level path/bytes from worst *concrete* measured sink (not UNKNOWN-only).
+            concrete = None
+            concrete_rank = -1
+            for name in EXPECTED_STREAM_SINKS:
+                entry = sinks.get(name)
+                if not isinstance(entry, dict):
+                    continue
+                cand = _normalize_size_cap_level(entry.get("level"))
+                if cand == "UNKNOWN":
+                    continue
+                if _LEVEL_RANK[cand] > concrete_rank:
+                    concrete = entry
+                    concrete_rank = _LEVEL_RANK[cand]
+            row = {
+                "schema": SIZE_CAP_SCHEMA,
+                "reason": SIZE_CAP_REASON,
+                "level": aggregate,
+                "sinks": sinks,
+                "stop_writing": bool(any_stop),  # measured sink stops only — never UNKNOWN-alone (F1/HM nit)
+                "card": size_cap_card(),
+                "ts": time.time(),
+                "path": (concrete or {}).get("path"),
+                "used_bytes": (concrete or {}).get("used_bytes"),
+                "need": (concrete or {}).get("need"),
+                "cap_bytes": (concrete or {}).get("cap_bytes"),
+                "ratio": (concrete or {}).get("ratio"),
+            }
+            # H2: unique tmp name + full write+replace under the module lock.
+            tmp = f"{dest}.tmp.{os.getpid()}.{threading.get_ident()}"
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(row, fh, separators=(",", ":"), sort_keys=True)
+                os.replace(tmp, dest)
+            except OSError as exc:
+                # Leave unique tmp in place on failure (R25: Sink must not os.unlink/remove).
+                _log(
+                    f"OSError publishing {SIZE_CAP_STATUS_FILE}: "
+                    f"{type(exc).__name__}: {exc} dest={dest} tmp={tmp}"
+                )
+        # raise_red only for measured RED (not UNKNOWN-alone aggregate).
+        if level == "RED" or stop_writing:
+            try:
+                import disk_alert
+                disk_alert.raise_red(
+                    SIZE_CAP_REASON,
+                    {"path": self.path, "used_bytes": self._bytes, "cap_bytes": self.max_total_bytes,
+                     "ratio": round(ratio, 4), "stop_writing": stop_writing},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _apply_pressure(self, projected: int, need: int) -> bool:
+        """AMBER@70%, RED STREAM_SIZE_CAP@85%, stop at >=100%. Returns True when write must stop."""
+        level, ratio, stop = _pressure_level(projected, self.max_total_bytes)
+        if level != self._alarm_level or stop:
+            self._alarm_level = level
+            if level != "GREEN" or stop:
+                _log(
+                    f"ALARM {SIZE_CAP_REASON} level={level} stop_writing={stop} "
+                    f"path={self.path} used_bytes={self._bytes} need={need} "
+                    f"cap={self.max_total_bytes} ratio={ratio:.4f}"
+                )
+            self._publish_status(level if not stop else "RED", ratio, stop_writing=stop, need=need)
+        if stop:
+            self.size_cap_hits += 1
+        return stop
 
     def _rotate(self) -> None:
+        """Rename the active file to ``<path>.N`` when it exceeds rotate_bytes.
+
+        Never unlinks any segment (R25). Running byte total is unchanged by rename.
+        """
         try:
             if os.path.getsize(self.path) <= self.rotate_bytes:
                 return
@@ -127,22 +379,26 @@ class Sink:
             return
         sufs = sorted(int(p.rsplit(".", 1)[-1]) for p in glob.glob(self.path + ".*") if p.rsplit(".", 1)[-1].isdigit())
         os.rename(self.path, f"{self.path}.{(sufs[-1] if sufs else 0) + 1}")
-        sufs = sorted(int(p.rsplit(".", 1)[-1]) for p in glob.glob(self.path + ".*") if p.rsplit(".", 1)[-1].isdigit())
-        for s in sufs[:-self.keep] if self.keep > 0 else []:
-            try:
-                os.remove(f"{self.path}.{s}")
-            except OSError:
-                pass
 
     def write(self, row: dict) -> None:
         line = json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n"
+        need = len(line.encode("utf-8"))
         with self._lock:
             try:
+                if self._apply_pressure(self._bytes + need, need):
+                    self.failures += 1
+                    return
                 self._rotate()
                 with open(self.path, "a", encoding="utf-8") as fh:
                     fh.write(line)
+                self._bytes += need
                 self.rows += 1
-            except (OSError, ValueError) as exc:
+            except OSError as exc:
+                # Re-seed running total from disk after I/O failure (may have partially written).
+                self._bytes = _measure_total_bytes(self.path)
+                self.failures += 1
+                _log(f"write failed {self.path}: {type(exc).__name__} (bytes re-seeded)")
+            except ValueError as exc:
                 self.failures += 1
                 _log(f"write failed {self.path}: {type(exc).__name__}")
 

@@ -923,6 +923,18 @@ def materialize_bundle(
     now: float | None = None, lifecycle_horizon_sec: float = 7200.0,
     reconciliation_allowance_sec: float = 180.0,
 ) -> dict[str, Any]:
+    try:
+        import r5_retention
+        if r5_retention.lifecycle_bundles_stop_write_latched():
+            import retention_stop_write
+            return {
+                "written": False,
+                "lifecycle_identity_id": key.identity_id,
+                "stopped_by": "LIFECYCLE_BUNDLE_CAP_STOP_WRITE",
+                "stop_write": retention_stop_write.latch_state(r5_retention.FAMILY_LIFECYCLE_BUNDLES),
+            }
+    except Exception:
+        pass
     root = Path(root).resolve()
     frozen = sorted(
         (dict(row) for row in rows),

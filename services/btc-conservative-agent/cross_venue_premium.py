@@ -38,7 +38,9 @@ from cross_venue_lead import (
     _mid,
 )
 
-SHADOW_FILE = "xvp_shadow_signals.jsonl"
+# HM/RK 30 Oct 2026: xvp_shadow_signals stream + shadow_outcome recording RETIRED
+# (ticker/L1-priced). Signal evaluation for GS-01 stays; SHADOW_FILE None skips append.
+SHADOW_FILE = None
 TRIGGER_SCHEMA = "xvp_shadow_trigger_v1"
 OUTCOME_SCHEMA = "xvp_shadow_outcome_v1"
 STATUS_WARMING = "MEAN_WARMING_UP"

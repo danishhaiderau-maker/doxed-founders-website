@@ -35,7 +35,6 @@ research.report_history
 research.research_trade_accumulator
 research.retention
 research.runtime_identity_incidents
-research.shadow_exit_report
 research.shadow_model_input
 research.shadow_result_stream
 research.tile_evidence_points

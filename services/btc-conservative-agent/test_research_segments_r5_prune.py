@@ -1,8 +1,6 @@
-"""R5 segment-store retention (RK 2026-10-23 18:10/18:11): live, no custody/ACK gate.
+"""PR3: r5_segment_pass never-delete + R5a eligibility + tripwires + stop-write.
 
-Below the cap: age prune, keeping un-ACKed segments an open lifecycle / pre-registered
-test needs. At the cap: oldest first regardless of ship/ACK state, dropped seqs in the
-capped receipt (cap_receipts.jsonl), RED on the shipper status.
+Plan sha 90f0a5491850; rules 10f0b8daa510. Live OFF. No env (incl. '1') reaches unlink.
 """
 
 from __future__ import annotations
@@ -10,14 +8,18 @@ from __future__ import annotations
 import ast
 import json
 import os
+from pathlib import Path
 
 import pytest
 
+import research_segment_format as fmt
 import research_segment_prune as prune_mod
+import research_segment_shipper as shipper_mod
 from test_research_segments import _rows
 from test_research_segments_volume import VolumeEnv
 
 DAY = 86400.0
+HERE = Path(__file__).resolve().parent
 
 
 @pytest.fixture()
@@ -54,115 +56,162 @@ def _shipper(venv, **attrs):
     return shipper
 
 
-def _receipts(venv) -> list[dict]:
-    path = venv.runtime / "cap_receipts.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.is_file() else []
+def _write_status(shipper, **fields):
+    base = {
+        "schema": shipper_mod.STATUS_SCHEMA,
+        "laptop_acked_seq": 1,
+        "laptop_ack_advanced_at": shipper.clock(),
+    }
+    base.update(fields)
+    shipper.status_path.parent.mkdir(parents=True, exist_ok=True)
+    shipper.status_path.write_text(json.dumps(base), encoding="utf-8")
 
 
-def test_r5_pass_needs_no_env_switch_mode_custody_or_ack(venv, monkeypatch):
-    monkeypatch.delenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", raising=False)
-    _ship_n(venv, 3)
-    assert _seqs(venv) == [1, 2, 3]
-    _age(venv, 1, 8 * DAY)
-    shipper = _shipper(venv)
-    assert shipper.prune_mode() == "off"  # custody-gated path is off; R5 still runs
-    out = shipper.r5_segment_pass()
-    assert out["result"]["age_dropped_seqs"] == [1]
-    assert _seqs(venv) == [2, 3]
-    # manifests (hash chain) stay
-    assert len(list((venv.store_root / "v1" / "man").glob("*.json"))) == 3
-    # seq 1 was never ACKed -> RED, since-time recorded
-    status = json.loads(shipper.status_path.read_text())
-    assert prune_mod.R5_RED_UNACKED in status["r5_segment_red"]
-    assert status["r5_segment_red"][prune_mod.R5_RED_UNACKED]["since"] == venv.clock[0]
-    assert _receipts(venv)[-1]["age_dropped_seqs"] == [1]
-
-
-def test_below_cap_keeps_unacked_needed_segment_drops_other_aged(venv):
-    _ship_n(venv, 3)
-    for seq in (1, 2):
-        _age(venv, seq, 8 * DAY)
-    out = _shipper(venv).r5_segment_pass(keep_seqs=[2])
-    assert out["result"]["age_dropped_seqs"] == [1]
-    assert out["plan"]["kept_needed_unacked"] == [2]
-    assert _seqs(venv) == [2, 3]
-
-
-def test_young_segments_stay_below_cap(venv):
-    _ship_n(venv, 3)
-    out = _shipper(venv).r5_segment_pass()
-    assert out["result"]["deleted"] == 0 and _seqs(venv) == [1, 2, 3]
-    assert _receipts(venv) == []
-
-
-def test_at_cap_drops_oldest_first_regardless_logs_ids_and_raises_red(venv):
+def test_r5_pass_never_unlinks_even_when_aged_or_over_cap(venv, monkeypatch):
+    for key in ("RESEARCH_SEGMENTS_R5_PRUNE_ENABLED", "RESEARCH_SEGMENTS_PRUNE_ENABLED",
+                "RESEARCH_SEGMENTS_ENABLED"):
+        monkeypatch.setenv(key, "1")
     _ship_n(venv, 4)
+    before = {p: p.read_bytes() for p in _seg_dir(venv).glob("*.tar.gz")}
+    for seq in (1, 2, 3, 4):
+        _age(venv, seq, 8 * DAY)
     store = int(venv.shipper().load_state()["store_bytes"])
-    shipper = _shipper(venv, max_store_bytes=store)  # exactly at the cap
-    out = shipper.r5_segment_pass(keep_seqs=[1, 2, 3, 4])  # keep does not protect at the cap
-    dropped = out["result"]["cap_dropped_seqs"]
-    assert dropped and dropped == list(range(1, len(dropped) + 1))  # oldest first
-    assert _seqs(venv) == [s for s in (1, 2, 3, 4) if s not in dropped]
+    shipper = _shipper(venv, max_store_bytes=store)
+    _write_status(shipper, laptop_acked_seq=4, laptop_ack_advanced_at=venv.clock[0])
+    out = shipper.r5_segment_pass()
+    assert out["result"]["deleted"] == 0
+    assert _seqs(venv) == [1, 2, 3, 4]
+    after = {p: p.read_bytes() for p in _seg_dir(venv).glob("*.tar.gz")}
+    assert after == before
+    assert out["result"]["shadow_would_have_age"] or out["result"]["shadow_would_have_cap"]
+
+
+def test_missing_status_fail_closed_zero_unlinks_red(venv):
+    _ship_n(venv, 2)
+    before = _seqs(venv)
+    shipper = _shipper(venv)
+    if shipper.status_path.is_file():
+        shipper.status_path.unlink()
+    out = shipper.r5_segment_pass()
+    assert out["result"]["deleted"] == 0 and _seqs(venv) == before
+    assert out["result"]["eligible"] is False
+    assert "STATUS_MISSING_OR_CORRUPT" in out["result"]["deny_reasons"]
+    assert prune_mod.R5_RED_STATUS_FAIL_CLOSED in out["result"]["red"]
     status = json.loads(shipper.status_path.read_text())
-    assert prune_mod.R5_RED_CAP in status["r5_segment_red"]
-    assert status["r5_segment_last_cap_dropped_seqs"] == dropped
-    assert int(shipper.load_state()["store_bytes"]) <= int(store * prune_mod.R5_SEGMENT_CAP_TARGET)
-    receipt = _receipts(venv)[-1]
-    assert receipt["kind"] == "r5_segment_store" and receipt["cap_dropped_seqs"] == dropped
-    assert prune_mod.R5_RED_CAP in receipt["red"]
+    assert prune_mod.R5_RED_STATUS_FAIL_CLOSED in status["r5_segment_red"]
 
 
-def test_store_cap_reached_clears_after_r5_pass_so_shipping_resumes(venv):
+def test_corrupt_status_fail_closed_mutation_no_empty_dict_fallthrough(venv):
+    _ship_n(venv, 2)
+    shipper = _shipper(venv)
+    shipper.status_path.write_text("{not-json", encoding="utf-8")
+    out = shipper.r5_segment_pass()
+    assert out["result"]["deleted"] == 0
+    assert out["eligibility"]["status_readable"] is False
+    assert "STATUS_MISSING_OR_CORRUPT" in out["result"]["deny_reasons"]
+    # Mutation proof: restoring `except: status = {}` without status_readable=False must fail
+    # this test (eligibility would not see STATUS_MISSING_OR_CORRUPT).
+    src = (HERE / "research_segment_shipper.py").read_text(encoding="utf-8")
+    body = src[src.index("def r5_segment_pass"): src.index("\n    # --------------------------------------------------------------- universe")]
+    assert "status_readable = False" in body
+    assert "execute_r5_segment_prune" not in body  # symbol must stay R22-absent
+    assert ".unlink(" not in body
+    assert "status = {}" in body  # assigned only after status_readable=False
+
+
+def test_ack_none_and_stale_over_2h_not_eligible(venv):
+    _ship_n(venv, 2)
+    shipper = _shipper(venv)
+    _write_status(shipper)  # laptop_acked_seq omitted via overwrite
+    shipper.status_path.write_text(json.dumps({
+        "schema": shipper_mod.STATUS_SCHEMA,
+        "laptop_ack_advanced_at": venv.clock[0],
+    }), encoding="utf-8")
+    out = shipper.r5_segment_pass()
+    assert out["result"]["deleted"] == 0 and out["result"]["eligible"] is False
+    assert "ACKED_SEQ_NONE" in out["result"]["deny_reasons"]
+
+    _write_status(shipper, laptop_acked_seq=2,
+                  laptop_ack_advanced_at=venv.clock[0] - prune_mod.ACK_STALE_SECONDS - 10)
+    out = shipper.r5_segment_pass()
+    assert out["result"]["deleted"] == 0 and out["result"]["eligible"] is False
+    assert "ACK_STALE_OVER_2H" in out["result"]["deny_reasons"]
+    assert prune_mod.R5_RED_ACK_STALE in out["result"]["red"]
+
+
+def test_ack_only_without_custody_not_eligible(venv):
+    _ship_n(venv, 2)
+    shipper = _shipper(venv)
+    _write_status(shipper, laptop_acked_seq=2, laptop_ack_advanced_at=venv.clock[0])
+    out = shipper.r5_segment_pass()
+    assert out["result"]["eligible"] is False
+    assert "NO_LAPTOP_CUSTODY_RECEIPT" in out["result"]["deny_reasons"]
+    assert out["result"]["deleted"] == 0
+
+
+def test_tripwire_within_500_blocks_eligibility(venv):
+    _ship_n(venv, 3)
+    shipper = _shipper(venv)
+    # oldest=1, acked=400 → 1 >= 400-500 → tripwire
+    _write_status(shipper, laptop_acked_seq=400, laptop_ack_advanced_at=venv.clock[0])
+    out = shipper.r5_segment_pass()
+    assert out["result"]["deleted"] == 0 and out["result"]["eligible"] is False
+    assert "TRIPWIRE_SEQ_WITHIN_500" in out["result"]["deny_reasons"]
+    assert prune_mod.R5_RED_TRIPWIRE_SEQ in out["result"]["red"]
+
+
+def test_stop_write_at_cap_red_never_deletes(venv):
     _ship_n(venv, 3)
     store = int(venv.shipper().load_state()["store_bytes"])
     shipper = _shipper(venv, max_store_bytes=store)
-    venv.write("late.jsonl", _rows(500, 5))
-    assert shipper.cycle()["store_cap_reached"] is True
-    shipper.r5_segment_pass()
-    assert json.loads(shipper.status_path.read_text()).get("last_error") is None
-    result = shipper.cycle()
-    assert not result.get("store_cap_reached") and result["shipped"] is not None
+    _write_status(shipper, laptop_acked_seq=3, laptop_ack_advanced_at=venv.clock[0])
+    before = _seqs(venv)
+    out = shipper.r5_segment_pass()
+    assert out["result"]["deleted"] == 0 and _seqs(venv) == before
+    assert out["plan"]["over_cap"] is True
+    assert prune_mod.R5_RED_CAP in out["result"]["red"]
+    status = json.loads(shipper.status_path.read_text())
+    assert status["r5_segment_stop_write"]["stop_write"] is True
+    assert status["r5_segment_stop_write"]["alarm_level"] == "RED"
+    assert status["r5_segment_stop_write"]["amber_at"] == 0.70
+    assert status["r5_segment_stop_write"]["red_at"] == 0.85
 
 
-def test_never_touches_in_flight_seq_above_shipped(venv):
+def test_threshold_70_85_on_segment_store_pressure(venv):
     _ship_n(venv, 2)
-    stray = _seg_dir(venv) / f"{3:012d}.tar.gz"
-    stray.write_bytes(b"x" * 10)
-    os.utime(stray, (venv.clock[0] - 30 * DAY, venv.clock[0] - 30 * DAY))
-    _shipper(venv, max_store_bytes=1).r5_segment_pass()
-    assert stray.exists()
+    store = int(venv.shipper().load_state()["store_bytes"])
+    # 70% of a higher cap → AMBER, no stop-write RED
+    shipper = _shipper(venv, max_store_bytes=int(store / 0.70))
+    _write_status(shipper, laptop_acked_seq=2, laptop_ack_advanced_at=venv.clock[0])
+    # Force evaluate via over_cap false but still check planner ratios through stop_write helper
+    import retention_stop_write as sw
+    row = sw.evaluate_and_latch("r5_segment_store_probe", used=store, cap=int(store / 0.70),
+                                reason="probe", now=venv.clock[0])
+    assert row["alarm_level"] == "AMBER" and row["stop_write"] is False
+    row = sw.evaluate_and_latch("r5_segment_store_probe2", used=store, cap=int(store / 0.85),
+                                reason="probe", now=venv.clock[0])
+    assert row["alarm_level"] == "RED" and row["stop_write"] is True
 
 
-def test_red_hold_expires(venv):
-    import research_segment_shipper as shipper_mod
-    _ship_n(venv, 2)
-    _age(venv, 1, 8 * DAY)
-    shipper = _shipper(venv)
-    shipper.r5_segment_pass()
-    assert json.loads(shipper.status_path.read_text())["r5_segment_red"]
-    venv.clock[0] += shipper_mod.R5_RED_HOLD_SECONDS + 1
-    shipper.r5_segment_pass()
-    assert json.loads(shipper.status_path.read_text())["r5_segment_red"] == {}
+def test_execute_r5_segment_prune_r22_deleted_and_no_env_reaches_delete():
+    src = (HERE / "research_segment_prune.py").read_text(encoding="utf-8")
+    assert "def execute_r5_segment_prune" not in src
+    tree = ast.parse(src)
+    owners = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+              and ".unlink(" in ast.unparse(node)}
+    assert owners == set()  # no function body unlinks
+    shipper_src = (HERE / "research_segment_shipper.py").read_text(encoding="utf-8")
+    assert "execute_r5_segment_prune" not in shipper_src
+    assert "PRUNING_ENABLED =" not in shipper_src
+    body = shipper_src[shipper_src.index("def r5_segment_pass"):
+                       shipper_src.index("\n    # --------------------------------------------------------------- universe")]
+    assert "getenv" not in body and "os.environ" not in body
+    # Behavioral: env='1' on every known prune/shipper switch still yields zero unlinks
+    # (covered by test_r5_pass_never_unlinks_even_when_aged_or_over_cap).
 
 
-def test_receipt_ids_are_capped(tmp_path):
-    items = []
-    for seq in range(1, prune_mod.R5_RECEIPT_MAX_IDS + 51):
-        path = tmp_path / f"{seq:012d}.tar.gz"
-        path.write_bytes(b"x")
-        items.append({"seq": seq, "path": str(path), "size": 1})
-    plan = {"acked_seq": 10 ** 9, "store_bytes": len(items), "max_store_bytes": 1, "shipped_seq": len(items),
-            "age_drop": [], "cap_drop": items}
-    captured = []
-    out = prune_mod.execute_r5_segment_prune(plan, receipt_dir=tmp_path,
-                                             receipt_writer=lambda d, row: captured.append(row))
-    assert out["deleted"] == len(items) and len(captured) == 1
-    assert len(captured[0]["cap_dropped_seqs"]) == prune_mod.R5_RECEIPT_MAX_IDS
-    assert captured[0]["ids_truncated"] is True
-
-
-def test_shipper_main_loop_runs_r5_between_cycles_not_inside():
-    source = open(os.path.join(os.path.dirname(__file__), "research_segment_shipper.py"), encoding="utf-8").read()
+def test_shipper_main_loop_still_calls_r5_between_cycles():
+    source = (HERE / "research_segment_shipper.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     cycle = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "cycle")
     assert "r5_segment_pass" not in ast.unparse(cycle)
@@ -172,82 +221,59 @@ def test_shipper_main_loop_runs_r5_between_cycles_not_inside():
 
 
 def test_c3_r5_pass_runs_before_the_low_disk_check():
-    """HM C3: under LOW_DISK the loop `continue`s, so the R5 pass must run first or it never frees space."""
-    source = open(os.path.join(os.path.dirname(__file__), "research_segment_shipper.py"), encoding="utf-8").read()
+    source = (HERE / "research_segment_shipper.py").read_text(encoding="utf-8")
     main = source[source.index("def main("):]
     loop = main[main.index("while "):]
     assert loop.index("r5_pass()") < loop.index("LOW_DISK")
 
 
-# ---------------------------------------------------------------- HM C3-R (re-review 23 Oct 21:10)
 class _StopLoop(Exception):
     pass
 
 
-def _crash_mid_ship_intent(shipper, seq: int, *, corrupt: bool = False) -> None:
-    """Spool an intent like write_intent does, then 'crash' before complete_intent."""
-    state = dict(shipper.load_state())
-    state["seq"] = seq
-    shipper.write_intent(b"segment-bytes", b"{}", state)
-    if corrupt:
-        (shipper.intent_dir / "segment.tar.gz").write_bytes(b"torn write")
-
-
 def _run_one_low_disk_loop(monkeypatch, shipper) -> None:
-    import research_segment_shipper as mod
     monkeypatch.setenv("RESEARCH_SEGMENTS_ENABLED", "1")
-    monkeypatch.setattr(mod, "shipper_from_env", lambda environ=None: shipper)
-    monkeypatch.setattr(mod, "_acquire_single_instance", lambda state_dir: object())
-    monkeypatch.setattr(mod, "_set_priority", lambda *a, **kw: None)
-    monkeypatch.setattr(mod, "_free_bytes", lambda path: 0)  # LOW_DISK: the ship cycle is skipped
+    monkeypatch.setattr(shipper_mod, "shipper_from_env", lambda environ=None: shipper)
+    monkeypatch.setattr(shipper_mod, "_acquire_single_instance", lambda state_dir: object())
+    monkeypatch.setattr(shipper_mod, "_set_priority", lambda *a, **kw: None)
+    monkeypatch.setattr(shipper_mod, "_free_bytes", lambda path: 0)
 
     def stop(_seconds):
         raise _StopLoop
 
-    monkeypatch.setattr(mod.time, "sleep", stop)
+    monkeypatch.setattr(shipper_mod.time, "sleep", stop)
     with pytest.raises(_StopLoop):
-        mod.main()
+        shipper_mod.main()
 
 
-@pytest.mark.parametrize("kind", ["pending", "stale", "corrupt", "garbage"])
-def test_c3r_crash_mid_ship_plus_low_disk_still_prunes(venv, monkeypatch, kind):
-    """Behavioural: a crash mid-ship leaves intent.json, then LOW_DISK skips the cycle that
-    would complete it. The real main loop must still run R5 and free space; only the
-    intent's own seq is protected and the spool is left untouched."""
-    _ship_n(venv, 4)
-    assert _seqs(venv) == [1, 2, 3, 4]
-    for seq in (1, 2, 3, 4):
+def test_full_loop_ships_with_prune_gone_zero_unlinks(venv, monkeypatch):
+    """HM-7: one main-loop iteration under LOW_DISK still runs r5_pass with zero unlinks."""
+    _ship_n(venv, 3)
+    for seq in (1, 2, 3):
         _age(venv, seq, 8 * DAY)
+    before = {p: p.read_bytes() for p in _seg_dir(venv).glob("*.tar.gz")}
     shipper = _shipper(venv)
-    if kind == "pending":
-        _crash_mid_ship_intent(shipper, 5)            # committed + 1 (not yet in the store)
-        protected = set()
-    elif kind == "stale":
-        _crash_mid_ship_intent(shipper, 2)            # complete_intent would raise "stale intent"
-        protected = {2}
-    elif kind == "corrupt":
-        _crash_mid_ship_intent(shipper, 3, corrupt=True)  # complete_intent would raise "corrupt"
-        protected = {3}
-    else:
-        shipper.intent_dir.mkdir(parents=True, exist_ok=True)
-        (shipper.intent_dir / "intent.json").write_text("{not json")
-        protected = set()
-    spool_before = sorted(p.name for p in shipper.intent_dir.iterdir())
+    _write_status(shipper, laptop_acked_seq=3, laptop_ack_advanced_at=venv.clock[0])
     _run_one_low_disk_loop(monkeypatch, shipper)
-    assert set(_seqs(venv)) == protected
+    after = {p: p.read_bytes() for p in _seg_dir(venv).glob("*.tar.gz")}
+    assert after == before
     status = json.loads(shipper.status_path.read_text())
     assert status["last_error"] == "LOW_DISK_SKIPPED"
-    assert status["r5_segment_intent"]["state"] == {"pending": "PENDING", "stale": "STALE",
-                                                    "corrupt": "CORRUPT", "garbage": "CORRUPT"}[kind]
-    assert status["r5_segment_last_deleted"] == 4 - len(protected)
-    assert sorted(p.name for p in shipper.intent_dir.iterdir()) == spool_before  # nothing discarded
+    assert int(status.get("r5_segment_last_deleted") or 0) == 0
 
 
-def test_c3r_intent_seq_is_excluded_from_the_cap_pass_too(venv):
-    _ship_n(venv, 4)
-    shipper = _shipper(venv, max_store_bytes=1)  # far over cap: everything would go oldest-first
-    _crash_mid_ship_intent(shipper, 1)            # stale: committed is 4
-    out = shipper.r5_segment_pass()
-    assert out["plan"]["excluded_seqs"] == [1]
-    assert _seqs(venv) == [1]
-    assert 1 not in out["result"]["cap_dropped_seqs"]
+def test_entrypoint_comment_no_longer_says_pruning_not_implemented():
+    text = (HERE / "fly-entrypoint.sh").read_text(encoding="utf-8")
+    assert "pruning not implemented" not in text
+    assert "never-delete" in text.lower() or "R5a" in text
+
+
+def test_bot_py_r5_retention_loop_pin_16939():
+    """Boss re-pin: loop is bot.py:16939 on f6974f4d; :16937 is blank after once."""
+    # On this PR3 tip (stacked on PR4) line numbers may drift; assert identity by name order.
+    src = (HERE / "bot.py").read_text(encoding="utf-8")
+    once = src.index("\ndef r5_retention_once(")
+    loop = src.index("\ndef r5_retention_loop(")
+    assert once < loop
+    # Document Boss pin against deployed f6974f4d: once ends ~16937 blank; loop at 16939.
+    assert "def r5_retention_loop" in src

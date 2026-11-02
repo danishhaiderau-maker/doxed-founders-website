@@ -569,14 +569,23 @@ def _replay_for(rule):
     return premium_replay_trades if isinstance(rule, PremiumRule) else session_follow_replay_trades
 
 
+def xvp_shadow_read_receipt() -> dict:
+    """R17: xvp_shadow_signals analyzer read is EMPTY_BECAUSE (0 rows)."""
+    return {"source": "xvp_shadow_signals.jsonl", "EMPTY_BECAUSE": "R17_RETIRED", "rows_read": 0}
+
+
 def load_xvl_shadow_rows(data_dir: str) -> tuple:
-    """Trigger and outcome rows from the cross-venue tiles' shadow streams (premium XVP and session-follow XVS)."""
+    """Trigger and outcome rows from the cross-venue tiles' shadow streams (premium XVP and session-follow XVS).
+
+    XVP ``SHADOW_FILE`` is R17-retired (None): never open ``xvp_shadow_signals.jsonl``.
+    """
     import cross_venue_premium as premium
     import cross_venue_session_follow as follow
     trigger_schemas = {follow.TRIGGER_SCHEMA, premium.TRIGGER_SCHEMA}
     outcome_schemas = {follow.OUTCOME_SCHEMA, premium.OUTCOME_SCHEMA}
     triggers, outcomes = [], []
-    paths = [path for name in (premium.SHADOW_FILE, follow.SHADOW_FILE)
+    # premium.SHADOW_FILE is None (R17) — skip; only session-follow may still have a file.
+    paths = [path for name in (premium.SHADOW_FILE, follow.SHADOW_FILE) if name
              for path in _generations(os.path.join(data_dir, name))]
     for path in paths:
         try:

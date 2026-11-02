@@ -10,8 +10,10 @@ whose file mtime is before ``since_ts`` provably holds nothing written since (no
 stamped row and no write since ``since_ts`` that is retired by code is reported IDLE with its reason (never GREEN).
 Rows whose sha256 is in the exclusion list (RK list) are reported separately and not counted.
 
-Status: RED when count > 0, a stream is unreadable (fail closed), or a retired stream was written after retirement;
-AMBER while the cached incremental scan has not yet reached EOF (it resumes on the next call); IDLE when a ledger is idle (reason given); GREEN only when none of these apply.
+Status: RED when count > 0, a stream is unreadable (fail closed), a retired stream was written after retirement,
+or a retired-stream scan cannot finish within its bound (H3 / R36: SCAN_INCOMPLETE — never AMBER indefinitely);
+AMBER while a non-retired cached incremental scan has not yet reached EOF (it resumes on the next call);
+IDLE when a ledger is idle (reason given — market_segment uses AMEND2 C3 status label); GREEN only when none of these apply.
 CLI: ``python ledger_stamp_monitor.py --data-dir DIR --since TS [--exclusion-list F]``; exit 0 GREEN, 2 RED, 3 other.
 """
 from __future__ import annotations
@@ -68,7 +70,11 @@ def _reverse_lines(path: Path, max_bytes: int) -> Iterator[tuple[bytes, bool]]:
 # cutoff is RED (NO_WRITE_SINCE_NOT_ALLOWLISTED); any write since the cutoff to a retired stream is RED
 # (WRITE_TO_RETIRED_STREAM), stamped or not.
 # One source of truth (RK): the allowlist lives in retired_streams.py, shared with V3EvidenceStore.open_read_only.
-from retired_streams import RETIRED_STREAM_ALLOWLIST  # noqa: E402
+from retired_streams import (  # noqa: E402
+    MARKET_SEGMENT_STATUS_LABEL,
+    RETIRED_STREAM_ALLOWLIST,
+    status_label_for_retired_stream,
+)
 RETIREMENT_FLAGS: dict[str, tuple[tuple[str, str], ...]] = {
     "market_segment": (
         ("research_v3_bridge", "MARKET_SEGMENT_WRITES_RETIRED"),
@@ -99,6 +105,20 @@ def _retired_reason(name: str) -> str | None:
     if reason is None or not flags or not all(v is True for v in flags.values()):
         return None
     return reason
+
+
+def _idle_reason_for(name: str, retired: str) -> str:
+    """AMEND2 C3: market_segment idle surfaces the exact RETIRED status label."""
+    return status_label_for_retired_stream(name) or retired
+
+
+def _mark_idle(info: dict, name: str, retired: str) -> None:
+    label = _idle_reason_for(name, retired)
+    info["idle_reason"] = label
+    info["status_label"] = label
+    if name == "market_segment":
+        # Keep short ruling discoverable alongside C3 display label.
+        info["retired_ruling"] = RETIRED_STREAM_ALLOWLIST.get(name) or retired
 
 
 def generation_paths(ledger_dir: Path, name: str) -> list[Path]:
@@ -134,7 +154,8 @@ def load_exclusions(path: str | os.PathLike | None) -> set[str]:
 def _new_info() -> dict:
     return {"status": None, "unstamped": 0, "excluded_listed": 0, "stamped": 0, "boundary_reached": False,
             "boundary": None, "legacy_unstamped_before_first_stamp": 0, "unclassified_at_cap": 0,
-            "generations_scanned": [], "idle_reason": None, "red_reason": None, "reasons": {}, "sample_row_ids": [],
+            "generations_scanned": [], "idle_reason": None, "status_label": None,
+            "red_reason": None, "reasons": {}, "sample_row_ids": [],
             "warnings": [], "last_write_ts": None}
 
 
@@ -269,7 +290,7 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
         info.update(boundary_reached=True, boundary="NO_FILE")
         info["scan"]["complete"] = True
         if retired:
-            info["idle_reason"] = retired
+            _mark_idle(info, name, retired)
         else:
             info["red_reason"] = "NO_WRITE_SINCE_NOT_ALLOWLISTED"
         return info
@@ -368,13 +389,18 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
     if not complete:
         info["unclassified_at_cap"] = legacy[0]
         legacy = [0, {}, []]
-        unverified.append(f"{name}:SCAN_INCOMPLETE_RESUMING")
+        if retired:
+            # H3 / R36: retired partial scan → RED SCAN_INCOMPLETE (never AMBER resume).
+            unverified.append(f"{name}:SCAN_INCOMPLETE")
+            info["red_reason"] = "SCAN_INCOMPLETE"
+        else:
+            unverified.append(f"{name}:SCAN_INCOMPLETE_RESUMING")
     elif not fold["boundary"]:
         info.update(boundary_reached=True, boundary="END_OF_OLDEST_GENERATION")
     info["legacy_unstamped_before_first_stamp"] = legacy[0]
     retired_since = RETIRED_SINCE_TS.get(name)
     if retired and retired_since is not None and not complete:
-        return info  # AMBER (resuming); never RED/IDLE on a partial fold of a retired stream
+        return info  # RED SCAN_INCOMPLETE already set; never AMBER/IDLE on partial retired fold
     if retired and retired_since is not None:
         # Split: rows with written_at_ts < retirement, or unstamped rows in files untouched since retirement, are
         # pre-retirement history (IDLE). Any newer stamp, or file touched at/after retirement, is a post-retirement write.
@@ -382,7 +408,7 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
         post = (max_w is not None and max_w >= retired_since) or newest_mtime >= retired_since
         if not post:
             info["pre_retirement_rows"] = counted[0] + info["stamped"] + info["legacy_unstamped_before_first_stamp"]
-            info["idle_reason"] = retired
+            _mark_idle(info, name, retired)
             return info
         info["red_reason"] = "WRITE_TO_RETIRED_STREAM"
         _apply_counted(info, counted)
@@ -395,7 +421,7 @@ def _scan_ledger(name: str, ledger_dir: Path, since_ts: float, exclusions: set[s
         info["red_reason"] = "WRITE_TO_RETIRED_STREAM"
     elif not wrote_since and complete:
         if retired:
-            info["idle_reason"] = retired
+            _mark_idle(info, name, retired)
         else:
             info["red_reason"] = "NO_WRITE_SINCE_NOT_ALLOWLISTED"
     return info

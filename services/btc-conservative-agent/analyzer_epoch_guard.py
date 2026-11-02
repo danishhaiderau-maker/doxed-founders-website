@@ -325,6 +325,23 @@ UNPLACED_LIST_SCHEMA = "analyzer_epoch_unplaced_rows_v1"
 _ROW_ID_KEYS = ("record_id", "event_id", "decision_id", "lifecycle_id", "segment_id", "trade_id", "id")
 
 
+def stream_is_retired_allowlisted(relpath: str | os.PathLike) -> bool:
+    """True when ``relpath`` is an allowlisted retired V3 ledger (case-insensitive basename).
+
+    Used by purity / unplaced / monitor.report so retired ``market_segment`` is never opened.
+    """
+    from retired_streams import RETIRED_STREAM_ALLOWLIST
+
+    name = Path(str(relpath).replace("\\", "/")).name.lower()
+    stem, dot, suffix = name.rpartition(".")
+    if dot and suffix.isdigit():
+        name = stem
+        stem, dot, suffix = name.rpartition(".")
+    if suffix in ("jsonl", "csv") and stem in {k.lower() for k in RETIRED_STREAM_ALLOWLIST}:
+        return True
+    return False
+
+
 def file_unplaced_rows(path: str | os.PathLike, relpath: str, manifest: dict | None,
                        floor_ts: float | None = None) -> Iterator[dict]:
     """The exact straddle/unstamped rows of one JSONL stream file (same classification as
@@ -333,11 +350,16 @@ def file_unplaced_rows(path: str | os.PathLike, relpath: str, manifest: dict | N
     guessed into the epoch); the list exists so they can be reviewed before any deletion. Read-only."""
     import hashlib
     import json
+    import analyzer_book10_regime as abr
+
     if not manifest or relpath.endswith(".csv"):
         return
     floor = float(floor_ts or manifest.get("started_at_ts") or 0)
     if not floor:
         return
+    # Backup guard before open (Strategist / HM): never open market_segment here.
+    abr.guard_no_market_segment_open(path)
+    abr.guard_no_market_segment_open(relpath)
     with guarded_read(relpath, "inventory"):
         handle = open(path, "rb")
     with handle:
@@ -377,6 +399,8 @@ def unplaced_rows_document(data_root: str | os.PathLike, manifest: dict | None, 
     if streams is None:
         ledgers = root / "v3" / "ledgers"
         streams = sorted(f"v3/ledgers/{p.name}" for p in ledgers.glob("*.jsonl")) if ledgers.is_dir() else []
+    # Filter retired streams case-insensitively (never open market_segment for unplaced list).
+    streams = [s for s in streams if not stream_is_retired_allowlisted(s)]
     rows: list[dict] = []
     for rel in streams:
         base = root / rel
@@ -618,6 +642,13 @@ class StreamReadMonitor:
                     inventory[stream] = inventory.get(stream, 0) + entry["inventory"]
                 if not entry.get("raw"):
                     continue
+                # Skip retired streams (case-insensitive); never re-open market_segment here.
+                if stream_is_retired_allowlisted(stream) or stream_is_retired_allowlisted(path):
+                    continue
+                import analyzer_book10_regime as abr
+
+                abr.guard_no_market_segment_open(path)
+                abr.guard_no_market_segment_open(stream)
                 try:
                     counts = file_epoch_row_counts(path, stream, manifest, floor_ts)
                 except OSError:
