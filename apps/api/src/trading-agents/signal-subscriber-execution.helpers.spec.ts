@@ -8342,11 +8342,15 @@ test('web process dispatches emergency reconciliation to the authenticated execu
   const priorWorker = process.env.RELAY_EXECUTOR_WORKER;
   const priorUrl = process.env.RELAY_EXECUTOR_WAKE_URL;
   const priorSecret = process.env.BOT_CONTROL_SECRET;
+  // Legacy wake-path unit test: non-Fly internal executor only under FORCE_ACTIVE.
+  // Production keeps FLY_SHOWCASE_RUNTIME_RETIRED (no RELAY_EXECUTOR_WAKE_URL use).
+  const priorForce = process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE;
   const originalFetch = globalThis.fetch;
   process.env.SUBSCRIBER_EXECUTION_ENABLED = 'false';
   process.env.RELAY_EXECUTOR_WORKER = 'false';
   process.env.RELAY_EXECUTOR_WAKE_URL = 'http://relay-executor.internal';
   process.env.BOT_CONTROL_SECRET = 'control-secret';
+  process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = '1';
   const calls: Array<{ url: string; init: RequestInit; body: any }> = [];
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
@@ -8379,6 +8383,8 @@ test('web process dispatches emergency reconciliation to the authenticated execu
     else process.env.RELAY_EXECUTOR_WAKE_URL = priorUrl;
     if (priorSecret == null) delete process.env.BOT_CONTROL_SECRET;
     else process.env.BOT_CONTROL_SECRET = priorSecret;
+    if (priorForce == null) delete process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE;
+    else process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = priorForce;
   }
 });
 

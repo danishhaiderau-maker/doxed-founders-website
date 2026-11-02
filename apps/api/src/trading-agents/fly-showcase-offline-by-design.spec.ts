@@ -147,3 +147,17 @@ test('wake path and fly-control refuse dead Fly host', () => {
   assert.match(fly, /isFlyShowcaseRuntimeRetired\(\)/);
   assert.match(fly, /SHOWCASE_OFFLINE_BY_DESIGN_LABEL/);
 });
+
+test('legacy emergency-wake helpers.spec uses FORCE_ACTIVE (not production wake)', () => {
+  // Mutation proof: drop FORCE_ACTIVE from the emergency reconcile helpers test → CI fails
+  // the same way tip fe5153f8e166 did (wake retired throw).
+  const helpers = read('signal-subscriber-execution.helpers.spec.ts');
+  assert.match(
+    helpers,
+    /web process dispatches emergency reconciliation[\s\S]*FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE\s*=\s*'1'/,
+  );
+  assert.match(
+    helpers,
+    /FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE[\s\S]*requestExecutorEmergencyReconcile/,
+  );
+});
