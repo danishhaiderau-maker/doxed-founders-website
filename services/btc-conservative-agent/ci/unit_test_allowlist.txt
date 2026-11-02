@@ -1,5 +1,6 @@
 # Files that pass under pytest (run by .github/workflows/unit-tests.yml). Generated 2026-10-16 by Grok Bot.
 # Any test file must be here or in known_red.txt: test_ci_test_inventory.py fails on drift.
+
 test_active_execution_graph_contract.py
 test_adaptive_entry_funnel.py
 test_admin_close_trigger_ts.py
@@ -266,8 +267,11 @@ test_genome_source_preflight.py
 test_gs_regime_engine.py
 test_hm_audit_20261010.py
 test_hm_missing_checks.py
+test_hm_r4_b1_exit_fill.py
+test_hm_r4_b2_guardian.py
 test_hm_r5_fill_provenance.py
 test_hm_r6_report_contract.py
+test_hm_r7_a1_fade3_key.py
 test_hop_windows.py
 test_horizon_source_truth.py
 test_http_emergency_admission.py
@@ -682,8 +686,6 @@ test_ws_live_readiness_contract.py
 test_ws_tick_lifecycle_worker.py
 test_ws_trade_wake_book_mark.py
 test_xvenue_submit_latency.py
-tests/test_crash_journal_writer.py
-tests/test_v3_ledger_index.py
 ../../scripts/r2_backup/test_r2_backup.py
 ../../scripts/test-fly-workflow-revision-contract.py
 test_fly_runtime_retired_r22.py
