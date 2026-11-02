@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Fly.io-only production entry point for the Conservative BTC bot.
+Production entry point for the Conservative BTC bot.
 
-Fly.io is the only supported production runtime. Desktop processes are
-dashboard, data-mirror, and analyzer services only.
+Historically Fly.io-only. After Fly ``doxed-btc-bot`` delete (2026-11-03), a
+confirmed ``LOCAL_FRESH_START`` path may own local paper (CTRL+GS-01 only).
+Without that confirmation the Fly identity gates still refuse non-Fly runtimes.
 """
 from __future__ import annotations
 
@@ -83,86 +84,168 @@ def _read_boot_revision() -> str:
     return "unknown"
 
 
-_fly_app = (os.getenv("FLY_APP_NAME") or "").strip()
-_fly_machine = (
-    os.getenv("FLY_MACHINE_ID")
-    or os.getenv("FLY_ALLOC_ID")
-    or ""
-).strip()
-_fly_region = (os.getenv("FLY_REGION") or "").strip()
-if (
-    _fly_app != "doxed-btc-bot"
-    or not _fly_machine
-    or not _fly_region
-):
-    print(
-        "REFUSED_NON_FLY_RUNTIME: Fly.io app doxed-btc-bot is the sole AI, "
-        "strategy, paper-execution, and relay-signal owner. Use the desktop "
-        "mirror launchers for dashboard/analyzer access. Exact Fly app, "
-        "machine, and region identity is required.",
-        file=sys.stderr,
+def _local_fresh_requested() -> bool:
+    # Inline truth check so this file stays importable before local_fresh_runtime
+    # is on sys.path (service dir insert happens below).
+    if (os.getenv("LOCAL_FRESH_START") or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+    return (
+        (os.getenv("LOCAL_FRESH_START_CONFIRM") or "").strip()
+        == "I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE"
     )
-    raise SystemExit(78)
 
-_required_fly_controls = (
-    "BOT_ADMIN_TOKEN",
-    "BOT_CONTROL_SECRET",
-    "SHOWCASE_WEBHOOK_SECRET",
-    "SHOWCASE_RELAY_WEBHOOK_URL",
-)
-_missing_fly_controls = [
-    name for name in _required_fly_controls
-    if not (os.getenv(name) or "").strip()
-]
-if _missing_fly_controls:
-    print(
-        "REFUSED_MISSING_FLY_CONTROL: canonical Fly production requires "
-        + ", ".join(_missing_fly_controls),
-        file=sys.stderr,
+
+_LOCAL_FRESH = _local_fresh_requested()
+
+if _LOCAL_FRESH:
+    # Local paper owner after Fly delete — fail closed on trade keys / live / Fly env.
+    _service_preload = os.path.dirname(os.path.abspath(__file__))
+    if _service_preload not in sys.path:
+        sys.path.insert(0, _service_preload)
+    from local_fresh_runtime import (  # noqa: E402
+        apply_local_fresh_environ,
+        build_health_payload,
+        refuse_message,
+        resolve_data_dir,
+        resolve_health_path,
+        validate_paper_safe_env,
+        write_health_json,
     )
-    raise SystemExit(78)
 
-if (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() not in (
-    "1",
-    "true",
-    "yes",
-    "on",
-):
-    print(
-        "REFUSED_DIRECT_FLY_LIVE: Fly is the paper-signal owner only; "
-        "Railway is the isolated Bitfinex live executor.",
-        file=sys.stderr,
+    apply_local_fresh_environ()
+    _ok, _reasons = validate_paper_safe_env()
+    if not _ok:
+        print(refuse_message(_reasons), file=sys.stderr)
+        raise SystemExit(78)
+    # HM AMBER: laptop Bitfinex/live policy gate (replaces disabled bitfinex-production-gate).
+    from local_bitfinex_live_policy_gate import run_gate as _run_live_policy_gate  # noqa: E402
+
+    _gate_receipt = (
+        (os.getenv("LOCAL_BITFINEX_LIVE_POLICY_GATE_RECEIPT") or "").strip()
+        or str(resolve_health_path().parent / "local_bitfinex_live_policy_gate.json")
     )
-    raise SystemExit(78)
-
-os.environ.setdefault("SHOWCASE_AGENT", "1")
-# Adoption chart feed — DeepSeek usage POSTs here after each trading inference.
-# Restored after the Jul 31 Fly-only rewrite dropped the previous setdefault and
-# left Fly without SHOWCASE_INFERENCE_USAGE_URL, which zeroed the landing chart.
-os.environ.setdefault(
-    "SHOWCASE_INFERENCE_USAGE_URL",
-    "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
-)
-# Fly is the canonical strategy/trading owner and the research-data warehouse
-# (paper collection writers + owner dashboard). Do not treat this process as
-# an execution mirror: that 404s CSV/JSONL exports. Railway/live copy is the
-# only EXECUTION_MIRROR_ONLY host.
-os.environ["HOME_BOT_LOCAL"] = "0"
-os.environ["HOME_RESEARCH_FULL"] = "1"
-if os.environ.get("EXECUTION_MIRROR_ONLY", "").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-):
-    os.environ["HOME_RESEARCH_FULL"] = "0"
-    os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "1"
+    _gate = _run_live_policy_gate(
+        receipt_path=_gate_receipt,
+        require_local_fresh_confirm=True,
+    )
+    if not _gate.get("ok"):
+        print(refuse_message(_gate.get("reasons") or ["GATE_FAILED"]), file=sys.stderr)
+        raise SystemExit(78)
+    # Local admin token still required for /api admin; relay webhook optional (isolated soak).
+    _required_local_controls = ("BOT_ADMIN_TOKEN", "BOT_CONTROL_SECRET")
+    _missing_local = [
+        name for name in _required_local_controls if not (os.getenv(name) or "").strip()
+    ]
+    if _missing_local:
+        print(
+            "REFUSED_MISSING_LOCAL_CONTROL: local paper requires "
+            + ", ".join(_missing_local),
+            file=sys.stderr,
+        )
+        raise SystemExit(78)
+    os.environ.setdefault("SHOWCASE_AGENT", "1")
+    _data_dir = resolve_data_dir()
+    _data_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("BOT_DATA_DIR", str(_data_dir))
+    _health_path = resolve_health_path()
+    write_health_json(
+        _health_path,
+        build_health_payload(
+            ok=True,
+            data_dir=str(_data_dir),
+            gap_log_path=str(_data_dir / "gap_log.jsonl"),
+            collector={"entrypoint": "btc_conservative_agent.local_fresh"},
+            extra={"bitfinex_live_policy_gate": dict(_gate)},
+        ),
+    )
 else:
-    os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "0"
-os.environ["DASHBOARD_PUBLIC_URL"] = "https://doxed-btc-bot.fly.dev/"
-os.environ["RESEARCH_DASHBOARD_PUBLIC_URL"] = (
-    "https://doxed-btc-bot.fly.dev/analysis"
-)
+    _fly_app = (os.getenv("FLY_APP_NAME") or "").strip()
+    _fly_machine = (
+        os.getenv("FLY_MACHINE_ID")
+        or os.getenv("FLY_ALLOC_ID")
+        or ""
+    ).strip()
+    _fly_region = (os.getenv("FLY_REGION") or "").strip()
+    if (
+        _fly_app != "doxed-btc-bot"
+        or not _fly_machine
+        or not _fly_region
+    ):
+        print(
+            "REFUSED_NON_FLY_RUNTIME: Fly.io app doxed-btc-bot is the sole AI, "
+            "strategy, paper-execution, and relay-signal owner. Use the desktop "
+            "mirror launchers for dashboard/analyzer access. Exact Fly app, "
+            "machine, and region identity is required. After Fly delete, set "
+            "LOCAL_FRESH_START=1 with LOCAL_FRESH_START_CONFIRM="
+            "I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE for local paper.",
+            file=sys.stderr,
+        )
+        raise SystemExit(78)
+
+    _required_fly_controls = (
+        "BOT_ADMIN_TOKEN",
+        "BOT_CONTROL_SECRET",
+        "SHOWCASE_WEBHOOK_SECRET",
+        "SHOWCASE_RELAY_WEBHOOK_URL",
+    )
+    _missing_fly_controls = [
+        name for name in _required_fly_controls
+        if not (os.getenv(name) or "").strip()
+    ]
+    if _missing_fly_controls:
+        print(
+            "REFUSED_MISSING_FLY_CONTROL: canonical Fly production requires "
+            + ", ".join(_missing_fly_controls),
+            file=sys.stderr,
+        )
+        raise SystemExit(78)
+
+    if (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        print(
+            "REFUSED_DIRECT_FLY_LIVE: Fly is the paper-signal owner only; "
+            "Railway is the isolated Bitfinex live executor.",
+            file=sys.stderr,
+        )
+        raise SystemExit(78)
+
+    os.environ.setdefault("SHOWCASE_AGENT", "1")
+    # Adoption chart feed — DeepSeek usage POSTs here after each trading inference.
+    # Restored after the Jul 31 Fly-only rewrite dropped the previous setdefault and
+    # left Fly without SHOWCASE_INFERENCE_USAGE_URL, which zeroed the landing chart.
+    os.environ.setdefault(
+        "SHOWCASE_INFERENCE_USAGE_URL",
+        "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
+    )
+    # Fly is the canonical strategy/trading owner and the research-data warehouse
+    # (paper collection writers + owner dashboard). Do not treat this process as
+    # an execution mirror: that 404s CSV/JSONL exports. Railway/live copy is the
+    # only EXECUTION_MIRROR_ONLY host.
+    os.environ["HOME_BOT_LOCAL"] = "0"
+    os.environ["HOME_RESEARCH_FULL"] = "1"
+    if os.environ.get("EXECUTION_MIRROR_ONLY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        os.environ["HOME_RESEARCH_FULL"] = "0"
+        os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "1"
+    else:
+        os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "0"
+    os.environ["DASHBOARD_PUBLIC_URL"] = "https://doxed-btc-bot.fly.dev/"
+    os.environ["RESEARCH_DASHBOARD_PUBLIC_URL"] = (
+        "https://doxed-btc-bot.fly.dev/analysis"
+    )
 
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVICE_DIR not in sys.path:
