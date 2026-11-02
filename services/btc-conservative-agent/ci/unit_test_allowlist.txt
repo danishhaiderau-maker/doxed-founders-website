@@ -686,6 +686,8 @@ test_ws_live_readiness_contract.py
 test_ws_tick_lifecycle_worker.py
 test_ws_trade_wake_book_mark.py
 test_xvenue_submit_latency.py
+tests/test_crash_journal_writer.py
+tests/test_v3_ledger_index.py
 ../../scripts/r2_backup/test_r2_backup.py
 ../../scripts/test-fly-workflow-revision-contract.py
 test_fly_runtime_retired_r22.py
