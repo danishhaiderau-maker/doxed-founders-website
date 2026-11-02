@@ -39,6 +39,9 @@ from fly_monitor_contract import (  # noqa: E402
     resolve_deployed_revision,
 )
 
+# App doxed-btc-bot DELETED 2026-11-03 01:12 AEDT (OBSERVED). Keep URL constants
+# for static contract tests; main() refuses probes (R22 / R50c — no dead-app wake).
+FLY_RUNTIME_RETIRED = True
 FLY_BASE = "https://doxed-btc-bot.fly.dev"
 HEALTH_URL = "https://doxed-btc-bot.fly.dev/health"
 READY_URL = "https://doxed-btc-bot.fly.dev/ready"
@@ -567,6 +570,18 @@ def write_heartbeat(now: float, *, crashed: bool, restored: bool) -> str:
 
 
 def main() -> int:
+    if FLY_RUNTIME_RETIRED:
+        msg = (
+            "FLY_RUNTIME_RETIRED: doxed-btc-bot deleted 2026-11-03 (OBSERVED); "
+            "refusing Fly /health probes (R22/R50e disable-not-delete; R50c)."
+        )
+        print(msg)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as out:
+                out.write("### Fly monitor (retired)\n\n")
+                out.write(f"- {msg}\n")
+        return 0
     state_path = Path(os.environ.get("FLY_MONITOR_STATE", ".fly-monitor-state/state.json"))
     state, restored = load_state(state_path)
     now = time.time()

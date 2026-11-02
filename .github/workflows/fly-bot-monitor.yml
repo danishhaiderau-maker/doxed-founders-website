@@ -1,15 +1,11 @@
 name: Monitor Fly BTC bot
+# RETIRED / DISABLED IN PLACE — do NOT delete this file (RK PASS 01:21 AEDT: disable-not-delete).
+# Fly app doxed-btc-bot DELETED 2026-11-03 01:12 AEDT (OBSERVED). Cite R22 + R50(e)/R50c.
+# No push auto-deploy, no schedule probes, every job hard-gated with `if: false`.
+# Manual workflow_dispatch retained only so the file stays a valid Actions workflow; jobs never run.
 
 on:
-  schedule:
-    # Fly probes /health every 15s and Railway owns the sustained-drop guard.
-    # This job is revision-drift and safety observability, not the money-path
-    # watchdog. Failures are deduplicated by scripts/fly_monitor_run.py: a run
-    # fails only when a critical incident alerts or re-alerts (warnings are
-    # listed in the issue but stay green), and one issue labelled
-    # fly-monitor-incident tracks it until recovery. A crashed run or a cache
-    # miss never closes the issue.
-    - cron: "*/15 * * * *"
+  # FORMER cron */15 REMOVED — no Fly /health probes (app deleted).
   workflow_dispatch:
     inputs:
       test_alert:
@@ -28,6 +24,7 @@ concurrency:
 
 jobs:
   monitor:
+    if: false  # FLY_RUNTIME_RETIRED — hard fail-closed
     runs-on: ubuntu-slim
     timeout-minutes: 8
     steps:

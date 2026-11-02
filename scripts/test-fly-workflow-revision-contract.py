@@ -14,16 +14,23 @@ TEST_PATH = "services/btc-conservative-agent/test*.py"
 
 
 def test_test_only_changes_are_excluded_from_deploy():
+    # Push auto-deploy retired (R22); former path filters stay archived in comments.
     assert f'- "!{TEST_PATH}"' in DEPLOY
+    assert "FORMER push auto-deploy REMOVED" in DEPLOY
 
 
 def test_runtime_and_deploy_contract_changes_remain_deploy_triggers():
+    # Historical path filters remain as comments; live `on.push` must stay gone.
     for path in (
         "services/btc-conservative-agent/**",
         "scripts/check-relay-flat.mjs",
         ".github/workflows/fly-bot-deploy.yml",
     ):
         assert path in DEPLOY
+    on_block = DEPLOY[DEPLOY.index("\non:"):DEPLOY.index("\npermissions:")]
+    assert "\n  push:" not in on_block
+    assert "workflow_dispatch:" in on_block
+    assert "if: false && (" in DEPLOY
 
 
 def test_monitor_expects_latest_successful_deploy_on_master():
@@ -33,6 +40,12 @@ def test_monitor_expects_latest_successful_deploy_on_master():
     assert "require_deployed_revision(" in MONITOR_RUNNER
     assert 'run.get("head_branch") == "master"' in MONITOR_RUNNER
     assert "ref: aac5940" not in MONITOR
+    # Cron retired — no 15-min Fly /health probes against a deleted app.
+    on_block = MONITOR[MONITOR.index("\non:"):MONITOR.index("\npermissions:")]
+    assert "cron:" not in on_block
+    assert "schedule:" not in on_block
+    assert "if: false" in MONITOR
+    assert "FLY_RUNTIME_RETIRED = True" in MONITOR_RUNNER
 
 
 def test_monitor_splits_fast_liveness_from_full_readiness_fail_closed():

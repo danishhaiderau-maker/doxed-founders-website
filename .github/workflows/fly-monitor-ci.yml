@@ -1,32 +1,37 @@
 name: Fly monitor CI
+# RETIRED / DISABLED IN PLACE — do NOT delete this file (RK PASS 01:21 AEDT: disable-not-delete).
+# Fly app doxed-btc-bot DELETED 2026-11-03 01:12 AEDT (OBSERVED). Cite R22 + R50(e)/R50c.
+# No push auto-deploy, no schedule probes, every job hard-gated with `if: false`.
+# Manual workflow_dispatch retained only so the file stays a valid Actions workflow; jobs never run.
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/fly-bot-monitor.yml"
-      - ".github/workflows/fly-monitor-ci.yml"
-      - "scripts/fly_monitor_*.py"
-      - "scripts/test_fly_monitor_*.py"
-      - "scripts/laptop_chain_incident.py"
-      - "scripts/test_laptop_chain_incident.py"
-      - "scripts/laptop-chain-supervisor.ps1"
-      - "scripts/system_health*.py"
-      - "scripts/health_client.py"
-      - "scripts/test_system_health.py"
-      - "scripts/fixtures/system_health/**"
-      - "services/btc-conservative-agent/system_health_banner.py"
-      - "services/btc-conservative-agent/runtime_uptime.py"
-      - ".github/workflows/laptop-incident-relay.yml"
-      - "services/btc-conservative-agent/test_volume_health_snapshot.py"
-      - "scripts/test-fly-workflow-revision-contract.py"
-      - "scripts/fly-bot-runtime-contract.spec.mjs"
-      - "tests/test_fly_bot_monitor_contract.py"
+  # FORMER pull_request path filter REMOVED (R22). Archived paths:
+  #   - ".github/workflows/fly-bot-monitor.yml"
+  #   - ".github/workflows/fly-monitor-ci.yml"
+  #   - "scripts/fly_monitor_*.py"
+  #   - "scripts/test_fly_monitor_*.py"
+  #   - "scripts/laptop_chain_incident.py"
+  #   - "scripts/test_laptop_chain_incident.py"
+  #   - "scripts/laptop-chain-supervisor.ps1"
+  #   - "scripts/system_health*.py"
+  #   - "scripts/health_client.py"
+  #   - "scripts/test_system_health.py"
+  #   - "scripts/fixtures/system_health/**"
+  #   - "services/btc-conservative-agent/system_health_banner.py"
+  #   - "services/btc-conservative-agent/runtime_uptime.py"
+  #   - ".github/workflows/laptop-incident-relay.yml"
+  #   - "services/btc-conservative-agent/test_volume_health_snapshot.py"
+  #   - "scripts/test-fly-workflow-revision-contract.py"
+  #   - "scripts/fly-bot-runtime-contract.spec.mjs"
+  #   - "tests/test_fly_bot_monitor_contract.py"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   monitor-contract:
+    if: false  # FLY_RUNTIME_RETIRED — hard fail-closed
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -1,4 +1,7 @@
 name: Bitfinex production gate
+# NOT Fly-retired. RK HOLD 02:14 AEDT on #969: keep pull_request + push so
+# bitfinex-policy still runs on every PR (Live-OFF / production lock). Fly-era
+# workflows stay fail-closed elsewhere; this gate has no Fly steps.
 
 on:
   push:
