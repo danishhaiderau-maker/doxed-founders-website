@@ -1,17 +1,16 @@
 name: Deploy Fly BTC bot
+# RETIRED / DISABLED IN PLACE — do NOT delete this file (RK PASS 01:21 AEDT: disable-not-delete).
+# Fly app doxed-btc-bot DELETED 2026-11-03 01:12 AEDT (OBSERVED). Cite R22 + R50(e)/R50c.
+# No push auto-deploy, no schedule probes, every job hard-gated with `if: false`.
+# Manual workflow_dispatch retained only so the file stays a valid Actions workflow; jobs never run.
 # deploy-trigger: land #910+#913 tip fa4c4c6d5
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "services/btc-conservative-agent/**"
-      # Tests validate an image but are not copied into or imported by the
-      # running Fly service. A test-only push must not claim a new deployed
-      # source revision.
-      - "!services/btc-conservative-agent/test*.py"
-      - "scripts/check-relay-flat.mjs"
-      - ".github/workflows/fly-bot-deploy.yml"
+  # FORMER push auto-deploy REMOVED (R22/R50c). Archived path filters (tests may still cite):
+  #   - "services/btc-conservative-agent/**"
+  #   - "!services/btc-conservative-agent/test*.py"
+  #   - "scripts/check-relay-flat.mjs"
+  #   - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
     inputs:
       mode:
@@ -152,7 +151,7 @@ env:
 
 jobs:
   resume-bootstrap:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap')
     runs-on: ubuntu-latest
     timeout-minutes: 95
     steps:
@@ -188,7 +187,7 @@ jobs:
           python scripts/fly_resume_bootstrap.py preserve-maintenance
           --expected "$EXPECTED_BOOTSTRAP_REVISION"
   resume-predeploy-abort:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-predeploy-abort'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-predeploy-abort')
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -234,7 +233,7 @@ jobs:
     # readiness, resumes through the deploy-owned /api/resume path (operator
     # and safety pauses are retained), then turns every registry tile ON and
     # proves two advancing AI cycles.
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-paper'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-paper')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -274,7 +273,7 @@ jobs:
           EXPECTED_REVISION: ${{ inputs.expected_bootstrap_revision }}
         run: python scripts/fly_postdeploy_active_gate.py
   repair-execution-tail:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -368,7 +367,7 @@ jobs:
         run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   repair-lifecycle-cursor:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-cursor'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-cursor')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -470,7 +469,7 @@ jobs:
         run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   repair-lifecycle-tail:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-tail'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-tail')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -627,7 +626,7 @@ jobs:
         run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   repair-execution-funnel:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-funnel'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-funnel')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -714,7 +713,7 @@ jobs:
           PY
 
   expand-storage:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'expand-storage'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'expand-storage')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -739,7 +738,7 @@ jobs:
     # Recoverability gate before any data deletion: an on-demand snapshot of
     # the exact BTC data volume. Read-only for the guest; never deploys,
     # restarts, deletes or touches exchange exposure.
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-volume'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-volume')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -781,7 +780,7 @@ jobs:
     # snapshot receipt first. Paper is resumed with every registry tile ON;
     # relay/Bitfinex are never armed. The v1 epoch is only a candidate when
     # the laptop's ACK of its final published seq exists on the volume.
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'fresh-start-wipe-plan' || inputs.mode == 'fresh-start-wipe-execute')
+    if: false && (github.event_name == 'workflow_dispatch' && (inputs.mode == 'fresh-start-wipe-plan' || inputs.mode == 'fresh-start-wipe-execute'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -868,7 +867,7 @@ jobs:
     # keep_maintenance_pause=true selects the pre-start wipe (Danish: wipe while
     # held down before the final start): --pre-start plan, confirm
     # DELETE-PRE-START:<plan sha12>, and paper is never resumed.
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-wipe-plan' || inputs.mode == 'clean-epoch-wipe-execute')
+    if: false && (github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-wipe-plan' || inputs.mode == 'clean-epoch-wipe-execute'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -1000,7 +999,7 @@ jobs:
     # collector file handles are clean -> verify (live off unchanged, 0 rows on every monitor route) -> wait for the
     # book stream. Paper is NEVER resumed here (Boss resumes after the Health Monitor check). Never arms relay/Bitfinex.
     # Confirm: DELETE-FULL-RESET:<plan sha256[:12]> printed by the plan; reason in full_reset_reason (>= 10 chars).
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'full-reset-no-archive-plan' || inputs.mode == 'full-reset-no-archive-execute')
+    if: false && (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full-reset-no-archive-plan' || inputs.mode == 'full-reset-no-archive-execute'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -1366,7 +1365,7 @@ jobs:
     # so collector_v22 reads and the event index reconcile again. Execute
     # requires QUARANTINE-V22-SEALS:<plan sha12> and the paper maintenance hold
     # (paused DEPLOY_MAINTENANCE, disarmed, force-paper); paper is never resumed.
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v22-seals-plan' || inputs.mode == 'repair-v22-seals-execute')
+    if: false && (github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v22-seals-plan' || inputs.mode == 'repair-v22-seals-execute'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1431,7 +1430,7 @@ jobs:
     # generations 1 and 2 into seals/quarantine/ (never deletes) with hashes
     # verified before and after, then restores the image entrypoint and proves
     # a held-down boot. Any failure leaves the machine down.
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v22-seals-offline-plan' || inputs.mode == 'repair-v22-seals-offline-execute')
+    if: false && (github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v22-seals-offline-plan' || inputs.mode == 'repair-v22-seals-offline-execute'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -1614,7 +1613,7 @@ jobs:
     # markers to /app/data/quarantine/v3_completeness_markers/ (outside the
     # reset scope; never deletes) with hashes verified, requires the reset
     # pre-flight to pass, then restores the entrypoint and proves a held boot.
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v3-markers-offline-plan' || inputs.mode == 'repair-v3-markers-offline-execute')
+    if: false && (github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v3-markers-offline-plan' || inputs.mode == 'repair-v3-markers-offline-execute'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -1783,7 +1782,7 @@ jobs:
     # V3 generation pointer, so appends stay valid across later deploys.
     # Execute requires RESET-AT-BOUNDARY:<epoch>:<deployed rev12>, the epoch
     # opened <= 60 min ago and a volume snapshot <= 6 h old. Never arms relay.
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-reset-plan' || inputs.mode == 'clean-epoch-reset-execute')
+    if: false && (github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-reset-plan' || inputs.mode == 'clean-epoch-reset-execute'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -1952,7 +1951,7 @@ jobs:
     # this dispatch-only job proves the durable paper boundary directly on the
     # guest (paper-only, disarmed, zero positions/orders) and changes only VM
     # memory. It never deploys source, flattens, or touches exchange exposure.
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-memory'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-memory')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1985,7 +1984,7 @@ jobs:
         run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   close-paper-position:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'close-paper-position'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'close-paper-position')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -2028,7 +2027,7 @@ jobs:
           PY
 
   flatten-paper-exposure:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'flatten-paper-exposure'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'flatten-paper-exposure')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -2114,7 +2113,7 @@ jobs:
   probe-reset-writers:
     # Read-only: samples reset deletion targets twice over minutes, which the
     # bounded inspect-runtime probes cannot do.
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'probe-reset-writers'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'probe-reset-writers')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -2130,7 +2129,7 @@ jobs:
             python -c "import base64; exec(base64.b64decode('${writer_probe_b64}'))"
 
   inspect-runtime:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'inspect-runtime'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'inspect-runtime')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -2209,7 +2208,7 @@ jobs:
             "python -c \"import base64; exec(base64.b64decode('${v3_authority_probe_b64}'))\""
 
   restart-only:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2232,7 +2231,7 @@ jobs:
         run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   recover-startup-crash:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-startup-crash'
+    if: false && (github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-startup-crash')
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -2370,7 +2369,7 @@ jobs:
         run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   test-and-deploy:
-    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
+    if: false && (github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     defaults:

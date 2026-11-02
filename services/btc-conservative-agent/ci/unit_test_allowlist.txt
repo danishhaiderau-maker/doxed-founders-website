@@ -692,6 +692,7 @@ test_tile_fade3_deriv_rotation.py
 # run 40147646292 failed on a scripts/ test PR CI never ran. Paths are relative to this service dir (runner cwd).
 ../../scripts/r2_backup/test_r2_backup.py
 ../../scripts/test-fly-workflow-revision-contract.py
+test_fly_runtime_retired_r22.py
 ../../scripts/test_fly_deploy_ci_coverage.py
 ../../scripts/test_fly_deploy_reset_proof.py
 ../../scripts/test_fly_deploy_workflow_order.py

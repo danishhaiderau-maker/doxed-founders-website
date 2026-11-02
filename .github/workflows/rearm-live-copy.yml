@@ -1,4 +1,8 @@
 name: Rearm Bitfinex live copy
+# RETIRED / DISABLED IN PLACE — do NOT delete this file (RK PASS 01:21 AEDT: disable-not-delete).
+# Fly app doxed-btc-bot DELETED 2026-11-03 01:12 AEDT (OBSERVED). Cite R22 + R50(e)/R50c.
+# Live re-arm suspended while Fly runtime is gone; every job hard-gated with `if: false`.
+# Manual workflow_dispatch retained only so the file stays a valid Actions workflow; jobs never run.
 
 on:
   workflow_dispatch:
@@ -21,6 +25,7 @@ concurrency:
 
 jobs:
   rearm:
+    if: false  # FLY_RUNTIME_RETIRED / live re-arm suspended — hard fail-closed
     runs-on: ubuntu-latest
     environment: production
     steps:
