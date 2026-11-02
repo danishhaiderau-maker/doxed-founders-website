@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState, Suspense } from 'react';
 import { ChevronDown, Menu, Search, X } from 'lucide-react';
 import { cn, resolveGamifiedRole } from '@dcf/utils';
 import { fetchAccountOverview, AccountOverview } from '@/lib/api';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 import { GamifiedRoleBadge } from '@/components/account/gamified-role-badge';
 import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 import { NotificationBell } from '@/components/notification-bell';
@@ -467,7 +468,7 @@ function MobileNavDrawer({
           <DownloadAppLauncher />
           <PlatformMessagesBell />
           <NotificationBell />
-          {session ? (
+          {session && !isBackendApiRetired() ? (
             <ProfileMenu
               session={session}
               isAdmin={isAdmin}
@@ -480,7 +481,7 @@ function MobileNavDrawer({
             />
           ) : (
             <Link
-              href="/login"
+              href="/platform-offline?feature=login"
               onClick={onClose}
               className="rounded-lg border border-zinc-600 px-3 py-2 text-sm text-zinc-200 hover:text-white"
             >
@@ -578,7 +579,7 @@ function SiteNavInner() {
     session?.user?.id ?? accountPreview?.userId ?? getActiveUserId(session?.user?.id);
 
   useEffect(() => {
-    if (!session?.accessToken) {
+    if (isBackendApiRetired() || !session?.accessToken) {
       setAccountPreview(null);
       return;
     }
@@ -626,6 +627,20 @@ function SiteNavInner() {
   });
 
   function resolveHref(item: HubNavItem): string | null {
+    if (isBackendApiRetired()) {
+      if (
+        item.href.startsWith('/paper-trading') ||
+        item.href.startsWith('/agent-hub') ||
+        item.href.startsWith('/agents') ||
+        item.href.startsWith('/leaderboard') ||
+        item.href.startsWith('/watchlist') ||
+        item.href.startsWith('/predict') ||
+        item.href === '__portfolio__'
+      ) {
+        return '/platform-offline?feature=trading';
+      }
+      return `/platform-offline?feature=generic`;
+    }
     if (item.href === '__portfolio__') {
       if (!session && !portfolioUserId) return '/login?callbackUrl=%2Fpaper-trading';
       if (!portfolioUserId) return null;
@@ -673,7 +688,7 @@ function SiteNavInner() {
           <div className="h-5 w-px bg-zinc-800" aria-hidden />
           <PlatformMessagesBell />
           <NotificationBell />
-          {session ? (
+          {session && !isBackendApiRetired() ? (
             <ProfileMenu
               session={session}
               isAdmin={isAdmin}
@@ -686,7 +701,7 @@ function SiteNavInner() {
             />
           ) : (
             <Link
-              href="/login"
+              href="/platform-offline?feature=login"
               className="rounded-lg border border-zinc-600 px-3 py-2 text-sm text-zinc-200 transition hover:border-zinc-500 hover:text-white"
             >
               Sign in

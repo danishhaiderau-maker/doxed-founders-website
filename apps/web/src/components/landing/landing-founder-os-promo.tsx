@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { fetchPublicFounderPromo } from '@/lib/api';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 
 type Promo = { enabled: boolean; message: string | null; windowDays?: number };
 
@@ -58,6 +59,10 @@ export function LandingFounderOsPromo() {
   const [promo, setPromo] = useState<Promo | null>(null);
 
   useEffect(() => {
+    if (isBackendApiRetired()) {
+      setPromo(null);
+      return;
+    }
     fetchPublicFounderPromo()
       .then(setPromo)
       .catch(() => setPromo(null));

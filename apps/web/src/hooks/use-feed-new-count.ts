@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { fetchFeedHub } from '@/lib/api';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 
 const STORAGE_KEY = 'dcf-feed-last-seen-at';
 
@@ -14,6 +15,10 @@ export function useFeedNewCount(pollMs = 60_000) {
   const [count, setCount] = useState(0);
 
   const load = useCallback(async () => {
+    if (isBackendApiRetired()) {
+      setCount(0);
+      return;
+    }
     try {
       const hub = await fetchFeedHub('all', 'all', undefined, 80);
       const lastSeenRaw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
@@ -26,6 +31,10 @@ export function useFeedNewCount(pollMs = 60_000) {
   }, []);
 
   useEffect(() => {
+    if (isBackendApiRetired()) {
+      setCount(0);
+      return;
+    }
     void load();
     const interval = setInterval(() => void load(), pollMs);
     return () => clearInterval(interval);

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   fetchPlatformStats,
@@ -12,6 +13,7 @@ import {
 import type { LandingHighlights } from '@/components/landing/landing-live-highlights';
 import { LandingHeader, LandingSinglePage } from '@/components/landing/landing-mockup-sections';
 import type { TradingAgentSummary } from '@/lib/api';
+import { BACKEND_API_RETIRED_REASON, isBackendApiRetired } from '@/lib/backend-api-retired';
 
 // Override the conservative-btc agent's stats with the analyzer / full-session
 // summary so the landing-page highlights match the full-session panel on the profile
@@ -57,8 +59,10 @@ function withAnalyzerOverride(
 export function LandingPage() {
   const [platformStats, setPlatformStats] = useState<PlatformStats | null>(null);
   const [highlights, setHighlights] = useState<LandingHighlights | null>(null);
+  const retired = isBackendApiRetired();
 
   useEffect(() => {
+    if (retired) return;
     Promise.all([
       fetchPlatformStats().catch(() => null),
       fetchTradingAgentLeaderboard().catch(() => [] as Awaited<ReturnType<typeof fetchTradingAgentLeaderboard>>),
@@ -76,10 +80,20 @@ export function LandingPage() {
         topBuilder: builders?.entries[0] ?? null,
       });
     });
-  }, []);
+  }, [retired]);
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
+      {retired ? (
+        <div className="border-b border-amber-700/40 bg-amber-950/40 px-4 py-3 text-center text-sm text-amber-100/90">
+          {BACKEND_API_RETIRED_REASON}{' '}
+          <Link href="/platform-offline?feature=generic" className="font-semibold underline">
+            Details
+          </Link>
+          {' · '}
+          Cite t781u · Fly deleted · Railway/Neon removal · R50c static
+        </div>
+      ) : null}
       <LandingHeader />
       <LandingSinglePage stats={platformStats} highlights={highlights} />
     </main>

@@ -1,4 +1,5 @@
 import { apiUrl, describeApiTarget } from './api-base';
+import { isBackendApiRetired, throwIfBackendApiRetired } from './backend-api-retired';
 import type { AgentShowcaseFlash, GamifiedRole, NotificationPreferenceGroups, SecurityScoreResult } from '@dcf/utils';
 
 export interface DexScreenerPreview {
@@ -335,6 +336,9 @@ export function isSessionExpiredError(err: unknown): boolean {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit, token?: string): Promise<T> {
+  // Fail closed before any network I/O — no Railway `/api` fetch or retry loops (t781u).
+  throwIfBackendApiRetired();
+
   let res: Response;
   try {
     res = await fetch(apiUrl(path), {
@@ -346,6 +350,9 @@ async function apiFetch<T>(path: string, init?: RequestInit, token?: string): Pr
       },
     });
   } catch {
+    if (isBackendApiRetired()) {
+      throwIfBackendApiRetired();
+    }
     const target = describeApiTarget();
     const onProdSite =
       typeof window !== 'undefined' &&

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppNotification, fetchNotifications } from '@/lib/api';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 
 const SEEN_KEY = 'dcf-flash-notifications';
 const FLASH_TYPES = new Set(['TRADER_WIN', 'TRADER_LOSS']);
@@ -36,6 +37,7 @@ export function NotificationFlashProvider({ children }: { children: React.ReactN
   }, []);
 
   useEffect(() => {
+    if (isBackendApiRetired()) return;
     if (!session?.accessToken) return;
 
     const poll = async () => {

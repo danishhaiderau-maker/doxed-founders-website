@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useEffect, useMemo, useState } from 'react';
 import { POINTS, formatUsd, formatDdollarCompact } from '@dcf/utils';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 import {
   AppNotification,
   AccountOverview,
@@ -169,6 +170,7 @@ export function LandingHubPreviewWidgets({
   });
 
   useEffect(() => {
+    if (isBackendApiRetired()) return;
     let cancelled = false;
     async function load() {
       try {

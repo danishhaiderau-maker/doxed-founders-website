@@ -12,6 +12,7 @@ import {
   markNotificationRead,
 } from '@/lib/api';
 import { subscribeInboxRefresh } from '@/lib/inbox-refresh';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 
 function accent(type: string, read: boolean) {
   if (type.includes('AGENT') || type === 'AGENT_RESULT') return 'border-purple-500/40';
@@ -30,6 +31,7 @@ export function NotificationBell() {
   const ref = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
+    if (isBackendApiRetired()) return;
     if (!token) return;
     try {
       const [notes, countRes] = await Promise.all([
@@ -45,6 +47,7 @@ export function NotificationBell() {
   }, [token]);
 
   useEffect(() => {
+    if (isBackendApiRetired()) return;
     if (!token) return;
     load();
     const interval = setInterval(load, 30_000);

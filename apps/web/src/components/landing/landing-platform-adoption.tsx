@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import { formatUsd } from '@dcf/utils';
 import { fetchPlatformAdoptionMetrics, type PlatformAdoptionMetrics } from '@/lib/api';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 
 function formatDayLabel(isoDate: string) {
   const d = new Date(`${isoDate}T12:00:00Z`);
@@ -29,6 +30,10 @@ export function LandingPlatformAdoption() {
   const [data, setData] = useState<PlatformAdoptionMetrics | null>(null);
 
   useEffect(() => {
+    if (isBackendApiRetired()) {
+      setData(null);
+      return;
+    }
     fetchPlatformAdoptionMetrics(14)
       .then(setData)
       .catch(() => setData(null));

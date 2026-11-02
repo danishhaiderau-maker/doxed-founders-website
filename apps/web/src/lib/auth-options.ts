@@ -4,6 +4,7 @@ import GoogleProvider from 'next-auth/providers/google';
 import TwitterProvider from 'next-auth/providers/twitter';
 import { cookies } from 'next/headers';
 import { apiUrl } from './api-base';
+import { isBackendApiRetired } from './backend-api-retired';
 
 /** Decode JWT exp (seconds) without verifying — used only to decide when to refresh. */
 function decodeJwtExp(token: string | undefined | null): number | null {
@@ -27,6 +28,7 @@ function apiTokenNeedsRefresh(exp: number | null, skewSec = 3600): boolean {
 }
 
 async function refreshApiAccessToken(userId: string): Promise<string | null> {
+  if (isBackendApiRetired()) return null;
   try {
     const res = await fetch(apiUrl('/auth/session-refresh', true), {
       method: 'POST',
@@ -63,6 +65,7 @@ async function syncOAuthWithApi(input: {
   xVerified?: boolean;
   referralCode?: string | null;
 }) {
+  if (isBackendApiRetired()) return null;
   const payload: Record<string, string | boolean | null | undefined> = {
     email: input.email,
     name: input.name ?? undefined,
@@ -132,6 +135,9 @@ const providers: NextAuthOptions['providers'] = [
       accessToken: { label: 'Access Token', type: 'text' },
     },
     async authorize(credentials) {
+      // Login / X sync / credentials need Nest+Neon — refuse without opening Railway loops (t781u).
+      if (isBackendApiRetired()) return null;
+
       if (credentials?.accessToken) {
         const res = await fetch(apiUrl('/auth/me', true), {
           headers: { Authorization: `Bearer ${credentials.accessToken}` },

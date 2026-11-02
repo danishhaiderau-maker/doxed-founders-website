@@ -1,6 +1,7 @@
 import { getServerSession } from 'next-auth';
 import { NextRequest, NextResponse } from 'next/server';
 import { authOptions } from '@/lib/auth-options';
+import { backendApiGonePayload, isBackendApiRetired } from '@/lib/backend-api-retired';
 import { prisma } from '@/lib/prisma';
 
 export const runtime = 'nodejs';
@@ -45,6 +46,9 @@ function inferCategory(name: string, mime: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  if (isBackendApiRetired()) {
+    return NextResponse.json(backendApiGonePayload(), { status: 410 });
+  }
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
     return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });

@@ -13,6 +13,7 @@ import {
   type DiscoverUniverseStageFilter,
   type TrustInvestigation,
 } from '@/lib/api';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 
 /**
  * Landing Projects section — reuses the REAL Discover bubble map and
@@ -49,6 +50,12 @@ export function LandingProjectsSection() {
   const [loading, setLoading] = useState(true);
 
   const loadUniverse = useCallback(async () => {
+    if (isBackendApiRetired()) {
+      setData(null);
+      setScamMap({});
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const [res, investigations] = await Promise.all([

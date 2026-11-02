@@ -12,6 +12,7 @@ import {
   type MessageThread,
 } from '@/lib/api';
 import { subscribeInboxRefresh } from '@/lib/inbox-refresh';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 
 const POLL_MS = 15_000;
 
@@ -23,7 +24,7 @@ export function useUnreadMessageCount(token: string | undefined) {
   const [count, setCount] = useState(0);
 
   const refresh = useCallback(async () => {
-    if (!token) {
+    if (isBackendApiRetired() || !token) {
       setCount(0);
       return;
     }
@@ -41,7 +42,7 @@ export function useUnreadMessageCount(token: string | undefined) {
   }, [token]);
 
   useEffect(() => {
-    if (!token) {
+    if (isBackendApiRetired() || !token) {
       setCount(0);
       return;
     }
@@ -92,7 +93,7 @@ export function PlatformMessagesBell() {
   const ref = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
-    if (!token) return;
+    if (isBackendApiRetired() || !token) return;
     try {
       const data = await fetchMessageThreads(token);
       setThreads(data.slice(0, 6));
@@ -103,7 +104,7 @@ export function PlatformMessagesBell() {
   }, [token]);
 
   useEffect(() => {
-    if (!token) return;
+    if (isBackendApiRetired() || !token) return;
     load();
     const interval = setInterval(load, POLL_MS);
     const onFocus = () => void load();

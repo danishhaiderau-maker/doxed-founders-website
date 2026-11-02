@@ -1,8 +1,14 @@
+import { PlatformOfflineNotice } from '@/components/platform-offline-notice';
+import { isBackendApiRetired } from '@/lib/backend-api-retired';
 import { Suspense } from 'react';
 import { getEnabledOAuthProviders } from '@/lib/auth-options';
 import LoginPageClient from './page.client';
 
 export default function LoginPage() {
+  if (isBackendApiRetired()) {
+    return <PlatformOfflineNotice feature="login" />;
+  }
+
   const oauth = getEnabledOAuthProviders();
   const nextAuthUrl = process.env.NEXTAUTH_URL ?? 'http://localhost:3000';
   return (

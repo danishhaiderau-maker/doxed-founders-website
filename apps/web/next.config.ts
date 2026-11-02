@@ -32,6 +32,13 @@ const apiProxyTarget = (
     : 'http://127.0.0.1:4000')
 ).replace(/\/$/, '');
 
+/** Railway Nest proxy off by default (t781u — backend/Neon removal; static Vercel site). */
+function isBackendApiRetiredBuild(): boolean {
+  const raw = process.env.NEXT_PUBLIC_BACKEND_API_RETIRED?.trim().toLowerCase();
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no') return false;
+  return true;
+}
+
 function isLocalApiTarget(target: string) {
   return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(target);
 }
@@ -101,6 +108,10 @@ const nextConfig: NextConfig = {
     return [{ source: '/:path*', headers: securityHeaders }];
   },
   async rewrites() {
+    // Never proxy browser `/api` to Railway when the backend is retired (R50c / t781u).
+    if (isBackendApiRetiredBuild()) {
+      return [];
+    }
     const useProxy =
       process.env.NODE_ENV === 'development'
         ? isLocalApiTarget(apiProxyTarget)

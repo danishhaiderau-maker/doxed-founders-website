@@ -4,12 +4,17 @@ import { getServerSession } from 'next-auth';
 import { NextRequest, NextResponse } from 'next/server';
 import { authOptions } from '@/lib/auth-options';
 import { getServerApiBase } from '@/lib/api-base';
+import { backendApiGonePayload, isBackendApiRetired } from '@/lib/backend-api-retired';
 import { buildListingApplicationUpdates, prisma } from '@/lib/prisma';
 
 export async function PATCH(
   req: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
+  if (isBackendApiRetired()) {
+    return NextResponse.json(backendApiGonePayload(), { status: 410 });
+  }
+
   const session = await getServerSession(authOptions);
   if (!session?.user || session.user.role !== 'ADMIN') {
     return NextResponse.json({ message: 'Unauthorized', statusCode: 401 }, { status: 401 });
