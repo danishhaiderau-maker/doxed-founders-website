@@ -3,6 +3,10 @@
 Opens ``local_market.sqlite3`` and ``gap_log.jsonl`` without writes. Does not
 import bot trading paths. Analyzer / research loaders may call
 ``open_local_fresh_store_readonly`` to inspect book/trades/gaps after SERIES BREAK.
+
+P5 (RK HOLD #972): any pooled query whose window straddles ``series_start_ts``
+raises :class:`LocalFreshStoreReadError` — pre-break and post-break rows must
+never be mixed in one analyzer read.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from local_fresh_runtime import SERIES_BREAK_NAME, read_series_break
 from local_market_persist import GAP_LOG_NAME, SQLITE_NAME
 
 SCHEMA = "local_fresh_analyzer_read_v1"
+POOLED_ACROSS_SERIES_BREAK = "LOCAL_FRESH_POOLED_ACROSS_SERIES_BREAK"
 
 
 class LocalFreshStoreReadError(RuntimeError):
@@ -55,6 +60,40 @@ class LocalFreshStoreReadonly:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def series_start_s(self) -> Optional[int]:
+        """Integer second boundary of the local series (P5), or None if unmarked."""
+        sb = self.series_break or {}
+        raw = sb.get("series_start_ts")
+        if raw is None:
+            return None
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return None
+
+    def refuse_pooled_across_series_break(
+        self, *, start_s: Optional[int] = None, end_s: Optional[int] = None
+    ) -> None:
+        """P5: error if the requested window would pool rows across ``series_start_ts``.
+
+        A window straddles the break when it includes time strictly before the
+        series start and time at-or-after the series start. Fully unbounded
+        queries (no start, no end) are refused when a series break is present —
+        callers must pick a pre-break or post-break side explicitly.
+        """
+        boundary = self.series_start_s()
+        if boundary is None:
+            return
+        lo = None if start_s is None else int(start_s)
+        hi = None if end_s is None else int(end_s)
+        includes_before = lo is None or lo < boundary
+        includes_at_or_after = hi is None or hi >= boundary
+        if includes_before and includes_at_or_after:
+            raise LocalFreshStoreReadError(
+                f"{POOLED_ACROSS_SERIES_BREAK}: start_s={lo} end_s={hi} "
+                f"series_start_ts={boundary}"
+            )
+
     def identity(self) -> dict[str, Any]:
         sb = self.series_break or {}
         return {
@@ -84,6 +123,7 @@ class LocalFreshStoreReadonly:
     def iter_book_seconds(
         self, *, start_s: Optional[int] = None, end_s: Optional[int] = None
     ) -> Iterator[dict[str, Any]]:
+        self.refuse_pooled_across_series_break(start_s=start_s, end_s=end_s)
         sql = "SELECT s, bid, ask, receive_ts, carried, payload_json FROM book_1s"
         params: list[Any] = []
         clauses: list[str] = []
@@ -109,6 +149,7 @@ class LocalFreshStoreReadonly:
     def iter_trades(
         self, *, start_s: Optional[int] = None, end_s: Optional[int] = None
     ) -> Iterator[dict[str, Any]]:
+        self.refuse_pooled_across_series_break(start_s=start_s, end_s=end_s)
         sql = (
             "SELECT id, s, trade_id, mts_ms, amount, price, receive_ts FROM trades"
         )

@@ -221,6 +221,14 @@ try {
   $status.researchModeFlag = $mode.Flag
   $status.researchModeMatchesFly = $mode.Matched
 
+  # RK HOLD #972 item 2: run script must import local_fresh_analyzer_read before the pass.
+  $agentDir = Join-Path $cfg.RepoRoot 'services\btc-conservative-agent'
+  $importOut = & python -c "import sys; sys.path.insert(0, r'$agentDir'); import local_fresh_analyzer_read as m; print(m.SCHEMA)" 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw ("LOCAL_FRESH_ANALYZER_READ_IMPORT_FAILED: {0}" -f ($importOut | Out-String).Trim())
+  }
+  Write-ChainLog -Config $cfg -Name $logName -Message ("LOCAL_FRESH_ANALYZER_READ_OK schema={0}" -f ($importOut | Select-Object -First 1))
+
   # Ensured before, watched during, and ensured again after the single pass.
   Confirm-AnalyzerDashboard
   $before = Get-AnalyzerStatus

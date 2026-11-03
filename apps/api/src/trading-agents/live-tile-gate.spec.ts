@@ -27,10 +27,7 @@ test('every live-copy tile prefix has a stable tile code; codes are unique and n
   for (const c of codes) assert.ok(c >= 1 && c <= 127);
   assert.equal(LIVE_TILE_KEY_CODES.gs1, 2);
   assert.equal(RESERVED_LIVE_TILE_KEY_CODES.gs6, 5);
-  assert.equal(RESERVED_LIVE_TILE_KEY_CODES.gf3, 8);
-  assert.equal(RESERVED_LIVE_TILE_KEY_CODES.gf3l, 9);
-  assert.equal(LIVE_TILE_KEY_CODES.gf3, undefined);
-  assert.equal(LIVE_TILE_KEY_CODES.gf3l, undefined);
+  assert.equal(LIVE_TILE_KEY_CODES.gf3l, 9);
 });
 
 test('tile key from trade id ignores adopt/relink wrappers and unknown prefixes', () => {
@@ -38,8 +35,6 @@ test('tile key from trade id ignores adopt/relink wrappers and unknown prefixes'
   assert.equal(tileKeyForTradeId('ADOPT:gb2-x'), 'gb2');
   assert.equal(tileKeyForTradeId('relink:rnd-1'), 'rnd');
   assert.equal(tileKeyForTradeId('dsl-1'), null);
-  assert.equal(tileKeyForTradeId('gf3-1'), null); // FADE3 reserved
-  assert.equal(tileKeyForTradeId('gf3l-1'), null);
   assert.equal(tileKeyForTradeId('gs1-'), null);
   assert.equal(tileKeyForTradeId(null), null);
 });
@@ -54,11 +49,9 @@ test('cid round-trips the tile, stays a positive int32, and keeps hashes distinc
     }
   }
   assert.notEqual(encodeTileClientOrderId('gs1', 1), encodeTileClientOrderId('gs1', 2));
-  assert.notEqual(encodeTileClientOrderId('gs1', 7), encodeTileClientOrderId('gb2', 7));
+  assert.notEqual(encodeTileClientOrderId('gs1', 7), encodeTileClientOrderId('gf3l', 7));
   assert.throws(() => encodeTileClientOrderId('gs6', 7));
   assert.throws(() => encodeTileClientOrderId('dsl', 1));
-  assert.throws(() => encodeTileClientOrderId('gf3', 7));
-  assert.throws(() => encodeTileClientOrderId('gf3l', 7));
 });
 
 test('legacy / foreign cids decode to no tile', () => {
@@ -68,8 +61,6 @@ test('legacy / foreign cids decode to no tile', () => {
   assert.equal(decodeTileClientOrderId(0x80000000), null);
   assert.equal(decodeTileClientOrderId(0x10000000 | (2 << 21)), null); // wrong marker
   assert.equal(decodeTileClientOrderId((0b101 << 28) | (6 << 21)), null); // reserved code
-  assert.equal(decodeTileClientOrderId((0b101 << 28) | (8 << 21)), null); // reserved FADE3 gf3
-  assert.equal(decodeTileClientOrderId((0b101 << 28) | (9 << 21)), null); // reserved FADE3 gf3l
 });
 
 test('per-entry admission: mutex then net=0', () => {

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from local_fresh_analyzer_read import (
+    POOLED_ACROSS_SERIES_BREAK,
     LocalFreshStoreReadError,
     open_local_fresh_store_readonly,
     summarize_local_fresh_store,
@@ -102,9 +103,10 @@ class TestLocalFreshAnalyzerRead(unittest.TestCase):
                 self.assertEqual(counts["book_1s_rows"], 1)
                 self.assertEqual(counts["trade_rows"], 1)
                 self.assertGreaterEqual(counts["gap_events"], 1)
-                books = list(ro.iter_book_seconds())
+                # Pre-break side only (s=100 << series_start); P5 forbids unbounded/straddle.
+                books = list(ro.iter_book_seconds(start_s=0, end_s=200))
                 self.assertEqual(books[0]["s"], 100)
-                trades = list(ro.iter_trades())
+                trades = list(ro.iter_trades(start_s=0, end_s=200))
                 self.assertEqual(trades[0]["price"], 10.05)
                 gaps = list(ro.iter_gap_log_lines())
                 self.assertTrue(any(g.get("kind") == "COLLECTOR_DISCONNECT" for g in gaps))
@@ -112,6 +114,34 @@ class TestLocalFreshAnalyzerRead(unittest.TestCase):
             snap = summarize_local_fresh_store(tmp)
             self.assertEqual(snap["schema"], "local_fresh_analyzer_read_v1")
             self.assertEqual(snap["counts"]["book_1s_rows"], 1)
+
+    def test_readonly_refuses_pooled_query_across_series_break(self):
+        # P5 / RK HOLD #972: analyzer must error on any pooled window across series_break.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MarketStore(tmp, clock=lambda: 1_700_000_000.0)
+            try:
+                store.append_book_second(
+                    {"s": 100, "bid": 10.0, "ask": 10.1, "receive_ts": 100.5}
+                )
+            finally:
+                store.close()
+
+            with open_local_fresh_store_readonly(tmp) as ro:
+                boundary = ro.series_start_s()
+                self.assertEqual(boundary, 1_700_000_000)
+                with self.assertRaises(LocalFreshStoreReadError) as ctx_unbounded:
+                    list(ro.iter_book_seconds())
+                self.assertIn(POOLED_ACROSS_SERIES_BREAK, str(ctx_unbounded.exception))
+                with self.assertRaises(LocalFreshStoreReadError) as ctx_straddle:
+                    list(
+                        ro.iter_trades(
+                            start_s=boundary - 10, end_s=boundary + 10
+                        )
+                    )
+                self.assertIn(POOLED_ACROSS_SERIES_BREAK, str(ctx_straddle.exception))
+                # Same-side windows remain allowed.
+                list(ro.iter_book_seconds(start_s=0, end_s=boundary - 1))
+                list(ro.iter_book_seconds(start_s=boundary, end_s=boundary + 60))
 
     def test_readonly_refuses_missing_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:

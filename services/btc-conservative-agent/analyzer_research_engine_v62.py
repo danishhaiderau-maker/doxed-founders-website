@@ -89,6 +89,8 @@ from research.quantity_execution import (
     validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
 from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
+# RK HOLD #972: analyzer must import the day-1 local-fresh read path (P5 fence lives there).
+import local_fresh_analyzer_read as _local_fresh_analyzer_read  # noqa: E402
 
 
 class _R3RetiredSection(Exception):
