@@ -21,6 +21,7 @@ import {
   NotificationType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { invalidateRelayStatusCache, relayStatusCacheKey } from './relay-status-cache';
 import { fetchL27ArmBlock, type LiveArmPath } from './live-arm-l27-gate';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -879,6 +880,8 @@ export class TradingAgentInstancesService {
         dashboardState: relayDashboardState as Prisma.InputJsonValue,
       },
     });
+    // RK 21:05 / 22:14: arm + pause paths invalidate so ChainSupervisor cannot read stale arm state.
+    invalidateRelayStatusCache(relayStatusCacheKey(agentSlug, userId));
 
     // F8 — Wake the executor immediately so the first tick fires within
     // milliseconds of the user clicking Start, instead of waiting up to 2s

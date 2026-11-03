@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { installRelayStatusCachePrismaHooks } from '../trading-agents/relay-status-cache-prisma-hooks';
 
 @Injectable()
 export class PrismaService
@@ -8,6 +9,18 @@ export class PrismaService
 {
   private readonly logger = new Logger(PrismaService.name);
   private connected = false;
+  private relayStatusCacheHooksInstalled = false;
+
+  constructor() {
+    super();
+    this.installRelayStatusCacheHooksOnce();
+  }
+
+  private installRelayStatusCacheHooksOnce(): void {
+    if (this.relayStatusCacheHooksInstalled) return;
+    installRelayStatusCachePrismaHooks(this);
+    this.relayStatusCacheHooksInstalled = true;
+  }
 
   async connect(): Promise<boolean> {
     if (this.connected) {
@@ -35,6 +48,7 @@ export class PrismaService
   }
 
   async onModuleInit() {
+    this.installRelayStatusCacheHooksOnce();
     if (process.env.NODE_ENV === 'production') {
       // Do not block Nest bootstrap — Railway hits /api/health/live before DB is ready.
       void this.connect();
