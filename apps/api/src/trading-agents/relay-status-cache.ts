@@ -5,8 +5,13 @@
  * Auth stays outside the cache (caller asserts the token first). Default TTL
  * is 10 minutes so a 5-minute supervisor leaves ≥5 min Neon-idle gaps.
  *
- * RK 22:14: armed / live payloads never use the cache — pause + arming paths
- * also invalidate so a disarm cannot leave a stale ARMED read.
+ * RK 22:14 / HM 9754e839380f:
+ * - Armed / LIVE status reads **always bypass** the cache.
+ * - Only disarmed snapshots are stored.
+ * - Writers invalidate via setInstancePaused + PrismaService hooks (outside
+ *   bitfinex-policy hash-locked files), covering the four pause/arm paths:
+ *   setInstancePaused, failClosedStuckLiveInstances,
+ *   pauseRelayForSustainedFidelityBreach, pauseRelayForPositionMismatch.
  */
 export const RELAY_STATUS_CACHE_TTL_MS = Math.max(
   60_000,
@@ -40,6 +45,10 @@ export function isRelayStatusArmedOrLive(status: unknown): boolean {
   return false;
 }
 
+/**
+ * Load relay-status with cache. Armed/LIVE results always bypass (never served
+ * from cache, never stored). Disarmed results may hit the TTL cache.
+ */
 export async function cachedRelayStatus<T>(
   key: string,
   load: () => Promise<T>,
@@ -47,10 +56,10 @@ export async function cachedRelayStatus<T>(
 ): Promise<T> {
   const hit = entries.get(key);
   if (hit && hit.generation === generation && clock() < hit.expiresAt) {
-    // RK 22:14: never serve armed/live from cache (bypass).
     if (!isRelayStatusArmedOrLive(hit.value)) {
       return hit.value as T;
     }
+    // Stale armed entry must never be served.
     entries.delete(key);
   }
   const pending = inFlight.get(key);
@@ -60,7 +69,6 @@ export async function cachedRelayStatus<T>(
   const loadGeneration = generation;
   const promise = load().then((value) => {
     if (loadGeneration === generation) {
-      // Only cache disarmed / non-live snapshots (Neon idle for ChainSupervisor).
       if (!isRelayStatusArmedOrLive(value)) {
         entries.set(key, { value, expiresAt: clock() + ttlMs, generation: loadGeneration });
       } else {
@@ -86,6 +94,32 @@ export function invalidateRelayStatusCache(key?: string): void {
   generation += 1;
   entries.clear();
   inFlight.clear();
+}
+
+/** Drop every cached snapshot for a user (any slug). */
+export function invalidateRelayStatusCacheForUser(userId: string): void {
+  const suffix = `|${userId.trim()}`;
+  for (const key of [...entries.keys()]) {
+    if (key.endsWith(suffix)) entries.delete(key);
+  }
+}
+
+/**
+ * True when a Prisma TradingAgentInstance write can change pause/arm visibility
+ * for ops/relay-status (the four named pause/arm writers all go through these).
+ */
+export function tradingAgentInstanceWriteTouchesArmOrPause(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Record<string, unknown>;
+  if (d.status != null) return true;
+  const dash = d.dashboardState;
+  if (!dash || typeof dash !== 'object') return false;
+  const ds = dash as Record<string, unknown>;
+  return (
+    'relayArmedAt' in ds ||
+    'relayExecutionMode' in ds ||
+    'realTradingConfirmedAt' in ds
+  );
 }
 
 /** Test hook: swap the clock used for TTL checks. Pass `null` to restore. */

@@ -604,8 +604,8 @@ export class TradingAgentsService implements OnModuleInit {
     adminHeader?: string,
     authorization?: string,
   ) {
-    // Auth every request; Neon load is cached when disarmed (RK 21:05 neon idle).
-    // Armed/live always bypass cache (RK 22:14).
+    // Auth every request. Disarmed snapshots may use the TTL cache (RK 21:05
+    // neon idle). Armed/LIVE status reads always bypass (HM 9754e839380f).
     assertBotReadToken(adminHeader, authorization);
     if (!userId?.trim()) {
       throw new BadRequestException('userId query param is required');

@@ -1,7 +1,6 @@
 /**
- * RK 21:05: relay-status cache — one Neon load per TTL window.
- *
- * Mutation proof: drop the TTL hit branch → loads increments on every call.
+ * RK 22:14 / HM 9754e839380f: relay-status cache — disarmed only; armed/live
+ * always bypass; pause/arm invalidation outside hash-locked files.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -11,10 +10,13 @@ import {
   RELAY_STATUS_CACHE_TTL_MS,
   cachedRelayStatus,
   invalidateRelayStatusCache,
+  invalidateRelayStatusCacheForUser,
   isRelayStatusArmedOrLive,
   relayStatusCacheKey,
   setRelayStatusCacheClockForTests,
+  tradingAgentInstanceWriteTouchesArmOrPause,
 } from './relay-status-cache';
+import { installRelayStatusCachePrismaHooks } from './relay-status-cache-prisma-hooks';
 
 function withClock(start = 1_000_000) {
   let now = start;
@@ -42,32 +44,52 @@ test('cache key scopes slug + userId', () => {
   assert.equal(relayStatusCacheKey(' conservative-btc ', ' u1 '), 'conservative-btc|u1');
 });
 
-test('serves cached value inside TTL and reloads after expiry', async () => {
+test('serves cached disarmed value inside TTL and reloads after expiry', async () => {
   const clock = withClock();
   let loads = 0;
   const load = async () => {
     loads += 1;
-    return { n: loads };
+    return { relayArmedAt: null, relayExecutionMode: 'PAUSED', n: loads };
   };
   const key = relayStatusCacheKey('slug', 'user');
-  assert.deepEqual(await cachedRelayStatus(key, load), { n: 1 });
+  assert.equal((await cachedRelayStatus(key, load)).n, 1);
   clock.advance(RELAY_STATUS_CACHE_TTL_MS - 1);
-  assert.deepEqual(await cachedRelayStatus(key, load), { n: 1 });
+  assert.equal((await cachedRelayStatus(key, load)).n, 1);
   assert.equal(loads, 1);
   clock.advance(1);
-  assert.deepEqual(await cachedRelayStatus(key, load), { n: 2 });
+  assert.equal((await cachedRelayStatus(key, load)).n, 2);
   assert.equal(loads, 2);
 });
 
 test('invalidate forces the next read to reload', async () => {
   withClock();
-  let value = 'a';
+  let value = { relayArmedAt: null, v: 'a' };
   const key = 'k';
-  assert.equal(await cachedRelayStatus(key, async () => value), 'a');
-  value = 'b';
-  assert.equal(await cachedRelayStatus(key, async () => value), 'a');
+  assert.equal((await cachedRelayStatus(key, async () => value)).v, 'a');
+  value = { relayArmedAt: null, v: 'b' };
+  assert.equal((await cachedRelayStatus(key, async () => value)).v, 'a');
   invalidateRelayStatusCache(key);
-  assert.equal(await cachedRelayStatus(key, async () => value), 'b');
+  assert.equal((await cachedRelayStatus(key, async () => value)).v, 'b');
+});
+
+test('invalidateRelayStatusCacheForUser drops every slug for that user', async () => {
+  withClock();
+  await cachedRelayStatus(relayStatusCacheKey('a', 'u1'), async () => ({ relayArmedAt: null, n: 1 }));
+  await cachedRelayStatus(relayStatusCacheKey('b', 'u1'), async () => ({ relayArmedAt: null, n: 1 }));
+  await cachedRelayStatus(relayStatusCacheKey('a', 'u2'), async () => ({ relayArmedAt: null, n: 1 }));
+  invalidateRelayStatusCacheForUser('u1');
+  let loads = 0;
+  await cachedRelayStatus(relayStatusCacheKey('a', 'u1'), async () => {
+    loads += 1;
+    return { relayArmedAt: null, n: loads };
+  });
+  assert.equal(loads, 1);
+  loads = 0;
+  await cachedRelayStatus(relayStatusCacheKey('a', 'u2'), async () => {
+    loads += 1;
+    return { relayArmedAt: null, n: loads };
+  });
+  assert.equal(loads, 0, 'u2 cache must survive u1 invalidation');
 });
 
 test('concurrent callers share one in-flight load', async () => {
@@ -76,33 +98,13 @@ test('concurrent callers share one in-flight load', async () => {
   const load = async () => {
     loads += 1;
     await new Promise((r) => setTimeout(r, 5));
-    return 'v';
+    return { relayArmedAt: null, v: 'v' };
   };
   await Promise.all([cachedRelayStatus('k', load), cachedRelayStatus('k', load)]);
   assert.equal(loads, 1);
 });
 
-test('mutation proof: bypassing TTL hit would double-load inside window', async () => {
-  const clock = withClock();
-  let loads = 0;
-  const load = async () => {
-    loads += 1;
-    return loads;
-  };
-  const key = 'mut';
-  await cachedRelayStatus(key, load);
-  // Simulate a broken cache that always misses: call load directly twice.
-  clock.advance(1);
-  await load();
-  assert.equal(loads, 2, 'direct load bypass proves the cache is what keeps loads at 1');
-  // Healthy cache still at 1 for the cached key path after first fill:
-  loads = 0;
-  await cachedRelayStatus(key, load);
-  await cachedRelayStatus(key, load);
-  assert.equal(loads, 0);
-});
-
-test('RK 22:14: armed/live payloads bypass cache (always reload)', async () => {
+test('RK 22:14 / HM: armed/live payloads always bypass cache', async () => {
   withClock();
   let loads = 0;
   const load = async () => {
@@ -122,16 +124,65 @@ test('isRelayStatusArmedOrLive detects arm and LIVE mode', () => {
   assert.equal(isRelayStatusArmedOrLive({ relayExecutionMode: 'PAUSED' }), false);
 });
 
-test('mutation proof: pause/arm writers invalidate relay-status cache', () => {
+test('tradingAgentInstanceWriteTouchesArmOrPause detects pause/arm fields', () => {
+  assert.equal(tradingAgentInstanceWriteTouchesArmOrPause({ status: 'PAUSED' }), true);
+  assert.equal(
+    tradingAgentInstanceWriteTouchesArmOrPause({
+      dashboardState: { relayArmedAt: null },
+    }),
+    true,
+  );
+  assert.equal(tradingAgentInstanceWriteTouchesArmOrPause({ lastError: 'x' }), false);
+});
+
+test('Prisma hooks invalidate on arm/pause writes (outside locked files)', async () => {
+  withClock();
+  const key = relayStatusCacheKey('conservative-btc', 'user-1');
+  await cachedRelayStatus(key, async () => ({ relayArmedAt: null, n: 1 }));
+
+  let updateCalls = 0;
+  const prisma = {
+    tradingAgentInstance: {
+      update: async (args: unknown) => {
+        updateCalls += 1;
+        return { userId: 'user-1', ...(args as object) };
+      },
+      updateMany: async () => ({ count: 0 }),
+    },
+  };
+  installRelayStatusCachePrismaHooks(prisma);
+  await prisma.tradingAgentInstance.update({
+    where: { id: 'i1' },
+    data: { status: 'PAUSED', dashboardState: { relayArmedAt: null, relayExecutionMode: 'PAUSED' } },
+  });
+  assert.equal(updateCalls, 1);
+
+  let loads = 0;
+  await cachedRelayStatus(key, async () => {
+    loads += 1;
+    return { relayArmedAt: null, n: loads };
+  });
+  assert.equal(loads, 1, 'pause write must invalidate cached disarmed snapshot');
+});
+
+test('mutation proof: locked execution file has no relay-status-cache import', () => {
+  const exec = readFileSync(
+    path.join(__dirname, 'signal-subscriber-execution.service.ts'),
+    'utf8',
+  );
+  assert.equal(exec.includes('relay-status-cache'), false);
+  assert.equal(exec.includes('invalidateRelayStatusCache'), false);
+});
+
+test('mutation proof: PrismaService installs relay-status cache hooks', () => {
+  const src = readFileSync(path.join(__dirname, '../prisma/prisma.service.ts'), 'utf8');
+  assert.ok(src.includes('installRelayStatusCachePrismaHooks'));
+});
+
+test('mutation proof: setInstancePaused still invalidates (non-locked)', () => {
   const instances = readFileSync(
     path.join(__dirname, 'trading-agent-instances.service.ts'),
     'utf8',
   );
   assert.ok(instances.includes('invalidateRelayStatusCache(relayStatusCacheKey(agentSlug, userId))'));
-  const exec = readFileSync(
-    path.join(__dirname, 'signal-subscriber-execution.service.ts'),
-    'utf8',
-  );
-  const hits = exec.split('invalidateRelayStatusCache(relayStatusCacheKey(AGENT_SLUG').length - 1;
-  assert.ok(hits >= 3, `expected ≥3 execution-service invalidates, got ${hits}`);
 });
