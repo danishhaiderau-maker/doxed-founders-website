@@ -3,7 +3,6 @@ import copy
 
 import pytest
 
-import bot
 import paper_policy_family_committed_fade_taker_90 as policy
 from adaptive_regime_entry import ACTION_STAND_ASIDE, ACTION_TAKER
 from combo_pathway_config import (
@@ -107,10 +106,9 @@ def test_exit_and_dashboard_disclose_inverted_committed_taker():
 
 
 def test_runtime_tile_view_refuses_uncommitted_and_inverts_committed():
+    # H-A / B2 / GS-06 all R22-retired from TILE_POLICY_MODULES; assert invert via kept policy module.
     for raw, expected in ((_ai(62, 38, raw_direction="NO_TRADE"), "NO_TRADE"), (_ai(80, 20), "SHORT")):
         shared = dict(copy.deepcopy(raw), direction="LONG", decision="APPROVE")
         snapshot = copy.deepcopy(shared)
-        ai, direction, spread, _ = bot._tile_view_of_shared_call(
-            "FAMILY_GSB2_REGIME_SWITCHER", raw, shared, _admission(raw), "LONG", 4,  # H-A/GS-06 retired; B2 TREND shares invert rule
-        )
-        assert direction == expected and shared == snapshot
+        view = policy.lane_admission(raw, _admission(raw))
+        assert view["direction"] == expected and shared == snapshot

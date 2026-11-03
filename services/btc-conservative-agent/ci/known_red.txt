@@ -29,7 +29,6 @@ test_research_completeness.py | Boss | 2026-10-16 | asserts lane order/roster ag
 test_research_dashboard_genome_sections.py | Boss | 2026-10-16 | dashboard JS section order assertion stale (loadMixMatch now precedes loadCombos)
 test_research_dashboard_no_onedrive_paths.py | Boss | 2026-10-16 | subprocess imports research.research_dashboard which needs pyarrow (not in requirements.txt)
 test_research_dashboard_upstream_identity.py | Boss | 2026-10-16 | dashboard JS source assertion stale: 16 unexpected template rows still contain the old identity markup
-test_shared_cvd_trigger_lane_receipts.py | Boss | 2026-10-16 | asserts the lane roster equals a stale set; the registry now carries extra FAMILY_* lanes
 test_singleton_startup.py | Boss | 2026-10-16 | script-style; fails 'fresh canonical cache is returned as immutable pre-serialized JSON' (relay execution cache header/body), fails before and after #675
 test_step2_exit_latency_bench.py | Boss | 2026-10-16 | script-style; TypeError at line 80 (results contain a None booked price), bench harness drift
 test_strategy_lab.py | Boss | 2026-10-16 | 1 of 5 tests: KeyError FAMILY_PREMIUM_REVERSION_60M (lane removed from registry; test fixture stale)
