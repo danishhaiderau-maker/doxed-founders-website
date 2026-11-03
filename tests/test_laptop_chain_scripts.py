@@ -120,32 +120,64 @@ def test_vault_allowlist_is_admin_token_only_and_refuses_bitfinex():
     ("start-home-bot.ps1", "bot-auto-restart.ps1", "start-local-collection-bot.ps1"),
 )
 def test_bot_starters_route_vault_through_true_bot_allowlist(script_name):
-    """HM HOLD: true BotAllowlist + fail-closed Assert; no blanket vault dump."""
+    """RK 08:26: starters = allowlist only (no Assert); restore LIVE_ENABLED=0."""
     source = _source(script_name)
     assert "Import-LaptopChainVaultAllowlist" in source
     assert "BotAllowlist" in source
-    assert "Assert-BitfinexProcessEnvAbsent" in source
+    # Starters must NOT refuse before strip — refusal lives in launched process.
+    assert "Assert-BitfinexProcessEnvAbsent" not in source
     assert "laptop-chain-common.ps1" in source
     assert not re.search(
         r"Get-Content\s+\$\w*[Vv]ault\w*\s*\|[^\n]*ForEach-Object",
         source,
     )
     assert "Clear-BitfinexProcessEnvNames" in source
-    # Missing flag means off — no executable assignment of BITFINEX_LIVE_ENABLED.
-    assert not re.search(r'\$env:BITFINEX_LIVE_ENABLED\s*=', source)
-    assert "Set-Item" not in source or "BITFINEX_LIVE_ENABLED" not in re.findall(
-        r"Set-Item[^\n]+", source
-    )
+    # RK 08:26 (A): explicit BITFINEX_LIVE_ENABLED=0 restored.
+    assert re.search(r'\$env:BITFINEX_LIVE_ENABLED\s*=\s*"0"', source)
 
 
 def test_supervisor_and_cycle_fail_closed_on_bitfinex_env_names():
+    """Refusal inside supervisor children / analyzer runners (not bot starters)."""
     supervisor = _source("laptop-chain-supervisor.ps1")
     cycle = _source("run-segment-analyzer-cycle.ps1")
     analyzer = _source("run-analyzer-once.ps1")
+    home_analyzer = _source("start-home-analyzer.ps1")
     for source in (supervisor, cycle, analyzer):
         assert "Assert-BitfinexProcessEnvAbsent" in source
         assert "BITFINEX_ENV_NAME_COUNT count=" in _source("laptop-chain-common.ps1")
+    # Analyzer starter: allowlist/clear + LIVE=0 only; gate runs in v62 process.
+    assert "Assert-BitfinexProcessEnvAbsent" not in home_analyzer
+    assert re.search(r'\$env:BITFINEX_LIVE_ENABLED\s*=\s*"0"', home_analyzer)
     assert "Write-Host $env:BITFINEX" not in supervisor
+
+
+def test_bot_allowlist_names_justified_or_dropped():
+    """RK 08:26 (B): each remaining allowlist name has a documented keep reason."""
+    common = _source("laptop-chain-common.ps1")
+    bot_names = _ps_allowlist_names(common, "LaptopChainBotVaultAllowlist")
+    # Dropped: PLATFORM_* (not read by bot), LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID (no getenv).
+    assert "PLATFORM_API_BASE_URL" not in bot_names
+    assert "PLATFORM_RELAY_AGENT_SLUG" not in bot_names
+    assert "PLATFORM_RELAY_USER_ID" not in bot_names
+    assert "LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID" not in bot_names
+    expected = {
+        "BOT_ADMIN_TOKEN",
+        "BOT_CONTROL_SECRET",
+        "DEEPSEEK_API_KEY",
+        "SHOWCASE_WEBHOOK_SECRET",
+        "SHOWCASE_RELAY_WEBHOOK_URL",
+        "CRASH_NOTIFY_WEBHOOK",
+        "MONITOR_READ_TOKEN",
+        "LIFECYCLE_LAPTOP_ATTESTATION_KEY",
+        "LIFECYCLE_CLEANUP_ENABLED",
+    }
+    assert set(bot_names) == expected
+    # DEEPSEEK kept: paper AI path reads it (bot.py getenv).
+    bot = (ROOT / "services" / "btc-conservative-agent" / "bot.py").read_text(encoding="utf-8")
+    assert 'os.getenv("DEEPSEEK_API_KEY")' in bot
+    # MONITOR_READ_TOKEN kept only if read-only monitor path.
+    assert "MONITOR_READ_TOKEN" in bot
+    assert "read-only" in bot.lower() or "MONITOR_READ_TOKEN" in bot
 
 
 def test_fees_system_health_node_do_not_export_vault_bitfinex_into_process():
@@ -467,7 +499,7 @@ def test_bot_starter_bot_allowlist_never_exports_bitfinex_names(
 
 @windows_only
 def test_assert_bitfinex_process_env_absent_refuses_nonzero(chain):
-    """CI refusal proof: Assert exits 79 when a BITFINEX_* name is present."""
+    """CI refusal proof: Assert exits 79 when a BITFINEX_* KEY name is present."""
     script = (
         _common_prelude(chain)
         + "[Environment]::SetEnvironmentVariable('BITFINEX_API_KEY','preexisting','Process'); "
@@ -478,6 +510,30 @@ def test_assert_bitfinex_process_env_absent_refuses_nonzero(chain):
     assert "BITFINEX_ENV_NAME_COUNT count=1" in result.stdout
     assert "REFUSED_BITFINEX_ENV_NAMES" in result.stdout
     assert "preexisting" not in result.stdout
+
+
+@windows_only
+def test_assert_allows_live_enabled_exact_zero_and_refuses_other(chain):
+    """RK 08:26 (A): LIVE_ENABLED='0' exempt; any other value refuses."""
+    ok_script = (
+        _common_prelude(chain)
+        + "[Environment]::SetEnvironmentVariable('BITFINEX_LIVE_ENABLED','0','Process'); "
+        "Assert-BitfinexProcessEnvAbsent; "
+        "Write-Output 'ok'"
+    )
+    ok = _ps(ok_script, _clean_chain_env(chain))
+    assert ok.returncode == 0, ok.stderr
+    assert "BITFINEX_ENV_NAME_COUNT count=0" in ok.stdout
+    assert "ok" in ok.stdout
+
+    bad_script = (
+        _common_prelude(chain)
+        + "[Environment]::SetEnvironmentVariable('BITFINEX_LIVE_ENABLED','1','Process'); "
+        "Assert-BitfinexProcessEnvAbsent"
+    )
+    bad = _ps(bad_script, _clean_chain_env(chain))
+    assert bad.returncode == 79, bad.stdout + bad.stderr
+    assert "REFUSED_BITFINEX_ENV_NAMES" in bad.stdout
 
 
 @windows_only

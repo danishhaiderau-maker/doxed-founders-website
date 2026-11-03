@@ -23,7 +23,7 @@ try {
   $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File')
   $roots = @('-RepoRoot', $cfg.RepoRoot, '-CanonicalRoot', $cfg.CanonicalRoot, '-StateDir', $cfg.StateDir)
 
-  # HM HOLD b5700e72694d: names-only count; fail closed if any BITFINEX_* remain.
+  # RK 08:26: refuse KEY/SECRET/TOKEN (LIVE_ENABLED='0' exempt) inside supervisor.
   Assert-BitfinexProcessEnvAbsent -Config $cfg -LogName $logName
 
   # RK 20:20 / R22 (#972 REV7): Fly-only steps 1–3 REMOVED (segment pull,

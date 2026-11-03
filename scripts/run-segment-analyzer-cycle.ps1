@@ -82,7 +82,7 @@ if (-not $env:BOT_ADMIN_TOKEN) {
   Import-LaptopChainVaultAllowlist -VaultEnv $cfg.VaultEnv
   if (-not $env:BOT_ADMIN_TOKEN) { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
 }
-# HM HOLD b5700e72694d: names-only count; fail closed if any BITFINEX_* remain.
+# RK 08:26: supervisor-child refusal (KEY/SECRET/TOKEN; LIVE_ENABLED='0' exempt).
 Assert-BitfinexProcessEnvAbsent -Config $cfg -LogName $logName
 
 $service = Join-Path $cfg.RepoRoot 'services\btc-conservative-agent'

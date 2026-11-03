@@ -44,7 +44,10 @@ _attach_startup_logs()
 
 
 def _refuse_bitfinex_process_env_names() -> None:
-    """HM HOLD b5700e72694d: log names-only count; exit 79 if any BITFINEX_* remain."""
+    """RK 08:26: exit 79 inside launched bot if KEY/SECRET/TOKEN present.
+
+    BITFINEX_LIVE_ENABLED exactly '0' is exempt. Names only (R10).
+    """
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)

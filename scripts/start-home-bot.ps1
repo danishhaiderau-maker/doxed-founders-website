@@ -167,9 +167,8 @@ if (-not (Test-Path $VaultEnv)) {
   exit 1
 }
 
-# HM HOLD 7767d31f7f94 / b5700e72694d: true allowlist; never BITFINEX_* names.
-# Missing BITFINEX_LIVE_ENABLED means off in bot._apply_env_live_gating — do not
-# set BITFINEX_LIVE_ENABLED=0 (that would reintroduce a BITFINEX_* name).
+# RK 08:26: starters = allowlist filter only (no pre-strip / Assert refusal).
+# Exit-79 lives inside the launched bot process (bitfinex_env_name_gate).
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
 Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
 
@@ -180,7 +179,8 @@ $env:FORCE_PAPER_MODE = "1"
 $env:LIVE_TRADING_ENABLED = "0"
 $env:LIVE_ARMED = "0"
 [void](Clear-BitfinexProcessEnvNames)
-Assert-BitfinexProcessEnvAbsent
+# RK 08:26 (A): restore explicit BITFINEX_LIVE_ENABLED=0 (gate exempts exact '0').
+$env:BITFINEX_LIVE_ENABLED = "0"
 
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 if (-not (Test-Path $agentDir)) {

@@ -23934,6 +23934,17 @@ def finalize_analyzer_outputs(
 
 
 if __name__ == "__main__":
+    # RK 08:26: exit-79 refusal inside launched analyzer (incl. v62). Starters
+    # do not pre-strip-check; KEY/SECRET/TOKEN names refuse; LIVE_ENABLED='0' ok.
+    try:
+        from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names as _refuse_bfx
+    except ImportError:
+        _script_dir_for_gate = os.path.dirname(os.path.abspath(__file__))
+        if _script_dir_for_gate not in sys.path:
+            sys.path.insert(0, _script_dir_for_gate)
+        from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names as _refuse_bfx
+    _refuse_bfx()
+
     # The analyzer writes derived reports into the source/report directory.  A
     # direct launch without the canonical mirror used to fall back to cwd and
     # could therefore replace valid reports with an all-zero cohort.  Runtime

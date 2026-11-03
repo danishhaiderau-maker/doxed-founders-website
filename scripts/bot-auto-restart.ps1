@@ -102,8 +102,7 @@ try {
   if (-not $VaultEnv) {
     $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
   }
-  # HM HOLD 7767d31f7f94 / b5700e72694d: true BotAllowlist; never BITFINEX_* names.
-  # Missing BITFINEX_LIVE_ENABLED means off — do not set BITFINEX_LIVE_ENABLED=0.
+  # RK 08:26: starters = allowlist filter only (no Assert). Refusal inside bot.
   . (Join-Path $scriptDir 'laptop-chain-common.ps1')
   if (Test-Path $VaultEnv) {
     Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
@@ -120,7 +119,8 @@ try {
   $env:LIVE_TRADING_ENABLED = "0"
   $env:LIVE_ARMED = "0"
   [void](Clear-BitfinexProcessEnvNames)
-  Assert-BitfinexProcessEnvAbsent
+  # RK 08:26 (A): restore explicit BITFINEX_LIVE_ENABLED=0 (gate exempts exact '0').
+  $env:BITFINEX_LIVE_ENABLED = "0"
 
   # --- Crash report (mirrors start-home-bot.ps1 Write-CrashReport) -------------
   function Write-CrashReport([int]$CrashedPid, [int]$Code, [string]$Message) {
@@ -175,7 +175,7 @@ try {
   # --- Relaunch the bot exactly like start-home-bot.ps1 -NoWait ---------------
   function Import-VaultEnv {
     # Re-read vault on every relaunch so new secrets (e.g. BOT_ADMIN_TOKEN) apply
-    # without requiring a monitor respawn. True BotAllowlist; never BITFINEX_*.
+    # without requiring a monitor respawn. Allowlist only; refusal inside bot.
     if (Test-Path $VaultEnv) {
       Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
     } else {
@@ -187,7 +187,7 @@ try {
     $env:LIVE_TRADING_ENABLED = "0"
     $env:LIVE_ARMED = "0"
     [void](Clear-BitfinexProcessEnvNames)
-    Assert-BitfinexProcessEnvAbsent
+    $env:BITFINEX_LIVE_ENABLED = "0"
   }
 
   function Start-BotHidden {

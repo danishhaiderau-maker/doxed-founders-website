@@ -56,9 +56,14 @@ class TestLocalFreshRuntime(unittest.TestCase):
         }
         out = lfr.apply_local_fresh_environ(env)
         self.assertEqual(out["FORCE_PAPER_MODE"], "1")
-        # Missing BITFINEX_* names (not BITFINEX_LIVE_ENABLED=0) — HM b5700e72694d.
-        self.assertNotIn("BITFINEX_LIVE_ENABLED", out)
-        self.assertFalse(any(str(k).upper().startswith("BITFINEX_") for k in out))
+        # RK 08:26: restore explicit BITFINEX_LIVE_ENABLED=0; no credential names.
+        self.assertEqual(out["BITFINEX_LIVE_ENABLED"], "0")
+        self.assertFalse(
+            any(
+                str(k).upper().startswith("BITFINEX_") and str(k).upper() != "BITFINEX_LIVE_ENABLED"
+                for k in out
+            )
+        )
         self.assertEqual(out["HOME_BOT_LOCAL"], "1")
         self.assertNotIn("FLY_APP_NAME", out)
         self.assertNotIn("LIVE_COPY_ARMED", out)

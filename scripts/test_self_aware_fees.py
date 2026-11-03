@@ -75,6 +75,37 @@ def test_credentials_prefer_read_key_then_file_and_never_leak(tmp_path, monkeypa
     assert KEY not in blob and SECRET not in blob and "[REDACTED]" in blob
 
 
+def test_refresh_account_creds_absent_uses_public_fallback(tmp_path):
+    """HM HOLD 3d30a788b4f0 (3): no creds → public schedule fallback (fees.py:174 / :396-415)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    public_calls: list[int] = []
+
+    def public():
+        public_calls.append(1)
+        return {
+            "maker_rate": 0.0,
+            "taker_rate": 0.0,
+            "derivatives_maker_rate": 0.0,
+            "derivatives_taker_rate": 0.0,
+            "source": fees.PUBLIC_SCHEDULE_UNVERIFIED,
+            "endpoint": "https://www.bitfinex.com/fees/",
+            "zero_fee_language_found": True,
+        }
+
+    rec = fees.refresh_account(
+        home,
+        NOW,
+        creds_env={"SELF_AWARE_BITFINEX_ENV_FILE": str(tmp_path / "missing.env")},
+        fetch_account_fn=lambda _c: pytest.fail("must not call account without creds"),
+        fetch_public_fn=public,
+    )
+    assert len(public_calls) == 1
+    assert rec["source"] == fees.PUBLIC_SCHEDULE_UNVERIFIED
+    assert rec["last_attempt"]["credentials"] == "missing"
+    assert rec["maker_rate"] == 0.0
+
+
 def test_nonce_stays_on_platform_scale_and_is_monotonic():
     a, b = int(fees._nonce()), int(fees._nonce())
     assert b > a

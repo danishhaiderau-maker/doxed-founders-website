@@ -40,11 +40,11 @@ if (-not (Test-Path $vaultEnv)) {
   exit 1
 }
 
-# HM HOLD 7767d31f7f94 / b5700e72694d: true BotAllowlist; never BITFINEX_* names.
+# RK 08:26: starters = allowlist filter only (no Assert). Refusal inside bot.
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
 Import-LaptopChainVaultAllowlist -VaultEnv $vaultEnv -Mode BotAllowlist
 [void](Clear-BitfinexProcessEnvNames)
-Assert-BitfinexProcessEnvAbsent
+$env:BITFINEX_LIVE_ENABLED = "0"
 
 $env:PORT = "$Port"
 $env:DASHBOARD_PORT = "$Port"

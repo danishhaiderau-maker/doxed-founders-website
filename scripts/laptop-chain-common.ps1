@@ -199,11 +199,24 @@ function Publish-UpstreamIdentity {
   return [pscustomobject]$identity
 }
 
-# RK 05:12 / HM HOLD 7767d31f7f94 + b5700e72694d: never put BITFINEX_* into
-# supervisor/bot process env from home-bot.env. Values are never printed.
-# True allowlists only (denylist mode removed).
+# RK 05:12 / HM HOLD 7767d31f7f94 + b5700e72694d + RK 08:26: never put
+# BITFINEX_* into supervisor/bot process env from home-bot.env. Values never
+# printed. True allowlists only (denylist mode removed). Each BotAllowlist
+# name is justified (code ref) or dropped — see allowlist table in #981 asks.
 $script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
 # Bot starters: explicit non-BITFINEX names only (disaster-recovery / showcase).
+# Dropped vs rev3: PLATFORM_* (snapshots load via home-bot-vault-env), 
+# LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID (no getenv reader).
+# Keep reasons (RK 08:26 B) — one line each; full table in #981 asks:
+# BOT_ADMIN_TOKEN — bot admin auth (btc_conservative_agent / bot.py)
+# BOT_CONTROL_SECRET — relay/control HMAC (bot.py)
+# DEEPSEEK_API_KEY — paper AI (bot.py getenv); R50: paid DeepSeek when set
+# SHOWCASE_WEBHOOK_SECRET — showcase webhook HMAC (bot.py)
+# SHOWCASE_RELAY_WEBHOOK_URL — paper relay delivery URL (bot.py)
+# CRASH_NOTIFY_WEBHOOK — crash notify (start-home-bot / bot-auto-restart)
+# MONITOR_READ_TOKEN — read-only monitor bearer (bot.py / monitor_api.py)
+# LIFECYCLE_LAPTOP_ATTESTATION_KEY — lifecycle cleanup attest (bot.py)
+# LIFECYCLE_CLEANUP_ENABLED — lifecycle cleanup toggle (bot.py)
 $script:LaptopChainBotVaultAllowlist = @(
   'BOT_ADMIN_TOKEN',
   'BOT_CONTROL_SECRET',
@@ -212,11 +225,7 @@ $script:LaptopChainBotVaultAllowlist = @(
   'SHOWCASE_RELAY_WEBHOOK_URL',
   'CRASH_NOTIFY_WEBHOOK',
   'MONITOR_READ_TOKEN',
-  'PLATFORM_API_BASE_URL',
-  'PLATFORM_RELAY_AGENT_SLUG',
-  'PLATFORM_RELAY_USER_ID',
   'LIFECYCLE_LAPTOP_ATTESTATION_KEY',
-  'LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID',
   'LIFECYCLE_CLEANUP_ENABLED'
 )
 $script:BitfinexEnvRefusalExitCode = 79
@@ -256,17 +265,34 @@ function Read-LaptopChainVaultValue {
   return $null
 }
 
-# COUNT of BITFINEX_* names in this process env. Never returns or prints values.
+# True when a BITFINEX_* binding must refuse (RK 08:26): KEY/SECRET/TOKEN in
+# the name, or BITFINEX_LIVE_ENABLED whose value is not exactly '0'.
+function Test-BitfinexEnvNameRefused {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [AllowNull()][string]$Value
+  )
+  if (-not ($Name -like 'BITFINEX_*')) { return $false }
+  if ([string]::Equals($Name, 'BITFINEX_LIVE_ENABLED', [StringComparison]::OrdinalIgnoreCase)) {
+    return ($Value -cne '0')
+  }
+  $upper = $Name.ToUpperInvariant()
+  return ($upper.Contains('KEY') -or $upper.Contains('SECRET') -or $upper.Contains('TOKEN'))
+}
+
+# COUNT of refused BITFINEX_* names in this process env. Never returns/prints values.
 function Get-BitfinexProcessEnvNameCount {
   $count = 0
-  foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
-    if ([string]$key -like 'BITFINEX_*') { $count++ }
+  $vars = [Environment]::GetEnvironmentVariables('Process')
+  foreach ($key in @($vars.Keys)) {
+    $name = [string]$key
+    if (Test-BitfinexEnvNameRefused -Name $name -Value ([string]$vars[$key])) { $count++ }
   }
   return $count
 }
 
 # Remove every BITFINEX_* name from process env. Returns how many names were
-# cleared. Never prints values.
+# cleared. Never prints values. Starters re-set BITFINEX_LIVE_ENABLED=0 after.
 function Clear-BitfinexProcessEnvNames {
   $cleared = 0
   foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
@@ -278,7 +304,9 @@ function Clear-BitfinexProcessEnvNames {
   return $cleared
 }
 
-# Log names-only count; exit 79 if any BITFINEX_* name remains (fail closed).
+# Log names-only refused count; exit 79 if any refused name remains (fail closed).
+# Used inside launched processes / supervisor children — NOT in bot starters
+# (RK 08:26: starters = allowlist filter only; no pre-strip refusal).
 function Assert-BitfinexProcessEnvAbsent {
   param(
     $Config = $null,
