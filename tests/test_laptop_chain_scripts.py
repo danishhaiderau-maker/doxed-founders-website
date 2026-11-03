@@ -166,7 +166,7 @@ def test_promotion_waits_out_a_parity_pass_holding_the_shadow_lock():
 def test_supervisor_task_uses_system_powershell():
     register = _source("register-laptop-chain-task.ps1")
     assert "System32\\WindowsPowerShell\\v1.0\\powershell.exe" in register
-    assert "-AtLogOn" in register and "New-TimeSpan -Minutes 5" in register
+    assert "-AtLogOn" in register and "New-TimeSpan -Minutes 10" in register
     assert ".cache" not in register
 
 

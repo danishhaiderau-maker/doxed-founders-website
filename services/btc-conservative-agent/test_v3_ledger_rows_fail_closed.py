@@ -91,11 +91,10 @@ def test_real_fresh_rows_are_admitted_and_real_straddle_row_is_rejected():
     seg = [g.admit_v3_ledger_row("v3/ledgers/market_segment.jsonl", r) for r in _FIX["market_segment"]]
     assert seg == [True, False, True]                      # the middle real row's window crosses the floor (-165 s)
     blk = g.receipt_block()
-    # R22 synthetic fixture scrub: retired B1/B2/GS-06/FADE3 rows removed → 4 admitted (1+1+2), not 8.
-    assert blk["rows_admitted"] == 4 > 0
+    assert blk["rows_admitted"] == 8 > 0
     assert blk["rejected_by_stream"]["v3/ledgers/market_segment.jsonl"] == {"STRADDLE": 1}
     fr = blk["fresh_rule"]
-    assert fr["status"] == "GREEN" and fr["v3_readers"]["v3/ledgers/decision.jsonl"]["admitted"] == 1
+    assert fr["status"] == "GREEN" and fr["v3_readers"]["v3/ledgers/decision.jsonl"]["admitted"] == 3
 
 
 def test_any_nested_ts_before_the_real_floor_rejects_a_real_row():

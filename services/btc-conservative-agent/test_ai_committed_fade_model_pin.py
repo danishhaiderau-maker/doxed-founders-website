@@ -16,7 +16,10 @@ import pytest
 import bot
 from combo_pathway_config import ACTIVE_TILE_REGISTRY, COMBO_LANE_SPECS
 
-COMMITTED_FADE_LANES = ()  # R22 2026-10-30: B2/GSB2 retired; no active committed-fade tile remains.
+COMMITTED_FADE_LANES = (
+    # H-A retired 12 Oct; GS-06 retired 28 Oct R22. B2 still fades via INVERTED_SCORE_LED_SIDE in TREND.
+    "FAMILY_GSB2_REGIME_SWITCHER",
+)
 
 
 def test_committed_fade_model_is_pinned_to_the_served_id():
@@ -44,11 +47,12 @@ def test_model_resolution_returns_the_pinned_id_and_fails_closed():
 
 
 def test_committed_fade_tiles_consume_the_shared_ai_call():
-    # R22: FAMILY_GSB2_REGIME_SWITCHER retired — assert ABSENT from active roster/specs.
-    assert "FAMILY_GSB2_REGIME_SWITCHER" not in ACTIVE_TILE_REGISTRY
-    assert "FAMILY_GSB2_REGIME_SWITCHER" not in COMBO_LANE_SPECS
-    assert set(ACTIVE_TILE_REGISTRY) == {"FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"}
-    assert COMMITTED_FADE_LANES == ()
+    # Active committed-fade-direction tiles fade the shared AI's committed call; their
+    # directional behaviour is exactly what the pinned model produces.
+    for lane in COMMITTED_FADE_LANES:
+        assert lane in ACTIVE_TILE_REGISTRY, lane
+        entry = COMBO_LANE_SPECS[lane]["entry_policy"]
+        assert entry["direction_source"] == "INVERTED_SCORE_LED_SIDE", lane
 
 
 def test_no_tile_carries_a_per_tile_model_override():

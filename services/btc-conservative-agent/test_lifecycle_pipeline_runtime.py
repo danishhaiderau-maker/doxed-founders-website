@@ -524,7 +524,7 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         "v31-freeze21b-8t-v14",
         # 2026-10-28 (#924): pin moved deliberately — GS-06 R22 retire + FADE3-LOOSE mid-epoch add
         # (score_led = research_freeze.MID_EPOCH_REGISTRY_SIGNATURES["score_led"]).
-        "82e8202a639413075762b8b8aec8f752a93876d7e3e613c3cea540d2337b16f4",
+        "967e0c884da7f250070461cec707ab3bee1ae00424427ac2f74ca57dfaed3e51",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -541,7 +541,7 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         "v31-freeze21b-8t-v14",
         # 2026-10-28 (#924): hypothesis-mode pin moved for the same roster change
         # (hypothesis = research_freeze.MID_EPOCH_REGISTRY_SIGNATURES["hypothesis"]).
-        "d079c1eecba39298e5a911c58609225afad272c97c1d208cb0ea751b1db6b21f",
+        "119353794df3748626a080e46d21a981463e6b5b78b24496fac98cd596fdc05b",
     ]
 
 

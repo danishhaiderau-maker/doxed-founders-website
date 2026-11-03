@@ -1,4 +1,4 @@
-# One scheduled supervisor tick (at logon and every 5 minutes). It returns
+# One scheduled supervisor tick (at logon and every 10 minutes — Neon idle). It returns
 # quickly: it ensures exactly one segment pull loop, starts a segment analyzer
 # cycle (pull, promote, migrate, analyze) when the 30-minute cadence is due,
 # restarts the dashboard if it is down, and runs the monitor. Long-running

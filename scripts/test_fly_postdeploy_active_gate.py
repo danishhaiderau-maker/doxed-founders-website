@@ -318,7 +318,7 @@ def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     # HM nit: pin the roster size; a 7th tile must update this pin deliberately (and pass the standard below).
     # 2026-10-28 (R22 + LOOSE): still 6 tiles — GS-06 out, FADE3-LOOSE in. Index 4 = FADE3 (tile 5),
     # index 5 = LOOSE (tile 6). Updating this pin is deliberate.
-    assert len(lanes) == 2 and lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"], lanes
+    assert len(lanes) == 4 and lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"], lanes
     assert not set(lanes) & retired
     # CTRL + GS-01 only after 2026-10-30 R22 retire of tiles 3–6.
     assert set(lanes) == {"FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"}

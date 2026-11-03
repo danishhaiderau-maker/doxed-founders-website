@@ -349,8 +349,7 @@ def test_thesis_fast_cut_requires_mfe_at_most_two(monkeypatch):
 def test_gs01_and_b1_cuts_carry_the_mfe_cap_and_window():
     import combo_pathway_config as c
     import gs_regime_exit_stack as g
-    # R22: _GSB1_EXIT ABSENT; GS-01 remains and keeps the MFE cap.
-    assert not hasattr(c, "_GSB1_EXIT")
-    for prof in c._GS01_EXIT["profiles"].values():
-        assert prof["cut_max_peak_bp"] == 2.0 and prof["cut_win_sec"] == 300
+    for policy in (c._GS01_EXIT, c._GSB1_EXIT):
+        for prof in policy["profiles"].values():
+            assert prof["cut_max_peak_bp"] == 2.0 and prof["cut_win_sec"] == 300
     assert "cut_max_peak_bp" in open(g.__file__).read()

@@ -107,7 +107,6 @@ TILE14_ORDER = ("FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DISLOC_BFX_DISLOCATI
 # Tile 6 · GS-FADE3-TP30 (gf3) added 25 Oct 2026: self-simulated PAPER tile (tile_fade3), live refused.
 GF3_ORDER = ()  # GS-FADE3-TP30 / LOOSE retired 2026-10-30 (R22)
 RETIRED_20261030 = (
-    "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
     "FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25",
 )
 EXPECTED_ORDER_ALL = (FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER + TILE14_ORDER
@@ -125,7 +124,7 @@ EXPECTED_ORDER = tuple(lane for lane in EXPECTED_ORDER_ALL
                        if lane not in RETIRED_20261011_LANES and lane not in RETIRED_TILE67_LANES
                        and lane not in RETIRED_GS06_LANES and lane not in RETIRED_20261030)
 ACTIVE_GS_B_ORDER = tuple(lane for lane in GS_B_ORDER
-                          if lane not in RETIRED_20261011_LANES and lane not in RETIRED_20261030)
+                          if lane not in RETIRED_20261011_LANES)
 # PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
 RETIRED_PHASE02_LANES = (
     "FAMILY_NOTRADE_FOLLOW_TAKER_60",
@@ -146,7 +145,7 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     ]
     assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, len(EXPECTED_ORDER) + 1))
     gs_tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_ORDER + ACTIVE_GS_B_ORDER]
-    assert [t["id_prefix"] for t in gs_tiles] == ["gs1"]
+    assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gb1", "gb2"]
     assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == len(ACTIVE_TILE_REGISTRY)
     mid = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_MID_EPOCH_ORDER]
     assert mid == []  # GS-06 retired
@@ -333,7 +332,7 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     # active tile (H-A, the committed fade) is registered on them.
     inverted_users = [lane for lane in ACTIVE_TILE_ORDER
                       if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
-    assert inverted_users == []  # B2 retired 2026-10-30; no active inverted-side tile remains
+    assert inverted_users == ["FAMILY_GSB2_REGIME_SWITCHER"]
     assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
     assert callable(taker_time_exit_binding.committed_call_refusal)
     for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):
@@ -541,16 +540,22 @@ def test_ha_gs07_and_tiles67_retired_and_roster_renumbered_1_to_5():
     service_dir = __import__("pathlib").Path(__file__).resolve().parent
     assert not (service_dir / "paper_policy_family_gs06_committed_fade_atr_tp.py").exists()
     assert not (service_dir / "test_paper_policy_family_gs06_committed_fade_atr_tp.py").exists()
-    assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 3))
+    assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 5))
     assert ACTIVE_TILE_ORDER == (
-        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP")
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+        "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER")
     for lane in RETIRED_20261030:
         assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_ORDER
         assert lane not in registry.COMBO_LANE_SPECS  # R22 delete
-    for gone in (
+    for kept in (
         "paper_policy_family_gsb1_cvd_div_regime.py", "paper_policy_family_gsb2_regime_switcher.py",
-        "tile_fade3.py", "tile_fade3_loose.py",
         "test_paper_policy_family_gsb1_cvd_div_regime.py", "test_paper_policy_family_gsb2_regime_switcher.py",
+    ):
+        assert (service_dir / kept).is_file(), kept
+    for gone in (
+        "tile_fade3.py", "tile_fade3_loose.py",
         "test_tile_fade3.py", "test_tile_fade3_loose.py",
+        "test_tile_fade3_deriv_rotation.py", "test_tile_fade3_incremental_feed.py",
+        "fade3_feed_test_helpers.py",
     ):
         assert not (service_dir / gone).exists(), gone
