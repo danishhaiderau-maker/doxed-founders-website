@@ -35,7 +35,10 @@ PARQUET_TRADES_DIR = "parquet" + os.sep + "trades"
 
 # Retention defaults (override via env).
 DEFAULT_GAP_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB
-DEFAULT_SQLITE_RETENTION_SECONDS = 7 * 24 * 3600  # 7 days of book/trade secs
+# RK (C) / R51 BLOCKER: default 0 = **no SQLite purge** so fresh local data
+# cannot be lost before the analyzer reads it. Set a positive seconds value
+# only with a lossless archive path. Parquet remains optional (pyarrow).
+DEFAULT_SQLITE_RETENTION_SECONDS = 0
 DEFAULT_RETENTION_EVERY_N_WRITES = 500
 
 _LOG = logging.getLogger("local_market_persist")
@@ -74,7 +77,8 @@ class MarketStore:
         self.root = Path(data_dir).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.clock = clock
-        self.series_break = ensure_series_break(self.root)
+        # P5: series-start stamp uses the same clock as the store (tests + soak).
+        self.series_break = ensure_series_break(self.root, now=float(self.clock()))
         self.sqlite_path = self.root / SQLITE_NAME
         self.gap_log_path = self.root / GAP_LOG_NAME
         self._conn = _connect(self.sqlite_path)
@@ -294,6 +298,12 @@ class MarketStore:
             "gap_log_bytes": int(gap_bytes),
             "sqlite_bytes": int(sqlite_bytes),
             "parquet_enabled": bool(self._parquet_ok),
+            "sqlite_purge_enabled": _env_int(
+                "LOCAL_FRESH_SQLITE_RETENTION_SECONDS", DEFAULT_SQLITE_RETENTION_SECONDS
+            )
+            > 0,
+            "local_epoch_id": (self.series_break or {}).get("local_epoch_id"),
+            "series_start_ts": (self.series_break or {}).get("series_start_ts"),
             "last_book_sec": self._last_book_sec,
             "last_trade_sec": self._last_trade_sec,
             "series_break_ts": (self.series_break or {}).get("series_break_ts"),
@@ -348,6 +358,18 @@ class MarketStore:
         retain_s = _env_int(
             "LOCAL_FRESH_SQLITE_RETENTION_SECONDS", DEFAULT_SQLITE_RETENTION_SECONDS
         )
+        # RK (C): retain_s <= 0 → no DELETE (analyzer must see all fresh rows).
+        if retain_s <= 0:
+            return {
+                "cutoff_s": None,
+                "book_deleted": 0,
+                "trade_deleted": 0,
+                "gap_deleted": 0,
+                "retain_seconds": retain_s,
+                "purge": False,
+                "reason": "LOCAL_FRESH_SQLITE_PURGE_DISABLED",
+                "min_disk_free_bytes": min_disk_free_bytes(),
+            }
         now_s = int(self.clock())
         cutoff = now_s - retain_s
         cur = self._conn.cursor()
@@ -368,6 +390,7 @@ class MarketStore:
             "trade_deleted": int(trade_del or 0),
             "gap_deleted": int(gap_del or 0),
             "retain_seconds": retain_s,
+            "purge": True,
             "min_disk_free_bytes": min_disk_free_bytes(),
         }
 

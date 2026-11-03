@@ -354,6 +354,7 @@ test_local_dynamic_mapping.py
 test_local_fresh_collection.py
 test_local_fresh_collection_integration.py
 test_local_fresh_runtime.py
+test_local_fresh_analyzer_read.py
 test_local_generation_fence.py
 test_local_market_persist.py
 test_local_research_reset.py
