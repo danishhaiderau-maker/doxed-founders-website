@@ -21,7 +21,7 @@ pytestmark = _pytest_r20.mark.usefixtures("small_loss_limit")   # R20: legacy lo
 HERE = Path(__file__).resolve().parent
 TS = HERE.parent.parent / "apps" / "api" / "src" / "trading-agents" / "live-tile-gate.ts"
 GS1 = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
-GB2 = "FAMILY_GSB2_REGIME_SWITCHER"
+GB2 = "FAMILY_GSB2_REGIME_SWITCHER"  # retired 2026-10-30; reserved key only
 NOW = dt.datetime(2026, 10, 24, 12, 0, tzinfo=dt.timezone.utc).timestamp()
 FLAT = {"ok": True, "read_age_s": 1.0, "positions": [], "open_orders": [], "orphans": []}
 CAPS = {"per_tile_usd": {}, "total_usd": None, "max_entries_per_day": 20}
@@ -32,7 +32,7 @@ BOOK = {"s": NOW - 1.5, "b": [[100000.0, 1.0]], "a": [[100010.0, 1.0]]}   # fres
 
 def admit(**over):
     kw = dict(lane=GS1, trade_id="gs1-new", now=NOW, chains=[], mirror=FLAT, decisions=[],
-              armed_lanes=[GS1, GB2], entry_margin_usd=0.25, caps=CAPS, book=BOOK)
+              armed_lanes=[GS1], entry_margin_usd=0.25, caps=CAPS, book=BOOK)
     kw.update(over)
     return ltg.admit_entry(**kw)
 
@@ -79,8 +79,9 @@ def test_trade_id_and_chain_tile_key():
     assert ltg.tile_key_for_trade_id("gs1-abc") == "gs1"
     assert ltg.tile_key_for_trade_id("adopt:gs6-1") is None  # gs6 reserved/retired
     assert ltg.tile_key_for_trade_id("dsl-1") is None and ltg.tile_key_for_trade_id("gs1-") is None
-    assert ltg.chain_tile_key({"lane": GB2, "correlation_id": "gb2-1"}) == "gb2"
-    assert ltg.chain_tile_key({"correlation_id": "gb2-9"}) == "gb2"
+    assert ltg.chain_tile_key({"lane": GB2, "correlation_id": "gb2-1"}) is None  # retired
+    assert ltg.chain_tile_key({"correlation_id": "gb2-9"}) is None
+    assert ltg.chain_tile_key({"lane": GS1, "correlation_id": "gs1-9"}) == "gs1"
     assert ltg.tile_key_for_lane("FAMILY_UNKNOWN") is None
 
 
@@ -98,7 +99,7 @@ def test_clean_entry_admitted():
 
 
 @pytest.mark.parametrize("chain", [
-    {"correlation_id": "gb2-a", "lane": GB2, "fill_at_ts": NOW - 50},             # open on another tile
+    {"correlation_id": "gs1-a", "lane": GS1, "fill_at_ts": NOW - 50},             # open on another tile
     {"correlation_id": "gs1-a", "lane": GS1, "order_sent_at_ts": NOW - 30},       # pending on the same tile
 ])
 def test_second_signal_refused_while_another_live_lot_exists(chain):
@@ -107,22 +108,22 @@ def test_second_signal_refused_while_another_live_lot_exists(chain):
 
 
 def test_closed_or_stale_pending_chain_does_not_block():
-    chains = [{"correlation_id": "gb2-a", "lane": GB2, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100, "exit_fill_at_ts": NOW - 100,
+    chains = [{"correlation_id": "gs1-a", "lane": GS1, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100, "exit_fill_at_ts": NOW - 100,
                "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 100_000.0, "exit_price_source": "exchange_fill", "fill_price_source": "exchange_trades"},
-              {"correlation_id": "gb2-b", "lane": GB2, "order_sent_at_ts": NOW - ltg.PENDING_EXPOSURE_SEC - 1}]
+              {"correlation_id": "gs1-b", "lane": GS1, "order_sent_at_ts": NOW - ltg.PENDING_EXPOSURE_SEC - 1}]
     assert admit(chains=chains)[0]
 
 
 def test_approved_but_unreported_trade_is_in_flight_and_blocks():
-    rows = [("gb2-x", {"approved": True, "lane": GB2, "approval_ts": NOW - 10})]
+    rows = [("gs1-x", {"approved": True, "lane": GS1, "approval_ts": NOW - 10})]
     ok, r, _ = admit(decisions=rows)
     assert not ok and ltg.SKIP_MUTEX in r
     # a skipped/rejected intent or an expired approval no longer blocks
-    skipped = [{"correlation_id": "gb2-x", "errors": [{"type": "INTENT_REJECTED"}]}]
+    skipped = [{"correlation_id": "gs1-x", "errors": [{"type": "INTENT_REJECTED"}]}]
     assert admit(decisions=rows, chains=skipped)[0]
-    old = [("gb2-x", {"approved": True, "lane": GB2, "approval_ts": NOW - ltg.INFLIGHT_APPROVAL_SEC - 1})]
+    old = [("gs1-x", {"approved": True, "lane": GS1, "approval_ts": NOW - ltg.INFLIGHT_APPROVAL_SEC - 1})]
     assert admit(decisions=old)[0]
-    denied = [("gb2-x", {"approved": False, "lane": GB2, "approval_ts": None})]
+    denied = [("gs1-x", {"approved": False, "lane": GS1, "approval_ts": None})]
     assert admit(decisions=denied)[0]
 
 
@@ -148,7 +149,7 @@ def test_reduce_only_or_stop_orders_and_zero_rows_are_flat():
 # ------------------------------------------------------------------ $ caps
 def test_default_caps_and_total_is_sum_of_armed_tiles():
     assert ltg.tile_cap_usd("gs1", CAPS) == ltg.DEFAULT_TILE_MARGIN_CAP_USD == 0.25
-    assert ltg.total_cap_usd({"gs1", "gb2"}, CAPS) == 0.5
+    assert ltg.total_cap_usd({"gs1", "gb2"}, CAPS) == 0.25  # gb2 retired → ignored
     assert ltg.total_cap_usd({"gs1"}, CAPS) == 0.25
     assert ltg.total_cap_usd({"gs1", "nope"}, CAPS) == 0.25
 
@@ -176,7 +177,7 @@ def test_entered_tile_counts_as_armed_even_if_list_is_stale():
 def test_load_caps_from_env_and_bad_values_fall_back():
     caps = ltg.load_caps({"LIVE_TILE_MARGIN_CAPS_USD_JSON": '{"gs1": 0.2, "gb2": 0.15, "zzz": 9, "gb1": -1}',
                           "LIVE_TOTAL_MARGIN_CAP_USD": "0.3", "LIVE_TILE_MAX_ENTRIES_PER_DAY": "50"})
-    assert caps == {"per_tile_usd": {"gs1": 0.2, "gb2": 0.15}, "total_usd": 0.3, "max_entries_per_day": 20}
+    assert caps == {"per_tile_usd": {"gs1": 0.2}, "total_usd": 0.3, "max_entries_per_day": 20}
     bad = ltg.load_caps({"LIVE_TILE_MARGIN_CAPS_USD_JSON": "{nope", "LIVE_TOTAL_MARGIN_CAP_USD": "x",
                          "LIVE_TILE_MAX_ENTRIES_PER_DAY": "x"})
     assert bad == {"per_tile_usd": {}, "total_usd": None, "max_entries_per_day": 20}
@@ -193,7 +194,8 @@ def test_twenty_entries_per_tile_per_utc_day():
     ok, r, info = admit(decisions=_rows(20))
     assert not ok and ltg.DENY_DAILY_LIMIT in r and info["entries_today"] == 20
     # other tile's entries and denied rows don't count
-    assert admit(decisions=_rows(20, "gb2", GB2) + [("gs1-d", {"approved": False, "approval_ts": None})])[0]
+    ok20, r20, _ = admit(decisions=_rows(20, "gs1", GS1))
+    assert not ok20  # 20 prior gs1 entries hit daily cap
 
 
 def test_daily_limit_resets_at_utc_midnight_not_local():
@@ -291,8 +293,8 @@ def test_bot_wires_admission_into_stamp_and_reports_tile_gate():
 # ------------------------------------------------------------------ HM R2 C4 / C5 / C6 / C1-admission
 def test_c4_env_per_tile_cap_is_clamped_to_the_default():
     caps = ltg.load_caps({"LIVE_TILE_MARGIN_CAPS_USD_JSON": '{"gs1": 5.0, "gb2": 0.10}'})
-    assert caps["per_tile_usd"] == {"gs1": ltg.DEFAULT_TILE_MARGIN_CAP_USD, "gb2": 0.10}
-    assert ltg.total_cap_usd({"gs1", "gb2"}, caps) <= 2 * ltg.DEFAULT_TILE_MARGIN_CAP_USD
+    assert caps["per_tile_usd"] == {"gs1": ltg.DEFAULT_TILE_MARGIN_CAP_USD}  # gb2 retired → ignored
+    assert ltg.total_cap_usd({"gs1"}, caps) <= ltg.DEFAULT_TILE_MARGIN_CAP_USD
 
 
 @pytest.mark.parametrize("age", [None, "x", -1])
@@ -314,15 +316,16 @@ def test_c1_admission_refuses_while_a_daily_loss_cap_is_breached():
     def rf(pnl):   # HM R4 B1: a real Bitfinex exit fill backs the loss (pnl_usd alone is unreadable)
         return {"pnl_usd": pnl, "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG",
                 "exit_fill_price": 100_000.0 + pnl / 0.01, "exit_price_source": "exchange_fill", "fill_price_source": "exchange_trades"}
-    lost = {"correlation_id": "gb2-old", "lane": GB2, "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60, **rf(-0.06)}
-    assert admit(chains=[lost])[0]
-    ok, r, info = admit(chains=[lost, dict(lost, correlation_id="gs1-old", lane=GS1, **rf(-0.05))])
-    assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and info["daily_loss_violations"]
-    small = dict(lost, **rf(-0.01))
+    # Only GS-01 remains live-eligible after 2026-10-30 R22; exercise the same-tile loss path.
+    small = {"correlation_id": "gs1-small", "lane": GS1, "closed": True, "closed_at_ts": NOW - 60,
+             "exit_fill_at_ts": NOW - 60, **rf(-0.01)}
     assert admit(chains=[small])[0]
-    # the per-tile cap blocks only that tile's entries (gs6 lost $0.06; gs1 is still under its own cap and the $0.10 total)
-    ok, r, info = admit(chains=[lost], lane=GB2, trade_id="gb2-new")
+    lost = {"correlation_id": "gs1-old", "lane": GS1, "closed": True, "closed_at_ts": NOW - 60,
+            "exit_fill_at_ts": NOW - 60, **rf(-0.06)}
+    ok, r, info = admit(chains=[lost], lane=GS1, trade_id="gs1-new")
     assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and ltg.VIOL_TILE_LOSS_CAP in info["daily_loss_violations"]
+    ok, r, info = admit(chains=[lost, dict(lost, correlation_id="gs1-old2", **rf(-0.05))])
+    assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and info["daily_loss_violations"]
 
 
 def test_force_flattened_trades_are_non_countable():
@@ -334,7 +337,7 @@ def test_force_flattened_trades_are_non_countable():
 # RK final ruling (1) (24 Oct 06:26): D3 loss cap = realised trade P&L from the REAL Bitfinex fill prices + the open
 # position marked to the book (full-size walk, book <= 2 s else BLOCK). No funding term, no fee term. ONE shared helper (R4).
 def test_d3_realised_pnl_is_from_real_fills_with_no_funding_or_fee_term():
-    row = {"correlation_id": "gb2-a", "lane": GB2, "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60,
+    row = {"correlation_id": "gs1-a", "lane": GS1, "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60,
            "fill_price": 100_000.0, "exit_fill_price": 99_800.0, "exit_price_source": "exchange_fill", "fill_price_source": "exchange_trades",
            "exit_price": 99_900.0, "fill_qty": 0.0003, "side": "LONG",
            "pnl_usd": 123.0, "funding_usd": -50.0, "fee_usd": -9.0}
@@ -346,7 +349,7 @@ def test_d3_realised_pnl_is_from_real_fills_with_no_funding_or_fee_term():
     # a missing/unknown funding value never blocks, never gates countability
     assert not ltg.daily_loss_violations([dict(row, side="SHORT", funding_usd=None, funding_status="PENDING")], NOW)
     # HM R4 B1: NO pnl_usd fallback. Without a real exit fill the trade is UNREADABLE (AMBER), never a $0 loss
-    bare = {"correlation_id": "gb2-b", "lane": GB2, "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60, "pnl_usd": -0.02,
+    bare = {"correlation_id": "gs1-b", "lane": GS1, "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60, "pnl_usd": -0.02,
             "funding_usd": -5.0}
     assert ltg.trade_realised_pnl_usd(bare) is None
     assert ltg.daily_realised_loss([bare], NOW)[2] == 0
