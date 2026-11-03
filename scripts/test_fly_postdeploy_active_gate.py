@@ -320,9 +320,13 @@ def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     # index 5 = LOOSE (tile 6). Updating this pin is deliberate.
     assert len(lanes) == 4 and lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"], lanes
     assert not set(lanes) & retired
-    # CTRL + GS-01 only after 2026-10-30 R22 retire of tiles 3–6.
-    assert set(lanes) == {"FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"}
+    # #972 REV8: FADE3/LOOSE retired; CTRL+GS-01+B1+B2 remain (GSB split is a separate PR).
+    assert set(lanes) == {
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+        "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
+    }
     assert "FAMILY_GS06_COMMITTED_FADE_ATR_TP" in retired
+    assert {"FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25"} <= retired
     for lane in lanes:
         spec = registry.ACTIVE_TILE_REGISTRY[lane]
         assert spec.get("paper_only") is True and spec.get("execution_scope") == "PAPER_ONLY", lane
@@ -432,9 +436,12 @@ def test_checkout_registry_roster_passes_the_gate_and_gs01_is_held_to_the_same_s
 
 
 def test_checkout_registry_live_copy_check_flags_every_non_false_relay_flag_on_the_real_roster():
-    """HM nit: live-copy check on the real roster (CTRL + GS-01 after R22 2026-10-30)."""
+    """HM nit: live-copy check on the real roster (CTRL+GS-01+B1+B2; FADE3 retired #972)."""
     lanes, _ = gate.checkout_registry()
-    assert lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
+    assert lanes == [
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+        "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
+    ]
     assert gate.relay_eligible_tiles([{"lane": lane, "relay_eligible": False} for lane in lanes]) == []
     probe = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
     idx = lanes.index(probe)

@@ -110,7 +110,10 @@ function Initialize-AnalyzerEnvironment {
 
 function Test-NativeCrashExit([int]$Code) {
   # Windows ACCESS_VIOLATION 0xC0000005 = -1073741819 (signed) / 3221225477 (unsigned).
-  return ($Code -eq -1073741819) -or ([uint32]$Code -eq [uint32]0xC0000005)
+  # Do not cast negative ExitCode through [uint32] — that throws on Windows PowerShell 5.1.
+  if ($Code -eq -1073741819) { return $true }
+  if ($Code -lt 0) { return $false }
+  return ([uint32]$Code -eq [uint32]0xC0000005)
 }
 
 # The dashboard is an independent process that keeps serving the last

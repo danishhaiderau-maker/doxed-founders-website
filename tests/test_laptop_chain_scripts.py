@@ -79,13 +79,18 @@ def test_supervisor_keeps_one_segment_pull_loop_not_a_second_watcher():
     supervisor = _source("laptop-chain-supervisor.ps1")
     loop = _source("research-segment-pull-loop.ps1")
     pull = _source("research-segment-pull.ps1")
-    assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')" in supervisor
-    assert "research-segment-pull-loop.ps1" in supervisor
+    # RK 20:20 / R22: Fly-only steps 1–3 removed from supervisor (segment pull gone).
+    assert "research-segment-pull-loop.ps1" not in supervisor
+    assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')" not in supervisor
+    assert "laptop-status-snapshots.ps1" not in supervisor
+    assert "v2c-auto-ff.ps1" not in supervisor
+    assert "r22-fly-steps" in supervisor
     assert "laptop-ack-watcher" not in supervisor
     assert "run-segment-analyzer-cycle.ps1" in supervisor
     assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')" in supervisor
     cycle = _source("run-segment-analyzer-cycle.ps1")
     assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')" in cycle
+    # Pull-loop script remains on disk for manual/admin use; not started by supervisor.
     assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentPull')" in loop
     assert "[int]$PullIntervalSec = 120" in loop and "[int]$ParityIntervalMin = 60" in loop
     assert "'-Source', 'Http'" in loop and "-MaxSegments" in loop
@@ -631,8 +636,11 @@ def test_supervisor_runs_the_unattended_proof_after_the_monitor():
 
 
 def test_supervisor_collects_snapshots_before_the_monitor():
+    # R22: fly_* status snapshots removed from supervisor; monitor still runs.
     supervisor = _source("laptop-chain-supervisor.ps1")
-    assert supervisor.index("laptop-status-snapshots.ps1") < supervisor.index("laptop-chain-monitor.ps1")
+    assert "laptop-status-snapshots.ps1" not in supervisor
+    assert "laptop-chain-monitor.ps1" in supervisor
+    assert "snapshots=removed:r22-fly-steps" in supervisor
 
 
 def _fake_repo(tmp_path, launcher_body: str) -> Path:
