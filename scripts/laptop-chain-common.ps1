@@ -35,6 +35,8 @@ function Get-LaptopChainConfig {
     RunDir = Join-Path $StateDir 'run'
     QuarantineDir = Join-Path $StateDir 'quarantine'
     AlertDir = Join-Path $StateDir 'alerts'
+    # Path only — never load the vault here. Admin token enters process env
+    # solely via Import-LaptopChainVaultAllowlist / Get-AdminToken (allowlist).
     VaultEnv = Join-Path (Split-Path -Parent $CanonicalRoot) 'doxedcryptofounder-secrets\vault\home-bot.env'
     WatcherStatus = Join-Path $StateDir 'laptop-ack-watcher.status.json'
     WatcherLock = Join-Path $StateDir 'laptop-ack-watcher.lock.json'
@@ -197,12 +199,54 @@ function Publish-UpstreamIdentity {
   return [pscustomobject]$identity
 }
 
+# RK 05:12 AEDT 4 Nov: laptop chain may import only these names from
+# home-bot.env into supervisor/bot process env. BITFINEX_* is never allowed,
+# even if present in the file. Values are never printed.
+$script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
+
+function Test-LaptopChainVaultNameAllowed([string]$Name) {
+  if (-not $Name) { return $false }
+  if ($Name.StartsWith('BITFINEX_', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+  foreach ($allowed in $script:LaptopChainVaultAllowlist) {
+    if ([string]::Equals($allowed, $Name, [StringComparison]::Ordinal)) { return $true }
+  }
+  return $false
+}
+
+function Read-LaptopChainVaultValue {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if (-not (Test-LaptopChainVaultNameAllowed $Name)) { return $null }
+  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { return $null }
+  $pattern = '^\s*' + [regex]::Escape($Name) + '=(.*)$'
+  foreach ($line in Get-Content -LiteralPath $VaultEnv -ErrorAction SilentlyContinue) {
+    if ($line -match $pattern) {
+      return [string]$Matches[1].Trim().Trim('"').Trim("'")
+    }
+  }
+  return $null
+}
+
+# Export only allowlisted admin-token var(s) into this process. Never imports
+# BITFINEX_* (hard refuse). Never prints values.
+function Import-LaptopChainVaultAllowlist {
+  param([Parameter(Mandatory = $true)][string]$VaultEnv)
+  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { return }
+  foreach ($name in $script:LaptopChainVaultAllowlist) {
+    if (-not (Test-LaptopChainVaultNameAllowed $name)) { continue }
+    $value = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name $name
+    if (-not $value) { continue }
+    [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+  }
+}
+
 function Get-AdminToken([string]$VaultEnv) {
   if ($env:BOT_ADMIN_TOKEN) { return $env:BOT_ADMIN_TOKEN }
-  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
-  $raw = Get-Content -LiteralPath $VaultEnv -Raw
-  if ($raw -notmatch '(?m)^BOT_ADMIN_TOKEN=(.+)$') { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
-  return $Matches[1].Trim().Trim('"').Trim("'")
+  $token = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name 'BOT_ADMIN_TOKEN'
+  if (-not $token) { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
+  return $token
 }
 
 # ACKs are proven by the immutable terminal membership receipts the sync

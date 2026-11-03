@@ -78,9 +78,9 @@ $cycleStatus = [ordered]@{ schema = 'segment_analyzer_cycle_status_v1'; pid = $P
 Set-CycleStatus 'PROMOTION'
 
 if (-not $env:BOT_ADMIN_TOKEN) {
-  $raw = Get-Content -LiteralPath $cfg.VaultEnv -Raw
-  if ($raw -notmatch '(?m)^\s*BOT_ADMIN_TOKEN\s*=\s*(.+)$') { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
-  [Environment]::SetEnvironmentVariable('BOT_ADMIN_TOKEN', $Matches[1].Trim().Trim('"').Trim("'"), 'Process')
+  # Allowlist-only: BOT_ADMIN_TOKEN; never BITFINEX_* from home-bot.env.
+  Import-LaptopChainVaultAllowlist -VaultEnv $cfg.VaultEnv
+  if (-not $env:BOT_ADMIN_TOKEN) { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
 }
 
 $service = Join-Path $cfg.RepoRoot 'services\btc-conservative-agent'

@@ -62,6 +62,50 @@ def test_single_instance_helpers_and_utc_timestamps():
     assert "ToUniversalTime" in common and "UtcNow" in common
 
 
+def test_vault_allowlist_is_admin_token_only_and_refuses_bitfinex():
+    """RK 05:12: laptop chain must never import BITFINEX_* from home-bot.env."""
+    common = _source("laptop-chain-common.ps1")
+    assert "LaptopChainVaultAllowlist" in common
+    assert "Import-LaptopChainVaultAllowlist" in common
+    assert "Test-LaptopChainVaultNameAllowed" in common
+    assert "BITFINEX_" in common
+    assert "StartsWith('BITFINEX_'" in common or 'StartsWith("BITFINEX_"' in common
+    # Allowlist is admin token only — no blanket Set-Item of every vault key.
+    allow_match = re.search(
+        r"\$script:LaptopChainVaultAllowlist\s*=\s*@\(([^)]*)\)",
+        common,
+    )
+    assert allow_match, "LaptopChainVaultAllowlist declaration missing"
+    allow_names = [
+        n.strip().strip("'").strip('"')
+        for n in allow_match.group(1).split(",")
+        if n.strip().strip("'").strip('"')
+    ]
+    assert allow_names == ["BOT_ADMIN_TOKEN"]
+    assert not re.search(r'Set-Item\s+-Path\s+"env:\$', common)
+    assert "Write-Host $env:BOT_ADMIN_TOKEN" not in common
+    assert "Write-Host $token" not in common
+    # Fixture semantics: BITFINEX_* present in source must not be exported.
+    source_fixture = {
+        "BOT_ADMIN_TOKEN": "fixture-admin-token",
+        "BITFINEX_API_KEY": "fixture-bitfinex-key",
+        "BITFINEX_API_SECRET": "fixture-bitfinex-secret",
+        "OTHER_SECRET": "fixture-other",
+    }
+    exported = {
+        name: value
+        for name, value in source_fixture.items()
+        if name in allow_names and not name.upper().startswith("BITFINEX_")
+    }
+    assert "BOT_ADMIN_TOKEN" in exported
+    assert "BITFINEX_API_KEY" not in exported
+    assert "BITFINEX_API_SECRET" not in exported
+    assert "OTHER_SECRET" not in exported
+    # Values must never appear in contract assertions / source dumps as prints.
+    for secret_name in ("BITFINEX_API_KEY", "BITFINEX_API_SECRET"):
+        assert f"Write-Host $env:{secret_name}" not in common
+
+
 def test_legacy_ack_watcher_is_retired():
     assert not (SCRIPTS / "laptop-ack-watcher.ps1").exists()
 
@@ -266,6 +310,54 @@ def _dead_pid() -> int:
 
 def _iso(delta_minutes: float = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=delta_minutes)).isoformat()
+
+
+@windows_only
+def test_import_vault_allowlist_never_exports_bitfinex_into_process_env(chain, tmp_path):
+    """Process-env proof: BITFINEX_* names in a vault fixture are not exported.
+
+    Emits only name presence/counts — never secret values (R10).
+    """
+    fixture = tmp_path / "home-bot.env"
+    fixture.write_text(
+        "\n".join(
+            [
+                "BOT_ADMIN_TOKEN=fixture-admin-token-not-real",
+                "BITFINEX_API_KEY=fixture-should-not-export",
+                "BITFINEX_API_SECRET=fixture-should-not-export-either",
+                "OTHER_SECRET=fixture-also-not",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # Strip parent BITFINEX_* so the child process starts clean for this proof.
+    clean_env = {
+        key: value
+        for key, value in (chain["env"] or {}).items()
+        if not str(key).upper().startswith("BITFINEX_")
+    }
+    clean_env["BOT_ADMIN_TOKEN"] = ""
+    script = (
+        _common_prelude(chain)
+        + f"Remove-Item Env:BOT_ADMIN_TOKEN -ErrorAction SilentlyContinue; "
+        f"Remove-Item Env:BITFINEX_API_KEY -ErrorAction SilentlyContinue; "
+        f"Remove-Item Env:BITFINEX_API_SECRET -ErrorAction SilentlyContinue; "
+        f"Remove-Item Env:OTHER_SECRET -ErrorAction SilentlyContinue; "
+        f"Import-LaptopChainVaultAllowlist -VaultEnv '{fixture}'; "
+        f"$keys = @([Environment]::GetEnvironmentVariables('Process').Keys); "
+        f"$bfx = @($keys | Where-Object {{ $_ -like 'BITFINEX_*' }}); "
+        f"$admin = [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('BOT_ADMIN_TOKEN','Process')) -eq $false; "
+        f"$other = [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('OTHER_SECRET','Process')) -eq $false; "
+        f"Write-Output ('adminPresent=' + $admin + ';bitfinexNameCount=' + $bfx.Count + ';otherPresent=' + $other)"
+    )
+    result = _ps(script, clean_env)
+    assert result.returncode == 0, result.stderr
+    line = result.stdout.strip().splitlines()[-1]
+    assert line == "adminPresent=True;bitfinexNameCount=0;otherPresent=False", line
+    # Never leak fixture values into pytest output via stdout.
+    assert "fixture-should-not-export" not in result.stdout
+    assert "fixture-admin-token-not-real" not in result.stdout
 
 
 @windows_only
