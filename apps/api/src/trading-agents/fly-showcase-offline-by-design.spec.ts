@@ -3,7 +3,8 @@
  * no error loop, no retry storm, no cached armed/live fallback.
  *
  * Mutation proof: flip `FLY_SHOWCASE_RUNTIME_RETIRED` to false, drop
- * `offline, by design` from the label, or remove `live_armed: false` /
+ * `offline, by design` from the label, restore fetchAnalyzerProxy / Fly
+ * analyzer HTTP bodies, or remove `live_armed: false` /
  * `refuseRetiredFlyRuntime` / reporter loop guard → this file fails.
  */
 import assert from 'node:assert/strict';
@@ -100,6 +101,27 @@ test('bot-bridge refuses retired Fly and clears armed/live cache path', () => {
     src.split('refuseRetiredFlyRuntime(): boolean')[1]?.slice(0, 800) ?? '',
     /live_armed:\s*true/,
   );
+});
+
+test('bot-bridge analyzer-via-Fly path deleted (R22 — no dead fetch leftovers)', () => {
+  // HM #978 post-merge: dashboard loads hit fetchAnalyzer* → doxed-btc-bot.fly.dev
+  // → "fetch failed". R22: delete the HTTP proxy, do not leave it flag-gated.
+  const src = read('bot-bridge.service.ts');
+  assert.doesNotMatch(src, /fetchAnalyzerProxy/);
+  assert.doesNotMatch(src, /doxxedcrypto-analyzer/);
+  assert.doesNotMatch(src, /fetch\(`\$\{cf\}\/api\/analyzer/);
+  assert.doesNotMatch(src, /fetch\(`\$\{cf\}\$\{path\}`/);
+  assert.doesNotMatch(src, /Analyzer proxy /);
+  assert.doesNotMatch(src, /Analyzer mirror receipt /);
+  assert.match(src, /async fetchAnalyzerSummary\(\)[\s\S]*?return null;/);
+  assert.match(src, /async fetchAnalyzerMirrorReceipt\(\)[\s\S]*?return null;/);
+  assert.match(src, /async fetchAnalyzerGenome\(\)[\s\S]*?return null;/);
+  // Stubs must not call refuseRetiredFlyRuntime then fetch — path is deleted.
+  const summaryBody = src.match(
+    /async fetchAnalyzerSummary\(\)[^{]*\{([\s\S]*?)\n  \}/,
+  )?.[1] ?? '';
+  assert.match(summaryBody, /return null;/);
+  assert.doesNotMatch(summaryBody, /\bfetch\s*\(/);
 });
 
 test('trading-status / bot health / dashboard stamp offline-by-design', () => {
