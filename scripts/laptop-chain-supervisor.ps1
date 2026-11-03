@@ -23,45 +23,13 @@ try {
   $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File')
   $roots = @('-RepoRoot', $cfg.RepoRoot, '-CanonicalRoot', $cfg.CanonicalRoot, '-StateDir', $cfg.StateDir)
 
-  # Segment shadow pull loop (Fly volume sink): pull every 2 min, parity every
-  # 30 min. Opt out with <StateDir>\segment-pull.disabled.
-  # HM S0 / RK (#972): Fly-only step 1 — disable via flag; keep ChainSupervisor task Enabled.
-  $segmentPullDisabled = Test-Path -LiteralPath (Join-Path $cfg.StateDir 'segment-pull.disabled')
-  if (-not $segmentPullDisabled -and -not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull'))) {
-    $segmentLoop = Start-Process -FilePath $powershell -WorkingDirectory $cfg.RepoRoot -WindowStyle Hidden -PassThru `
-      -ArgumentList ($common + @((Join-Path $PSScriptRoot 'research-segment-pull-loop.ps1')) + $roots)
-    Write-ChainLog -Config $cfg -Name $logName -Message "SEGMENT_PULL_STARTED pid=$($segmentLoop.Id)"
-  } elseif ($segmentPullDisabled) {
-    Write-ChainLog -Config $cfg -Name $logName -Message "SEGMENT_PULL_SKIPPED reason=segment-pull.disabled"
-  }
-
-  # Read-only Fly v2 shipper head, runtime, deploy-run and relay-status
-  # snapshots; never fails the tick. Opt out with <StateDir>\fly-status-snapshots.disabled
-  # (HM S0 / RK #972 Fly-only step 2). Analyzer/health/alerts still run below.
-  $snapshots = 'snapshots=off'
-  if (-not (Test-Path -LiteralPath (Join-Path $cfg.StateDir 'fly-status-snapshots.disabled'))) {
-    $snapshots = (& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots 2>&1 |
-      Select-Object -Last 1) -as [string]
-  } else {
-    $snapshots = 'snapshots=skipped:fly-status-snapshots.disabled'
-  }
-
-  # Follow Fly to a successfully deployed revision before any cycle starts, so
-  # promotion and the analyzer run the code Fly runs. Opt out with
-  # <StateDir>\v2c-auto-ff.disabled (HM S0 / RK #972 Fly-only step 3).
-  # Never fails the tick.
-  $autoFf = 'autoFf=off'
+  # RK 20:20 / R22 (#972 REV7): Fly-only steps 1–3 REMOVED (segment pull,
+  # fly_* status snapshots, v2c-auto-ff). Flag-off VIOLATES R22. Task stays
+  # Enabled so steps 4–9 (analyzer / dashboard ensure / monitor / proof /
+  # health / incident) continue. No Disable-ScheduledTask.
+  $snapshots = 'snapshots=removed:r22-fly-steps'
+  $autoFf = 'autoFf=removed:r22-fly-steps'
   $followedDeploy = $false
-  if (-not (Test-Path -LiteralPath (Join-Path $cfg.StateDir 'v2c-auto-ff.disabled'))) {
-    try {
-      $revBefore = (& git -C $cfg.RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
-      & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'v2c-auto-ff.ps1') @roots | Out-Null
-      $autoFf = "autoFf=$LASTEXITCODE"
-      $revAfter = (& git -C $cfg.RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
-      # HM-BATCH3: rerun the analyzer right after each deploy the laptop follows.
-      if ($revBefore -and $revAfter -and $revBefore -ne $revAfter) { $followedDeploy = $true; $autoFf += ' followed' }
-    } catch { $autoFf = 'autoFf=error' }
-  }
 
   $dashboardUp = $false
   try { $dashboardUp = [bool](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10 -UseBasicParsing) } catch { }

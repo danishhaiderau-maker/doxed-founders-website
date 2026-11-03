@@ -194,31 +194,10 @@ function Test-CheckoutContainsDeployed {
   return ($LASTEXITCODE -eq 0)
 }
 if (-not (Test-CheckoutContainsDeployed)) {
-  Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_REVISION_MISMATCH checkout={0} deployed={1}" -f $checkoutHead, $deployedRev)
-  $autoFfDisabled = Test-Path -LiteralPath (Join-Path $cfg.StateDir 'v2c-auto-ff.disabled')
-  if ($autoFfDisabled -or -not $deployedRev) { Stop-Cycle 5 'ANALYZER_REVISION_MISMATCH' ("checkout={0} deployed={1}" -f $checkoutHead, $deployedRev) }
-  $ffStart = [datetime]::UtcNow
-  $roots = @('-RepoRoot', $cfg.RepoRoot, '-CanonicalRoot', $cfg.CanonicalRoot, '-StateDir', $cfg.StateDir)
-  $contains = $false
-  while (-not $contains) {
-    Set-CycleStatus 'AUTO_FF'
-    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots | Out-Null
-    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'v2c-auto-ff.ps1') @roots -CycleLockHeld | Out-Null
-    $ffExit = $LASTEXITCODE
-    $contains = Test-CheckoutContainsDeployed
-    $waited = [int]([datetime]::UtcNow - $ffStart).TotalSeconds
-    if ($contains) {
-      Write-ChainLog -Config $cfg -Name $logName -Message ("AUTO_FF_INLINE ok exit={0} waited={1}s checkout={2} deployed={3}" -f $ffExit, $waited, $checkoutHead, $deployedRev)
-      break
-    }
-    # 3 is a hard refusal (dirty, not a fast-forward, parity); 2 means the
-    # deploy run has not concluded success yet and is worth waiting for.
-    if ($ffExit -eq 3 -or $waited -ge $InlineFfMaxWaitSec) {
-      Write-ChainLog -Config $cfg -Name $logName -Message ("AUTO_FF_INLINE gave_up exit={0} waited={1}s checkout={2} deployed={3}" -f $ffExit, $waited, $checkoutHead, $deployedRev)
-      Stop-Cycle 5 'AUTO_FF_INLINE_GAVE_UP' ("exit={0} waited={1}s" -f $ffExit, $waited)
-    }
-    Start-Sleep -Seconds $InlineFfPollSec
-  }
+  # RK 20:20 / R22 (#972 REV7): Fly auto-ff + status-snapshot code removed.
+  # Fail closed on revision mismatch — never invoke Fly follow paths.
+  Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_REVISION_MISMATCH checkout={0} deployed={1} (fly-auto-ff removed)" -f $checkoutHead, $deployedRev)
+  Stop-Cycle 5 'ANALYZER_REVISION_MISMATCH' ("checkout={0} deployed={1}" -f $checkoutHead, $deployedRev)
 }
 Set-CycleStatus 'ANALYZER'
 

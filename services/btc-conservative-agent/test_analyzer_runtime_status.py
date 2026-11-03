@@ -59,8 +59,12 @@ def main() -> None:
     checks = {
         "native analyzer faults persist outside Python exception handling": (
             'ANALYZER_NATIVE_CRASH_LOG_FILE = "analyzer_native_crash.log"' in analyzer_engine
+            and "_DEFAULT_DOXXED_NATIVE_CRASH_LOG = r\"C:\\DoxxedCrypto\\logs\\analyzer-native-crash.log\""
+            in analyzer_engine
+            and "def _resolve_native_crash_log_path()" in analyzer_engine
             and "faulthandler.enable(file=handle, all_threads=True)" in analyzer_engine
             and "_close_native_fault_log(_native_fault_handle)" in analyzer_engine
+            and 'os.environ.setdefault("PYTHONFAULTHANDLER", "1")' in analyzer_engine
         ),
         "analyzer fails closed without canonical mirror": (
             'BTC_AGENT_DATA_DIR is required and must point to the ' in analyzer_engine

@@ -40,8 +40,15 @@ DEFAULT_GAP_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB
 # only with a lossless archive path. Parquet remains optional (pyarrow).
 DEFAULT_SQLITE_RETENTION_SECONDS = 0
 DEFAULT_RETENTION_EVERY_N_WRITES = 500
+# RK 20:20 (#972 REV7): pruning off with no limit is a FAIL. Cap store growth
+# fail-closed + alert while purge is disabled (override via env).
+DEFAULT_STORE_MAX_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB
 
 _LOG = logging.getLogger("local_market_persist")
+
+
+class StoreGrowthCapError(RuntimeError):
+    """Raised when local store size exceeds the fail-closed growth cap (purge off)."""
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -103,11 +110,62 @@ class MarketStore:
             )
             return False
 
+    def _store_bytes(self) -> int:
+        total = 0
+        for path in (self.sqlite_path, self.gap_log_path):
+            try:
+                if path.is_file():
+                    total += int(path.stat().st_size)
+            except OSError:
+                pass
+        # WAL/SHM siblings (if present) count toward the growth cap.
+        for suffix in ("-wal", "-shm"):
+            sibling = Path(str(self.sqlite_path) + suffix)
+            try:
+                if sibling.is_file():
+                    total += int(sibling.stat().st_size)
+            except OSError:
+                pass
+        return total
+
+    def store_max_bytes(self) -> int:
+        return _env_int("LOCAL_FRESH_STORE_MAX_BYTES", DEFAULT_STORE_MAX_BYTES)
+
     def _disk_guard(self) -> None:
         ok, free, minimum = ensure_disk_headroom(self.root)
         if not ok:
             raise DiskFullError(
                 f"DISK_FREE_BELOW_MIN free={free} min={minimum} path={self.root}"
+            )
+        # RK 20:20: while SQLite purge is off, enforce a fail-closed growth cap.
+        purge_on = (
+            _env_int(
+                "LOCAL_FRESH_SQLITE_RETENTION_SECONDS", DEFAULT_SQLITE_RETENTION_SECONDS
+            )
+            > 0
+        )
+        if purge_on:
+            return
+        used = self._store_bytes()
+        cap = self.store_max_bytes()
+        if cap > 0 and used >= cap:
+            _LOG.error(
+                "LOCAL_FRESH_STORE_GROWTH_CAP_EXCEEDED used=%s cap=%s path=%s",
+                used,
+                cap,
+                self.root,
+            )
+            raise StoreGrowthCapError(
+                f"STORE_GROWTH_CAP_EXCEEDED used={used} cap={cap} path={self.root}"
+            )
+        # Alert at 80% so operators can archive (lossless Parquet) before hard fail.
+        if cap > 0 and used >= int(cap * 0.8):
+            _LOG.warning(
+                "LOCAL_FRESH_STORE_GROWTH_ALERT used=%s cap=%s pct=%.1f path=%s",
+                used,
+                cap,
+                100.0 * used / cap,
+                self.root,
             )
 
     def _init_schema(self) -> None:
@@ -311,6 +369,15 @@ class MarketStore:
             "disk_free_bytes": free,
             "disk_min_free_bytes": minimum,
             "disk_headroom_ok": ok,
+            "store_bytes": int(sqlite_bytes + gap_bytes),
+            "store_max_bytes": self.store_max_bytes(),
+            "store_growth_cap_enforced": not bool(
+                _env_int(
+                    "LOCAL_FRESH_SQLITE_RETENTION_SECONDS",
+                    DEFAULT_SQLITE_RETENTION_SECONDS,
+                )
+                > 0
+            ),
         }
 
     def _maybe_retention(self) -> None:
@@ -360,6 +427,8 @@ class MarketStore:
         )
         # RK (C): retain_s <= 0 → no DELETE (analyzer must see all fresh rows).
         if retain_s <= 0:
+            used = self._store_bytes()
+            cap = self.store_max_bytes()
             return {
                 "cutoff_s": None,
                 "book_deleted": 0,
@@ -369,6 +438,10 @@ class MarketStore:
                 "purge": False,
                 "reason": "LOCAL_FRESH_SQLITE_PURGE_DISABLED",
                 "min_disk_free_bytes": min_disk_free_bytes(),
+                "store_bytes": used,
+                "store_max_bytes": cap,
+                "store_growth_cap_enforced": True,
+                "alert": bool(cap > 0 and used >= int(cap * 0.8)),
             }
         now_s = int(self.clock())
         cutoff = now_s - retain_s

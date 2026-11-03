@@ -108,7 +108,10 @@ except Exception:
     pass
 
 ANALYZER_RUN_LOG_FILE = "analyzer_run.log"
+# RK 1a / HM X1 (#972 REV7): default under C:\DoxxedCrypto\logs (override via
+# ANALYZER_NATIVE_CRASH_LOG). Relative name kept only as a last-resort fallback.
 ANALYZER_NATIVE_CRASH_LOG_FILE = "analyzer_native_crash.log"
+_DEFAULT_DOXXED_NATIVE_CRASH_LOG = r"C:\DoxxedCrypto\logs\analyzer-native-crash.log"
 RESEARCH_COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
 RESEARCH_HIGHLIGHTS_FILE = "research_highlights.txt"
@@ -331,15 +334,41 @@ def _setup_analyzer_output(verbose_console=False, enable_log=True):
     return tee, log_handle
 
 
+def _resolve_native_crash_log_path() -> str:
+    """Absolute crash-log path; prefer C:\\DoxxedCrypto (RK 1a / HM X1)."""
+    configured = (os.getenv("ANALYZER_NATIVE_CRASH_LOG") or "").strip()
+    if configured:
+        return configured
+    doxxed_root = (os.getenv("DOXXED_CRYPTO_ROOT") or r"C:\DoxxedCrypto").strip()
+    if doxxed_root.rstrip("\\/") == r"C:\DoxxedCrypto".rstrip("\\/"):
+        candidate = _DEFAULT_DOXXED_NATIVE_CRASH_LOG
+    else:
+        candidate = os.path.join(doxxed_root, "logs", "analyzer-native-crash.log")
+    if os.name == "nt" or os.path.isdir(doxxed_root):
+        return candidate
+    # Non-Windows CI / unit hosts: keep a cwd-relative fallback so tests can open it.
+    return ANALYZER_NATIVE_CRASH_LOG_FILE
+
+
 def _enable_native_fault_log():
-    """Persist native interpreter faults that bypass Python exception handling."""
+    """Persist native interpreter faults that bypass Python exception handling.
+
+    RK 1a: PYTHONFAULTHANDLER path must land under C:\\DoxxedCrypto (or
+    DOXXED_CRYPTO_ROOT). Env ANALYZER_NATIVE_CRASH_LOG wins when set.
+    """
     try:
-        handle = open(ANALYZER_NATIVE_CRASH_LOG_FILE, "a", encoding="utf-8", buffering=1)
+        path = _resolve_native_crash_log_path()
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        handle = open(path, "a", encoding="utf-8", buffering=1)
         handle.write(
-            f"\n--- analyzer native fault tracing enabled {datetime.now(timezone.utc).isoformat()} ---\n"
+            f"\n--- analyzer native fault tracing enabled {datetime.now(timezone.utc).isoformat()} path={path} ---\n"
         )
         handle.flush()
         faulthandler.enable(file=handle, all_threads=True)
+        # Also honor PYTHONFAULTHANDLER=1 for dump-on-fatal (same file).
+        os.environ.setdefault("PYTHONFAULTHANDLER", "1")
         return handle
     except Exception as exc:
         print(f"  WARNING: native fault tracing unavailable: {exc} {PIPELINE_ENFORCEMENT_TAG}")

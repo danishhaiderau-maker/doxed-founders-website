@@ -11,7 +11,7 @@ from local_fresh_analyzer_read import (
     open_local_fresh_store_readonly,
     summarize_local_fresh_store,
 )
-from local_market_persist import MarketStore
+from local_market_persist import MarketStore, StoreGrowthCapError
 
 
 class TestLocalFreshNoSqlitePurge(unittest.TestCase):
@@ -29,11 +29,28 @@ class TestLocalFreshNoSqlitePurge(unittest.TestCase):
                 report = store.run_retention()
                 self.assertFalse(report["sqlite"].get("purge", True))
                 self.assertEqual(report["sqlite"]["book_deleted"], 0)
+                self.assertTrue(report["sqlite"].get("store_growth_cap_enforced"))
                 self.assertEqual(store.stats()["book_1s_rows"], 2)
                 self.assertFalse(store.stats()["sqlite_purge_enabled"])
+                self.assertTrue(store.stats()["store_growth_cap_enforced"])
+                self.assertGreater(store.stats()["store_max_bytes"], 0)
                 self.assertIsNotNone(store.stats()["local_epoch_id"])
                 self.assertIsNotNone(store.stats()["series_start_ts"])
             finally:
+                store.close()
+
+    def test_store_growth_cap_fails_closed_while_purge_off(self):
+        # RK 20:20: prune off + no limit is FAIL — tiny cap must refuse writes.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MarketStore(tmp, clock=lambda: 2_000_000_000.0)
+            try:
+                os.environ["LOCAL_FRESH_STORE_MAX_BYTES"] = "1"
+                with self.assertRaises(StoreGrowthCapError):
+                    store.append_book_second(
+                        {"s": 1_000, "bid": 1.0, "ask": 1.1, "receive_ts": 1_000.0}
+                    )
+            finally:
+                os.environ.pop("LOCAL_FRESH_STORE_MAX_BYTES", None)
                 store.close()
 
     def test_positive_retention_still_prunes_when_explicitly_enabled(self):
