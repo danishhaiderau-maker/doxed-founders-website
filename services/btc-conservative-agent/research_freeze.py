@@ -142,11 +142,10 @@ FREEZE_OPENING_SEC = 3600
 # Set to {"approved_by": ..., "approved_utc": ..., "reason": ...} only with the
 # owner's explicit approval to change the frozen registry or epoch in code.
 CODE_OVERRIDE: Optional[Mapping[str, str]] = {
-    "approved_by": "Danish (owner), 2026-10-28",
-    "approved_utc": "2026-10-28T00:00:00Z",
-    "reason": ("Retire GS-06 (FAMILY_GS06_COMMITTED_FADE_ATR_TP) under Rule 22 and add paper-only "
-               "mid-epoch GS-FADE3-LOOSE (FAMILY_GS_FADE3_LOOSE_TP25 / gf3l, relay-ineligible, live refused) "
-               "in one atomic registry transaction; CTRL/GS-01/B1/B2/FADE3 untouched; no arm/Soft B/wipe"),
+    "approved_by": "Danish (owner) via RK 20:20 split from #972, 2026-11-03",
+    "approved_utc": "2026-11-03T00:00:00Z",
+    "reason": ("Split PR: retire B1/B2 (FAMILY_GSB1_CVD_DIV_REGIME, FAMILY_GSB2_REGIME_SWITCHER) "
+               "under Rule 22; keep FADE3/LOOSE + CTRL + GS-01; no arm/Soft B/wipe"),
 }
 
 ERROR = "RESEARCH_FREEZE_ACTIVE"

@@ -115,12 +115,12 @@ RANDOM_CONTROL_ADMISSION_POLICY_ID = "RANDOM_COIN_SIDE_ON_COMMITTED_CALL_TAKER_V
 # pre-registered rules PREREG-GS-20261004 (GS-01..04) and -B (B1..B3) as
 # visible paper tiles (regime_adaptive_binding.py).
 RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
-RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME = "FAMILY_GSB1_CVD_DIV_REGIME"
-RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER = "FAMILY_GSB2_REGIME_SWITCHER"
+# RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME retired (split PR)
+# RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER retired (split PR)
 RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME = "FAMILY_GSB3_COMMITTED_FADE_REGIME"
 GS_PREMIUM_FOLLOW_ADMISSION_POLICY_ID = "GS01_CROSS_VENUE_PREMIUM_FOLLOW_NO_AI_V1"
 GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID = "GS_CVD_DIVERGENCE_3M_EVENT_NO_AI_V1"
-GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID = "GSB2_CVD_DIVERGENCE_OR_COMMITTED_FADE_BY_REGIME_V1"
+# GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID retired (split PR)
 GSB3_COMMITTED_FADE_ADMISSION_POLICY_ID = "GSB3_INVERTED_COMMITTED_SCORE_LED_SIDE_REGIME_V1"
 # FREEZE21B mid-epoch GS-06 (owner 2026-10-05) was retired 2026-10-28 under Rule 22
 # (Danish yes; CODE_OVERRIDE in research_freeze). Lane token kept only in
@@ -184,8 +184,6 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
     RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
-    RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
-    RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
     RESEARCH_LANE_FAMILY_GS_FADE3_TP30,
     RESEARCH_LANE_FAMILY_GS_FADE3_LOOSE_TP25,
 )
@@ -1060,12 +1058,6 @@ _GS01_ENTRY = _gs_entry(
 _GS01_ENTRY.update({"max_bbo_age_sec": 2.0, "max_spread_bps": 3.0})
 _CVD_TRIGGER = {"cvd_indicator": "CVD_DIVERGENCE_20", "cvd_lookback_bars": 20, "bar_sec": 180,
                 "trigger_event": "TRANSITION_INTO_LONG_OR_SHORT_AT_BAR_CLOSE"}
-_GSB1_ENTRY = _gs_entry(
-    mode="REGIME_ADAPTIVE", direction_source="CVD_DIVERGENCE_3M", ai_role="NONE", regime=GSB_REGIME,
-    regime_exec={"QUIET": "TOUCH", "TREND": None, "VIOLENT": "DEEP_0.75"},
-    signal_clock=BAR_CLOSE_SIGNAL_CLOCK, min_submit_interval_sec=5, max_submissions_per_hour=60,
-    flip_indicator={"QUIET": "CVD_DIVERGENCE_20", "VIOLENT": "CVD_DIVERGENCE_20"}, **_CVD_TRIGGER,
-)
 _COMMITTED_FADE_KEYS = {
     "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE", "SCORE_DIRECTION_MISMATCH",
                   "BBO_STALE", "FADE_SPREAD_ABOVE_MAX", "FADE_SESSION_GATED"),
@@ -1073,14 +1065,6 @@ _COMMITTED_FADE_KEYS = {
     "fade_allowed_sessions": FREEZE21_SESSIONS_ASIA_EU, "fade_max_spread_bps": 3.0,
     "fade_definition": "H-A committed fade (frozen scorer: explicit side == score-led side, Asia+EU, spread <= 3 bp)",
 }
-_GSB2_ENTRY = _gs_entry(
-    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
-    regime=GSB_REGIME, regime_exec={"QUIET": "TOUCH", "TREND": "OFFSET", "VIOLENT": "DEEP_0.75"},
-    bar_clock_trigger="CVD_DIVERGENCE_20", min_submit_interval_sec=5, max_submissions_per_hour=60,
-    regime_trigger={"QUIET": "CVD_DIVERGENCE_3M", "TREND": "COMMITTED_FADE", "VIOLENT": "CVD_DIVERGENCE_3M"},
-    flip_indicator={"QUIET": "CVD_DIVERGENCE_20", "TREND": "CVD_TREND_20", "VIOLENT": "CVD_DIVERGENCE_20"},
-    **_CVD_TRIGGER, **_COMMITTED_FADE_KEYS,
-)
 _GSB3_ENTRY = _gs_entry(
     mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
     # PHASE02 (owner, 2026-10-07): committed fade loses in VIOLENT (H-A -3.63
@@ -1091,7 +1075,6 @@ _GSB3_ENTRY = _gs_entry(
     **_COMMITTED_FADE_KEYS,
 )
 _GS01_EXIT = _gs_simple_exit(tp_atr=2.5, be_atr=2.0)
-_GSB1_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": None, "VIOLENT": "MOM_VIOLENT"})
 
 
 def _with_cut_mfe_cap(exit_policy: dict, cap_bp: float = 2.0) -> dict:
@@ -1105,8 +1088,6 @@ def _with_cut_mfe_cap(exit_policy: dict, cap_bp: float = 2.0) -> dict:
 
 
 _GS01_EXIT = _with_cut_mfe_cap(_GS01_EXIT)
-_GSB1_EXIT = _with_cut_mfe_cap(_GSB1_EXIT)
-_GSB2_EXIT = _gsb_exit({"QUIET": "REV_QUIET", "TREND": "MOM_TREND", "VIOLENT": "REV_VIOLENT"})
 _GSB3_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": "MOM_TREND", "VIOLENT": None})
 GS_SHADOW_REASON = "pre-registered stack: its own thesis cut is live; the shared catalog is shadow-only comparison"
 
@@ -1143,43 +1124,6 @@ COMBO_LANE_SPECS.update({
         subtitle="GS-01 — premium follow, ATR take-profit — PAPER ONLY — RELAY INELIGIBLE",
         signal_summary=("H-C's cross-venue premium trigger (Binance/Bybit premium vs its 60-min mean "
                         ">=+1.75 / <=-1.88 bp); taker toward convergence; ATR-scaled maker take-profit"),
-    ),
-    RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME: _gs_tile(
-        lane=RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
-        label="B1 CVD divergence, regime-managed · touch limit when quiet, stand aside in trend, deep 0.75 ATR limit when violent, momentum exit set",
-        raw_policy_id="GSB1_CVD_DIVERGENCE_3M_QUIET_TOUCH_TREND_ASIDE_VIOLENT_DEEP0.75ATR|DYN_MOM_QUIET_VIOLENT_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
-        id_prefix="gb1", module="paper_policy_family_gsb1_cvd_div_regime.py",
-        entry=_GSB1_ENTRY, exit_policy=_GSB1_EXIT, signal_clock=BAR_CLOSE_SIGNAL_CLOCK,
-        admission=GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID, entry_ttl_sec=1200,
-        relay=PARTIAL_EXIT_RELAY_CAPABILITY,
-        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-B1",
-                    "in_sample": "discovery only (see PREREG-GS-20261004-B.md)"},
-        pre=_gs_pre_registration(
-            "GS-20261004-B1", prereg_path=GSB_PREREG_PATH, registered_utc="2026-10-04T06:34:58Z", bonferroni_k=3,
-            honest_label=_GS_HONEST, giveback_arm_bp=10.0,
-            extra_kills={"be_armed_negative_share_above": 0.10, "worst_trade_below_bp": -45.0,
-                         "fill_rate_below": 0.60, "fill_rate_after_signals": 40, "latency_p50_above_sec": 5.0}),
-        subtitle="B1 — CVD divergence with regime-specific entry and exits — PAPER ONLY — RELAY INELIGIBLE",
-        signal_summary=("the GS-03 CVD divergence event; QUIET: passive touch limit with re-pegs and a guarded "
-                        "taker fallback; TREND: stand aside; VIOLENT: deep 0.75 ATR limit, 20-min TTL"),
-    ),
-    RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER: _gs_tile(
-        lane=RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
-        label="B2 Regime switcher · CVD divergence reversion in quiet/violent, committed-AI fade in trend, regime exits",
-        raw_policy_id="GSB2_QUIET_VIOLENT_CVD_DIVERGENCE_REV_TREND_COMMITTED_FADE_MOM_OFFSET0.25ATR|DYN_REV_QUIET_VIOLENT_MOM_TREND_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
-        id_prefix="gb2", module="paper_policy_family_gsb2_regime_switcher.py",
-        entry=_GSB2_ENTRY, exit_policy=_GSB2_EXIT, admission=GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID,
-        entry_ttl_sec=1200, relay=PARTIAL_EXIT_RELAY_CAPABILITY,
-        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-B2",
-                    "in_sample": "discovery only (see PREREG-GS-20261004-B.md)"},
-        pre=_gs_pre_registration(
-            "GS-20261004-B2", prereg_path=GSB_PREREG_PATH, registered_utc="2026-10-04T06:34:58Z", bonferroni_k=3,
-            honest_label=_GS_HONEST, giveback_arm_bp=10.0,
-            extra_kills={"be_armed_negative_share_above": 0.10, "worst_trade_below_bp": -45.0,
-                         "fill_rate_below": 0.60, "fill_rate_after_signals": 40, "latency_p50_above_sec": 5.0}),
-        subtitle="B2 — regime switcher (CVD reversion / committed fade) — PAPER ONLY — RELAY INELIGIBLE",
-        signal_summary=("QUIET and VIOLENT: the CVD divergence event (reversion exit set); TREND (ADX >= 25): fade "
-                        "the shared AI's committed call (H-A definition) with a 0.25 ATR offset limit"),
     ),
     RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME: _gs_tile(
         lane=RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
@@ -1626,6 +1570,7 @@ def active_tile_policy_epochs() -> tuple[str, ...]:
 # token remains on any active execution/UI/analyzer surface. Historical data is
 # quarantined separately and never keeps runtime code alive.
 RETIRED_TILE_LANES = frozenset({
+    "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
     "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED",
     "OFFSET_029_ATR_REGIME", "PROTECTED_W234_SCENARIO_C",
     # Retired 2026-10-01: all lost in conservative paper evidence.
