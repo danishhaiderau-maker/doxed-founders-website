@@ -40,11 +40,10 @@ if (-not (Test-Path $vaultEnv)) {
   exit 1
 }
 
-Get-Content $vaultEnv | ForEach-Object {
-  if ($_ -match '^\s*([^#=]+)=(.*)$') {
-    Set-Item -Path ("env:" + $matches[1].Trim()) -Value $matches[2].Trim()
-  }
-}
+# HM HOLD 7767d31f7f94: never import BITFINEX_* into bot process env.
+. (Join-Path $scriptDir 'laptop-chain-common.ps1')
+Import-LaptopChainVaultAllowlist -VaultEnv $vaultEnv -Mode ExcludeBitfinex
+[void](Clear-BitfinexProcessEnvNames)
 
 $env:PORT = "$Port"
 $env:DASHBOARD_PORT = "$Port"

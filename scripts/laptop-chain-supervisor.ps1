@@ -23,6 +23,11 @@ try {
   $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File')
   $roots = @('-RepoRoot', $cfg.RepoRoot, '-CanonicalRoot', $cfg.CanonicalRoot, '-StateDir', $cfg.StateDir)
 
+  # HM HOLD 7767d31f7f94: log COUNT of BITFINEX_* names in this process only
+  # (never values). Supervisor must not inherit vault Bitfinex keys.
+  $bitfinexNameCount = Get-BitfinexProcessEnvNameCount
+  Write-ChainLog -Config $cfg -Name $logName -Message ("BITFINEX_ENV_NAME_COUNT count={0}" -f $bitfinexNameCount)
+
   # RK 20:20 / R22 (#972 REV7): Fly-only steps 1–3 REMOVED (segment pull,
   # fly_* status snapshots, v2c-auto-ff). Flag-off VIOLATES R22. Task stays
   # Enabled so steps 4–9 (analyzer / dashboard ensure / monitor / proof /

@@ -199,14 +199,18 @@ function Publish-UpstreamIdentity {
   return [pscustomobject]$identity
 }
 
-# RK 05:12 AEDT 4 Nov: laptop chain may import only these names from
-# home-bot.env into supervisor/bot process env. BITFINEX_* is never allowed,
-# even if present in the file. Values are never printed.
+# RK 05:12 AEDT 4 Nov / HM HOLD 7767d31f7f94: never put BITFINEX_* into
+# supervisor/bot process env from home-bot.env. Values are never printed.
 $script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
 
-function Test-LaptopChainVaultNameAllowed([string]$Name) {
+function Test-LaptopChainVaultNameAllowed {
+  param(
+    [string]$Name,
+    [ValidateSet('AdminTokenOnly', 'ExcludeBitfinex')][string]$Mode = 'AdminTokenOnly'
+  )
   if (-not $Name) { return $false }
   if ($Name.StartsWith('BITFINEX_', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+  if ($Mode -eq 'ExcludeBitfinex') { return $true }
   foreach ($allowed in $script:LaptopChainVaultAllowlist) {
     if ([string]::Equals($allowed, $Name, [StringComparison]::Ordinal)) { return $true }
   }
@@ -216,9 +220,10 @@ function Test-LaptopChainVaultNameAllowed([string]$Name) {
 function Read-LaptopChainVaultValue {
   param(
     [Parameter(Mandatory = $true)][string]$VaultEnv,
-    [Parameter(Mandatory = $true)][string]$Name
+    [Parameter(Mandatory = $true)][string]$Name,
+    [ValidateSet('AdminTokenOnly', 'ExcludeBitfinex')][string]$Mode = 'AdminTokenOnly'
   )
-  if (-not (Test-LaptopChainVaultNameAllowed $Name)) { return $null }
+  if (-not (Test-LaptopChainVaultNameAllowed -Name $Name -Mode $Mode)) { return $null }
   if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { return $null }
   $pattern = '^\s*' + [regex]::Escape($Name) + '=(.*)$'
   foreach ($line in Get-Content -LiteralPath $VaultEnv -ErrorAction SilentlyContinue) {
@@ -229,22 +234,63 @@ function Read-LaptopChainVaultValue {
   return $null
 }
 
-# Export only allowlisted admin-token var(s) into this process. Never imports
-# BITFINEX_* (hard refuse). Never prints values.
-function Import-LaptopChainVaultAllowlist {
-  param([Parameter(Mandatory = $true)][string]$VaultEnv)
-  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { return }
-  foreach ($name in $script:LaptopChainVaultAllowlist) {
-    if (-not (Test-LaptopChainVaultNameAllowed $name)) { continue }
-    $value = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name $name
-    if (-not $value) { continue }
-    [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+# COUNT of BITFINEX_* names in this process env. Never returns or prints values.
+function Get-BitfinexProcessEnvNameCount {
+  $count = 0
+  foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+    if ([string]$key -like 'BITFINEX_*') { $count++ }
   }
+  return $count
+}
+
+# Remove every BITFINEX_* name from process env. Returns how many names were
+# cleared. Never prints values.
+function Clear-BitfinexProcessEnvNames {
+  $cleared = 0
+  foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+    if ([string]$key -like 'BITFINEX_*') {
+      [Environment]::SetEnvironmentVariable([string]$key, $null, 'Process')
+      $cleared++
+    }
+  }
+  return $cleared
+}
+
+# AdminTokenOnly (default): export BOT_ADMIN_TOKEN only (laptop chain).
+# ExcludeBitfinex: export every non-BITFINEX_* vault key, then strip any
+# BITFINEX_* names already present (bot starters / auto-restart).
+# Never prints values.
+function Import-LaptopChainVaultAllowlist {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv,
+    [ValidateSet('AdminTokenOnly', 'ExcludeBitfinex')][string]$Mode = 'AdminTokenOnly'
+  )
+  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) {
+    [void](Clear-BitfinexProcessEnvNames)
+    return
+  }
+  if ($Mode -eq 'AdminTokenOnly') {
+    foreach ($name in $script:LaptopChainVaultAllowlist) {
+      if (-not (Test-LaptopChainVaultNameAllowed -Name $name -Mode $Mode)) { continue }
+      $value = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name $name -Mode $Mode
+      if (-not $value) { continue }
+      [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
+  } else {
+    foreach ($line in Get-Content -LiteralPath $VaultEnv -ErrorAction SilentlyContinue) {
+      if ($line -notmatch '^\s*([^#=]+)=(.*)$') { continue }
+      $name = $Matches[1].Trim()
+      if (-not (Test-LaptopChainVaultNameAllowed -Name $name -Mode $Mode)) { continue }
+      $value = $Matches[2].Trim().Trim('"').Trim("'")
+      [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+    }
+  }
+  [void](Clear-BitfinexProcessEnvNames)
 }
 
 function Get-AdminToken([string]$VaultEnv) {
   if ($env:BOT_ADMIN_TOKEN) { return $env:BOT_ADMIN_TOKEN }
-  $token = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name 'BOT_ADMIN_TOKEN'
+  $token = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name 'BOT_ADMIN_TOKEN' -Mode 'AdminTokenOnly'
   if (-not $token) { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
   return $token
 }

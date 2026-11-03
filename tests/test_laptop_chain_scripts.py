@@ -68,6 +68,9 @@ def test_vault_allowlist_is_admin_token_only_and_refuses_bitfinex():
     assert "LaptopChainVaultAllowlist" in common
     assert "Import-LaptopChainVaultAllowlist" in common
     assert "Test-LaptopChainVaultNameAllowed" in common
+    assert "Get-BitfinexProcessEnvNameCount" in common
+    assert "Clear-BitfinexProcessEnvNames" in common
+    assert "ExcludeBitfinex" in common
     assert "BITFINEX_" in common
     assert "StartsWith('BITFINEX_'" in common or 'StartsWith("BITFINEX_"' in common
     # Allowlist is admin token only — no blanket Set-Item of every vault key.
@@ -85,7 +88,7 @@ def test_vault_allowlist_is_admin_token_only_and_refuses_bitfinex():
     assert not re.search(r'Set-Item\s+-Path\s+"env:\$', common)
     assert "Write-Host $env:BOT_ADMIN_TOKEN" not in common
     assert "Write-Host $token" not in common
-    # Fixture semantics: BITFINEX_* present in source must not be exported.
+    # Fixture semantics (AdminTokenOnly): BITFINEX_* and non-allowlisted not exported.
     source_fixture = {
         "BOT_ADMIN_TOKEN": "fixture-admin-token",
         "BITFINEX_API_KEY": "fixture-bitfinex-key",
@@ -101,9 +104,66 @@ def test_vault_allowlist_is_admin_token_only_and_refuses_bitfinex():
     assert "BITFINEX_API_KEY" not in exported
     assert "BITFINEX_API_SECRET" not in exported
     assert "OTHER_SECRET" not in exported
-    # Values must never appear in contract assertions / source dumps as prints.
+    # ExcludeBitfinex mode still refuses BITFINEX_* names.
+    exclude_exported = {
+        name: value
+        for name, value in source_fixture.items()
+        if not name.upper().startswith("BITFINEX_")
+    }
+    assert "BITFINEX_API_KEY" not in exclude_exported
+    assert "BITFINEX_API_SECRET" not in exclude_exported
+    assert "BOT_ADMIN_TOKEN" in exclude_exported and "OTHER_SECRET" in exclude_exported
     for secret_name in ("BITFINEX_API_KEY", "BITFINEX_API_SECRET"):
         assert f"Write-Host $env:{secret_name}" not in common
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ("start-home-bot.ps1", "bot-auto-restart.ps1", "start-local-collection-bot.ps1"),
+)
+def test_bot_starters_route_vault_through_allowlist_exclude_bitfinex(script_name):
+    """HM HOLD 7767d31f7f94: no full-vault Set-Item; Import ExcludeBitfinex only."""
+    source = _source(script_name)
+    assert "Import-LaptopChainVaultAllowlist" in source
+    assert "-Mode ExcludeBitfinex" in source or "Mode ExcludeBitfinex" in source
+    assert "laptop-chain-common.ps1" in source
+    # No remaining blanket vault→env dump.
+    assert not re.search(
+        r"Get-Content\s+\$\w*[Vv]ault\w*\s*\|[^\n]*ForEach-Object",
+        source,
+    )
+    assert "Clear-BitfinexProcessEnvNames" in source
+
+
+def test_supervisor_logs_bitfinex_env_name_count_never_values():
+    supervisor = _source("laptop-chain-supervisor.ps1")
+    assert "Get-BitfinexProcessEnvNameCount" in supervisor
+    assert "BITFINEX_ENV_NAME_COUNT count=" in supervisor
+    assert "Write-Host $env:BITFINEX" not in supervisor
+    assert "Write-ChainLog" in supervisor
+
+
+def test_fees_system_health_node_do_not_export_vault_bitfinex_into_process():
+    """Evidence for HM: diagnostic readers ≠ bot process-env loaders."""
+    fees = (ROOT / "scripts" / "self_aware" / "fees.py").read_text(encoding="utf-8")
+    health = (ROOT / "scripts" / "system_health.py").read_text(encoding="utf-8")
+    load_vault_mjs = (ROOT / "scripts" / "load-vault-env.mjs").read_text(encoding="utf-8")
+    # fees.py may parse home-bot.env into a local dict for read-only fee probes;
+    # it must not assign BITFINEX_* into os.environ.
+    assert "DEFAULT_ENV_FILE" in fees and "home-bot.env" in fees
+    assert not re.search(r"os\.environ\[[^\]]*BITFINEX", fees)
+    assert not re.search(r"os\.environ\.update\(", fees)
+    assert "return vals[k], vals[s]" in fees or "return vals.get" in fees or "origin" in fees
+    # system_health.load_vault returns a dict; BOT_ADMIN / PLATFORM / DEEPSEEK
+    # lookups use vault.get — no os.environ[BITFINEX_*]= assignment.
+    assert "def load_vault" in health
+    assert not re.search(r"os\.environ\[[^\]]*BITFINEX", health)
+    assert 'vault.get("BOT_ADMIN_TOKEN")' in health or "vault.get('BOT_ADMIN_TOKEN')" in health
+    # Node one-shot: home-bot.env loader only copies BOT_ADMIN_TOKEN.
+    assert "loadCanonicalBotAdminToken" in load_vault_mjs
+    assert "BOT_ADMIN_TOKEN=" in load_vault_mjs
+    assert "BITFINEX_API_KEY" not in load_vault_mjs
+    assert "BITFINEX_API_SECRET" not in load_vault_mjs
 
 
 def test_legacy_ack_watcher_is_retired():
@@ -312,12 +372,7 @@ def _iso(delta_minutes: float = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=delta_minutes)).isoformat()
 
 
-@windows_only
-def test_import_vault_allowlist_never_exports_bitfinex_into_process_env(chain, tmp_path):
-    """Process-env proof: BITFINEX_* names in a vault fixture are not exported.
-
-    Emits only name presence/counts — never secret values (R10).
-    """
+def _vault_fixture(tmp_path) -> Path:
     fixture = tmp_path / "home-bot.env"
     fixture.write_text(
         "\n".join(
@@ -331,13 +386,26 @@ def test_import_vault_allowlist_never_exports_bitfinex_into_process_env(chain, t
         ),
         encoding="utf-8",
     )
-    # Strip parent BITFINEX_* so the child process starts clean for this proof.
+    return fixture
+
+
+def _clean_chain_env(chain) -> dict:
     clean_env = {
         key: value
         for key, value in (chain["env"] or {}).items()
         if not str(key).upper().startswith("BITFINEX_")
     }
     clean_env["BOT_ADMIN_TOKEN"] = ""
+    return clean_env
+
+
+@windows_only
+def test_import_vault_allowlist_never_exports_bitfinex_into_process_env(chain, tmp_path):
+    """Process-env proof (AdminTokenOnly): BITFINEX_* names are not exported.
+
+    Emits only name presence/counts — never secret values (R10).
+    """
+    fixture = _vault_fixture(tmp_path)
     script = (
         _common_prelude(chain)
         + f"Remove-Item Env:BOT_ADMIN_TOKEN -ErrorAction SilentlyContinue; "
@@ -345,19 +413,72 @@ def test_import_vault_allowlist_never_exports_bitfinex_into_process_env(chain, t
         f"Remove-Item Env:BITFINEX_API_SECRET -ErrorAction SilentlyContinue; "
         f"Remove-Item Env:OTHER_SECRET -ErrorAction SilentlyContinue; "
         f"Import-LaptopChainVaultAllowlist -VaultEnv '{fixture}'; "
-        f"$keys = @([Environment]::GetEnvironmentVariables('Process').Keys); "
-        f"$bfx = @($keys | Where-Object {{ $_ -like 'BITFINEX_*' }}); "
+        f"$count = Get-BitfinexProcessEnvNameCount; "
         f"$admin = [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('BOT_ADMIN_TOKEN','Process')) -eq $false; "
         f"$other = [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('OTHER_SECRET','Process')) -eq $false; "
-        f"Write-Output ('adminPresent=' + $admin + ';bitfinexNameCount=' + $bfx.Count + ';otherPresent=' + $other)"
+        f"Write-Output ('adminPresent=' + $admin + ';bitfinexNameCount=' + $count + ';otherPresent=' + $other)"
     )
-    result = _ps(script, clean_env)
+    result = _ps(script, _clean_chain_env(chain))
     assert result.returncode == 0, result.stderr
     line = result.stdout.strip().splitlines()[-1]
     assert line == "adminPresent=True;bitfinexNameCount=0;otherPresent=False", line
-    # Never leak fixture values into pytest output via stdout.
     assert "fixture-should-not-export" not in result.stdout
     assert "fixture-admin-token-not-real" not in result.stdout
+
+
+@windows_only
+@pytest.mark.parametrize(
+    "script_name",
+    ("start-home-bot.ps1", "bot-auto-restart.ps1", "start-local-collection-bot.ps1"),
+)
+def test_bot_starter_exclude_bitfinex_import_never_exports_bitfinex_names(
+    chain, tmp_path, script_name
+):
+    """Windows proof per HM HOLD: each bot starter's Import Mode=ExcludeBitfinex.
+
+    Runs the same Import call those scripts use; never prints values.
+    """
+    source = _source(script_name)
+    assert "Import-LaptopChainVaultAllowlist" in source and "ExcludeBitfinex" in source
+    fixture = _vault_fixture(tmp_path)
+    script = (
+        _common_prelude(chain)
+        + f"Remove-Item Env:BOT_ADMIN_TOKEN -ErrorAction SilentlyContinue; "
+        f"Remove-Item Env:BITFINEX_API_KEY -ErrorAction SilentlyContinue; "
+        f"Remove-Item Env:BITFINEX_API_SECRET -ErrorAction SilentlyContinue; "
+        f"Remove-Item Env:OTHER_SECRET -ErrorAction SilentlyContinue; "
+        f"[Environment]::SetEnvironmentVariable('BITFINEX_API_KEY','preexisting','Process'); "
+        f"Import-LaptopChainVaultAllowlist -VaultEnv '{fixture}' -Mode ExcludeBitfinex; "
+        f"$count = Get-BitfinexProcessEnvNameCount; "
+        f"$admin = -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('BOT_ADMIN_TOKEN','Process')); "
+        f"$other = -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('OTHER_SECRET','Process')); "
+        f"Write-Output ('adminPresent=' + $admin + ';bitfinexNameCount=' + $count + ';otherPresent=' + $other)"
+    )
+    result = _ps(script, _clean_chain_env(chain))
+    assert result.returncode == 0, f"{script_name}: {result.stderr}"
+    line = result.stdout.strip().splitlines()[-1]
+    assert line == "adminPresent=True;bitfinexNameCount=0;otherPresent=True", (script_name, line)
+    assert "fixture-should-not-export" not in result.stdout
+    assert "preexisting" not in result.stdout
+
+
+@windows_only
+def test_supervisor_bitfinex_env_name_count_helper(chain):
+    """Supervisor log uses count-only helper; values never appear."""
+    script = (
+        _common_prelude(chain)
+        + "[Environment]::SetEnvironmentVariable('BITFINEX_API_KEY','x','Process'); "
+        "[Environment]::SetEnvironmentVariable('BITFINEX_API_SECRET','y','Process'); "
+        "$before = Get-BitfinexProcessEnvNameCount; "
+        "[void](Clear-BitfinexProcessEnvNames); "
+        "$after = Get-BitfinexProcessEnvNameCount; "
+        "Write-Output ('before=' + $before + ';after=' + $after)"
+    )
+    result = _ps(script, _clean_chain_env(chain))
+    assert result.returncode == 0, result.stderr
+    line = result.stdout.strip().splitlines()[-1]
+    assert line == "before=2;after=0", line
+    assert "BITFINEX_ENV_NAME_COUNT count=" in _source("laptop-chain-supervisor.ps1")
 
 
 @windows_only

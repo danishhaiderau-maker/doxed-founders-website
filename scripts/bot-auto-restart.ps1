@@ -102,12 +102,12 @@ try {
   if (-not $VaultEnv) {
     $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
   }
+  # HM HOLD 7767d31f7f94: never import BITFINEX_* into bot process env.
+  . (Join-Path $scriptDir 'laptop-chain-common.ps1')
   if (Test-Path $VaultEnv) {
-    Get-Content $VaultEnv | ForEach-Object {
-      if ($_ -match '^\s*([^#=]+)=(.*)$') {
-        Set-Item -Path "env:$($matches[1].Trim())" -Value $matches[2].Trim()
-      }
-    }
+    Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode ExcludeBitfinex
+  } else {
+    [void](Clear-BitfinexProcessEnvNames)
   }
 
   # Script port wins over anything in home-bot.env (vault must not override :7002).
@@ -115,10 +115,11 @@ try {
   $env:DASHBOARD_PORT = "$Port"
   # Every locally supervised showcase process is paper-only. The website relay
   # is the sole component permitted to place real Bitfinex orders.
+  # Do not set BITFINEX_* names (HM HOLD 7767d31f7f94 — names absent).
   $env:FORCE_PAPER_MODE = "1"
   $env:LIVE_TRADING_ENABLED = "0"
-  $env:BITFINEX_LIVE_ENABLED = "0"
   $env:LIVE_ARMED = "0"
+  [void](Clear-BitfinexProcessEnvNames)
 
   # --- Crash report (mirrors start-home-bot.ps1 Write-CrashReport) -------------
   function Write-CrashReport([int]$CrashedPid, [int]$Code, [string]$Message) {
@@ -173,19 +174,18 @@ try {
   # --- Relaunch the bot exactly like start-home-bot.ps1 -NoWait ---------------
   function Import-VaultEnv {
     # Re-read vault on every relaunch so new secrets (e.g. BOT_ADMIN_TOKEN) apply
-    # without requiring a monitor respawn.
-    if (-not (Test-Path $VaultEnv)) { return }
-    Get-Content $VaultEnv | ForEach-Object {
-      if ($_ -match '^\s*([^#=]+)=(.*)$') {
-        Set-Item -Path "env:$($matches[1].Trim())" -Value $matches[2].Trim()
-      }
+    # without requiring a monitor respawn. Never imports BITFINEX_* (HM HOLD).
+    if (Test-Path $VaultEnv) {
+      Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode ExcludeBitfinex
+    } else {
+      [void](Clear-BitfinexProcessEnvNames)
     }
     $env:PORT = "$Port"
     $env:DASHBOARD_PORT = "$Port"
     $env:FORCE_PAPER_MODE = "1"
     $env:LIVE_TRADING_ENABLED = "0"
-    $env:BITFINEX_LIVE_ENABLED = "0"
     $env:LIVE_ARMED = "0"
+    [void](Clear-BitfinexProcessEnvNames)
   }
 
   function Start-BotHidden {
