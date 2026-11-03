@@ -4,6 +4,9 @@
  *
  * Auth stays outside the cache (caller asserts the token first). Default TTL
  * is 10 minutes so a 5-minute supervisor leaves ≥5 min Neon-idle gaps.
+ *
+ * RK 22:14: armed / live payloads never use the cache — pause + arming paths
+ * also invalidate so a disarm cannot leave a stale ARMED read.
  */
 export const RELAY_STATUS_CACHE_TTL_MS = Math.max(
   60_000,
@@ -28,6 +31,15 @@ export function relayStatusCacheKey(slug: string, userId: string): string {
   return `${slug.trim()}|${userId.trim()}`;
 }
 
+/** True when a relay-status payload reports armed or live execution. */
+export function isRelayStatusArmedOrLive(status: unknown): boolean {
+  if (!status || typeof status !== 'object') return false;
+  const s = status as Record<string, unknown>;
+  if (typeof s.relayArmedAt === 'string' && s.relayArmedAt.trim()) return true;
+  if (s.relayExecutionMode === 'LIVE') return true;
+  return false;
+}
+
 export async function cachedRelayStatus<T>(
   key: string,
   load: () => Promise<T>,
@@ -35,7 +47,11 @@ export async function cachedRelayStatus<T>(
 ): Promise<T> {
   const hit = entries.get(key);
   if (hit && hit.generation === generation && clock() < hit.expiresAt) {
-    return hit.value as T;
+    // RK 22:14: never serve armed/live from cache (bypass).
+    if (!isRelayStatusArmedOrLive(hit.value)) {
+      return hit.value as T;
+    }
+    entries.delete(key);
   }
   const pending = inFlight.get(key);
   if (pending && pending.generation === generation) {
@@ -44,7 +60,12 @@ export async function cachedRelayStatus<T>(
   const loadGeneration = generation;
   const promise = load().then((value) => {
     if (loadGeneration === generation) {
-      entries.set(key, { value, expiresAt: clock() + ttlMs, generation: loadGeneration });
+      // Only cache disarmed / non-live snapshots (Neon idle for ChainSupervisor).
+      if (!isRelayStatusArmedOrLive(value)) {
+        entries.set(key, { value, expiresAt: clock() + ttlMs, generation: loadGeneration });
+      } else {
+        entries.delete(key);
+      }
     }
     return value;
   });

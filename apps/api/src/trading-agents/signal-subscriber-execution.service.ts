@@ -7,6 +7,7 @@ import {
   liveCopyAccountArmed,
   readEnvelopeFlyApproval,
 } from './live-copy-approval';
+import { invalidateRelayStatusCache, relayStatusCacheKey } from './relay-status-cache';
 import {
   decodeTileClientOrderId,
   encodeTileClientOrderId,
@@ -5508,6 +5509,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           }) as unknown as Prisma.InputJsonValue,
         },
       });
+      // RK 22:14: system pause must drop stale relay-status cache.
+      invalidateRelayStatusCache(relayStatusCacheKey(AGENT_SLUG, instance.userId));
       let cancelledPendingOrders = 0;
       try {
         cancelledPendingOrders = await Promise.race([
@@ -9455,6 +9458,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }) as unknown as Prisma.InputJsonValue,
       },
     });
+    // RK 22:14: fidelity-guard pause must drop stale relay-status cache.
+    invalidateRelayStatusCache(relayStatusCacheKey(AGENT_SLUG, instance.userId));
 
     let pendingEntriesCancelled = 0;
     let pendingEntryCleanupError: string | null = null;
@@ -13234,6 +13239,8 @@ await this.notifications
         }) as unknown as Prisma.InputJsonValue,
       },
     });
+    // RK 22:14: mismatch pause must drop stale relay-status cache.
+    invalidateRelayStatusCache(relayStatusCacheKey(AGENT_SLUG, instance.userId));
     if (!alreadyPaused) {
       await this.notifyShowcaseLiveCopyCoordination(
         'RELAY_EXIT_ONLY',

@@ -5,10 +5,13 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   RELAY_STATUS_CACHE_TTL_MS,
   cachedRelayStatus,
   invalidateRelayStatusCache,
+  isRelayStatusArmedOrLive,
   relayStatusCacheKey,
   setRelayStatusCacheClockForTests,
 } from './relay-status-cache';
@@ -97,4 +100,38 @@ test('mutation proof: bypassing TTL hit would double-load inside window', async 
   await cachedRelayStatus(key, load);
   await cachedRelayStatus(key, load);
   assert.equal(loads, 0);
+});
+
+test('RK 22:14: armed/live payloads bypass cache (always reload)', async () => {
+  withClock();
+  let loads = 0;
+  const load = async () => {
+    loads += 1;
+    return { relayArmedAt: '2026-11-03T00:00:00.000Z', relayExecutionMode: 'LIVE', n: loads };
+  };
+  const key = 'armed';
+  await cachedRelayStatus(key, load);
+  await cachedRelayStatus(key, load);
+  assert.equal(loads, 2);
+});
+
+test('isRelayStatusArmedOrLive detects arm and LIVE mode', () => {
+  assert.equal(isRelayStatusArmedOrLive({ relayArmedAt: null }), false);
+  assert.equal(isRelayStatusArmedOrLive({ relayArmedAt: '2026-01-01T00:00:00Z' }), true);
+  assert.equal(isRelayStatusArmedOrLive({ relayExecutionMode: 'LIVE' }), true);
+  assert.equal(isRelayStatusArmedOrLive({ relayExecutionMode: 'PAUSED' }), false);
+});
+
+test('mutation proof: pause/arm writers invalidate relay-status cache', () => {
+  const instances = readFileSync(
+    path.join(__dirname, 'trading-agent-instances.service.ts'),
+    'utf8',
+  );
+  assert.ok(instances.includes('invalidateRelayStatusCache(relayStatusCacheKey(agentSlug, userId))'));
+  const exec = readFileSync(
+    path.join(__dirname, 'signal-subscriber-execution.service.ts'),
+    'utf8',
+  );
+  const hits = exec.split('invalidateRelayStatusCache(relayStatusCacheKey(AGENT_SLUG').length - 1;
+  assert.ok(hits >= 3, `expected ≥3 execution-service invalidates, got ${hits}`);
 });

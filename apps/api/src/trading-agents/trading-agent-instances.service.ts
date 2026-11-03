@@ -880,7 +880,7 @@ export class TradingAgentInstancesService {
         dashboardState: relayDashboardState as Prisma.InputJsonValue,
       },
     });
-    // RK 21:05: arm/pause must not leave ChainSupervisor reading a stale cached status.
+    // RK 21:05 / 22:14: arm + pause paths invalidate so ChainSupervisor cannot read stale arm state.
     invalidateRelayStatusCache(relayStatusCacheKey(agentSlug, userId));
 
     // F8 — Wake the executor immediately so the first tick fires within
