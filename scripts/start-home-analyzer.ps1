@@ -148,6 +148,10 @@ if (Test-Path -LiteralPath $vaultEnv) {
     }
   }
 }
+# HM HOLD b5700e72694d: strip residual BITFINEX_* names; fail closed on count > 0.
+. (Join-Path $scriptDir 'laptop-chain-common.ps1')
+[void](Clear-BitfinexProcessEnvNames)
+Assert-BitfinexProcessEnvAbsent
 
 # Explicit durable nonsecret opt-in; never load model economics from the vault.
 # An absent config preserves the disabled default or a validated inherited pin.

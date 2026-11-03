@@ -167,18 +167,20 @@ if (-not (Test-Path $VaultEnv)) {
   exit 1
 }
 
-# HM HOLD 7767d31f7f94: never import BITFINEX_* into bot process env.
+# HM HOLD 7767d31f7f94 / b5700e72694d: true allowlist; never BITFINEX_* names.
+# Missing BITFINEX_LIVE_ENABLED means off in bot._apply_env_live_gating — do not
+# set BITFINEX_LIVE_ENABLED=0 (that would reintroduce a BITFINEX_* name).
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
-Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode ExcludeBitfinex
+Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
 
 # The :7002 process is the canonical paper showcase. Real funds are handled by
 # the per-user website relay after explicit consent; the showcase must never
 # inherit a stale live flag from a local config or parent environment.
-# Do not set BITFINEX_* names at all (HM HOLD 7767d31f7f94 — names absent).
 $env:FORCE_PAPER_MODE = "1"
 $env:LIVE_TRADING_ENABLED = "0"
 $env:LIVE_ARMED = "0"
 [void](Clear-BitfinexProcessEnvNames)
+Assert-BitfinexProcessEnvAbsent
 
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 if (-not (Test-Path $agentDir)) {

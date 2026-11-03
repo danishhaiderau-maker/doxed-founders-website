@@ -43,6 +43,19 @@ def _attach_startup_logs() -> None:
 _attach_startup_logs()
 
 
+def _refuse_bitfinex_process_env_names() -> None:
+    """HM HOLD b5700e72694d: log names-only count; exit 79 if any BITFINEX_* remain."""
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names
+
+    assert_no_bitfinex_process_env_names()
+
+
+_refuse_bitfinex_process_env_names()
+
+
 def _read_boot_revision() -> str:
     """Read the checkout revision before the full bot import.
 

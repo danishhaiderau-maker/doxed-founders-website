@@ -102,10 +102,11 @@ try {
   if (-not $VaultEnv) {
     $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
   }
-  # HM HOLD 7767d31f7f94: never import BITFINEX_* into bot process env.
+  # HM HOLD 7767d31f7f94 / b5700e72694d: true BotAllowlist; never BITFINEX_* names.
+  # Missing BITFINEX_LIVE_ENABLED means off — do not set BITFINEX_LIVE_ENABLED=0.
   . (Join-Path $scriptDir 'laptop-chain-common.ps1')
   if (Test-Path $VaultEnv) {
-    Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode ExcludeBitfinex
+    Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
   } else {
     [void](Clear-BitfinexProcessEnvNames)
   }
@@ -115,11 +116,11 @@ try {
   $env:DASHBOARD_PORT = "$Port"
   # Every locally supervised showcase process is paper-only. The website relay
   # is the sole component permitted to place real Bitfinex orders.
-  # Do not set BITFINEX_* names (HM HOLD 7767d31f7f94 — names absent).
   $env:FORCE_PAPER_MODE = "1"
   $env:LIVE_TRADING_ENABLED = "0"
   $env:LIVE_ARMED = "0"
   [void](Clear-BitfinexProcessEnvNames)
+  Assert-BitfinexProcessEnvAbsent
 
   # --- Crash report (mirrors start-home-bot.ps1 Write-CrashReport) -------------
   function Write-CrashReport([int]$CrashedPid, [int]$Code, [string]$Message) {
@@ -174,9 +175,9 @@ try {
   # --- Relaunch the bot exactly like start-home-bot.ps1 -NoWait ---------------
   function Import-VaultEnv {
     # Re-read vault on every relaunch so new secrets (e.g. BOT_ADMIN_TOKEN) apply
-    # without requiring a monitor respawn. Never imports BITFINEX_* (HM HOLD).
+    # without requiring a monitor respawn. True BotAllowlist; never BITFINEX_*.
     if (Test-Path $VaultEnv) {
-      Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode ExcludeBitfinex
+      Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
     } else {
       [void](Clear-BitfinexProcessEnvNames)
     }
@@ -186,6 +187,7 @@ try {
     $env:LIVE_TRADING_ENABLED = "0"
     $env:LIVE_ARMED = "0"
     [void](Clear-BitfinexProcessEnvNames)
+    Assert-BitfinexProcessEnvAbsent
   }
 
   function Start-BotHidden {

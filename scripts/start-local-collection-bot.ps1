@@ -40,10 +40,11 @@ if (-not (Test-Path $vaultEnv)) {
   exit 1
 }
 
-# HM HOLD 7767d31f7f94: never import BITFINEX_* into bot process env.
+# HM HOLD 7767d31f7f94 / b5700e72694d: true BotAllowlist; never BITFINEX_* names.
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
-Import-LaptopChainVaultAllowlist -VaultEnv $vaultEnv -Mode ExcludeBitfinex
+Import-LaptopChainVaultAllowlist -VaultEnv $vaultEnv -Mode BotAllowlist
 [void](Clear-BitfinexProcessEnvNames)
+Assert-BitfinexProcessEnvAbsent
 
 $env:PORT = "$Port"
 $env:DASHBOARD_PORT = "$Port"
