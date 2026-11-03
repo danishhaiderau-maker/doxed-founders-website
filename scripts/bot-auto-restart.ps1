@@ -326,6 +326,13 @@ try {
         break
       }
 
+      # Exit 79 = BITFINEX env-name refusal (bitfinex_env_name_gate / Assert).
+      # HM HOLD 716511e8582d: never relaunch — relaunching would loop the same refuse.
+      if ($code -eq $script:BitfinexEnvRefusalExitCode) {
+        Write-RestartLog "bitfinex_env_refused	pid=$currentPid	code=$code	no_restart"
+        break
+      }
+
       # Crash path: report already written above (or by Write-CrashReport for the gone case).
       $consecutiveCrashes++
 

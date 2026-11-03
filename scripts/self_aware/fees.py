@@ -1,25 +1,22 @@
 """Fee truth: public Bitfinex fee schedule vs every place the repo encodes fees.
 
-HM HOLD ``ec34b9b9d0d9`` / RK 09:33: this module loads **no Bitfinex API
-credentials** (no env keys, no vault file keys). Source is the public fee
-schedule only (``PUBLIC_SCHEDULE_UNVERIFIED``, never GREEN from account auth).
-The static drift scan still runs on every job against ``bitfinex_cost_profile.py``.
+HM HOLD ``ec34b9b9d0d9`` / RK 09:33 / HOLD ``716511e8582d``: this module loads
+**no Bitfinex API credentials** and has **no signed account helpers**. Source is
+the public fee schedule only (``PUBLIC_SCHEDULE_UNVERIFIED``, never GREEN from
+account auth). The static drift scan still runs on every job against
+``bitfinex_cost_profile.py``.
 
-``fetch_account`` / signed ``/auth/r/summary`` remain as unused helpers for
-historical tests of the request shape; ``load_credentials`` always returns
-``None`` so ``refresh_account`` never calls them.
+``load_credentials`` always returns ``None`` so ``refresh_account`` never
+attempts an authenticated fetch. Legacy ``ACCOUNT_SUMMARY`` cache rows may still
+be read (stale → AMBER) until they age out.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import os
 import re
 import subprocess
-import threading
 import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -27,26 +24,16 @@ from typing import Any
 from .facts import iso
 
 VENUE = "bitfinex"
-SUMMARY_PATH = "v2/auth/r/summary"
-API_BASE = "https://api.bitfinex.com/"
 PUBLIC_SCHEDULE_URLS = ("https://www.bitfinex.com/fees/", "https://www.bitfinex.com/zero-fee-trading/")
 USER_AGENT = "doxxed-self-aware-fees/1 (+read-only)"
 FEE_TTL_SEC = 6 * 3600
 FEE_RETRY_SEC = 15 * 60
 STALE_AFTER_SEC = int(FEE_TTL_SEC * 1.5)
-# Bitfinex wants strictly increasing nonces per key. The platform relay and the
-# bot share this key at Date.now() * 10_000; staying on that scale (never above
-# it) keeps every caller's next nonce valid.
-NONCE_MS_SCALE = 10_000
-DEFAULT_ENV_FILE = r"C:\DoxxedCrypto\doxedcryptofounder-secrets\vault\home-bot.env"
 CACHE_NAME = "fees-truth.json"
 PROFILE_REL = "services/btc-conservative-agent/bitfinex_cost_profile.py"
 TOLERANCE_BPS = 1e-6
 
 ACCOUNT_SUMMARY, PUBLIC_SCHEDULE_UNVERIFIED, UNAVAILABLE = "ACCOUNT_SUMMARY", "PUBLIC_SCHEDULE_UNVERIFIED", "UNAVAILABLE"
-
-_nonce_lock = threading.Lock()
-_last_nonce = 0
 
 
 class FeeSourceError(RuntimeError):
@@ -55,103 +42,18 @@ class FeeSourceError(RuntimeError):
 
 # ------------------------------------------------------------ credentials
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except OSError:
-        return out
-    for line in text.splitlines():
-        m = re.match(r"\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*)$", line)
-        if m:
-            out[m.group(1)] = m.group(2).strip().strip('"').strip("'")
-    return out
-
-
 def load_credentials(env: dict[str, str] | None = None) -> tuple[str, str, str] | None:
     """Never load Bitfinex API credentials (public schedule only).
 
-    HM HOLD ec34b9b9d0d9 (3) / RK 09:33: ignore env and vault file KEY/SECRET
-    names entirely. ``env`` is accepted for call-site compatibility only.
+    HM HOLD ec34b9b9d0d9 (3) / RK 09:33 / HOLD 716511e8582d: ignore env and vault
+    file KEY/SECRET names entirely. ``env`` is accepted for call-site
+    compatibility only. Signed ``/auth/r/summary`` helpers were deleted.
     """
     _ = env  # intentionally unused — do not read BITFINEX_* from process or files
     return None
 
 
-def _nonce() -> str:
-    global _last_nonce
-    with _nonce_lock:
-        _last_nonce = max(int(time.time() * 1000) * NONCE_MS_SCALE, _last_nonce + 1)
-        return str(_last_nonce)
-
-
-def _redact(text: str, *secrets: str) -> str:
-    for s in secrets:
-        if s:
-            text = text.replace(s, "[REDACTED]")
-    return text
-
-
 # ---------------------------------------------------------------- sources
-
-def _post_summary(key: str, secret: str, timeout: float) -> Any:
-    body = "{}"
-    nonce = _nonce()
-    sig = hmac.new(secret.encode(), f"/api/{SUMMARY_PATH}{nonce}{body}".encode(), hashlib.sha384).hexdigest()
-    req = urllib.request.Request(API_BASE + SUMMARY_PATH, data=body.encode(), method="POST", headers={
-        "Content-Type": "application/json", "Accept": "application/json", "User-Agent": USER_AGENT,
-        "bfx-nonce": nonce, "bfx-apikey": key, "bfx-signature": sig})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read(1_000_000).decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(400).decode("utf-8", "replace") if exc.fp else ""
-        raise FeeSourceError(_redact(f"HTTP {exc.code}: {detail}", key, secret)) from None
-    except (OSError, ValueError) as exc:
-        raise FeeSourceError(_redact(f"{type(exc).__name__}: {exc}", key, secret)) from None
-
-
-def _rate(v: Any) -> float | None:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-
-
-def parse_summary(payload: Any) -> dict[str, Any]:
-    """Map the documented summary array to fee rates (fractions of notional).
-
-    ``payload[4] == [[MAKER, MAKER, MAKER, _, _, DERIV_REBATE], [TAKER_CRYPTO, TAKER_STABLE, TAKER_FIAT, _, _, DERIV_TAKER]]``.
-    ``DERIV_REBATE`` is a rebate: a positive value means the maker is paid, so the fee rate is its negation.
-    """
-    try:
-        maker_row, taker_row = payload[4][0], payload[4][1]
-    except (TypeError, IndexError, KeyError):
-        raise FeeSourceError("summary payload has no fee block at index 4") from None
-    pick = lambda row, i: _rate(row[i]) if isinstance(row, list) and len(row) > i else None  # noqa: E731
-    rebate = pick(maker_row, 5)
-    out = {
-        "maker_rate": pick(maker_row, 0), "taker_rate": pick(taker_row, 0),
-        "taker_rate_to_stable": pick(taker_row, 1), "taker_rate_to_fiat": pick(taker_row, 2),
-        "derivatives_maker_rate": None if rebate is None else (-rebate if rebate else 0.0),
-        "derivatives_taker_rate": pick(taker_row, 5),
-        "raw_fee_block": [maker_row, taker_row],
-    }
-    if out["derivatives_maker_rate"] is None or out["derivatives_taker_rate"] is None:
-        raise FeeSourceError("summary fee block lacks derivatives maker/taker fields")
-    return out
-
-
-def fetch_account(creds: tuple[str, str, str], timeout: float = 20.0) -> dict[str, Any]:
-    key, secret, origin = creds
-    for attempt in range(2):
-        try:
-            rates = parse_summary(_post_summary(key, secret, timeout))
-            return {**rates, "source": ACCOUNT_SUMMARY, "credential_origin": origin, "endpoint": API_BASE + SUMMARY_PATH}
-        except FeeSourceError as exc:
-            if "nonce" in str(exc).lower() and attempt == 0:
-                time.sleep(0.25)
-                continue
-            raise
-    raise FeeSourceError("unreachable")
-
 
 _ZERO_MARKERS = re.compile(r"zero[\s-]*fee|0(?:\.0+)?\s*%\s*(?:maker|taker)|(?:maker|taker)[^<]{0,40}\bzero\b", re.I)
 
@@ -368,38 +270,31 @@ def _save_cache(home: Path, doc: dict[str, Any]) -> None:
 
 
 def refresh_account(home: Path, now: float, *, force: bool = False, creds_env: dict[str, str] | None = None,
-                    fetch_account_fn=fetch_account, fetch_public_fn=fetch_public) -> dict[str, Any]:
-    """Return the cached account fee record, refreshing it when older than the TTL (or retry window after failure)."""
+                    fetch_public_fn=fetch_public) -> dict[str, Any]:
+    """Return the cached fee record, refreshing from the public schedule only."""
     cache = _load_cache(home)
     fetched = cache.get("fetched_at_epoch") or 0
     retry_at = cache.get("retry_at_epoch") or 0
     fresh = cache.get("source") == ACCOUNT_SUMMARY and now - fetched < FEE_TTL_SEC
     if not force and (fresh or (cache and now < retry_at)):
         return cache
-    creds = load_credentials(creds_env)
+    _ = load_credentials(creds_env)  # always None; proves no BITFINEX_* load
     attempt: dict[str, Any] = {
         "attempted_at": iso(now),
-        "credentials": "disabled_public_only" if creds is None else "configured",
+        "credentials": "disabled_public_only",
     }
     rec: dict[str, Any] | None = None
-    # Creds path retained for signature compatibility; load_credentials is always None.
-    if creds:
-        try:
-            rec = fetch_account_fn(creds)
-        except FeeSourceError as exc:
-            attempt["account_error"] = str(exc)[:300]
-    if rec is None:
-        if cache.get("source") == ACCOUNT_SUMMARY:
-            # Keep a legacy cached account answer; it turns stale rather than being replaced.
-            cache.update(last_attempt=attempt, retry_at_epoch=now + FEE_RETRY_SEC)
-            _save_cache(home, cache)
-            return cache
-        try:
-            rec = fetch_public_fn()
-        except FeeSourceError as exc:
-            attempt["public_error"] = str(exc)[:300]
-            rec = {"source": UNAVAILABLE, "maker_rate": None, "taker_rate": None,
-                   "derivatives_maker_rate": None, "derivatives_taker_rate": None}
+    if cache.get("source") == ACCOUNT_SUMMARY:
+        # Keep a legacy cached account answer; it turns stale rather than being replaced.
+        cache.update(last_attempt=attempt, retry_at_epoch=now + FEE_RETRY_SEC)
+        _save_cache(home, cache)
+        return cache
+    try:
+        rec = fetch_public_fn()
+    except FeeSourceError as exc:
+        attempt["public_error"] = str(exc)[:300]
+        rec = {"source": UNAVAILABLE, "maker_rate": None, "taker_rate": None,
+               "derivatives_maker_rate": None, "derivatives_taker_rate": None}
     rec = {k: v for k, v in rec.items() if k != "raw_fee_block"} | {"raw_fee_block": rec.get("raw_fee_block")}
     rec.update(fetched_at=iso(now), fetched_at_epoch=now, last_attempt=attempt,
                retry_at_epoch=now + (FEE_TTL_SEC if rec["source"] == ACCOUNT_SUMMARY else FEE_RETRY_SEC))

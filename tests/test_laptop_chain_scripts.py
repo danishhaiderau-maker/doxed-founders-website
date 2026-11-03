@@ -151,10 +151,11 @@ def test_supervisor_and_cycle_fail_closed_on_bitfinex_env_names():
 
 
 def test_bot_allowlist_names_justified_or_dropped():
-    """RK 09:33: DEEPSEEK dropped (no monthly R50 figure); MONITOR kept with GET-only proof."""
+    """RK 09:33 / HM HOLD 716511e8582d: DEEPSEEK + MONITOR dropped from BotAllowlist."""
     common = _source("laptop-chain-common.ps1")
     bot_names = _ps_allowlist_names(common, "LaptopChainBotVaultAllowlist")
     assert "DEEPSEEK_API_KEY" not in bot_names
+    assert "MONITOR_READ_TOKEN" not in bot_names
     assert "PLATFORM_API_BASE_URL" not in bot_names
     expected = {
         "BOT_ADMIN_TOKEN",
@@ -162,16 +163,34 @@ def test_bot_allowlist_names_justified_or_dropped():
         "SHOWCASE_WEBHOOK_SECRET",
         "SHOWCASE_RELAY_WEBHOOK_URL",
         "CRASH_NOTIFY_WEBHOOK",
-        "MONITOR_READ_TOKEN",
         "LIFECYCLE_LAPTOP_ATTESTATION_KEY",
         "LIFECYCLE_CLEANUP_ENABLED",
     }
     assert set(bot_names) == expected
-    bot = (ROOT / "services" / "btc-conservative-agent" / "bot.py").read_text(encoding="utf-8")
-    # Server-route proof (not comments): monitor paths admitted only when method == "GET".
-    assert 'if method == "GET" and path in (_MONITOR_DIGEST_PATH, _MONITOR_INTEGRITY_PATH):' in bot
-    assert 'if method == "GET" and path in _MONITOR_TILE_PATHS:' in bot
-    assert "_MONITOR_READ_TOKEN" in bot
+    # Nest POST ops that accept MONITOR via assertBotReadToken (not GET-only).
+    controller = (
+        ROOT / "apps" / "api" / "src" / "trading-agents" / "trading-agents.controller.ts"
+    ).read_text(encoding="utf-8")
+    assert "@Post(':slug/ops/pause')" in controller
+    assert "@Post(':slug/ops/refresh-flat-audit')" in controller
+    service = (
+        ROOT / "apps" / "api" / "src" / "trading-agents" / "trading-agents.service.ts"
+    ).read_text(encoding="utf-8")
+    assert "assertBotReadToken" in service
+    assert "DROPPED MONITOR_READ_TOKEN" in common
+    assert "NOT GET-only" in common
+
+
+def test_bot_auto_restart_does_not_relaunch_on_exit_79():
+    """HM HOLD 716511e8582d: exit 79 (BITFINEX env refusal) must break, not relaunch."""
+    source = _source("bot-auto-restart.ps1")
+    assert "BitfinexEnvRefusalExitCode" in source
+    assert "bitfinex_env_refused" in source
+    assert "no_restart" in source
+    # Refusal check must precede the crash/relaunch path.
+    refuse_idx = source.find("BitfinexEnvRefusalExitCode")
+    crash_idx = source.find("$consecutiveCrashes++")
+    assert 0 <= refuse_idx < crash_idx
 
 
 def test_fees_system_health_node_do_not_export_vault_bitfinex_into_process():
@@ -181,6 +200,9 @@ def test_fees_system_health_node_do_not_export_vault_bitfinex_into_process():
     load_vault_mjs = (ROOT / "scripts" / "load-vault-env.mjs").read_text(encoding="utf-8")
     assert "load_credentials" in fees
     assert "return None" in fees
+    assert "def fetch_account" not in fees
+    assert "def _post_summary" not in fees
+    assert "import hmac" not in fees
     assert not re.search(r"os\.environ\[[^\]]*BITFINEX", fees)
     assert not re.search(r"os\.environ\.update\(", fees)
     assert "return env[k], env[s]" not in fees
@@ -571,6 +593,72 @@ def test_supervisor_bitfinex_env_name_count_helper(chain):
     assert result.returncode == 0, result.stderr
     assert "before=2;after=0" in result.stdout
     assert "Assert-BitfinexProcessEnvAbsent" in _source("laptop-chain-supervisor.ps1")
+
+
+@windows_only
+@pytest.mark.parametrize(
+    "script_name,extra_args",
+    [
+        ("run-analyzer-once.ps1", []),
+        ("run-segment-analyzer-cycle.ps1", None),  # filled at runtime with temp roots
+        ("laptop-chain-supervisor.ps1", []),
+    ],
+)
+def test_real_pwsh_file_launch_refuses_injected_key(chain, tmp_path, script_name, extra_args):
+    """HM HOLD 716511e8582d (1): real ``pwsh -File`` entry (not only common.ps1) → exit 79."""
+    env = _clean_chain_env(chain)
+    env["BITFINEX_API_KEY"] = "fake-file-launch-key-not-real"
+    env["BITFINEX_LIVE_ENABLED"] = "0"
+    env["BOT_ADMIN_TOKEN"] = "fixture-admin-token-for-cycle-assert"
+    # Unique mutex so a live host supervisor cannot steal the tick (exit 0).
+    env["DOXXED_LAPTOP_CHAIN_MUTEX_PREFIX"] = f"DoxxedFile79{uuid.uuid4().hex[:10]}"
+
+    args = [
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(SCRIPTS / script_name),
+        "-RepoRoot",
+        str(ROOT),
+        "-CanonicalRoot",
+        str(chain["canonical"]),
+        "-StateDir",
+        str(chain["state"]),
+    ]
+    if script_name == "run-segment-analyzer-cycle.ps1":
+        shadow = tmp_path / "shadow"
+        archive = tmp_path / "archive"
+        view = tmp_path / "view"
+        for p in (shadow, archive, view):
+            p.mkdir(parents=True, exist_ok=True)
+        args.extend(
+            [
+                "-ShadowRoot",
+                str(shadow),
+                "-ArchiveRoot",
+                str(archive),
+                "-ViewRoot",
+                str(view),
+            ]
+        )
+    elif extra_args:
+        args.extend(extra_args)
+
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**dict(os.environ), **env},
+        check=False,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 79, combined
+    assert "BITFINEX_ENV_NAME_COUNT count=1" in combined
+    assert "REFUSED_BITFINEX_ENV_NAMES" in combined
+    assert "fake-file-launch-key-not-real" not in combined
 
 
 @windows_only

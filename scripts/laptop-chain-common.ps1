@@ -207,25 +207,26 @@ $script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
 # Bot starters: explicit non-BITFINEX names only (disaster-recovery / showcase).
 # Dropped vs rev3: PLATFORM_* (snapshots load via home-bot-vault-env), 
 # LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID (no getenv reader).
-# Keep reasons (RK 09:33) — full table in #981 asks:
+# Keep reasons (RK 09:33 / HM HOLD 716511e8582d) — full table in #981 asks:
 # BOT_ADMIN_TOKEN — bot admin auth (btc_conservative_agent / bot.py)
 # BOT_CONTROL_SECRET — relay/control HMAC (bot.py)
 # SHOWCASE_WEBHOOK_SECRET — showcase webhook HMAC (bot.py)
 # SHOWCASE_RELAY_WEBHOOK_URL — paper relay delivery URL (bot.py)
 # CRASH_NOTIFY_WEBHOOK — crash notify (start-home-bot / bot-auto-restart)
-# MONITOR_READ_TOKEN — KEEP: before_request only admits monitor paths when
-#   method == "GET" (bot.py ~35850-35862); POST monitor routes use admin/R2.
 # LIFECYCLE_LAPTOP_ATTESTATION_KEY — lifecycle cleanup attest (bot.py)
 # LIFECYCLE_CLEANUP_ENABLED — lifecycle cleanup toggle (bot.py)
 # DROPPED DEEPSEEK_API_KEY — code path exists (bot.py getenv) but no observed
 #   monthly R50 USD figure in-repo; RK 09:33 requires real cost or drop.
+# DROPPED MONITOR_READ_TOKEN — NOT GET-only: Nest assertBotReadToken is the
+#   only auth on POST ops pause + POST ops refresh-flat-audit
+#   (trading-agents.controller.ts). Separate apps/api PR (other worker) must
+#   require assertBotAdminToken on those POSTs; do not vault-export here.
 $script:LaptopChainBotVaultAllowlist = @(
   'BOT_ADMIN_TOKEN',
   'BOT_CONTROL_SECRET',
   'SHOWCASE_WEBHOOK_SECRET',
   'SHOWCASE_RELAY_WEBHOOK_URL',
   'CRASH_NOTIFY_WEBHOOK',
-  'MONITOR_READ_TOKEN',
   'LIFECYCLE_LAPTOP_ATTESTATION_KEY',
   'LIFECYCLE_CLEANUP_ENABLED'
 )

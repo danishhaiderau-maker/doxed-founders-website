@@ -1,10 +1,9 @@
-"""Fee truth: Bitfinex account fees (auth/r/summary) vs bitfinex_cost_profile and every other fee surface."""
+"""Fee truth: public Bitfinex fee schedule vs bitfinex_cost_profile and every other fee surface."""
 from __future__ import annotations
 
 import json
 import sys
 import threading
-import time
 import urllib.request
 from pathlib import Path
 
@@ -15,7 +14,6 @@ from self_aware import diagnose, fees  # noqa: E402
 from self_aware.facts import iso  # noqa: E402
 
 NOW = 1_790_930_000.0
-ZERO_SUMMARY = [None, None, None, None, [[0, 0, 0, None, None, 0], [0, 0, 0, None, None, 0]], None, None]
 PROFILE = 'MAKER_FEE_RATE = {m}\nTAKER_FEE_RATE = {t}\n'
 KEY, SECRET = "k" * 43, "s" * 43
 
@@ -43,22 +41,8 @@ ACCOUNT_ZERO = {"source": fees.ACCOUNT_SUMMARY, "maker_rate": 0.0, "taker_rate":
 
 # ------------------------------------------------------------- source
 
-def test_parse_summary_reads_documented_fee_block():
-    r = fees.parse_summary(ZERO_SUMMARY)
-    assert (r["maker_rate"], r["taker_rate"], r["derivatives_maker_rate"], r["derivatives_taker_rate"]) == (0, 0, 0, 0)
-    paid = [0, 0, 0, 0, [[0.001, 0.001, 0.001, None, None, 0.0002], [0.002, 0.002, 0.002, None, None, 0.00065]]]
-    r = fees.parse_summary(paid)
-    assert r["maker_rate"] == 0.001 and r["taker_rate"] == 0.002
-    assert r["derivatives_maker_rate"] == -0.0002  # a positive rebate pays the maker
-    assert r["derivatives_taker_rate"] == 0.00065
-    with pytest.raises(fees.FeeSourceError):
-        fees.parse_summary([1, 2])
-    with pytest.raises(fees.FeeSourceError):
-        fees.parse_summary([0, 0, 0, 0, [[0, 0, 0], [0, 0, 0]]])
-
-
 def test_load_credentials_never_reads_bitfinex_keys(tmp_path):
-    """HM HOLD ec34b9b9d0d9 (3) / RK 09:33: no Bitfinex creds from env or vault file."""
+    """HM HOLD ec34b9b9d0d9 / 716511e8582d: no Bitfinex creds; signed helpers deleted."""
     env_file = tmp_path / "bot.env"
     env_file.write_text(f'BITFINEX_API_KEY="{KEY}"\nBITFINEX_API_SECRET={SECRET}\n', encoding="utf-8")
     assert fees.load_credentials({"SELF_AWARE_BITFINEX_ENV_FILE": str(env_file)}) is None
@@ -69,12 +53,17 @@ def test_load_credentials_never_reads_bitfinex_keys(tmp_path):
         "BITFINEX_API_SECRET": SECRET,
     }) is None
     assert fees.load_credentials(None) is None
-    # Source text must not return Bitfinex KEY/SECRET pairs from env or files.
     src = Path(fees.__file__).read_text(encoding="utf-8")
     assert "def load_credentials" in src and "return None" in src
     assert "return env[k], env[s]" not in src
     assert "return vals[k], vals[s]" not in src
     assert "Never load Bitfinex API credentials" in src
+    # Dead signed helpers removed (HOLD 716511e8582d).
+    assert "def fetch_account" not in src
+    assert "def _post_summary" not in src
+    assert "def _nonce" not in src
+    assert "def parse_summary" not in src
+    assert "import hmac" not in src
 
 
 def test_refresh_account_public_only_never_calls_account(tmp_path):
@@ -99,7 +88,6 @@ def test_refresh_account_public_only_never_calls_account(tmp_path):
         home,
         NOW,
         creds_env={"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET},
-        fetch_account_fn=lambda _c: pytest.fail("must not call account — creds disabled"),
         fetch_public_fn=public,
     )
     assert len(public_calls) == 1
@@ -107,35 +95,6 @@ def test_refresh_account_public_only_never_calls_account(tmp_path):
     assert rec["last_attempt"]["credentials"] == "disabled_public_only"
     assert KEY not in json.dumps(rec)
     assert SECRET not in json.dumps(rec)
-
-
-def test_nonce_stays_on_platform_scale_and_is_monotonic():
-    a, b = int(fees._nonce()), int(fees._nonce())
-    assert b > a
-    assert abs(a - int(time.time() * 1000) * fees.NONCE_MS_SCALE) < 60_000 * fees.NONCE_MS_SCALE
-
-
-def test_signed_request_is_read_only_summary_post(monkeypatch):
-    seen = {}
-
-    class Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self, n):
-            return json.dumps(ZERO_SUMMARY).encode()
-
-    def fake_urlopen(req, timeout):
-        seen.update(url=req.full_url, method=req.get_method(), headers=dict(req.header_items()))
-        return Resp()
-    monkeypatch.setattr(fees.urllib.request, "urlopen", fake_urlopen)
-    rec = fees.fetch_account((KEY, SECRET, "env:X"))
-    assert seen["url"] == "https://api.bitfinex.com/v2/auth/r/summary" and seen["method"] == "POST"
-    assert seen["headers"]["User-agent"] == fees.USER_AGENT and len(seen["headers"]["Bfx-signature"]) == 96
-    assert rec["source"] == fees.ACCOUNT_SUMMARY and rec["derivatives_taker_rate"] == 0
 
 
 def test_cache_honours_ttl_for_public_schedule(tmp_path):
