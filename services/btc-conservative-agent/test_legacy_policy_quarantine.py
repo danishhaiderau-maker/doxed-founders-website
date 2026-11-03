@@ -106,19 +106,35 @@ class LegacyQuarantineTests(unittest.TestCase):
         self.assertEqual(lpq.evaluate(["episode-b"], [late], {"episode-b": LISTED[EP]})["accepted"], [])
 
 
-    def test_real_ledger_rows_of_both_listed_ids_are_accepted_with_their_own_bounds_and_counts(self):
-        """Real rows (identity keys only) copied from the laptop v3 ledgers on 18 Oct, 48 rows incl. other policies' rows."""
-        import json
+    def test_synthetic_listed_rows_are_accepted_with_their_own_bounds_and_counts(self):
+        """SYNTHETIC rows only (R22 2026-10-30): real Fly/laptop ledger export deleted; shape matches list bounds/counts."""
         import pathlib
-        path = pathlib.Path(__file__).parent / "fixtures" / "legacy_policy_quarantine_real_rows.ndjson"
-        rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+        assert not (pathlib.Path(__file__).parent / "fixtures" / "legacy_policy_quarantine_real_rows.ndjson").exists()
+        rows = []
+        for ep, spec in lpq.LEGACY_POLICY_IDENTITY_EPISODES.items():
+            bound = float(spec["identity_rows_max_ts"])
+            count = int(spec["identity_row_count"])
+            pids = list(spec["policy_ids"])
+            for i in range(count):
+                rows.append({
+                    "episode_id": ep,
+                    "policy_id": pids[i % len(pids)],
+                    "policy_signature": f"synthetic-sig-{ep[-6:]}-{i}",
+                    "observed_ts": bound - (count - i),  # all <= bound
+                    "event_id": f"syn-{ep[-6:]}-{i}",
+                    "_fixture": "SYNTHETIC_R22_NO_LIVE_LEDGER",
+                })
+            rows.append({
+                "episode_id": ep, "policy_id": "OTHER", "policy_signature": "x",
+                "observed_ts": bound - 1.0, "event_id": f"syn-noise-{ep[-6:]}",
+                "_fixture": "SYNTHETIC_R22_NO_LIVE_LEDGER",
+            })
         out = lpq.evaluate(list(lpq.LEGACY_POLICY_IDENTITY_EPISODES), rows)
         self.assertEqual(out["rejected"], [])
         self.assertEqual({e["episode_id"]: e["identity_rows"] for e in out["episodes"]},
                          {"episode-1ff6cd183c4b011958be": 20, "episode-cfacc140c836a55a140c": 18})
         for e in out["episodes"]:
             self.assertLessEqual(e["newest_identity_row_ts"], e["evidence_bound_ts"])
-        # the same real rows with the new id's bound removed from the list reject nothing else: unlisted id is ignored
         only_first = {k: v for k, v in lpq.LEGACY_POLICY_IDENTITY_EPISODES.items() if k.endswith("11958be")}
         self.assertEqual(lpq.evaluate(["episode-cfacc140c836a55a140c"], rows, only_first)["accepted"], [])
 

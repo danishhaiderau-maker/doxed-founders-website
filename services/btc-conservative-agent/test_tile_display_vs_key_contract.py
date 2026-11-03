@@ -16,10 +16,12 @@ GEN = HERE.parents[1] / "packages/utils/src/generated/tile-registry.generated.ts
 EXPECTED = (
     ("FAMILY_RANDOM_CONTROL_TAKER_90", "rnd", "Tile 1 · CTRL"),
     ("FAMILY_GS01_XV_PREMIUM_ATR_TP", "gs1", "Tile 2 · GS-01"),
-    ("FAMILY_GSB1_CVD_DIV_REGIME", "gb1", "Tile 3 · B1"),
-    ("FAMILY_GSB2_REGIME_SWITCHER", "gb2", "Tile 4 · B2"),
-    ("FAMILY_GS_FADE3_TP30", "gf3", "Tile 5 · GS-FADE3"),
-    ("FAMILY_GS_FADE3_LOOSE_TP25", "gf3l", "Tile 6 · GS-FADE3-LOOSE"),
+)
+RETIRED_20261030 = (
+    "FAMILY_GSB1_CVD_DIV_REGIME",
+    "FAMILY_GSB2_REGIME_SWITCHER",
+    "FAMILY_GS_FADE3_TP30",
+    "FAMILY_GS_FADE3_LOOSE_TP25",
 )
 DISLOC = ("FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M")
 GS06 = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
@@ -36,6 +38,8 @@ def test_disloc_lanes_retired_and_not_numbered():
     for lane in DISLOC:
         assert lane in c.RETIRED_TILE_LANES and lane not in c.ACTIVE_TILE_ORDER
     assert GS06 in c.RETIRED_TILE_LANES and GS06 not in c.ACTIVE_TILE_ORDER
+    for lane in RETIRED_20261030:
+        assert lane in c.RETIRED_TILE_LANES and lane not in c.ACTIVE_TILE_ORDER
     prefixes = {c.ACTIVE_TILE_REGISTRY[lane]["id_prefix"] for lane in c.ACTIVE_TILE_ORDER}
     assert not prefixes & {"dsl", "dsf", "gs6"}
 
