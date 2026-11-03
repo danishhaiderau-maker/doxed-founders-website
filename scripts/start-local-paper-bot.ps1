@@ -12,11 +12,12 @@
 #   LOCAL_FRESH_START=1
 #   LOCAL_FRESH_START_CONFIRM=I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE
 #
-# Host soak notes (HM B1 — operator must keep these green for 24–48h paper):
-#   * Disable sleep while plugged in (powercfg / Settings → Power).
-#   * Pause or defer Windows Update reboots during the soak window.
-#   * Keep Windows Time / NTP sync ON (w32tm); this script checks and warns.
+# Host soak notes (HM B1 / RK S3 — operator; script does NOT apply silently):
+#   * AC only: sleep + hibernate Never while plugged (powercfg standby/hibernate-timeout-ac 0).
+#   * Stop automatic Update *restarts* (active hours / no-auto-restart). Pausing/turning off Windows Update itself is OUT OF SCOPE.
+#   * Keep Windows Time / NTP sync ON (w32tm); this script hard-refuses if unhealthy.
 #   * -InstallAutostart registers a Scheduled Task that restarts paper after login.
+#   * -UninstallAutostart disables that task only (never Unregister/delete); writes previous-state receipt.
 param(
   [int]$Port = 7002,
   [string]$VaultEnv = "",
@@ -51,10 +52,10 @@ if ($env:OS -match '(?i)Windows' -or $repoRoot -match '^[A-Za-z]:\\') {
 function Write-HostPreflightNotes {
   Write-Host ""
   Write-Host "=== Host soak preflight (HM B1) ===" -ForegroundColor Cyan
-  Write-Host "1) Sleep: keep AC plugged in; set Sleep=Never while plugged (powercfg /change standby-timeout-ac 0)."
-  Write-Host "2) Windows Update: pause updates or block auto-reboot for the soak window (Settings → Windows Update)."
-  Write-Host "3) NTP/clock: Windows Time service Running + w32tm sync; large clock skew breaks fills/gaps."
-  Write-Host "4) Autostart: use -InstallAutostart (Scheduled Task '$taskName' at logon) so paper restarts after reboot."
+  Write-Host "1) Sleep/Hibernate (AC only): powercfg /change standby-timeout-ac 0 AND hibernate-timeout-ac 0. Record previous values for rollback. OS approval required."
+  Write-Host "2) Update restarts only: set active hours or no-auto-restart so Updates do not reboot mid-soak. Do NOT pause/turn off Windows Update itself (OUT OF SCOPE)."
+  Write-Host "3) NTP/clock: Windows Time Running + w32tm sync — this script hard-refuses (exit 78) if unhealthy."
+  Write-Host "4) Autostart: -InstallAutostart registers '$taskName'; -UninstallAutostart disables only (definition kept + receipt)."
   Write-Host ""
 }
 
@@ -190,9 +191,8 @@ if (-not $ntp.ok) {
   Write-Host "Fix Windows Time / NTP, then re-run. (Host-preflight skip switch removed — RK ruled it a violation.)" -ForegroundColor Yellow
   exit 78
 }
-# HM laptop scope: powercfg sleep + Windows Update restart changes are STATED on the
-# R12 card for the operator — this script does NOT apply them silently.
-Write-Host "NOTE: powercfg Sleep=Never (AC) and Windows Update pause/reboot deferral are operator actions on the R12 card — not applied by this script."
+# RK S3: AC sleep/hibernate + no-auto-restart are STATED on the R12 card — not applied by this script.
+Write-Host "NOTE: RK S3 operator scope (after PASS + OS approval): AC sleep/hibernate=0; stop Update auto-restarts only. Pausing WU itself is OUT OF SCOPE. Record previous values for rollback."
 Write-Host "NOTE: laptop writes allowed only under C:\DoxxedCrypto plus one Task Scheduler entry ($taskName). No Bitfinex keys, no live/arm, no deletes, no Windows security/firewall changes."
 
 # Load vault NAMES only path (values never printed). Default home-bot.env sibling.
