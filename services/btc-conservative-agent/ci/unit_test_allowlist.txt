@@ -356,6 +356,7 @@ test_local_fresh_collection_integration.py
 test_local_fresh_runtime.py
 test_local_fresh_health9011.py
 test_local_fresh_analyzer_read.py
+test_analyzer_local_fresh_call.py
 test_local_generation_fence.py
 test_local_market_persist.py
 test_local_research_reset.py

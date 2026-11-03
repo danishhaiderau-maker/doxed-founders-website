@@ -89,8 +89,26 @@ from research.quantity_execution import (
     validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
 from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
-# RK HOLD #972: analyzer must import the day-1 local-fresh read path (P5 fence lives there).
+# RK HOLD #972 / RK 01:30: analyzer must import AND call the day-1 local-fresh read path.
 import local_fresh_analyzer_read as _local_fresh_analyzer_read  # noqa: E402
+
+
+def call_local_fresh_analyzer_read(data_dir):
+    """RK 01:30: invoke the local-fresh RO reader (not import-only).
+
+    Returns the ``summarize_local_fresh_store`` snapshot when ``local_market.sqlite3``
+    is present under ``data_dir``; otherwise ``None`` (canonical Fly mirror without
+    a day-1 store). Always goes through ``local_fresh_analyzer_read`` so P5 fencing
+    applies to any subsequent pooled query.
+    """
+    from pathlib import Path
+
+    from local_market_persist import SQLITE_NAME
+
+    root = Path(data_dir)
+    if not (root / SQLITE_NAME).is_file():
+        return None
+    return _local_fresh_analyzer_read.summarize_local_fresh_store(root)
 
 
 class _R3RetiredSection(Exception):
@@ -23949,6 +23967,14 @@ if __name__ == "__main__":
         )
         sys.exit(2)
     os.makedirs(_configured_report_root, exist_ok=True)
+    # RK 01:30: call (not merely import) the local-fresh reader when the day-1 store exists.
+    _local_fresh_snap = call_local_fresh_analyzer_read(_canonical_data_root)
+    if _local_fresh_snap is not None:
+        print(
+            f"  ℹ️ local-fresh analyzer read: schema={_local_fresh_snap.get('schema')} "
+            f"local_epoch_id={_local_fresh_snap.get('local_epoch_id')} "
+            f"series_start_ts={_local_fresh_snap.get('series_start_ts')}"
+        )
     _install_stream_read_monitor(_canonical_data_root)
     _epoch_guard()
     _canonical_input_bindings = _bind_existing_canonical_input_paths(_canonical_data_root)
