@@ -120,11 +120,19 @@ class TestLocalFreshRuntime(unittest.TestCase):
     def test_series_break_created_once_and_refuses_unmarked_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            first = lfr.ensure_series_break(root, now=1_700_000_000.0, source_git_rev="abc123")
+            first = lfr.ensure_series_break(root, now=1_700_000_000.0, source_git_rev="abc123def456")
             self.assertEqual(first["schema"], lfr.SERIES_BREAK_SCHEMA)
             self.assertEqual(first["fly_era_data"], "CLOSED")
+            # Strategist P5: series-start stamp = first local epoch id + timestamp.
+            self.assertEqual(first["series_start_ts"], 1_700_000_000.0)
+            self.assertEqual(first["series_start_utc"], first["series_break_utc"])
+            self.assertEqual(
+                first["local_epoch_id"],
+                "local-fresh-20231114T221320Z-abc123def456",
+            )
             second = lfr.ensure_series_break(root, now=1_800_000_000.0)
             self.assertEqual(second["series_break_ts"], first["series_break_ts"])
+            self.assertEqual(second["local_epoch_id"], first["local_epoch_id"])
             # Unmarked Fly-era sqlite in a fresh dir without series_break → refuse.
             other = Path(tmp) / "fly_era"
             other.mkdir()
@@ -181,6 +189,22 @@ class TestStartLocalPaperAutostartPreflight(unittest.TestCase):
             self.assertIsNone(free2)
         finally:
             lfr.disk_free_bytes = original  # type: ignore[assignment]
+
+    def test_uninstall_autostart_disables_only_never_unregisters(self):
+        # HM AMBER: -UninstallAutostart must Disable-ScheduledTask only; record previous state.
+        root = Path(__file__).resolve().parents[2]
+        script = root / "scripts" / "start-local-paper-bot.ps1"
+        text = script.read_text(encoding="utf-8")
+        start = text.index("function Uninstall-LocalPaperAutostart")
+        # Function ends at next top-level if/function after its body — take until Install dispatch.
+        end = text.index("\nif ($UninstallAutostart)", start)
+        block = text[start:end]
+        self.assertIn("Disable-ScheduledTask", block)
+        self.assertIn("previous_state", block)
+        self.assertIn("local_paper_autostart_disable_receipt.json", block)
+        self.assertNotIn("Unregister-ScheduledTask", block)
+        self.assertNotRegex(block, r"(?m)^\s*Unregister-ScheduledTask\b")
+        self.assertIn("deleted = $false", block)
 
 
 if __name__ == "__main__":

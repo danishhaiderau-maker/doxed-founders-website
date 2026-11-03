@@ -111,18 +111,48 @@ function Install-LocalPaperAutostart {
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force | Out-Null
   Write-Host "OK: Scheduled Task '$taskName' registered (AtLogOn → start-local-paper-bot.ps1 -NoWait; preflight ON)."
-  Write-Host "Disable later with: -UninstallAutostart"
+  Write-Host "Disable later with: -UninstallAutostart (disables only; never deletes/unregisters)."
   exit 0
 }
 
 function Uninstall-LocalPaperAutostart {
+  # HM AMBER / RK / R12: disable only — never delete or unregister the task definition.
+  # Record previous State for undo before Disable-ScheduledTask.
   $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  if ($existing) {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-    Write-Host "OK: Scheduled Task '$taskName' removed."
-  } else {
-    Write-Host "No Scheduled Task named '$taskName' (already absent)."
+  if (-not $existing) {
+    Write-Host "No Scheduled Task named '$taskName' (already absent) — nothing to disable."
+    exit 0
   }
+  $info = $null
+  try { $info = $existing | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue } catch {}
+  $previousState = [string]$existing.State
+  $previousPath = [string]$existing.TaskPath
+  $receipt = [ordered]@{
+    schema = "local_paper_autostart_disable_receipt_v1"
+    ts_utc = (Get-Date).ToUniversalTime().ToString("o")
+    task_name = $taskName
+    previous_state = $previousState
+    previous_task_path = $previousPath
+    last_run_time = if ($info) { [string]$info.LastRunTime } else { $null }
+    next_run_time = if ($info) { [string]$info.NextRunTime } else { $null }
+    action = "Disable-ScheduledTask"
+    deleted = $false
+    undo = "If previous_state was Ready or Running: Enable-ScheduledTask -TaskName '$taskName'"
+  }
+  if (-not (Test-Path $logsDir)) {
+    New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+  }
+  $receiptPath = Join-Path $logsDir "local_paper_autostart_disable_receipt.json"
+  ($receipt | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $receiptPath -Encoding utf8
+  Write-Host "Recorded previous state ($previousState) → $receiptPath"
+  if ($previousState -eq "Disabled") {
+    Write-Host "OK: Scheduled Task '$taskName' already Disabled — left as-found (definition kept)."
+    exit 0
+  }
+  Disable-ScheduledTask -TaskName $taskName | Out-Null
+  $after = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+  Write-Host "OK: Scheduled Task '$taskName' disabled (was $previousState → now $([string]$after.State)). Definition kept."
+  Write-Host "Undo: Enable-ScheduledTask -TaskName '$taskName' (only if previous was Ready/Running — see receipt)."
   exit 0
 }
 

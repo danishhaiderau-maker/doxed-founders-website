@@ -360,17 +360,28 @@ def ensure_series_break(
             "directory as a local series. Strategist: never mix Fly-era tape."
         )
     ts = float(now if now is not None else time.time())
+    rev12 = (source_git_rev or os.getenv("SOURCE_GIT_REV") or "")[:12] or None
+    # Strategist P5 / RK 19:12: first local epoch id + series-start timestamp.
+    series_start_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+    local_epoch_id = (
+        "local-fresh-"
+        + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(ts))
+        + "-"
+        + (rev12 or "nogit")
+    )
     payload = {
         "schema": SERIES_BREAK_SCHEMA,
         "series_break_ts": ts,
-        "series_break_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
+        "series_break_utc": series_start_utc,
+        "series_start_ts": ts,
+        "series_start_utc": series_start_utc,
+        "local_epoch_id": local_epoch_id,
         "fly_era_data": "CLOSED",
         "note": (
             "Local paper series starts here. Fly-era collector/tape must stay "
             "closed and must not be joined or gap-filled into this series."
         ),
-        "source_git_rev": (source_git_rev or os.getenv("SOURCE_GIT_REV") or "")[:12]
-        or None,
+        "source_git_rev": rev12,
         "lanes": list(LOCAL_FRESH_LANES),
     }
     tmp = None
