@@ -14,6 +14,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PaperTradingService } from './paper-trading.service';
+import { shouldRegisterNeonBackgroundTimers } from '../trading-agents/canonical-showcase-runtime';
 
 const POLL_MS = 60_000;
 
@@ -28,6 +29,13 @@ export class PaperLimitOrderService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
+    // R51: gate Neon-chatting 60s paper-limit timer at registration only.
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[PAPER-LIMIT] offline, by design — 60s Neon paper-limit timer not registered',
+      );
+      return;
+    }
     void this.processOpenOrders();
     setInterval(() => this.processOpenOrders(), POLL_MS);
   }

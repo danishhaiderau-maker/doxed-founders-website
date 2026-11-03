@@ -16,6 +16,9 @@ import {
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { TradingAgentsController } from './trading-agents.controller';
 
+// Legacy Fly-path unit tests: exercise arm-gate fetch without the retired short-circuit.
+process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = '1';
+
 const ok = { schema: FLY_ARM_GATE_SCHEMA, l27_block: null, live_fences_block: null };
 const blocked = { schema: FLY_ARM_GATE_SCHEMA, l27_block: DENY_L27_LATEST_L };
 
@@ -47,13 +50,31 @@ test('RK 24 Oct: live_fences ok:false / unreadable / missing on any account => a
   assert.equal(l27ArmGateVerdict({ ...blocked, live_fences_block: null }), DENY_L27_LATEST_L);   // L27 still wins
 });
 
-test('L27 gate: fetch reads Fly /api/live-copy/arm-gate with the admin header; any failure => UNREADABLE', async () => {
+test('L27 gate: Fly deleted => UNREADABLE fail-closed without dead-host fetch (no throw storm)', async () => {
+  // Production default: FLY_SHOWCASE_RUNTIME_RETIRED. Partial env bags without
+  // FORCE_ACTIVE must refuse arming without hammering doxed-btc-bot.fly.dev.
+  const seen: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    seen.push(String(url));
+    throw new Error('fetch must not run when Fly showcase runtime is retired');
+  }) as unknown as typeof fetch;
+  const env = { FLY_BOT_URL: 'https://doxed-btc-bot.fly.dev/', BOT_ADMIN_TOKEN: 't0k' } as NodeJS.ProcessEnv;
+  delete env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE;
+  assert.equal(await fetchL27ArmBlock(fetchImpl, env), DENY_L27_GATE_UNREADABLE);
+  assert.deepEqual(seen, []);
+});
+
+test('L27 gate: FORCE_ACTIVE legacy path reads arm-gate header; any failure => UNREADABLE', async () => {
   const seen: Array<{ url: string; token?: string }> = [];
   const mk = (r: () => Promise<Response>) => (async (url: string, init?: RequestInit) => {
     seen.push({ url, token: (init?.headers as Record<string, string>)['X-Bot-Admin-Token'] });
     return r();
   }) as unknown as typeof fetch;
-  const env = { FLY_BOT_URL: 'https://fly.example/', BOT_ADMIN_TOKEN: 't0k' } as NodeJS.ProcessEnv;
+  const env = {
+    FLY_BOT_URL: 'https://fly.example/',
+    BOT_ADMIN_TOKEN: 't0k',
+    FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE: '1',
+  } as NodeJS.ProcessEnv;
   assert.equal(await fetchL27ArmBlock(mk(async () => new Response(JSON.stringify(ok))), env), null);
   assert.deepEqual(seen[0], { url: `https://fly.example${FLY_ARM_GATE_PATH}`, token: 't0k' });
   assert.equal(await fetchL27ArmBlock(mk(async () => new Response(JSON.stringify(blocked))), env), DENY_L27_LATEST_L);

@@ -3,6 +3,9 @@ import test from 'node:test';
 import { AdminControlService } from './admin-control.service';
 import { ShowcaseRuntimeService } from './showcase-runtime.service';
 
+// Legacy Fly-path status tests (degraded / online) need the pre-retirement path.
+process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = '1';
+
 test('admin pause disarms the canonical process without stopping infrastructure', async () => {
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   let invalidations = 0;

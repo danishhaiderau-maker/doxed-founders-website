@@ -14,6 +14,10 @@ import {
 } from '../prisma/platform-settings-cache';
 import { BotBridgeService } from '../trading-agents/bot-bridge.service';
 import { TradingAgentsService } from '../trading-agents/trading-agents.service';
+import {
+  buildShowcaseOfflineByDesignStatus,
+  isFlyShowcaseRuntimeRetired,
+} from '../trading-agents/canonical-showcase-runtime';
 import { PLATFORM_X_SHARE_FOOTER } from '@dcf/utils';
 
 export type PublicAgentStatus = 'online' | 'offline' | 'updating' | 'degraded';
@@ -47,7 +51,29 @@ export class AdminControlService {
     return { globalShareFooter: globalShareFooter ?? PLATFORM_X_SHARE_FOOTER };
   }
 
-  async getPublicAgentStatus(): Promise<{ status: PublicAgentStatus; label: string }> {
+  async getPublicAgentStatus(): Promise<{
+    status: PublicAgentStatus;
+    label: string;
+    offline_by_design?: true;
+    moving_to_laptop?: true;
+    live_armed?: false;
+    bitfinex_live_enabled?: false;
+    retry?: false;
+    error_loop?: false;
+  }> {
+    if (isFlyShowcaseRuntimeRetired()) {
+      const offline = buildShowcaseOfflineByDesignStatus();
+      return {
+        status: offline.status,
+        label: offline.label,
+        offline_by_design: offline.offline_by_design,
+        moving_to_laptop: offline.moving_to_laptop,
+        live_armed: offline.live_armed,
+        bitfinex_live_enabled: offline.bitfinex_live_enabled,
+        retry: offline.retry,
+        error_loop: offline.error_loop,
+      };
+    }
     const enabled = this.botBridge.isEnabled();
     if (!enabled) {
       return { status: 'offline', label: 'Agent offline' };

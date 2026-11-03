@@ -3,6 +3,9 @@ import test from 'node:test';
 import { SignalCycleStatus } from '@prisma/client';
 import { SignalCyclesService } from './signal-cycles.service';
 
+// Legacy scheduling tests exercise Neon backstop registration under FORCE_ACTIVE.
+process.env.FLY_SHOWCASE_RUNTIME_FORCE_ACTIVE = '1';
+
 function terminalEventPrisma(claimCount: number, calls: string[]) {
   const prisma: any = {
     signalCycle: {

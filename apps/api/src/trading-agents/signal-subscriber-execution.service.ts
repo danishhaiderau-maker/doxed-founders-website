@@ -105,6 +105,10 @@ import {
   type LiveOrderExitFillInput,
 } from './live-row-countability';
 import { BotBridgeService } from './bot-bridge.service';
+import {
+  shouldDispatchRelayExecutorWake,
+  shouldRegisterNeonBackgroundTimers,
+} from './canonical-showcase-runtime';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
@@ -4862,6 +4866,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
   onModuleInit() {
     this.executorDestroyed = false;
+    // R51: gate Neon-chatting timers once at registration (not scattered stops).
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[EXECUTOR] offline, by design — Neon background timers not registered (wake/reconcile/keepalive)',
+      );
+      return;
+    }
     if (!executionEnabled()) {
       this.startExecutorConnectionKeepalive();
       this.logger.warn('Subscriber execution disabled (SUBSCRIBER_EXECUTION_ENABLED=false)');
@@ -5208,6 +5219,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * Signals can be tens of minutes apart; without this health-only probe the
    * first money-path wake pays DNS + TLS + edge connection setup. */
   private startExecutorConnectionKeepalive(): void {
+    // Drop wake-to-Fly / dead-host keepalive while showcase Fly runtime is retired.
+    if (!shouldDispatchRelayExecutorWake()) return;
     const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
     if (!base) return;
     const probe = () => {
@@ -5757,6 +5770,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   private async dispatchDirectExecutorWake(payload: RelayExecutorWakeRequest): Promise<void> {
+    if (!shouldDispatchRelayExecutorWake()) return;
     const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
     const secret = process.env.BOT_CONTROL_SECRET?.trim();
     if (!base || !secret) return;
@@ -5790,6 +5804,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason,
       });
       return { ...local, requestId: 'local-executor' };
+    }
+    // Fly-dead / wake retired: fail closed without throw storm (HM R2).
+    if (!shouldDispatchRelayExecutorWake()) {
+      this.logger.warn(
+        'Relay executor emergency reconcile skipped — wake retired (offline, by design)',
+      );
+      return { flattened: 0, requestId: 'offline-by-design' };
     }
     const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
     const secret = process.env.BOT_CONTROL_SECRET?.trim();

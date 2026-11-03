@@ -64,7 +64,12 @@ import {
   ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
   type CanonicalBotHealth,
 } from './public-bot-health-probe';
-import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
+import {
+  CANONICAL_SHOWCASE_BOT_URL,
+  buildShowcaseOfflineByDesignStatus,
+  isFlyShowcaseRuntimeRetired,
+  shouldRegisterNeonBackgroundTimers,
+} from './canonical-showcase-runtime';
 import { buildRelayFidelitySnapshot } from './relay-fidelity.mapper';
 import {
   buildShowcaseFlashFromBot,
@@ -294,6 +299,13 @@ export class TradingAgentsService implements OnModuleInit {
     await this.ensureSeed().catch(() => undefined);
     await this.syncConservativeBtcAgentRecord().catch(() => undefined);
     await this.botBridge.resolveBotUrl().catch(() => null);
+    // R51: gate Neon-chatting 20s position-alert timer at registration only.
+    if (!shouldRegisterNeonBackgroundTimers()) {
+      this.logger.log(
+        '[TRADING-AGENTS] offline, by design — 20s Neon position-alert timer not registered',
+      );
+      return;
+    }
     setInterval(() => void this.pollBotPositionAlerts(), 20_000);
   }
 
@@ -523,15 +535,30 @@ export class TradingAgentsService implements OnModuleInit {
   }
 
   async getBotBridgeStatus() {
-    const enabled = await this.botBridge.isEnabledAsync();
     const botUrl = await this.botBridge.resolveBotUrl();
+    if (isFlyShowcaseRuntimeRetired()) {
+      const offline = buildShowcaseOfflineByDesignStatus();
+      return {
+        status: offline.status,
+        label: offline.label,
+        botUrl,
+        offline_by_design: offline.offline_by_design,
+        moving_to_laptop: offline.moving_to_laptop,
+        live_armed: offline.live_armed,
+        bitfinex_live_enabled: offline.bitfinex_live_enabled,
+        retry: offline.retry,
+        error_loop: offline.error_loop,
+      };
+    }
+    const enabled = await this.botBridge.isEnabledAsync();
     if (!enabled) {
       return {
         status: 'offline' as const,
         label: 'Agent offline (bot URL not wired)',
         botUrl,
       };
-    }    const reachable = await this.botBridge.isReachable(true);
+    }
+    const reachable = await this.botBridge.isReachable(true);
     if (!reachable) {
       return {
         status: 'offline' as const,
@@ -898,7 +925,7 @@ export class TradingAgentsService implements OnModuleInit {
   }
 
   /** Exact Fly-host health plus authenticated canonical snapshot availability. */
-  async getBotHealth(slug: string): Promise<CanonicalBotHealth> {
+  async getBotHealth(slug: string): Promise<CanonicalBotHealth & Record<string, unknown>> {
     if (slug !== 'conservative-btc') {
       return {
         ok: false,
@@ -907,6 +934,24 @@ export class TradingAgentsService implements OnModuleInit {
         botConnected: false,
         source: 'unreachable',
         error: 'only conservative-btc',
+        analyzerMirror: { available: false, fresh: false, status: 'unreachable' },
+      };
+    }
+    if (isFlyShowcaseRuntimeRetired()) {
+      const offline = buildShowcaseOfflineByDesignStatus();
+      return {
+        ok: false,
+        fly: false,
+        snapshotFresh: false,
+        botConnected: false,
+        source: 'unreachable',
+        error: offline.label,
+        offline_by_design: offline.offline_by_design,
+        moving_to_laptop: offline.moving_to_laptop,
+        live_armed: offline.live_armed,
+        bitfinex_live_enabled: offline.bitfinex_live_enabled,
+        retry: offline.retry,
+        error_loop: offline.error_loop,
         analyzerMirror: { available: false, fresh: false, status: 'unreachable' },
       };
     }
@@ -948,6 +993,40 @@ export class TradingAgentsService implements OnModuleInit {
   async getBotBridgeStatusAdmin() {
     const enabled = await this.botBridge.isEnabledAsync();
     const url = await this.botBridge.resolveBotUrl();
+    if (isFlyShowcaseRuntimeRetired()) {
+      const offline = buildShowcaseOfflineByDesignStatus();
+      let host: string | null = null;
+      if (url) {
+        try {
+          host = new URL(url).hostname;
+        } catch {
+          host = 'configured';
+        }
+      }
+      return {
+        enabled: false,
+        connected: false,
+        publicStatus: offline.status,
+        label: offline.label,
+        offline_by_design: offline.offline_by_design,
+        moving_to_laptop: offline.moving_to_laptop,
+        live_armed: offline.live_armed,
+        bitfinex_live_enabled: offline.bitfinex_live_enabled,
+        retry: offline.retry,
+        error_loop: offline.error_loop,
+        strategyMode: null,
+        executionPaused: true,
+        executionReason: 'FLY_APP_DELETED',
+        price: null,
+        wsHealth: null,
+        deepSeekConnected: false,
+        appVersion: null,
+        lastFetchAt: null,
+        stateEndpoint: host,
+        health: null,
+        botState: null,
+      };
+    }
     const [state, health] = await Promise.all([
       enabled ? this.botBridge.fetchStateForAdmin(true) : Promise.resolve(null),
       enabled ? this.botBridge.fetchHealth() : Promise.resolve(null),
@@ -1863,8 +1942,26 @@ export class TradingAgentsService implements OnModuleInit {
       agent = { ...agent, founderRentalEntitled };
     }
 
+    const offlineByDesign = isFlyShowcaseRuntimeRetired()
+      ? buildShowcaseOfflineByDesignStatus()
+      : null;
+
     return {
       ...rest,
+      ...(offlineByDesign
+        ? {
+            botConnected: false,
+            botSource: 'OFFLINE_BY_DESIGN' as const,
+            status: offlineByDesign.status,
+            label: offlineByDesign.label,
+            offline_by_design: offlineByDesign.offline_by_design,
+            moving_to_laptop: offlineByDesign.moving_to_laptop,
+            live_armed: offlineByDesign.live_armed,
+            bitfinex_live_enabled: offlineByDesign.bitfinex_live_enabled,
+            retry: offlineByDesign.retry,
+            error_loop: offlineByDesign.error_loop,
+          }
+        : {}),
       dashboard: {
         ...rest.dashboard,
         relayLastTransition,
@@ -1876,10 +1973,12 @@ export class TradingAgentsService implements OnModuleInit {
       // "Showcase bot offline — relay cannot mirror" alert even when the
       // parallel /bot-health endpoint confirms Fly is reachable, producing
       // the contradictory dashboard state users have reported.
-      flyReachable:
-        flyReachableViaLightweightProbe ||
-        showcaseSource === 'LIVE' ||
-        showcaseSource === 'CACHED',
+      // After Fly delete: never claim reachable via LIVE/CACHED (HM fail-closed).
+      flyReachable: offlineByDesign
+        ? false
+        : flyReachableViaLightweightProbe ||
+          showcaseSource === 'LIVE' ||
+          showcaseSource === 'CACHED',
       agent,
       kind: 'public' as const,
       viewScope,
