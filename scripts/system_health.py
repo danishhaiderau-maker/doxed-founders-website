@@ -2112,9 +2112,20 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   f"/health {errors.get('railway_health')}", "api ok, database ok",
                   "Railway API down or redeploying"))
     else:
+        # RK 21:05: /api/health is DB-free (database=skipped). Explicit probe is /api/health/db.
         db = dig(rail, "services", "database")
-        add(check("railway.api", "railway", GREEN if db == "ok" else RED, f"api={dig(rail, 'services', 'api')} database={db}",
-                  "api ok, database ok", "" if db == "ok" else "Neon connection failing from Railway"))
+        api = dig(rail, "services", "api")
+        if db in ("skipped", "not_checked"):
+            st = GREEN if api == "ok" or dig(rail, "status") == "ok" else RED
+            add(check("railway.api", "railway", st,
+                      f"api={api} database={db} (DB probe at /api/health/db)",
+                      "api ok; database skipped on /health (no Neon wake)",
+                      "" if st == GREEN else "Railway API down or redeploying"))
+        else:
+            add(check("railway.api", "railway", GREEN if db == "ok" else RED,
+                      f"api={api} database={db}",
+                      "api ok, database ok",
+                      "" if db == "ok" else "Neon connection failing from Railway"))
 
     # ---------------- Neon
     neon = inputs.get("neon")

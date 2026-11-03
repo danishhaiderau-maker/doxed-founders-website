@@ -1,4 +1,9 @@
 import { assertBotReadToken } from './ops-read-auth';
+import {
+  cachedRelayStatus,
+  invalidateRelayStatusCache,
+  relayStatusCacheKey,
+} from './relay-status-cache';
 import { withFenceExclusion as withFenceExclusionRaw } from './live-fences-exclusion';
 import {
   Injectable,
@@ -599,14 +604,30 @@ export class TradingAgentsService implements OnModuleInit {
     adminHeader?: string,
     authorization?: string,
   ) {
+    // Auth every request; Neon load is cached (RK 21:05 neon idle).
     assertBotReadToken(adminHeader, authorization);
     if (!userId?.trim()) {
       throw new BadRequestException('userId query param is required');
     }
+    const uid = userId.trim();
+    const cacheKey = relayStatusCacheKey(slug, uid);
+    return cachedRelayStatus(cacheKey, () => this.loadOpsRelayStatus(slug, uid));
+  }
+
+  /** Drop cached relay-status after arm/pause/disarm so the next read is fresh. */
+  invalidateOpsRelayStatusCache(slug?: string, userId?: string): void {
+    if (slug && userId) {
+      invalidateRelayStatusCache(relayStatusCacheKey(slug, userId));
+      return;
+    }
+    invalidateRelayStatusCache();
+  }
+
+  private async loadOpsRelayStatus(slug: string, userId: string) {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
     if (!agent) throw new NotFoundException('Agent not found');
     const instance = await this.prisma.tradingAgentInstance.findUnique({
-      where: { agentId_userId: { agentId: agent.id, userId: userId.trim() } },
+      where: { agentId_userId: { agentId: agent.id, userId } },
       select: {
         status: true,
         lastError: true,
