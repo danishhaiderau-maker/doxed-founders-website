@@ -204,6 +204,20 @@ def open_local_fresh_store_readonly(data_dir: str | Path) -> LocalFreshStoreRead
     return LocalFreshStoreReadonly(data_dir)
 
 
-def summarize_local_fresh_store(data_dir: str | Path) -> dict[str, Any]:
+def summarize_local_fresh_store(
+    data_dir: str | Path,
+    *,
+    start_s: Optional[int] = None,
+    end_s: Optional[int] = None,
+) -> dict[str, Any]:
+    """Summarize the local-fresh store **through** the P5 series_break guard.
+
+    HM ed3b6600d2ec: summary must hit ``iter_book_seconds`` / ``iter_trades`` so the
+    ``refuse_pooled_across_series_break`` path actually runs. Unbounded windows
+    (default) refuse when a series break is present.
+    """
     with open_local_fresh_store_readonly(data_dir) as store:
+        # Drive the guarded iterators (guard runs before any yield).
+        next(store.iter_book_seconds(start_s=start_s, end_s=end_s), None)
+        next(store.iter_trades(start_s=start_s, end_s=end_s), None)
         return store.snapshot()

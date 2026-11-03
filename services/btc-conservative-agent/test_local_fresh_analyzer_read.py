@@ -111,7 +111,8 @@ class TestLocalFreshAnalyzerRead(unittest.TestCase):
                 gaps = list(ro.iter_gap_log_lines())
                 self.assertTrue(any(g.get("kind") == "COLLECTOR_DISCONNECT" for g in gaps))
 
-            snap = summarize_local_fresh_store(tmp)
+            # Same-side window: unbounded summarize refuses when series_break present.
+            snap = summarize_local_fresh_store(tmp, start_s=0, end_s=200)
             self.assertEqual(snap["schema"], "local_fresh_analyzer_read_v1")
             self.assertEqual(snap["counts"]["book_1s_rows"], 1)
 
@@ -142,6 +143,16 @@ class TestLocalFreshAnalyzerRead(unittest.TestCase):
                 # Same-side windows remain allowed.
                 list(ro.iter_book_seconds(start_s=0, end_s=boundary - 1))
                 list(ro.iter_book_seconds(start_s=boundary, end_s=boundary + 60))
+            # summarize also refuses unbounded / straddle (drives guarded iters).
+            with self.assertRaises(LocalFreshStoreReadError) as ctx_sum:
+                summarize_local_fresh_store(tmp)
+            self.assertIn(POOLED_ACROSS_SERIES_BREAK, str(ctx_sum.exception))
+            with self.assertRaises(LocalFreshStoreReadError) as ctx_sum_straddle:
+                summarize_local_fresh_store(
+                    tmp, start_s=boundary - 10, end_s=boundary + 10
+                )
+            self.assertIn(POOLED_ACROSS_SERIES_BREAK, str(ctx_sum_straddle.exception))
+            summarize_local_fresh_store(tmp, start_s=boundary)
 
     def test_readonly_refuses_missing_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:

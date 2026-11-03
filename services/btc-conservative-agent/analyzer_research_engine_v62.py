@@ -93,13 +93,16 @@ from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
 import local_fresh_analyzer_read as _local_fresh_analyzer_read  # noqa: E402
 
 
-def call_local_fresh_analyzer_read(data_dir):
-    """RK 01:30: invoke the local-fresh RO reader (not import-only).
+def call_local_fresh_analyzer_read(data_dir, *, start_s=None, end_s=None):
+    """RK 01:30 / HM P5: invoke the local-fresh RO reader (not import-only).
 
     Returns the ``summarize_local_fresh_store`` snapshot when ``local_market.sqlite3``
     is present under ``data_dir``; otherwise ``None`` (canonical Fly mirror without
-    a day-1 store). Always goes through ``local_fresh_analyzer_read`` so P5 fencing
-    applies to any subsequent pooled query.
+    a day-1 store). Summarize always drives ``iter_book_seconds`` / ``iter_trades``
+    so the P5 ``series_break`` guard runs. Unbounded or straddle windows raise
+    ``LocalFreshStoreReadError`` / ``LOCAL_FRESH_POOLED_ACROSS_SERIES_BREAK`` when
+    a series break is present — callers must pick a same-side window (boot uses
+    post-break ``start_s=series_start_s()``).
     """
     from pathlib import Path
 
@@ -108,7 +111,9 @@ def call_local_fresh_analyzer_read(data_dir):
     root = Path(data_dir)
     if not (root / SQLITE_NAME).is_file():
         return None
-    return _local_fresh_analyzer_read.summarize_local_fresh_store(root)
+    return _local_fresh_analyzer_read.summarize_local_fresh_store(
+        root, start_s=start_s, end_s=end_s
+    )
 
 
 class _R3RetiredSection(Exception):
@@ -23967,8 +23972,23 @@ if __name__ == "__main__":
         )
         sys.exit(2)
     os.makedirs(_configured_report_root, exist_ok=True)
-    # RK 01:30: call (not merely import) the local-fresh reader when the day-1 store exists.
-    _local_fresh_snap = call_local_fresh_analyzer_read(_canonical_data_root)
+    # RK 01:30 / HM P5: call (not merely import) the local-fresh reader when the
+    # day-1 store exists. Boot must pick the post-break side — unbounded summarize
+    # refuses when series_break is present (LOCAL_FRESH_POOLED_ACROSS_SERIES_BREAK).
+    _local_fresh_boot_start = None
+    try:
+        with _local_fresh_analyzer_read.open_local_fresh_store_readonly(
+            _canonical_data_root
+        ) as _local_fresh_ro:
+            _local_fresh_boot_start = _local_fresh_ro.series_start_s()
+    except _local_fresh_analyzer_read.LocalFreshStoreReadError:
+        _local_fresh_boot_start = None
+    if _local_fresh_boot_start is not None:
+        _local_fresh_snap = call_local_fresh_analyzer_read(
+            _canonical_data_root, start_s=_local_fresh_boot_start
+        )
+    else:
+        _local_fresh_snap = call_local_fresh_analyzer_read(_canonical_data_root)
     if _local_fresh_snap is not None:
         print(
             f"  ℹ️ local-fresh analyzer read: schema={_local_fresh_snap.get('schema')} "
