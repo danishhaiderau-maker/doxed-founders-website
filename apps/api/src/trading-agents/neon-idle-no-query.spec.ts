@@ -65,7 +65,8 @@ test('behavioral: retired onModuleInit registers zero timers and zero prisma cal
   const registeredMs: number[] = [];
   const created: ReturnType<typeof setInterval>[] = [];
   const realSetInterval = global.setInterval;
-  global.setInterval = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
+  // Nest `tsc` has no DOM lib — avoid TimerHandler (breaks Railway nest build).
+  global.setInterval = ((fn: Parameters<typeof setInterval>[0], ms?: number, ...args: unknown[]) => {
     registeredMs.push(Number(ms));
     const handle = realSetInterval(fn as never, ms as never, ...(args as never[]));
     created.push(handle);
@@ -107,8 +108,14 @@ test('behavioral: retired onModuleInit registers zero timers and zero prisma cal
     assert.deepEqual(metricsTrap.calls, [], `metrics prisma: ${JSON.stringify(metricsTrap.calls)}`);
     assert.deepEqual(epochTrap.calls, [], `epoch prisma: ${JSON.stringify(epochTrap.calls)}`);
     assert.deepEqual(cyclesTrap.calls, [], `cycles prisma: ${JSON.stringify(cyclesTrap.calls)}`);
-    assert.equal((cycles as { backstopEnabled?: boolean }).backstopEnabled, false);
-    assert.equal((epoch as { settlementTimer?: unknown }).settlementTimer, null);
+    assert.equal(
+      (cycles as unknown as { backstopEnabled?: boolean }).backstopEnabled,
+      false,
+    );
+    assert.equal(
+      (epoch as unknown as { settlementTimer?: unknown }).settlementTimer,
+      null,
+    );
   } finally {
     for (const h of created) clearInterval(h);
     global.setInterval = realSetInterval;
