@@ -265,6 +265,17 @@ PROBES: dict[str, Callable] = {
 }
 
 
+def active_probes() -> dict[str, Callable]:
+    """Probe set for this process. Local self-contained paper skips Railway/Neon/Fly
+    so missing cloud platforms never alert (HM + Strategist / RK t781u)."""
+    try:
+        from local_cloud_decouple import platform_probes_for_mode
+
+        return platform_probes_for_mode(PROBES)
+    except Exception:
+        return dict(PROBES)
+
+
 # --------------------------------------------------------------------------- diff / alerts
 def diff_alerts(prev: dict | None, cur: dict, lat_hist: deque, now: float) -> list[dict]:
     name = cur.get("platform")
@@ -273,6 +284,10 @@ def diff_alerts(prev: dict | None, cur: dict, lat_hist: deque, now: float) -> li
     def add(kind, sev, msg, **extra):
         alerts.append({"id": f"platform.{name}.{kind}", "platform": name, "kind": kind, "severity": sev,
                        "message": msg[:240], "ts": now, **extra})
+
+    # Local self-contained: skipped Railway/Neon/Fly must never alert.
+    if cur.get("skipped") or cur.get("state") == "skipped":
+        return alerts
 
     state = cur.get("state")
     if cur.get("probe_error"):
@@ -368,7 +383,18 @@ class PlatformMonitor:
             receipt = dict(self.receipt) if self.receipt_at and now - self.receipt_at < RECEIPT_STALE_SEC else {}
         ctx = {**ctx, "receipt": receipt}
         snap = {}
-        for name, fn in PROBES.items():
+        probes = active_probes()
+        # Record skipped platforms as non-alerting snapshots (no diff_alerts outage).
+        try:
+            from local_cloud_decouple import SKIPPED_PLATFORMS, cloud_coupling_disabled, skipped_platform_snapshot
+
+            if cloud_coupling_disabled():
+                for name in SKIPPED_PLATFORMS:
+                    if name not in probes:
+                        snap[name] = skipped_platform_snapshot(name, now)
+        except Exception:
+            pass
+        for name, fn in probes.items():
             try:
                 cur = fn(session, ctx)
             except Exception as exc:  # noqa: BLE001
@@ -378,9 +404,10 @@ class PlatformMonitor:
         with self.lock:
             new = []
             for name, cur in snap.items():
-                new.extend(diff_alerts(self.last.get(name), cur, self.lat[name], now))
+                hist = self.lat.setdefault(name, deque(maxlen=LATENCY_WINDOW))
+                new.extend(diff_alerts(self.last.get(name), cur, hist, now))
                 if isinstance(cur.get("latency_ms"), (int, float)) and cur.get("state") == "up":
-                    self.lat[name].append(cur["latency_ms"])
+                    hist.append(cur["latency_ms"])
                 self.last[name] = cur
             self.alerts.extend(new)
             self.snapshots.append({"ts": now, "states": {k: v.get("state") for k, v in snap.items()},
@@ -394,8 +421,8 @@ class PlatformMonitor:
         return snap
 
     def worst(self) -> str:
-        order = {"up": 0, "unknown": 1, "degraded": 2, "stuck": 3, "failing": 3, "down": 4}
-        states = [v.get("state") for v in self.last.values()]
+        order = {"up": 0, "skipped": 0, "unknown": 1, "degraded": 2, "stuck": 3, "failing": 3, "down": 4}
+        states = [v.get("state") for v in self.last.values() if v.get("state") != "skipped"]
         return max(states, key=lambda s: order.get(s, 1)) if states else "not_checked"
 
     def open_alerts(self, now: float, window_sec: float = 3600) -> list[dict]:

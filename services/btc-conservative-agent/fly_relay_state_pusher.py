@@ -66,6 +66,35 @@ def build_signed_snapshot_payload(
 def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    # Local self-contained paper (HM + Strategist / RK t781u): never push to Railway.
+    try:
+        from local_cloud_decouple import relay_pusher_disabled
+
+        if relay_pusher_disabled():
+            print(
+                "[fly-relay-pusher] disabled: LOCAL_CLOUD_COUPLING_DISABLED "
+                "(no Railway/Neon; local paper self-contained)",
+                flush=True,
+            )
+            return 0
+    except Exception as exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED local_cloud_decouple.relay_pusher_disabled: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+    try:
+        from relay_stack_mode import research_only
+
+        if research_only():
+            print("[fly-relay-pusher] disabled: RELAY_STACK_MODE=research_only", flush=True)
+            return 0
+    except Exception as exc:  # noqa: BLE001 — HM A2 loud import
+        print(
+            f"LOCAL_FRESH_IMPORT_FAILED relay_stack_mode.research_only: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
     if not CONTROL_SECRET:
         print("[fly-relay-pusher] disabled: BOT_CONTROL_SECRET missing", flush=True)
         return 0

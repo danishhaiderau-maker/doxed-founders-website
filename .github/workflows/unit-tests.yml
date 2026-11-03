@@ -124,6 +124,17 @@ jobs:
             echo "::warning title=unit-tests pytest headroom::Allowlisted pytest step took ${elapsed_min} min (>= 75% of 90m job timeout ≈ 67.5 min). Split plan if growth continues: move API tsx specs and/or script-style runners and/or an allowlist shard into a parallel job. Card seal 9153bcb8f78e."
           fi
           exit $rc
+      - name: Run services/btc-conservative-agent/tests/ (RK HOLD #972)
+        # Explicit agent tests/ collection in unit-tests (do not rely on allowlist alone).
+        # Branch protection / required checks are NOT changed here (laptop-tests = separate Danish ask).
+        run: |
+          python -m pytest tests/ -q -p no:cacheprovider --rootdir .
+      - name: Run repo-root tests/ (RK 01:30)
+        # Top-level tests/ must also run in the required unit-tests job (not only laptop-tests).
+        # Branch protection is NOT changed here.
+        working-directory: .
+        run: |
+          python -m pytest tests/ -q -p no:cacheprovider
       - name: Run script-style safety and contract files as `python file` (ci/script_style_tests.txt)
         # These files have no pytest collection (module-level checks / __main__), so pytest never runs them.
         # Each must exit 0; a failure here is a real red. The deploy job runs some of them the same way.

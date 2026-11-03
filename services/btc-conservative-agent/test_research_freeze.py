@@ -89,12 +89,10 @@ def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_on
         "FAMILY_DANISH_REGIME_ROUTER",
         "FAMILY_FADE_POOL",
         "FAMILY_GS07_V07_PREMIUM_FADE_60M",
-        "FAMILY_GS_FADE3_TP30",
-        "FAMILY_GS_FADE3_LOOSE_TP25",
     )
     assert not set(rf.MID_EPOCH_ADDITION_ROSTER).intersection(rf.FREEZE_ROSTER)
-    # PHASE03 additions ship default OFF; FADE3 + FADE3-LOOSE default ON.
-    # GS-06 removed from mid-epoch roster on 2026-10-28 R22 retire.
+    # PHASE03 additions ship default OFF.
+    # GS-06 removed 2026-10-28; FADE3/LOOSE removed 2026-10-30 (R22).
     default_off = {"FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL",
                    "FAMILY_GS07_V07_PREMIUM_FADE_60M"}
     for item in rf.MID_EPOCH_ADDITIONS:
@@ -210,7 +208,10 @@ def test_status_payload_is_json_serialisable():
 
 def test_status_lists_the_current_roster_next_to_the_pinned_original():
     cur = rf.freeze_status(MANIFEST, START + 600)["current_roster"]
-    assert len(cur["on_by_default"]) == 6 and cur["count"] == 6 and "default_off_tiles_6_7" not in cur
+    assert len(cur["on_by_default"]) == 4 and cur["count"] == 4 and "default_off_tiles_6_7" not in cur
+    assert cur["on_by_default"] == [
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+        "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"]
     # Tiles 6/7 (DISLOC / DISLOC-FOI) removed 23 Oct 2026: retired, never on the live roster.
     assert {"FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"}.isdisjoint(cur["on_by_default"])
     assert {"FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_PREMIUM_REVERSION_60M"} <= set(cur["retired_not_listed"])

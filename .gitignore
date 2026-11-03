@@ -153,6 +153,7 @@ scripts/_test.py
 scripts/_*.mjs
 scripts/_*.ps1
 services/btc-conservative-agent/local-collection-data/
+services/btc-conservative-agent/local-fresh-data/
 # Legacy migration/cleanup source; never an operational analyzer path.
 services/btc-conservative-agent/fly-data-mirror/
 services/btc-conservative-agent/analyzer_mirror/

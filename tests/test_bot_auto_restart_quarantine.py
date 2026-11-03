@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,6 +12,8 @@ SCRIPT = ROOT / "scripts" / "bot-auto-restart.ps1"
 
 
 def test_bot_auto_restart_parses_and_contract_mode_fails_closed_without_side_effects():
+    if shutil.which("powershell.exe") is None:
+        pytest.skip("powershell.exe required (Windows host)")
     env = os.environ.copy()
     env.pop("DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER", None)
     env["DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST"] = "NO_SIDE_EFFECTS"

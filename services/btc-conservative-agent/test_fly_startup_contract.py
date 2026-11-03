@@ -38,6 +38,11 @@ def test_fly_standby_has_no_implicit_production_relay():
     assert 'os.environ["DASHBOARD_PUBLIC_URL"] = "https://doxed-btc-bot.fly.dev/"' in WRAPPER
     assert '"https://doxed-btc-bot.fly.dev/analysis"' in WRAPPER
     assert "raise SystemExit(78)" in WRAPPER
+    # Day-1 local paper after Fly delete (confirmed opt-in only).
+    assert "LOCAL_FRESH_START" in WRAPPER
+    assert "I_OWN_LOCAL_PAPER_AFTER_FLY_DELETE" in WRAPPER
+    assert "REFUSED_MISSING_LOCAL_CONTROL" in WRAPPER
+    assert "apply_local_fresh_environ" in WRAPPER
 
 
 def test_fly_refuses_missing_control_secrets_or_direct_live_mode():

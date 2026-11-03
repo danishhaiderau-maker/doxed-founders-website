@@ -105,6 +105,8 @@ def test_set_ordered_header_rows_fail_closed_on_bad_identity(tmp_path, row, erro
 def test_current_canonical_damage_yields_both_joined_trade_ids():
     analyzer = _load_analyzer()
     path = AGENT / "canonical-research-data" / "expired_orders_3factor.csv"
+    if not path.is_file():
+        pytest.skip(f"canonical expired_orders fixture absent: {path}")
 
     frame = analyzer._load_expired_orders_csv(path)
 

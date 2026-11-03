@@ -89,6 +89,31 @@ from research.quantity_execution import (
     validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
 from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
+# RK HOLD #972 / RK 01:30: analyzer must import AND call the day-1 local-fresh read path.
+import local_fresh_analyzer_read as _local_fresh_analyzer_read  # noqa: E402
+
+
+def call_local_fresh_analyzer_read(data_dir, *, start_s=None, end_s=None):
+    """RK 01:30 / HM P5: invoke the local-fresh RO reader (not import-only).
+
+    Returns the ``summarize_local_fresh_store`` snapshot when ``local_market.sqlite3``
+    is present under ``data_dir``; otherwise ``None`` (canonical Fly mirror without
+    a day-1 store). Summarize always drives ``iter_book_seconds`` / ``iter_trades``
+    so the P5 ``series_break`` guard runs. Unbounded or straddle windows raise
+    ``LocalFreshStoreReadError`` / ``LOCAL_FRESH_POOLED_ACROSS_SERIES_BREAK`` when
+    a series break is present — callers must pick a same-side window (boot uses
+    post-break ``start_s=series_start_s()``).
+    """
+    from pathlib import Path
+
+    from local_market_persist import SQLITE_NAME
+
+    root = Path(data_dir)
+    if not (root / SQLITE_NAME).is_file():
+        return None
+    return _local_fresh_analyzer_read.summarize_local_fresh_store(
+        root, start_s=start_s, end_s=end_s
+    )
 
 
 class _R3RetiredSection(Exception):
@@ -108,7 +133,10 @@ except Exception:
     pass
 
 ANALYZER_RUN_LOG_FILE = "analyzer_run.log"
+# RK 1a / HM X1 (#972 REV7): default under C:\DoxxedCrypto\logs (override via
+# ANALYZER_NATIVE_CRASH_LOG). Relative name kept only as a last-resort fallback.
 ANALYZER_NATIVE_CRASH_LOG_FILE = "analyzer_native_crash.log"
+_DEFAULT_DOXXED_NATIVE_CRASH_LOG = r"C:\DoxxedCrypto\logs\analyzer-native-crash.log"
 RESEARCH_COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
 RESEARCH_HIGHLIGHTS_FILE = "research_highlights.txt"
@@ -331,15 +359,41 @@ def _setup_analyzer_output(verbose_console=False, enable_log=True):
     return tee, log_handle
 
 
+def _resolve_native_crash_log_path() -> str:
+    """Absolute crash-log path; prefer C:\\DoxxedCrypto (RK 1a / HM X1)."""
+    configured = (os.getenv("ANALYZER_NATIVE_CRASH_LOG") or "").strip()
+    if configured:
+        return configured
+    doxxed_root = (os.getenv("DOXXED_CRYPTO_ROOT") or r"C:\DoxxedCrypto").strip()
+    if doxxed_root.rstrip("\\/") == r"C:\DoxxedCrypto".rstrip("\\/"):
+        candidate = _DEFAULT_DOXXED_NATIVE_CRASH_LOG
+    else:
+        candidate = os.path.join(doxxed_root, "logs", "analyzer-native-crash.log")
+    if os.name == "nt" or os.path.isdir(doxxed_root):
+        return candidate
+    # Non-Windows CI / unit hosts: keep a cwd-relative fallback so tests can open it.
+    return ANALYZER_NATIVE_CRASH_LOG_FILE
+
+
 def _enable_native_fault_log():
-    """Persist native interpreter faults that bypass Python exception handling."""
+    """Persist native interpreter faults that bypass Python exception handling.
+
+    RK 1a: PYTHONFAULTHANDLER path must land under C:\\DoxxedCrypto (or
+    DOXXED_CRYPTO_ROOT). Env ANALYZER_NATIVE_CRASH_LOG wins when set.
+    """
     try:
-        handle = open(ANALYZER_NATIVE_CRASH_LOG_FILE, "a", encoding="utf-8", buffering=1)
+        path = _resolve_native_crash_log_path()
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        handle = open(path, "a", encoding="utf-8", buffering=1)
         handle.write(
-            f"\n--- analyzer native fault tracing enabled {datetime.now(timezone.utc).isoformat()} ---\n"
+            f"\n--- analyzer native fault tracing enabled {datetime.now(timezone.utc).isoformat()} path={path} ---\n"
         )
         handle.flush()
         faulthandler.enable(file=handle, all_threads=True)
+        # Also honor PYTHONFAULTHANDLER=1 for dump-on-fatal (same file).
+        os.environ.setdefault("PYTHONFAULTHANDLER", "1")
         return handle
     except Exception as exc:
         print(f"  WARNING: native fault tracing unavailable: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -23918,6 +23972,29 @@ if __name__ == "__main__":
         )
         sys.exit(2)
     os.makedirs(_configured_report_root, exist_ok=True)
+    # RK 01:30 / HM P5: call (not merely import) the local-fresh reader when the
+    # day-1 store exists. Boot must pick the post-break side — unbounded summarize
+    # refuses when series_break is present (LOCAL_FRESH_POOLED_ACROSS_SERIES_BREAK).
+    _local_fresh_boot_start = None
+    try:
+        with _local_fresh_analyzer_read.open_local_fresh_store_readonly(
+            _canonical_data_root
+        ) as _local_fresh_ro:
+            _local_fresh_boot_start = _local_fresh_ro.series_start_s()
+    except _local_fresh_analyzer_read.LocalFreshStoreReadError:
+        _local_fresh_boot_start = None
+    if _local_fresh_boot_start is not None:
+        _local_fresh_snap = call_local_fresh_analyzer_read(
+            _canonical_data_root, start_s=_local_fresh_boot_start
+        )
+    else:
+        _local_fresh_snap = call_local_fresh_analyzer_read(_canonical_data_root)
+    if _local_fresh_snap is not None:
+        print(
+            f"  ℹ️ local-fresh analyzer read: schema={_local_fresh_snap.get('schema')} "
+            f"local_epoch_id={_local_fresh_snap.get('local_epoch_id')} "
+            f"series_start_ts={_local_fresh_snap.get('series_start_ts')}"
+        )
     _install_stream_read_monitor(_canonical_data_root)
     _epoch_guard()
     _canonical_input_bindings = _bind_existing_canonical_input_paths(_canonical_data_root)

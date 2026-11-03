@@ -87,8 +87,15 @@ function Invoke-Launcher([string[]]$LauncherArgs, [string]$Tag, [int]$TimeoutMs,
 
 function Initialize-AnalyzerEnvironment {
   $env:DOXXED_NONINTERACTIVE = '1'
-  # A native crash (0xC0000005) otherwise leaves no Python stack behind.
+  # RK 1a / HM X1 (#972 REV7): PYTHONFAULTHANDLER=1 + log file under C:\DoxxedCrypto.
   $env:PYTHONFAULTHANDLER = '1'
+  $doxxedRoot = if ($env:DOXXED_CRYPTO_ROOT) { $env:DOXXED_CRYPTO_ROOT } else { 'C:\DoxxedCrypto' }
+  $faultLogDir = Join-Path $doxxedRoot 'logs'
+  if (-not (Test-Path -LiteralPath $faultLogDir)) {
+    New-Item -ItemType Directory -Path $faultLogDir -Force | Out-Null
+  }
+  $faultLog = Join-Path $faultLogDir 'analyzer-native-crash.log'
+  $env:ANALYZER_NATIVE_CRASH_LOG = $faultLog
   # A stale user-level value would point the analyzer at a retired store.
   Remove-Item -LiteralPath Env:BTC_AGENT_DATA_DIR -ErrorAction SilentlyContinue
   $health = $null
@@ -99,6 +106,12 @@ function Initialize-AnalyzerEnvironment {
   $env:SCORE_LED_PAPER_RESEARCH_ENABLED = $mode.Flag
   Assert-CanonicalDataLink
   return $mode
+}
+
+function Test-NativeCrashExit([int]$Code) {
+  # Windows ACCESS_VIOLATION 0xC0000005. Process.ExitCode is a signed Int32 on Windows,
+  # so the crash code is always -1073741819 here — never cast through [uint32] (PS 5.1 throws).
+  return ($Code -eq -1073741819)
 }
 
 # The dashboard is an independent process that keeps serving the last
@@ -208,11 +221,26 @@ try {
   $status.researchModeFlag = $mode.Flag
   $status.researchModeMatchesFly = $mode.Matched
 
+  # RK HOLD #972 item 2: run script must import local_fresh_analyzer_read before the pass.
+  # Require the import when the module is present in this checkout; skip only when the
+  # file is absent (laptop-chain fake repos in CI). A real agent checkout always has it.
+  $agentDir = Join-Path $cfg.RepoRoot 'services\btc-conservative-agent'
+  $analyzerReadPy = Join-Path $agentDir 'local_fresh_analyzer_read.py'
+  if (Test-Path -LiteralPath $analyzerReadPy) {
+    $importOut = & python -c "import sys; sys.path.insert(0, r'$agentDir'); import local_fresh_analyzer_read as m; print(m.SCHEMA)" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      throw ("LOCAL_FRESH_ANALYZER_READ_IMPORT_FAILED: {0}" -f ($importOut | Out-String).Trim())
+    }
+    Write-ChainLog -Config $cfg -Name $logName -Message ("LOCAL_FRESH_ANALYZER_READ_OK schema={0}" -f ($importOut | Select-Object -First 1))
+  } else {
+    Write-ChainLog -Config $cfg -Name $logName -Message "LOCAL_FRESH_ANALYZER_READ_SKIP missing=$analyzerReadPy"
+  }
+
   # Ensured before, watched during, and ensured again after the single pass.
   Confirm-AnalyzerDashboard
   $before = Get-AnalyzerStatus
   $beforeCompleted = if ($before -and $before.analysis_run) { ConvertTo-UtcDate $before.analysis_run.last_completed_at } else { $null }
-  Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_START reason={0} rev={1} scoreLed={2} flyMatch={3}" -f $Reason, $status.revision, $mode.Flag, $mode.Matched)
+  Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_START reason={0} rev={1} scoreLed={2} flyMatch={3} faultLog={4}" -f $Reason, $status.revision, $mode.Flag, $mode.Matched, $env:ANALYZER_NATIVE_CRASH_LOG)
   $script:dashboardMisses = 0
   $watchDashboard = {
     if (Get-AnalyzerStatus) { $script:dashboardMisses = 0; return }
@@ -222,11 +250,20 @@ try {
     Confirm-AnalyzerDashboard
     $script:dashboardMisses = 0
   }
+  # RK 2 / HM X2 (#972 REV7): analyzer/replay runs as an isolated subprocess
+  # (Invoke-Launcher); on native crash, retry the pass exactly once.
   $run = Invoke-Launcher -LauncherArgs @('-Once', "-Port $Port") -Tag 'once' -TimeoutMs ($TimeoutMin * 60 * 1000) -WhileRunning $watchDashboard
+  if (Test-NativeCrashExit ([int]$run.ExitCode)) {
+    $priorTail = $run.Tail
+    Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_NATIVE_CRASH_RETRY exit={0} faultLog={1}" -f $run.ExitCode, $env:ANALYZER_NATIVE_CRASH_LOG)
+    $run = Invoke-Launcher -LauncherArgs @('-Once', "-Port $Port") -Tag 'once-retry' -TimeoutMs ($TimeoutMin * 60 * 1000) -WhileRunning $watchDashboard
+    $status.detail = ("retry_after_native_crash prior_exit_tail={0} | {1}" -f $priorTail, $run.Tail)
+  } else {
+    $status.detail = $run.Tail
+  }
   $status.stdoutLog = $run.Stdout
   $status.stderrLog = $run.Stderr
   $exitCode = $run.ExitCode
-  $status.detail = $run.Tail
   try { Confirm-AnalyzerDashboard } catch {
     Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_RESTORE_FAILED {0}" -f $_.Exception.Message)
   }

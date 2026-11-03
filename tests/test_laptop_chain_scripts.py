@@ -79,13 +79,18 @@ def test_supervisor_keeps_one_segment_pull_loop_not_a_second_watcher():
     supervisor = _source("laptop-chain-supervisor.ps1")
     loop = _source("research-segment-pull-loop.ps1")
     pull = _source("research-segment-pull.ps1")
-    assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')" in supervisor
-    assert "research-segment-pull-loop.ps1" in supervisor
+    # RK 20:20 / R22: Fly-only steps 1–3 removed from supervisor (segment pull gone).
+    assert "research-segment-pull-loop.ps1" not in supervisor
+    assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')" not in supervisor
+    assert "laptop-status-snapshots.ps1" not in supervisor
+    assert "v2c-auto-ff.ps1" not in supervisor
+    assert "r22-fly-steps" in supervisor
     assert "laptop-ack-watcher" not in supervisor
     assert "run-segment-analyzer-cycle.ps1" in supervisor
     assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')" in supervisor
     cycle = _source("run-segment-analyzer-cycle.ps1")
     assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')" in cycle
+    # Pull-loop script remains on disk for manual/admin use; not started by supervisor.
     assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentPull')" in loop
     assert "[int]$PullIntervalSec = 120" in loop and "[int]$ParityIntervalMin = 60" in loop
     assert "'-Source', 'Http'" in loop and "-MaxSegments" in loop
@@ -166,7 +171,7 @@ def test_promotion_waits_out_a_parity_pass_holding_the_shadow_lock():
 def test_supervisor_task_uses_system_powershell():
     register = _source("register-laptop-chain-task.ps1")
     assert "System32\\WindowsPowerShell\\v1.0\\powershell.exe" in register
-    assert "-AtLogOn" in register and "New-TimeSpan -Minutes 5" in register
+    assert "-AtLogOn" in register and "New-TimeSpan -Minutes 10" in register
     assert ".cache" not in register
 
 
@@ -631,8 +636,11 @@ def test_supervisor_runs_the_unattended_proof_after_the_monitor():
 
 
 def test_supervisor_collects_snapshots_before_the_monitor():
+    # R22: fly_* status snapshots removed from supervisor; monitor still runs.
     supervisor = _source("laptop-chain-supervisor.ps1")
-    assert supervisor.index("laptop-status-snapshots.ps1") < supervisor.index("laptop-chain-monitor.ps1")
+    assert "laptop-status-snapshots.ps1" not in supervisor
+    assert "laptop-chain-monitor.ps1" in supervisor
+    assert "snapshots=removed:r22-fly-steps" in supervisor
 
 
 def _fake_repo(tmp_path, launcher_body: str) -> Path:
@@ -1058,15 +1066,33 @@ def test_auto_ff_refuses_dirty_checkout_and_waits_for_a_busy_cycle(tmp_path, cha
 
 def test_supervisor_fast_forwards_before_starting_a_cycle_and_cycle_refuses_old_checkout():
     supervisor = _source("laptop-chain-supervisor.ps1")
-    assert supervisor.index("v2c-auto-ff.ps1") < supervisor.index("run-segment-analyzer-cycle.ps1")
-    # The fast-forward reads the deploy-run snapshot, so it must be fresh this tick.
-    assert supervisor.index("laptop-status-snapshots.ps1") < supervisor.index("v2c-auto-ff.ps1")
-    assert "v2c-auto-ff.disabled" in supervisor
+    # RK 20:20 / R22 (#972 REV7): Fly steps 1–3 removed from supervisor (not flagged).
+    assert "research-segment-pull-loop.ps1" not in supervisor
+    assert "laptop-status-snapshots.ps1" not in supervisor
+    assert "v2c-auto-ff.ps1" not in supervisor
+    assert "segment-pull.disabled" not in supervisor
+    assert "fly-status-snapshots.disabled" not in supervisor
+    assert "v2c-auto-ff.disabled" not in supervisor
+    assert "r22-fly-steps" in supervisor
+    assert "run-segment-analyzer-cycle.ps1" in supervisor or "run-analyzer-once.ps1" in supervisor
+    assert "laptop-chain-monitor.ps1" in supervisor
+    assert "system_health.py" in supervisor
+    assert "laptop_chain_incident.py" in supervisor
+    assert not (SCRIPTS / "local-fresh-disable-fly-chain-steps.ps1").exists()
     cycle = _source("run-segment-analyzer-cycle.ps1")
-    check = cycle[cycle.index("ANALYZER_REVISION_MISMATCH") - 900:cycle.index("Set-CycleStatus 'ANALYZER'")]
-    assert "merge-base --is-ancestor $deployedFull $checkoutHead" in check and "Stop-Cycle 5" in check
+    check = cycle[cycle.index("ANALYZER_REVISION_MISMATCH") - 200:cycle.index("Set-CycleStatus 'ANALYZER'")]
+    assert "merge-base --is-ancestor $deployedFull $checkoutHead" in cycle
+    assert "Stop-Cycle 5" in check
+    assert "v2c-auto-ff.ps1" not in check
+    assert "laptop-status-snapshots.ps1" not in check
     assert "'.segment-promotion.index.json'" in cycle
-    assert "PYTHONFAULTHANDLER" in _source("run-analyzer-once.ps1")
+    once = _source("run-analyzer-once.ps1")
+    assert "PYTHONFAULTHANDLER" in once
+    assert "ANALYZER_NATIVE_CRASH_LOG" in once
+    assert r"C:\DoxxedCrypto" in once or "DOXXED_CRYPTO_ROOT" in once
+    assert "ANALYZER_NATIVE_CRASH_RETRY" in once
+    assert "Test-NativeCrashExit" in once
+    assert "once-retry" in once
 
 @windows_only
 def test_cycle_lock_held_auto_ff_fast_forwards_while_the_cycle_mutex_is_owned(tmp_path, chain):
@@ -1089,20 +1115,15 @@ def test_cycle_lock_held_auto_ff_fast_forwards_while_the_cycle_mutex_is_owned(tm
     assert receipt["outcome"] == "FAST_FORWARDED" and receipt["caller"] == "cycle"
 
 
-def test_cycle_fast_forwards_inline_instead_of_discarding_a_post_deploy_migration():
+def test_cycle_refuses_revision_mismatch_without_fly_auto_ff():
+    # RK 20:20 / R22: inline Fly auto-ff removed; mismatch fails closed.
     cycle = _source("run-segment-analyzer-cycle.ps1")
     gate = cycle[cycle.index("ANALYZER_REVISION_MISMATCH"):cycle.index("Set-CycleStatus 'ANALYZER'")]
-    # Fresh deploy-run evidence first, then the guarded fast-forward under the mutex this cycle holds.
-    assert gate.index("laptop-status-snapshots.ps1") < gate.index("v2c-auto-ff.ps1")
-    assert "-CycleLockHeld" in gate and "v2c-auto-ff.disabled" in gate
-    # Bounded: a hard refusal or the wait budget still stops the cycle before any analyzer pass.
-    assert "$ffExit -eq 3 -or $waited -ge $InlineFfMaxWaitSec" in gate and "Stop-Cycle 5" in gate
-    assert "Test-CheckoutContainsDeployed" in gate.split("AUTO_FF_INLINE ok")[0]
-    assert "[int]$InlineFfMaxWaitSec = 900" in cycle
-    auto_ff = _source("v2c-auto-ff.ps1")
-    assert "if (-not $CycleLockHeld)" in auto_ff
-    # The analyzer-run mutex is always taken, whoever calls.
-    assert auto_ff.count("Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerRun')") == 1
+    assert "Stop-Cycle 5" in gate
+    assert "v2c-auto-ff.ps1" not in gate
+    assert "laptop-status-snapshots.ps1" not in gate
+    assert "AUTO_FF_INLINE" not in gate
+    assert "Test-CheckoutContainsDeployed" in cycle
 
 def test_dashboard_revision_refreshes_after_every_generation():
     runner = _source("run-analyzer-once.ps1")

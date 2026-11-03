@@ -84,10 +84,12 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     rows += [_fill(RND, f"b{i}", 1.0, T0 + i * 600) for i in range(4)]
     rows += [_fill(CFT, f"b{i}", 2.0, T0 + i * 600, reason="PATH_END_90M") for i in range(4)]
     report = _report(rows)
+    # R22 #972: FADE3/LOOSE retired; CTRL + GS-01 + B1 + B2 remain.
+    assert tuple(ACTIVE_TILE_ORDER) == (RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER")
     assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
     assert report["tile_order"][:3] == [RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME"]
-    # Shared-call tiles pair (control + B2); evaluator-clock / self-sim tiles never do.
-    # H-A / B3 / GS-06 retired; GS-01 / B1 / FADE3 / FADE3-LOOSE are clock or self-sim.
+    # Shared-call tiles pair (control + B2); evaluator-clock tiles never do.
+    # H-A / B3 / GS-06 / FADE3 retired; GS-01 / B1 are clock (not shared-call pair).
     assert report["all_tiles_paired"]["paired_tiles"] == [
         RND, "FAMILY_GSB2_REGIME_SWITCHER"]
     assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
