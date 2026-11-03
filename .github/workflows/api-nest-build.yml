@@ -1,6 +1,6 @@
 # R51: nest/@dcf/api build must be a required PR check so CI cannot pass while
 # Railway production nest build would fail (incident: master c744ffea / Railway
-# deploy 655ec2f8 exit 1 at `npm run build --workspace=@dcf/api`).
+# deploy 655ec2f8 exit 1 at npm run build --workspace=@dcf/api).
 name: api-nest-build
 
 on:
@@ -32,8 +32,8 @@ jobs:
       - name: Build utils package
         run: npm run build:utils
 
-      - name: Nest build (@dcf/api) — same command as Railway Dockerfile step 21/22
+      - name: Nest build for @dcf/api matching Railway Dockerfile
         run: npm run build --workspace=@dcf/api
 
-      - name: Prove this workflow still gates nest build (mutation: drop the build step → fails)
+      - name: Prove api-nest-build workflow still gates nest build
         run: node --test scripts/api-nest-build-ci-gate.spec.mjs
