@@ -39,12 +39,42 @@ function assertRecoverAlreadyFlatAdminContract(src: string): void {
   assert.equal(/adminHeader\}|authorization\}/.test(body), false);
 }
 
+function assertOpsPauseAdminContract(src: string): void {
+  const body = routeBody(src, ':slug/ops/pause');
+  assert.ok(body.includes('assertBotAdminToken(adminHeader, authorization)'));
+  assert.ok(
+    body.indexOf('assertBotAdminToken') < body.indexOf('getOpsRelayStatus'),
+    'admin auth must run before ops status load',
+  );
+  assert.ok(body.includes("'PAUSE_AND_SETTLE_MANAGED_ENTRIES'"));
+  assert.equal(/adminHeader\}|authorization\}/.test(body), false);
+}
+
+function assertRefreshFlatAuditAdminContract(src: string): void {
+  const body = routeBody(src, ':slug/ops/refresh-flat-audit');
+  assert.ok(body.includes('assertBotAdminToken(adminHeader, authorization)'));
+  assert.ok(
+    body.indexOf('assertBotAdminToken') < body.indexOf('getOpsRelayStatus'),
+    'admin auth must run before ops status load',
+  );
+  assert.ok(body.includes("'REFRESH_PAUSED_FLAT_AUDIT'"));
+  assert.equal(/adminHeader\}|authorization\}/.test(body), false);
+}
+
 test('ops/emergency-reconcile route is admin-token only (not monitor read)', () => {
   assertEmergencyReconcileAdminContract(readController());
 });
 
 test('ops/recover-already-flat route is admin-token only (not monitor read)', () => {
   assertRecoverAlreadyFlatAdminContract(readController());
+});
+
+test('ops/pause route is admin-token only (not monitor read)', () => {
+  assertOpsPauseAdminContract(readController());
+});
+
+test('ops/refresh-flat-audit route is admin-token only (not monitor read)', () => {
+  assertRefreshFlatAuditAdminContract(readController());
 });
 
 test('mutation proof: emergency-reconcile without assertBotAdminToken fails contract', () => {
@@ -87,7 +117,47 @@ test('mutation proof: recover-already-flat with admin assert after getOpsRelaySt
   assert.throws(() => assertRecoverAlreadyFlatAdminContract(mutant));
 });
 
-test('MONITOR_READ_TOKEN cannot invoke emergency-reconcile or recover-already-flat', async () => {
+test('mutation proof: ops/pause without assertBotAdminToken fails contract', () => {
+  const mutant = readController().replace(
+    'assertBotAdminToken(adminHeader, authorization);\n    await this.tradingAgents.getOpsRelayStatus(\n      slug, body?.userId, adminHeader, authorization,\n    );\n    if (body?.confirmation !== \'PAUSE_AND_SETTLE_MANAGED_ENTRIES\')',
+    'await this.tradingAgents.getOpsRelayStatus(\n      slug, body?.userId, adminHeader, authorization,\n    );\n    if (body?.confirmation !== \'PAUSE_AND_SETTLE_MANAGED_ENTRIES\')',
+  );
+  assert.throws(() => assertOpsPauseAdminContract(mutant));
+});
+
+test('mutation proof: ops/pause with admin assert after getOpsRelayStatus fails contract', () => {
+  const src = readController();
+  const body = routeBody(src, ':slug/ops/pause');
+  const reordered = body
+    .replace(
+      'assertBotAdminToken(adminHeader, authorization);\n    await this.tradingAgents.getOpsRelayStatus(\n      slug, body?.userId, adminHeader, authorization,\n    );',
+      'await this.tradingAgents.getOpsRelayStatus(\n      slug, body?.userId, adminHeader, authorization,\n    );\n    assertBotAdminToken(adminHeader, authorization);',
+    );
+  const mutant = src.replace(body, reordered);
+  assert.throws(() => assertOpsPauseAdminContract(mutant));
+});
+
+test('mutation proof: refresh-flat-audit without assertBotAdminToken fails contract', () => {
+  const mutant = readController().replace(
+    /assertBotAdminToken\(adminHeader, authorization\);\n    const status = await this\.tradingAgents\.getOpsRelayStatus\(\n      slug, body\?\.userId, adminHeader, authorization,\n    \);/,
+    'const status = await this.tradingAgents.getOpsRelayStatus(\n      slug, body?.userId, adminHeader, authorization,\n    );',
+  );
+  assert.throws(() => assertRefreshFlatAuditAdminContract(mutant));
+});
+
+test('mutation proof: refresh-flat-audit with admin assert after getOpsRelayStatus fails contract', () => {
+  const src = readController();
+  const body = routeBody(src, ':slug/ops/refresh-flat-audit');
+  const reordered = body
+    .replace(
+      'assertBotAdminToken(adminHeader, authorization);\n    const status = await this.tradingAgents.getOpsRelayStatus(\n      slug, body?.userId, adminHeader, authorization,\n    );',
+      'const status = await this.tradingAgents.getOpsRelayStatus(\n      slug, body?.userId, adminHeader, authorization,\n    );\n    assertBotAdminToken(adminHeader, authorization);',
+    );
+  const mutant = src.replace(body, reordered);
+  assert.throws(() => assertRefreshFlatAuditAdminContract(mutant));
+});
+
+test('MONITOR_READ_TOKEN cannot invoke emergency-reconcile, recover-already-flat, pause, or refresh-flat-audit', async () => {
   const prev = {
     admin: process.env.BOT_ADMIN_TOKEN,
     monitor: process.env.MONITOR_READ_TOKEN,
@@ -97,14 +167,29 @@ test('MONITOR_READ_TOKEN cannot invoke emergency-reconcile or recover-already-fl
   let statusCalls = 0;
   let emergencyCalls = 0;
   let recoverCalls = 0;
+  let pauseCalls = 0;
+  let auditCalls = 0;
   const tradingAgents = {
     getOpsRelayStatus: async () => {
       statusCalls += 1;
       return {
         status: 'PAUSED',
+        relayExecutionMode: 'PAUSED',
+        relayArmedAt: null,
+        realTradingConfirmedAt: null,
         positionMismatchDetectedAt: '2026-08-16T14:28:21.690Z',
         lastError: 'mismatch',
       };
+    },
+  };
+  const instances = {
+    setInstancePaused: async () => {
+      pauseCalls += 1;
+      return { ok: true, status: 'PAUSED' };
+    },
+    refreshPausedFlatAudit: async () => {
+      auditCalls += 1;
+      return { accepted: true, status: 'PAUSED', resumed: false, armed: false, flat: true };
     },
   };
   const execution = {
@@ -119,7 +204,7 @@ test('MONITOR_READ_TOKEN cannot invoke emergency-reconcile or recover-already-fl
   };
   const controller = new TradingAgentsController(
     tradingAgents as never,
-    {} as never,
+    instances as never,
     {} as never,
     {} as never,
     execution as never,
@@ -159,9 +244,48 @@ test('MONITOR_READ_TOKEN cannot invoke emergency-reconcile or recover-already-fl
       ),
       (err: unknown) => err instanceof UnauthorizedException,
     );
+    await assert.rejects(
+      controller.opsPause(
+        'conservative-btc',
+        { userId: 'user-1', confirmation: 'PAUSE_AND_SETTLE_MANAGED_ENTRIES' },
+        'monitor-token-btc10',
+        undefined,
+      ),
+      (err: unknown) => err instanceof UnauthorizedException
+        && /Invalid BOT_ADMIN_TOKEN/.test(String((err as UnauthorizedException).message)),
+    );
+    await assert.rejects(
+      controller.opsPause(
+        'conservative-btc',
+        { userId: 'user-1', confirmation: 'PAUSE_AND_SETTLE_MANAGED_ENTRIES' },
+        undefined,
+        'Bearer monitor-token-btc10',
+      ),
+      (err: unknown) => err instanceof UnauthorizedException,
+    );
+    await assert.rejects(
+      controller.opsRefreshFlatAudit(
+        'conservative-btc',
+        { userId: 'user-1', confirmation: 'REFRESH_PAUSED_FLAT_AUDIT' },
+        'monitor-token-btc10',
+        undefined,
+      ),
+      (err: unknown) => err instanceof UnauthorizedException,
+    );
+    await assert.rejects(
+      controller.opsRefreshFlatAudit(
+        'conservative-btc',
+        { userId: 'user-1', confirmation: 'REFRESH_PAUSED_FLAT_AUDIT' },
+        undefined,
+        'Bearer monitor-token-btc10',
+      ),
+      (err: unknown) => err instanceof UnauthorizedException,
+    );
     assert.equal(statusCalls, 0);
     assert.equal(emergencyCalls, 0);
     assert.equal(recoverCalls, 0);
+    assert.equal(pauseCalls, 0);
+    assert.equal(auditCalls, 0);
 
     await controller.opsEmergencyReconcile(
       'conservative-btc',
@@ -172,6 +296,28 @@ test('MONITOR_READ_TOKEN cannot invoke emergency-reconcile or recover-already-fl
     );
     assert.equal(emergencyCalls, 1);
     assert.ok(statusCalls >= 1);
+
+    assert.deepEqual(
+      await controller.opsPause(
+        'conservative-btc',
+        { userId: 'user-1', confirmation: 'PAUSE_AND_SETTLE_MANAGED_ENTRIES' },
+        'admin-token-btc10',
+        undefined,
+      ),
+      { ok: true, status: 'PAUSED' },
+    );
+    assert.equal(pauseCalls, 1);
+
+    assert.deepEqual(
+      await controller.opsRefreshFlatAudit(
+        'conservative-btc',
+        { userId: 'user-1', confirmation: 'REFRESH_PAUSED_FLAT_AUDIT' },
+        'admin-token-btc10',
+        undefined,
+      ),
+      { accepted: true, status: 'PAUSED', resumed: false, armed: false, flat: true },
+    );
+    assert.equal(auditCalls, 1);
   } finally {
     if (prev.admin === undefined) delete process.env.BOT_ADMIN_TOKEN;
     else process.env.BOT_ADMIN_TOKEN = prev.admin;
