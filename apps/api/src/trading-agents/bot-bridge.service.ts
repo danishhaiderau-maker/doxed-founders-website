@@ -844,23 +844,66 @@ export class BotBridgeService {
     }
   }
 
-  /**
-   * Analyzer-via-Fly removed with the deleted showcase app (2026-11-03).
-   * R22: dead HTTP proxy deleted — not gated/flagged. Callers treat null as
-   * unavailable (dashboard → offline-by-design / cumulative-unavailable).
-   */
+  /** Read-only analyzer snapshot exposed by the canonical Fly dashboard API. */
+  private async fetchAnalyzerProxy<T>(path: string, timeoutMs = 20_000): Promise<T | null> {
+    const cf = await this.resolveBotUrl();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(`${cf}${path}`, {
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: { Accept: 'application/json', 'User-Agent': 'doxxedcrypto-analyzer/1.0' },
+        });
+        if (!res.ok) {
+          this.logger.warn(`Analyzer proxy ${cf}${path} HTTP ${res.status} (attempt ${attempt + 1})`);
+          continue;
+        }
+        return (await res.json()) as T;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Analyzer proxy ${cf}${path} failed (attempt ${attempt + 1}): ${msg}`);
+      }
+    }
+    return null;
+  }
+
   async fetchAnalyzerSummary(): Promise<Record<string, unknown> | null> {
-    return null;
+    return this.fetchAnalyzerProxy<Record<string, unknown>>('/api/analyzer/summary');
   }
 
-  /** Mirror receipt via Fly removed with the deleted showcase app (R22). */
+  /** Canonical bundle-v2 mirror receipt (admin-authenticated; not the legacy summary mirror). */
   async fetchAnalyzerMirrorReceipt(): Promise<Record<string, unknown> | null> {
+    const cf = await this.resolveBotUrl();
+    const adminToken = this.config.get<string>('BOT_ADMIN_TOKEN')?.trim();
+    if (!adminToken) return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(`${cf}/api/analyzer-mirror/status`, {
+          signal: AbortSignal.timeout(12_000),
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'doxxedcrypto-analyzer/1.0',
+            'X-Bot-Admin-Token': adminToken,
+          },
+        });
+        if (!res.ok) {
+          this.logger.warn(
+            `Analyzer mirror receipt ${cf}/api/analyzer-mirror/status HTTP ${res.status} (attempt ${attempt + 1})`,
+          );
+          continue;
+        }
+        return (await res.json()) as Record<string, unknown>;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `Analyzer mirror receipt ${cf}/api/analyzer-mirror/status failed (attempt ${attempt + 1}): ${msg}`,
+        );
+      }
+    }
     return null;
   }
 
-  /** Genome via Fly removed with the deleted showcase app (R22). */
   async fetchAnalyzerGenome(): Promise<Record<string, unknown> | null> {
-    return null;
+    return this.fetchAnalyzerProxy<Record<string, unknown>>('/api/analyzer/genome', 12_000);
   }
 
   /** Cumulative full-session metrics from the canonical showcase bot's full `/api/state`
