@@ -278,7 +278,8 @@ def test_trades_route_epoch_scoped_forced_flagged_and_fill_basis(bot):
     body = _get(bot, "/api/monitor/tiles/trades", {"X-Bot-Admin-Token": ADMIN}).get_json()
     ids = [r["trade_id"] for r in body["rows"]]
     assert "ha-old" not in ids  # closed before the epoch cutoff
-    assert set(ids) == {"gs1-exp", "gs1-a", "ha-forced", "ha-b", "gs1-open", "b2-pend"}
+    # Retired-lane pending rows (b2-pend) are omitted from the active-tile monitor surface.
+    assert set(ids) == {"gs1-exp", "gs1-a", "ha-forced", "ha-b", "gs1-open"}
     by_id = {r["trade_id"]: r for r in body["rows"]}
     assert by_id["ha-forced"]["exit"]["forced_close"] is True
     assert by_id["gs1-a"]["fill"]["fill_basis"] == "TRADE_THROUGH"
@@ -312,7 +313,7 @@ def test_counters_route_and_specs_route(bot):
     assert gs1["epoch"]["fills"] == 2 and gs1["epoch"]["expiries"] == 1 and gs1["epoch"]["open"] == 1
     assert len(json.dumps(counters).encode()) <= mt.MAX_TILE_COUNTERS_BYTES
     specs = _get(bot, "/api/monitor/tiles/specs", {"X-Bot-Admin-Token": ADMIN}).get_json()
-    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 4  # R22 #972: FADE3 gone; CTRL+GS-01+B1+B2
+    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 2  # R22 2026-10-30: CTRL + GS-01 only
     assert not specs.get("truncated")
     reg = bot.ACTIVE_TILE_REGISTRY
     for tile in specs["tiles"]:
@@ -363,11 +364,9 @@ def test_handlers_have_no_writes_or_order_calls():
     assert "_TILE_TAPE_RING.append(row)" in loop
 
 
-def test_ready_entry_policy_view_states_the_b2_signal_clock_without_touching_the_registry(bot):
+def test_ready_entry_policy_view_states_active_tile_signal_clocks_without_touching_the_registry(bot):
     reg = bot.ACTIVE_TILE_REGISTRY
-    b2 = bot._ready_entry_policy_view(reg["FAMILY_GSB2_REGIME_SWITCHER"]["entry_policy"])
-    assert b2["signal_clock"] == "SHARED_AI_CALL + BAR_CLOSE_3M_CVD_EVALUATOR" and b2["signal_clock_derived"] is True
-    assert "signal_clock" not in reg["FAMILY_GSB2_REGIME_SWITCHER"]["entry_policy"]
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in reg  # R22 2026-10-30 retired
     gs1 = bot._ready_entry_policy_view(reg[GS1]["entry_policy"])
     assert gs1["signal_clock"] == "PER_SECOND_CROSS_VENUE_EVALUATOR" and "signal_clock_derived" not in gs1
     assert bot._ready_entry_policy_view(reg[HA]["entry_policy"])["signal_clock"] == "SHARED_AI_CALL"

@@ -88,8 +88,8 @@ test('gate 4: B1/B2 partial exits are mirrored by default (reduce-only partial c
   // Boss 12 Oct: B1/B2 are live-copyable; their part exits become reduce-only
   // partial closes on Bitfinex with the stop resized to the remainder at the
   // same price. Only an explicit SUBSCRIBER_POSITION_REDUCTION_ENABLED=false refuses them.
-  assert.equal(isPartialExitLaneTradeId('gb1-deadbeef1234'), true);
-  assert.equal(isPartialExitLaneTradeId('gb2-deadbeef1234'), true);
+  assert.equal(isPartialExitLaneTradeId('gb1-deadbeef1234'), false); // B1/B2 retired R22 2026-11-04
+  assert.equal(isPartialExitLaneTradeId('gb2-deadbeef1234'), false);
   assert.equal(isPartialExitLaneTradeId('gs1-deadbeef1234'), false);
   assert.equal(subscriberPositionReductionEnabled(undefined), true);
   assert.equal(subscriberPositionReductionEnabled('true'), true);

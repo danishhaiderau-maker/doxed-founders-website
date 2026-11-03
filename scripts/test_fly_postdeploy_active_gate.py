@@ -315,16 +315,12 @@ def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     registry = gate._registry_module()
     # RK hotfix (25 Oct): the roster comes from the shared registry, never a hard-coded copy.
     assert lanes == [str(lane) for lane in registry.ACTIVE_TILE_ORDER] and len(lanes) == len(set(lanes))
-    # HM nit: pin the roster size; a 7th tile must update this pin deliberately (and pass the standard below).
-    # 2026-10-28 (R22 + LOOSE): still 6 tiles — GS-06 out, FADE3-LOOSE in. Index 4 = FADE3 (tile 5),
-    # index 5 = LOOSE (tile 6). Updating this pin is deliberate.
-    assert len(lanes) == 4 and lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"], lanes
+    # HM nit: pin the roster size; a new tile must update this pin deliberately.
+    # R22 2026-11-04: B1/B2 retired (FADE3 already retired #972) — CTRL + GS-01 only.
+    assert len(lanes) == 2 and lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"], lanes
     assert not set(lanes) & retired
-    # #972 REV8: FADE3/LOOSE retired; CTRL+GS-01+B1+B2 remain (GSB split is a separate PR).
-    assert set(lanes) == {
-        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
-        "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
-    }
+    assert set(lanes) == {"FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"}
+    assert {"FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"} <= retired
     assert "FAMILY_GS06_COMMITTED_FADE_ATR_TP" in retired
     assert {"FAMILY_GS_FADE3_TP30", "FAMILY_GS_FADE3_LOOSE_TP25"} <= retired
     for lane in lanes:
@@ -436,12 +432,9 @@ def test_checkout_registry_roster_passes_the_gate_and_gs01_is_held_to_the_same_s
 
 
 def test_checkout_registry_live_copy_check_flags_every_non_false_relay_flag_on_the_real_roster():
-    """HM nit: live-copy check on the real roster (CTRL+GS-01+B1+B2; FADE3 retired #972)."""
+    """HM nit: live-copy check on the real roster (CTRL + GS-01 only after B1/B2 R22)."""
     lanes, _ = gate.checkout_registry()
-    assert lanes == [
-        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
-        "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
-    ]
+    assert lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
     assert gate.relay_eligible_tiles([{"lane": lane, "relay_eligible": False} for lane in lanes]) == []
     probe = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
     idx = lanes.index(probe)

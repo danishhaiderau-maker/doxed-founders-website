@@ -29,13 +29,12 @@ import live_exit_fill as _lef
 TILE_KEY_CODES: dict = {
     "rnd": 1,   # FAMILY_RANDOM_CONTROL_TAKER_90
     "gs1": 2,   # FAMILY_GS01_XV_PREMIUM_ATR_TP (GS-01)
-    "gb1": 3,   # FAMILY_GSB1_CVD_DIV_REGIME
-    "gb2": 4,   # FAMILY_GSB2_REGIME_SWITCHER
-    "gf3": 8,   # FAMILY_GS_FADE3_TP30 (paper only)
+    "gf3": 8,   # FAMILY_GS_FADE3_TP30 (paper only; live gate path retained — separate from roster)
     "gf3l": 9,  # FAMILY_GS_FADE3_LOOSE_TP25 (paper only)
 }
-# Retired tiles keep their codes reserved forever (never reissued): gs6=5, dsl=6, dsf=7.
-RESERVED_TILE_KEY_CODES = {"gs6": 5, "dsl": 6, "dsf": 7}
+# Retired tiles keep their codes reserved forever (never reissued).
+# gb1/gb2 R22 2026-11-04 (B1/B2); gs6/dsl/dsf earlier. Do not reissue.
+RESERVED_TILE_KEY_CODES = {"gs6": 5, "dsl": 6, "dsf": 7, "gb1": 3, "gb2": 4}
 
 # cid layout (positive int32): bits 28-30 = 0b101 marker, bits 21-27 = tile code, bits 0-20 = hash.
 CID_MARKER = 0b101

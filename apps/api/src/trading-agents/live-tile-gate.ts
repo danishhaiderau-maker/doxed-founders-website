@@ -10,16 +10,17 @@
  * Protective-stop cids are NOT tile-keyed (stops are attributed via their owning participant).
  */
 
-/** NEVER renumber or reuse a code; a new tile takes the next free one. Retired: gs6=5, dsl=6, dsf=7 (reserved forever). */
+/** NEVER renumber or reuse a code; a new tile takes the next free one. */
 export const LIVE_TILE_KEY_CODES: Readonly<Record<string, number>> = Object.freeze({
   rnd: 1,
   gs1: 2,
-  gb1: 3,
-  gb2: 4,
   gf3: 8, // GS-FADE3-TP30 (paper only; arm refused: PAPER_ONLY_TILE_KEYS on Fly)
   gf3l: 9, // GS-FADE3-LOOSE (paper only)
 });
-export const RESERVED_LIVE_TILE_KEY_CODES: Readonly<Record<string, number>> = Object.freeze({ gs6: 5, dsl: 6, dsf: 7 });
+/** Retired codes reserved forever (never reissued): gb1/gb2 R22 2026-11-04; gs6/dsl/dsf earlier. */
+export const RESERVED_LIVE_TILE_KEY_CODES: Readonly<Record<string, number>> = Object.freeze({
+  gs6: 5, dsl: 6, dsf: 7, gb1: 3, gb2: 4,
+});
 
 /** cid layout (positive int32): bits 28-30 = 0b101 marker, bits 21-27 = tile code, bits 0-20 = hash. */
 export const TILE_CID_MARKER = 0b101;
