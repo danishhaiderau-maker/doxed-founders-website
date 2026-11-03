@@ -1,0 +1,39 @@
+# R51: nest/@dcf/api build must be a required PR check so CI cannot pass while
+# Railway production nest build would fail (incident: master c744ffea / Railway
+# deploy 655ec2f8 exit 1 at `npm run build --workspace=@dcf/api`).
+name: api-nest-build
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  api-nest-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma@6.8.2 generate --schema prisma/schema.prisma
+
+      - name: Build utils package
+        run: npm run build:utils
+
+      - name: Nest build (@dcf/api) — same command as Railway Dockerfile step 21/22
+        run: npm run build --workspace=@dcf/api
+
+      - name: Prove this workflow still gates nest build (mutation: drop the build step → fails)
+        run: node --test scripts/api-nest-build-ci-gate.spec.mjs
