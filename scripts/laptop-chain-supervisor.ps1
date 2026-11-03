@@ -25,22 +25,31 @@ try {
 
   # Segment shadow pull loop (Fly volume sink): pull every 2 min, parity every
   # 30 min. Opt out with <StateDir>\segment-pull.disabled.
+  # HM S0 / RK (#972): Fly-only step 1 — disable via flag; keep ChainSupervisor task Enabled.
   $segmentPullDisabled = Test-Path -LiteralPath (Join-Path $cfg.StateDir 'segment-pull.disabled')
   if (-not $segmentPullDisabled -and -not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull'))) {
     $segmentLoop = Start-Process -FilePath $powershell -WorkingDirectory $cfg.RepoRoot -WindowStyle Hidden -PassThru `
       -ArgumentList ($common + @((Join-Path $PSScriptRoot 'research-segment-pull-loop.ps1')) + $roots)
     Write-ChainLog -Config $cfg -Name $logName -Message "SEGMENT_PULL_STARTED pid=$($segmentLoop.Id)"
+  } elseif ($segmentPullDisabled) {
+    Write-ChainLog -Config $cfg -Name $logName -Message "SEGMENT_PULL_SKIPPED reason=segment-pull.disabled"
   }
 
   # Read-only Fly v2 shipper head, runtime, deploy-run and relay-status
-  # snapshots; never fails the tick. Refreshed before the fast-forward so a
-  # deploy that finished since the last tick is followed before a cycle starts.
-  $snapshots = (& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots 2>&1 |
-    Select-Object -Last 1) -as [string]
+  # snapshots; never fails the tick. Opt out with <StateDir>\fly-status-snapshots.disabled
+  # (HM S0 / RK #972 Fly-only step 2). Analyzer/health/alerts still run below.
+  $snapshots = 'snapshots=off'
+  if (-not (Test-Path -LiteralPath (Join-Path $cfg.StateDir 'fly-status-snapshots.disabled'))) {
+    $snapshots = (& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots 2>&1 |
+      Select-Object -Last 1) -as [string]
+  } else {
+    $snapshots = 'snapshots=skipped:fly-status-snapshots.disabled'
+  }
 
   # Follow Fly to a successfully deployed revision before any cycle starts, so
   # promotion and the analyzer run the code Fly runs. Opt out with
-  # <StateDir>\v2c-auto-ff.disabled. Never fails the tick.
+  # <StateDir>\v2c-auto-ff.disabled (HM S0 / RK #972 Fly-only step 3).
+  # Never fails the tick.
   $autoFf = 'autoFf=off'
   $followedDeploy = $false
   if (-not (Test-Path -LiteralPath (Join-Path $cfg.StateDir 'v2c-auto-ff.disabled'))) {

@@ -1062,6 +1062,16 @@ def test_supervisor_fast_forwards_before_starting_a_cycle_and_cycle_refuses_old_
     # The fast-forward reads the deploy-run snapshot, so it must be fresh this tick.
     assert supervisor.index("laptop-status-snapshots.ps1") < supervisor.index("v2c-auto-ff.ps1")
     assert "v2c-auto-ff.disabled" in supervisor
+    # HM S0 / #972: Fly-only steps opt out via flags; task stays Enabled.
+    assert "fly-status-snapshots.disabled" in supervisor
+    assert "segment-pull.disabled" in supervisor
+    assert "SEGMENT_PULL_SKIPPED" in supervisor
+    disable_helper = _source("local-fresh-disable-fly-chain-steps.ps1")
+    assert "LEAVE_ENABLED" in disable_helper or "Task stays Enabled" in disable_helper
+    assert "Disable-ScheduledTask" not in disable_helper.replace("never disables", "")
+    # No cmdlet invocation — only flag files.
+    assert "Disable-ScheduledTask -" not in disable_helper
+    assert "Unregister-ScheduledTask" not in disable_helper
     cycle = _source("run-segment-analyzer-cycle.ps1")
     check = cycle[cycle.index("ANALYZER_REVISION_MISMATCH") - 900:cycle.index("Set-CycleStatus 'ANALYZER'")]
     assert "merge-base --is-ancestor $deployedFull $checkoutHead" in check and "Stop-Cycle 5" in check
