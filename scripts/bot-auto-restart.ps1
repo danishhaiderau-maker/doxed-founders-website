@@ -102,12 +102,10 @@ try {
   if (-not $VaultEnv) {
     $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
   }
-  # RK 08:26: starters = allowlist filter only (no Assert). Refusal inside bot.
+  # RK 09:33: vault allowlist only — do NOT strip inherited BITFINEX_*.
   . (Join-Path $scriptDir 'laptop-chain-common.ps1')
   if (Test-Path $VaultEnv) {
     Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
-  } else {
-    [void](Clear-BitfinexProcessEnvNames)
   }
 
   # Script port wins over anything in home-bot.env (vault must not override :7002).
@@ -118,8 +116,6 @@ try {
   $env:FORCE_PAPER_MODE = "1"
   $env:LIVE_TRADING_ENABLED = "0"
   $env:LIVE_ARMED = "0"
-  [void](Clear-BitfinexProcessEnvNames)
-  # RK 08:26 (A): restore explicit BITFINEX_LIVE_ENABLED=0 (gate exempts exact '0').
   $env:BITFINEX_LIVE_ENABLED = "0"
 
   # --- Crash report (mirrors start-home-bot.ps1 Write-CrashReport) -------------
@@ -175,18 +171,15 @@ try {
   # --- Relaunch the bot exactly like start-home-bot.ps1 -NoWait ---------------
   function Import-VaultEnv {
     # Re-read vault on every relaunch so new secrets (e.g. BOT_ADMIN_TOKEN) apply
-    # without requiring a monitor respawn. Allowlist only; refusal inside bot.
+    # without requiring a monitor respawn. RK 09:33: no inherited-env strip.
     if (Test-Path $VaultEnv) {
       Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
-    } else {
-      [void](Clear-BitfinexProcessEnvNames)
     }
     $env:PORT = "$Port"
     $env:DASHBOARD_PORT = "$Port"
     $env:FORCE_PAPER_MODE = "1"
     $env:LIVE_TRADING_ENABLED = "0"
     $env:LIVE_ARMED = "0"
-    [void](Clear-BitfinexProcessEnvNames)
     $env:BITFINEX_LIVE_ENABLED = "0"
   }
 

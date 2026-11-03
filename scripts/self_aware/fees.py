@@ -1,20 +1,13 @@
-"""Fee truth: the Bitfinex account's actual fee rates vs every place the repo encodes fees.
+"""Fee truth: public Bitfinex fee schedule vs every place the repo encodes fees.
 
-Source of truth is the authenticated, read-only ``POST /v2/auth/r/summary``
-(the account's own maker/taker rates, derivatives included). If no read-capable
-key is configured the public fee schedule is consulted and the result is
-``PUBLIC_SCHEDULE_UNVERIFIED`` (never GREEN). The account answer is cached for
-``FEE_TTL_SEC``; the static drift scan runs on every job.
+HM HOLD ``ec34b9b9d0d9`` / RK 09:33: this module loads **no Bitfinex API
+credentials** (no env keys, no vault file keys). Source is the public fee
+schedule only (``PUBLIC_SCHEDULE_UNVERIFIED``, never GREEN from account auth).
+The static drift scan still runs on every job against ``bitfinex_cost_profile.py``.
 
-Drift scan: ``bitfinex_cost_profile.py`` is the one place fees may be written
-down. Every other surface (TS relay/sim constants, Fly's deployed revision,
-numeric fee literals in simulation/analyzer/dashboard code) must agree with it,
-and the profile must agree with the account.
-
-Credentials are read from ``BITFINEX_READ_API_KEY``/``BITFINEX_READ_API_SECRET``,
-then ``BITFINEX_API_KEY``/``BITFINEX_API_SECRET``, then the same names in
-``SELF_AWARE_BITFINEX_ENV_FILE``. Their values never leave this module: not in
-results, logs, errors or the cache file.
+``fetch_account`` / signed ``/auth/r/summary`` remain as unused helpers for
+historical tests of the request shape; ``load_credentials`` always returns
+``None`` so ``refresh_account`` never calls them.
 """
 from __future__ import annotations
 
@@ -76,18 +69,12 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 
 
 def load_credentials(env: dict[str, str] | None = None) -> tuple[str, str, str] | None:
-    """Return ``(key, secret, origin)``; origin names where they came from, never their value."""
-    env = dict(os.environ if env is None else env)
-    for k, s in (("BITFINEX_READ_API_KEY", "BITFINEX_READ_API_SECRET"), ("BITFINEX_API_KEY", "BITFINEX_API_SECRET")):
-        if env.get(k) and env.get(s):
-            return env[k], env[s], f"env:{k}"
-    path = Path(env.get("SELF_AWARE_BITFINEX_ENV_FILE") or DEFAULT_ENV_FILE)
-    if "onedrive" in str(path).lower():
-        return None
-    vals = _parse_env_file(path)
-    for k, s in (("BITFINEX_READ_API_KEY", "BITFINEX_READ_API_SECRET"), ("BITFINEX_API_KEY", "BITFINEX_API_SECRET")):
-        if vals.get(k) and vals.get(s):
-            return vals[k], vals[s], f"file:{path.name}:{k}"
+    """Never load Bitfinex API credentials (public schedule only).
+
+    HM HOLD ec34b9b9d0d9 (3) / RK 09:33: ignore env and vault file KEY/SECRET
+    names entirely. ``env`` is accepted for call-site compatibility only.
+    """
+    _ = env  # intentionally unused — do not read BITFINEX_* from process or files
     return None
 
 
@@ -390,8 +377,12 @@ def refresh_account(home: Path, now: float, *, force: bool = False, creds_env: d
     if not force and (fresh or (cache and now < retry_at)):
         return cache
     creds = load_credentials(creds_env)
-    attempt: dict[str, Any] = {"attempted_at": iso(now), "credentials": "configured" if creds else "missing"}
+    attempt: dict[str, Any] = {
+        "attempted_at": iso(now),
+        "credentials": "disabled_public_only" if creds is None else "configured",
+    }
     rec: dict[str, Any] | None = None
+    # Creds path retained for signature compatibility; load_credentials is always None.
     if creds:
         try:
             rec = fetch_account_fn(creds)
@@ -399,7 +390,7 @@ def refresh_account(home: Path, now: float, *, force: bool = False, creds_env: d
             attempt["account_error"] = str(exc)[:300]
     if rec is None:
         if cache.get("source") == ACCOUNT_SUMMARY:
-            # Keep the last verified account answer; it turns stale rather than being replaced by an unverified one.
+            # Keep a legacy cached account answer; it turns stale rather than being replaced.
             cache.update(last_attempt=attempt, retry_at_epoch=now + FEE_RETRY_SEC)
             _save_cache(home, cache)
             return cache

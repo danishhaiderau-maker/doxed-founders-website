@@ -57,26 +57,28 @@ def test_parse_summary_reads_documented_fee_block():
         fees.parse_summary([0, 0, 0, 0, [[0, 0, 0], [0, 0, 0]]])
 
 
-def test_credentials_prefer_read_key_then_file_and_never_leak(tmp_path, monkeypatch):
+def test_load_credentials_never_reads_bitfinex_keys(tmp_path):
+    """HM HOLD ec34b9b9d0d9 (3) / RK 09:33: no Bitfinex creds from env or vault file."""
     env_file = tmp_path / "bot.env"
     env_file.write_text(f'BITFINEX_API_KEY="{KEY}"\nBITFINEX_API_SECRET={SECRET}\n', encoding="utf-8")
-    key, secret, origin = fees.load_credentials({"SELF_AWARE_BITFINEX_ENV_FILE": str(env_file)})
-    assert (key, secret) == (KEY, SECRET) and origin == "file:bot.env:BITFINEX_API_KEY"
-    assert fees.load_credentials({"BITFINEX_READ_API_KEY": "r", "BITFINEX_READ_API_SECRET": "x",
-                                  "BITFINEX_API_KEY": "a", "BITFINEX_API_SECRET": "b"})[2] == "env:BITFINEX_READ_API_KEY"
-    assert fees.load_credentials({"SELF_AWARE_BITFINEX_ENV_FILE": str(tmp_path / "missing.env")}) is None
+    assert fees.load_credentials({"SELF_AWARE_BITFINEX_ENV_FILE": str(env_file)}) is None
+    assert fees.load_credentials({
+        "BITFINEX_READ_API_KEY": "r",
+        "BITFINEX_READ_API_SECRET": "x",
+        "BITFINEX_API_KEY": KEY,
+        "BITFINEX_API_SECRET": SECRET,
+    }) is None
+    assert fees.load_credentials(None) is None
+    # Source text must not return Bitfinex KEY/SECRET pairs from env or files.
+    src = Path(fees.__file__).read_text(encoding="utf-8")
+    assert "def load_credentials" in src and "return None" in src
+    assert "return env[k], env[s]" not in src
+    assert "return vals[k], vals[s]" not in src
+    assert "Never load Bitfinex API credentials" in src
 
-    def leaky(*a, **k):
-        raise fees.FeeSourceError(fees._redact(f"HTTP 500: apikey {KEY} invalid", KEY, SECRET))
-    monkeypatch.setattr(fees, "_post_summary", leaky)
-    rec = fees.refresh_account(tmp_path / "home", NOW, creds_env={"SELF_AWARE_BITFINEX_ENV_FILE": str(env_file)},
-                               fetch_public_fn=lambda: {**ACCOUNT_ZERO, "source": fees.PUBLIC_SCHEDULE_UNVERIFIED})
-    blob = json.dumps(rec) + (tmp_path / "home" / fees.CACHE_NAME).read_text(encoding="utf-8")
-    assert KEY not in blob and SECRET not in blob and "[REDACTED]" in blob
 
-
-def test_refresh_account_creds_absent_uses_public_fallback(tmp_path):
-    """HM HOLD 3d30a788b4f0 (3): no creds → public schedule fallback (fees.py:174 / :396-415)."""
+def test_refresh_account_public_only_never_calls_account(tmp_path):
+    """Public schedule only — even when BITFINEX_* names are present in creds_env."""
     home = tmp_path / "home"
     home.mkdir()
     public_calls: list[int] = []
@@ -96,14 +98,15 @@ def test_refresh_account_creds_absent_uses_public_fallback(tmp_path):
     rec = fees.refresh_account(
         home,
         NOW,
-        creds_env={"SELF_AWARE_BITFINEX_ENV_FILE": str(tmp_path / "missing.env")},
-        fetch_account_fn=lambda _c: pytest.fail("must not call account without creds"),
+        creds_env={"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET},
+        fetch_account_fn=lambda _c: pytest.fail("must not call account — creds disabled"),
         fetch_public_fn=public,
     )
     assert len(public_calls) == 1
     assert rec["source"] == fees.PUBLIC_SCHEDULE_UNVERIFIED
-    assert rec["last_attempt"]["credentials"] == "missing"
-    assert rec["maker_rate"] == 0.0
+    assert rec["last_attempt"]["credentials"] == "disabled_public_only"
+    assert KEY not in json.dumps(rec)
+    assert SECRET not in json.dumps(rec)
 
 
 def test_nonce_stays_on_platform_scale_and_is_monotonic():
@@ -135,44 +138,57 @@ def test_signed_request_is_read_only_summary_post(monkeypatch):
     assert rec["source"] == fees.ACCOUNT_SUMMARY and rec["derivatives_taker_rate"] == 0
 
 
-def test_cache_honours_ttl_and_keeps_last_verified_answer(tmp_path):
+def test_cache_honours_ttl_for_public_schedule(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    calls = []
+    calls: list[int] = []
 
-    def ok(creds):
+    def public():
         calls.append(1)
-        return dict(ACCOUNT_ZERO)
+        return {**ACCOUNT_ZERO, "source": fees.PUBLIC_SCHEDULE_UNVERIFIED,
+                "endpoint": "https://www.bitfinex.com/fees/"}
 
-    def fail(creds):
-        calls.append(1)
-        raise fees.FeeSourceError("HTTP 500: timeout")
-    env = {"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET}
-    fees.refresh_account(home, NOW, creds_env=env, fetch_account_fn=ok)
-    fees.refresh_account(home, NOW + 3600, creds_env=env, fetch_account_fn=ok)
-    assert len(calls) == 1  # inside the 6 h TTL
-    rec = fees.refresh_account(home, NOW + fees.FEE_TTL_SEC + 1, creds_env=env, fetch_account_fn=fail,
-                               fetch_public_fn=lambda: pytest.fail("must not downgrade to the public schedule"))
-    assert len(calls) == 2 and rec["source"] == fees.ACCOUNT_SUMMARY and rec["fetched_at_epoch"] == NOW
-    assert "timeout" in rec["last_attempt"]["account_error"]
-    fees.refresh_account(home, NOW + fees.FEE_TTL_SEC + 60, creds_env=env, fetch_account_fn=fail)
-    assert len(calls) == 2  # retry window after a failure
+    fees.refresh_account(home, NOW, fetch_public_fn=public)
+    fees.refresh_account(home, NOW + 60, fetch_public_fn=public)
+    # Public path uses FEE_RETRY_SEC as retry window (not ACCOUNT TTL).
+    assert len(calls) == 1
+    fees.refresh_account(home, NOW + fees.FEE_RETRY_SEC + 1, fetch_public_fn=public)
+    assert len(calls) == 2
+
+
+def _seed_legacy_account_cache(home: Path, now: float = NOW, *, retry_at: float | None = None) -> None:
+    """Seed a pre-rev5 ACCOUNT_SUMMARY cache row (legacy; refresh no longer fetches account)."""
+    home.mkdir(parents=True, exist_ok=True)
+    rec = {
+        **ACCOUNT_ZERO,
+        "fetched_at": iso(now),
+        "fetched_at_epoch": now,
+        "last_attempt": {"credentials": "legacy_seed"},
+        "retry_at_epoch": now + fees.FEE_TTL_SEC if retry_at is None else retry_at,
+    }
+    (home / fees.CACHE_NAME).write_text(json.dumps(rec), encoding="utf-8")
 
 
 # ------------------------------------------------------------- drift
 
-def test_zero_everywhere_is_green(tmp_path):
-    doc = fees.run(tmp_path / "home", _repo(tmp_path), NOW, fetch_account_fn=lambda c: dict(ACCOUNT_ZERO),
-                   creds_env={"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET})
-    assert doc["status"] == "GREEN" and doc["matches_cost_profile"] is True and doc["matches_everywhere"] is True
+def test_zero_everywhere_public_is_amber_match(tmp_path):
+    doc = fees.run(
+        tmp_path / "home",
+        _repo(tmp_path),
+        NOW,
+        fetch_public_fn=lambda: {**ACCOUNT_ZERO, "source": fees.PUBLIC_SCHEDULE_UNVERIFIED},
+    )
+    assert doc["status"] == "AMBER" and doc["matches_cost_profile"] is True and doc["matches_everywhere"] is True
     assert (doc["maker_bps"], doc["taker_bps"], doc["derivatives_maker_bps"], doc["derivatives_taker_bps"]) == (0, 0, 0, 0)
-    assert doc["source"] == "ACCOUNT_SUMMARY" and doc["stale"] is False and doc["cost_profile"]["fee_profile_id"] == "BITFINEX_ZERO"
+    assert doc["source"] == fees.PUBLIC_SCHEDULE_UNVERIFIED
+    assert doc["cost_profile"]["fee_profile_id"] == "BITFINEX_ZERO"
+    assert doc["last_attempt"]["credentials"] == "disabled_public_only"
 
 
 def test_profile_vs_account_mismatch_is_red_naming_field(tmp_path):
     paid = {**ACCOUNT_ZERO, "derivatives_taker_rate": 0.00065}
-    doc = fees.run(tmp_path / "home", _repo(tmp_path), NOW, fetch_account_fn=lambda c: paid,
-                   creds_env={"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET})
+    dr = fees.drift(_repo(tmp_path), paid)
+    doc = fees.build_doc(paid | {"fetched_at": iso(NOW), "fetched_at_epoch": NOW}, dr, NOW)
     assert doc["status"] == "RED" and doc["matches_cost_profile"] is False
     assert [(m["file"], m["field"]) for m in doc["mismatches"]] == [(fees.PROFILE_REL, "TAKER_FEE_RATE")]
 
@@ -225,31 +241,42 @@ def test_fly_revision_and_analyzer_checkout_are_compared(tmp_path, monkeypatch):
 
 
 def test_unverified_public_schedule_is_amber_never_green(tmp_path):
-    doc = fees.run(tmp_path / "home", _repo(tmp_path), NOW, creds_env={"SELF_AWARE_BITFINEX_ENV_FILE": str(tmp_path / "none")},
-                   fetch_public_fn=lambda: {**ACCOUNT_ZERO, "source": fees.PUBLIC_SCHEDULE_UNVERIFIED})
+    doc = fees.run(
+        tmp_path / "home",
+        _repo(tmp_path),
+        NOW,
+        fetch_public_fn=lambda: {**ACCOUNT_ZERO, "source": fees.PUBLIC_SCHEDULE_UNVERIFIED},
+    )
     assert doc["source"] == "PUBLIC_SCHEDULE_UNVERIFIED" and doc["status"] == "AMBER"
-    assert doc["matches_cost_profile"] is True and doc["last_attempt"]["credentials"] == "missing"
+    assert doc["matches_cost_profile"] is True
+    assert doc["last_attempt"]["credentials"] == "disabled_public_only"
 
 
-def test_stale_account_answer_is_amber(tmp_path):
-    env = {"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET}
-    fees.run(tmp_path / "home", _repo(tmp_path), NOW, fetch_account_fn=lambda c: dict(ACCOUNT_ZERO), creds_env=env)
-
-    def fail(c):
-        raise fees.FeeSourceError("HTTP 500")
-    doc = fees.run(tmp_path / "home", _repo(tmp_path), NOW + fees.STALE_AFTER_SEC + 10, fetch_account_fn=fail, creds_env=env)
+def test_stale_legacy_account_cache_is_amber(tmp_path):
+    home = tmp_path / "home"
+    later = NOW + fees.STALE_AFTER_SEC + 10
+    _seed_legacy_account_cache(home, NOW, retry_at=later + 3600)
+    doc = fees.run(home, _repo(tmp_path), later,
+                   fetch_public_fn=lambda: pytest.fail("must keep legacy account cache while retry window holds"))
     assert doc["source"] == "ACCOUNT_SUMMARY" and doc["stale"] is True and doc["status"] == "AMBER"
 
 
 # ------------------------------------------------------- health + API
 
 def test_health_check_finding(tmp_path):
-    env = {"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET}
-    green = fees.run(tmp_path / "h1", _repo(tmp_path), NOW, fetch_account_fn=lambda c: dict(ACCOUNT_ZERO), creds_env=env)
+    # GREEN still requires ACCOUNT_SUMMARY; seed legacy cache for that finding.
+    home = tmp_path / "h1"
+    _seed_legacy_account_cache(home, NOW)
+    green = fees.run(home, _repo(tmp_path), NOW,
+                     fetch_public_fn=lambda: pytest.fail("fresh account cache must short-circuit"))
     f = diagnose.check_fees({"now": NOW, "fees": green}, {}, None)
     assert f.id == "fees.truth" and f.severity == "GREEN" and f.runbook.endswith("#fees-truth")
-    red = fees.run(tmp_path / "h2", _repo(tmp_path / "b", sim_bps="4"), NOW,
-                   fetch_account_fn=lambda c: dict(ACCOUNT_ZERO), creds_env=env)
+    red = fees.run(
+        tmp_path / "h2",
+        _repo(tmp_path / "b", sim_bps="4"),
+        NOW,
+        fetch_public_fn=lambda: {**ACCOUNT_ZERO, "source": fees.PUBLIC_SCHEDULE_UNVERIFIED},
+    )
     f = diagnose.check_fees({"now": NOW, "fees": red}, {}, None)
     assert f.severity == "RED" and "bitfinex-sim-trading.client.ts SIM_FEE_BPS" in f.observed and f.causes
     old = {**green, "generated_at": iso(NOW - 3 * 3600)}
@@ -258,9 +285,14 @@ def test_health_check_finding(tmp_path):
 
 
 def test_fees_endpoint(tmp_path):
+    pytest.importorskip("pandas")  # server stack pulls optional analytics deps
     from self_aware.server import make_server
-    env = {"BITFINEX_API_KEY": KEY, "BITFINEX_API_SECRET": SECRET}
-    doc = fees.run(tmp_path / "home", _repo(tmp_path), NOW, fetch_account_fn=lambda c: dict(ACCOUNT_ZERO), creds_env=env)
+    doc = fees.run(
+        tmp_path / "home",
+        _repo(tmp_path),
+        NOW,
+        fetch_public_fn=lambda: {**ACCOUNT_ZERO, "source": fees.PUBLIC_SCHEDULE_UNVERIFIED},
+    )
 
     class FakeEngine:
         docs = {"fees": doc}
@@ -278,7 +310,7 @@ def test_fees_endpoint(tmp_path):
         for k in ("venue", "maker_bps", "taker_bps", "derivatives_maker_bps", "derivatives_taker_bps", "source",
                   "fetched_at", "stale", "matches_cost_profile"):
             assert k in body
-        assert body["venue"] == "bitfinex" and body["status"] == "GREEN" and "surfaces" not in body
+        assert body["venue"] == "bitfinex" and body["status"] == "AMBER" and "surfaces" not in body
         assert "surfaces" in get("/api/selfaware/fees?detail=1")
     finally:
         srv.shutdown()

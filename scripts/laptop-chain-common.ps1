@@ -207,20 +207,21 @@ $script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
 # Bot starters: explicit non-BITFINEX names only (disaster-recovery / showcase).
 # Dropped vs rev3: PLATFORM_* (snapshots load via home-bot-vault-env), 
 # LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID (no getenv reader).
-# Keep reasons (RK 08:26 B) — one line each; full table in #981 asks:
+# Keep reasons (RK 09:33) — full table in #981 asks:
 # BOT_ADMIN_TOKEN — bot admin auth (btc_conservative_agent / bot.py)
 # BOT_CONTROL_SECRET — relay/control HMAC (bot.py)
-# DEEPSEEK_API_KEY — paper AI (bot.py getenv); R50: paid DeepSeek when set
 # SHOWCASE_WEBHOOK_SECRET — showcase webhook HMAC (bot.py)
 # SHOWCASE_RELAY_WEBHOOK_URL — paper relay delivery URL (bot.py)
 # CRASH_NOTIFY_WEBHOOK — crash notify (start-home-bot / bot-auto-restart)
-# MONITOR_READ_TOKEN — read-only monitor bearer (bot.py / monitor_api.py)
+# MONITOR_READ_TOKEN — KEEP: before_request only admits monitor paths when
+#   method == "GET" (bot.py ~35850-35862); POST monitor routes use admin/R2.
 # LIFECYCLE_LAPTOP_ATTESTATION_KEY — lifecycle cleanup attest (bot.py)
 # LIFECYCLE_CLEANUP_ENABLED — lifecycle cleanup toggle (bot.py)
+# DROPPED DEEPSEEK_API_KEY — code path exists (bot.py getenv) but no observed
+#   monthly R50 USD figure in-repo; RK 09:33 requires real cost or drop.
 $script:LaptopChainBotVaultAllowlist = @(
   'BOT_ADMIN_TOKEN',
   'BOT_CONTROL_SECRET',
-  'DEEPSEEK_API_KEY',
   'SHOWCASE_WEBHOOK_SECRET',
   'SHOWCASE_RELAY_WEBHOOK_URL',
   'CRASH_NOTIFY_WEBHOOK',
@@ -332,14 +333,14 @@ function Assert-BitfinexProcessEnvAbsent {
 
 # AdminTokenOnly (default): BOT_ADMIN_TOKEN only (laptop chain / analyzer cycle).
 # BotAllowlist: explicit non-BITFINEX bot starter names only (true allowlist).
-# Never prints values. Always strips any residual BITFINEX_* names afterward.
+# Never prints values. RK 09:33: do NOT strip inherited BITFINEX_* — vault never
+# sets those names; inherited KEY/SECRET/TOKEN must reach in-process exit 79.
 function Import-LaptopChainVaultAllowlist {
   param(
     [Parameter(Mandatory = $true)][string]$VaultEnv,
     [ValidateSet('AdminTokenOnly', 'BotAllowlist')][string]$Mode = 'AdminTokenOnly'
   )
   if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) {
-    [void](Clear-BitfinexProcessEnvNames)
     return
   }
   $names = if ($Mode -eq 'BotAllowlist') {
@@ -353,7 +354,6 @@ function Import-LaptopChainVaultAllowlist {
     if (-not $value) { continue }
     [Environment]::SetEnvironmentVariable($name, $value, 'Process')
   }
-  [void](Clear-BitfinexProcessEnvNames)
 }
 
 function Get-AdminToken([string]$VaultEnv) {

@@ -148,10 +148,8 @@ if (Test-Path -LiteralPath $vaultEnv) {
     }
   }
 }
-# RK 08:26: starters = allowlist filter only (no Assert). Exit-79 lives inside
-# the launched analyzer process (v62 + bitfinex_env_name_gate).
+# RK 09:33: do NOT strip inherited BITFINEX_*. Exit-79 inside v62 process.
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
-[void](Clear-BitfinexProcessEnvNames)
 $env:BITFINEX_LIVE_ENABLED = "0"
 
 # Explicit durable nonsecret opt-in; never load model economics from the vault.

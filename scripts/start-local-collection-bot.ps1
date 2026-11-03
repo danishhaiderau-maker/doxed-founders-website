@@ -40,10 +40,9 @@ if (-not (Test-Path $vaultEnv)) {
   exit 1
 }
 
-# RK 08:26: starters = allowlist filter only (no Assert). Refusal inside bot.
+# RK 09:33: vault allowlist only — do NOT strip inherited BITFINEX_*.
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
 Import-LaptopChainVaultAllowlist -VaultEnv $vaultEnv -Mode BotAllowlist
-[void](Clear-BitfinexProcessEnvNames)
 $env:BITFINEX_LIVE_ENABLED = "0"
 
 $env:PORT = "$Port"

@@ -120,19 +120,18 @@ def test_vault_allowlist_is_admin_token_only_and_refuses_bitfinex():
     ("start-home-bot.ps1", "bot-auto-restart.ps1", "start-local-collection-bot.ps1"),
 )
 def test_bot_starters_route_vault_through_true_bot_allowlist(script_name):
-    """RK 08:26: starters = allowlist only (no Assert); restore LIVE_ENABLED=0."""
+    """RK 09:33: vault allowlist only; no inherited-env strip; restore LIVE=0."""
     source = _source(script_name)
     assert "Import-LaptopChainVaultAllowlist" in source
     assert "BotAllowlist" in source
-    # Starters must NOT refuse before strip — refusal lives in launched process.
     assert "Assert-BitfinexProcessEnvAbsent" not in source
     assert "laptop-chain-common.ps1" in source
     assert not re.search(
         r"Get-Content\s+\$\w*[Vv]ault\w*\s*\|[^\n]*ForEach-Object",
         source,
     )
-    assert "Clear-BitfinexProcessEnvNames" in source
-    # RK 08:26 (A): explicit BITFINEX_LIVE_ENABLED=0 restored.
+    # RK 09:33: starters must not Clear inherited BITFINEX_* names.
+    assert "Clear-BitfinexProcessEnvNames" not in source
     assert re.search(r'\$env:BITFINEX_LIVE_ENABLED\s*=\s*"0"', source)
 
 
@@ -145,25 +144,21 @@ def test_supervisor_and_cycle_fail_closed_on_bitfinex_env_names():
     for source in (supervisor, cycle, analyzer):
         assert "Assert-BitfinexProcessEnvAbsent" in source
         assert "BITFINEX_ENV_NAME_COUNT count=" in _source("laptop-chain-common.ps1")
-    # Analyzer starter: allowlist/clear + LIVE=0 only; gate runs in v62 process.
     assert "Assert-BitfinexProcessEnvAbsent" not in home_analyzer
+    assert "Clear-BitfinexProcessEnvNames" not in home_analyzer
     assert re.search(r'\$env:BITFINEX_LIVE_ENABLED\s*=\s*"0"', home_analyzer)
     assert "Write-Host $env:BITFINEX" not in supervisor
 
 
 def test_bot_allowlist_names_justified_or_dropped():
-    """RK 08:26 (B): each remaining allowlist name has a documented keep reason."""
+    """RK 09:33: DEEPSEEK dropped (no monthly R50 figure); MONITOR kept with GET-only proof."""
     common = _source("laptop-chain-common.ps1")
     bot_names = _ps_allowlist_names(common, "LaptopChainBotVaultAllowlist")
-    # Dropped: PLATFORM_* (not read by bot), LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID (no getenv).
+    assert "DEEPSEEK_API_KEY" not in bot_names
     assert "PLATFORM_API_BASE_URL" not in bot_names
-    assert "PLATFORM_RELAY_AGENT_SLUG" not in bot_names
-    assert "PLATFORM_RELAY_USER_ID" not in bot_names
-    assert "LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID" not in bot_names
     expected = {
         "BOT_ADMIN_TOKEN",
         "BOT_CONTROL_SECRET",
-        "DEEPSEEK_API_KEY",
         "SHOWCASE_WEBHOOK_SECRET",
         "SHOWCASE_RELAY_WEBHOOK_URL",
         "CRASH_NOTIFY_WEBHOOK",
@@ -172,12 +167,11 @@ def test_bot_allowlist_names_justified_or_dropped():
         "LIFECYCLE_CLEANUP_ENABLED",
     }
     assert set(bot_names) == expected
-    # DEEPSEEK kept: paper AI path reads it (bot.py getenv).
     bot = (ROOT / "services" / "btc-conservative-agent" / "bot.py").read_text(encoding="utf-8")
-    assert 'os.getenv("DEEPSEEK_API_KEY")' in bot
-    # MONITOR_READ_TOKEN kept only if read-only monitor path.
-    assert "MONITOR_READ_TOKEN" in bot
-    assert "read-only" in bot.lower() or "MONITOR_READ_TOKEN" in bot
+    # Server-route proof (not comments): monitor paths admitted only when method == "GET".
+    assert 'if method == "GET" and path in (_MONITOR_DIGEST_PATH, _MONITOR_INTEGRITY_PATH):' in bot
+    assert 'if method == "GET" and path in _MONITOR_TILE_PATHS:' in bot
+    assert "_MONITOR_READ_TOKEN" in bot
 
 
 def test_fees_system_health_node_do_not_export_vault_bitfinex_into_process():
@@ -185,18 +179,15 @@ def test_fees_system_health_node_do_not_export_vault_bitfinex_into_process():
     fees = (ROOT / "scripts" / "self_aware" / "fees.py").read_text(encoding="utf-8")
     health = (ROOT / "scripts" / "system_health.py").read_text(encoding="utf-8")
     load_vault_mjs = (ROOT / "scripts" / "load-vault-env.mjs").read_text(encoding="utf-8")
-    # fees.py may parse home-bot.env into a local dict for read-only fee probes;
-    # it must not assign BITFINEX_* into os.environ.
-    assert "DEFAULT_ENV_FILE" in fees and "home-bot.env" in fees
+    assert "load_credentials" in fees
+    assert "return None" in fees
     assert not re.search(r"os\.environ\[[^\]]*BITFINEX", fees)
     assert not re.search(r"os\.environ\.update\(", fees)
-    assert "return vals[k], vals[s]" in fees or "return vals.get" in fees or "origin" in fees
-    # system_health.load_vault returns a dict; BOT_ADMIN / PLATFORM / DEEPSEEK
-    # lookups use vault.get — no os.environ[BITFINEX_*]= assignment.
+    assert "return env[k], env[s]" not in fees
+    assert "return vals[k], vals[s]" not in fees
     assert "def load_vault" in health
     assert not re.search(r"os\.environ\[[^\]]*BITFINEX", health)
     assert 'vault.get("BOT_ADMIN_TOKEN")' in health or "vault.get('BOT_ADMIN_TOKEN')" in health
-    # Node one-shot: home-bot.env loader only copies BOT_ADMIN_TOKEN.
     assert "loadCanonicalBotAdminToken" in load_vault_mjs
     assert "BOT_ADMIN_TOKEN=" in load_vault_mjs
     assert "BITFINEX_API_KEY" not in load_vault_mjs
@@ -468,12 +459,13 @@ def test_import_vault_allowlist_never_exports_bitfinex_into_process_env(chain, t
     "script_name",
     ("start-home-bot.ps1", "bot-auto-restart.ps1", "start-local-collection-bot.ps1"),
 )
-def test_bot_starter_bot_allowlist_never_exports_bitfinex_names(
+def test_bot_starter_bot_allowlist_never_exports_vault_bitfinex_keeps_inherited(
     chain, tmp_path, script_name
 ):
-    """Windows proof: each starter's BotAllowlist Import; never prints values."""
+    """RK 09:33: vault allowlist never exports BITFINEX_*; inherited KEY remains for in-process refuse."""
     source = _source(script_name)
     assert "Import-LaptopChainVaultAllowlist" in source and "BotAllowlist" in source
+    assert "Clear-BitfinexProcessEnvNames" not in source
     fixture = _vault_fixture(tmp_path)
     script = (
         _common_prelude(chain)
@@ -486,13 +478,17 @@ def test_bot_starter_bot_allowlist_never_exports_bitfinex_names(
         f"$count = Get-BitfinexProcessEnvNameCount; "
         f"$admin = -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('BOT_ADMIN_TOKEN','Process')); "
         f"$other = -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('OTHER_SECRET','Process')); "
-        f"Write-Output ('adminPresent=' + $admin + ';bitfinexNameCount=' + $count + ';otherPresent=' + $other)"
+        f"$keyStill = -not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('BITFINEX_API_KEY','Process')); "
+        f"Write-Output ('adminPresent=' + $admin + ';bitfinexNameCount=' + $count + ';otherPresent=' + $other + ';keyStill=' + $keyStill)"
     )
     result = _ps(script, _clean_chain_env(chain))
     assert result.returncode == 0, f"{script_name}: {result.stderr}"
     line = result.stdout.strip().splitlines()[-1]
-    # BotAllowlist loads BOT_ADMIN_TOKEN; OTHER_SECRET is not allowlisted.
-    assert line == "adminPresent=True;bitfinexNameCount=0;otherPresent=False", (script_name, line)
+    # Inherited KEY remains (count=1); vault BITFINEX values never exported; OTHER not allowlisted.
+    assert line == "adminPresent=True;bitfinexNameCount=1;otherPresent=False;keyStill=True", (
+        script_name,
+        line,
+    )
     assert "fixture-should-not-export" not in result.stdout
     assert "preexisting" not in result.stdout
 
@@ -534,6 +530,28 @@ def test_assert_allows_live_enabled_exact_zero_and_refuses_other(chain):
     bad = _ps(bad_script, _clean_chain_env(chain))
     assert bad.returncode == 79, bad.stdout + bad.stderr
     assert "REFUSED_BITFINEX_ENV_NAMES" in bad.stdout
+
+
+@windows_only
+def test_real_starter_env_setup_with_inherited_key_leaves_refusal_for_process(chain, tmp_path):
+    """RK 09:33: real starter setup (Import + LIVE=0, no Clear) keeps inherited KEY → Assert 79."""
+    fixture = _vault_fixture(tmp_path)
+    # Mirror start-home-bot env setup exactly (vault allowlist + LIVE=0, no Clear).
+    script = (
+        _common_prelude(chain)
+        + f"[Environment]::SetEnvironmentVariable('BITFINEX_API_KEY','fake-inherited-key','Process'); "
+        f"Import-LaptopChainVaultAllowlist -VaultEnv '{fixture}' -Mode BotAllowlist; "
+        f"$env:FORCE_PAPER_MODE = '1'; $env:LIVE_TRADING_ENABLED = '0'; $env:LIVE_ARMED = '0'; "
+        f"$env:BITFINEX_LIVE_ENABLED = '0'; "
+        f"$count = Get-BitfinexProcessEnvNameCount; "
+        f"Write-Output ('count=' + $count); "
+        f"Assert-BitfinexProcessEnvAbsent"
+    )
+    result = _ps(script, _clean_chain_env(chain))
+    assert result.returncode == 79, result.stdout + result.stderr
+    assert "count=1" in result.stdout
+    assert "REFUSED_BITFINEX_ENV_NAMES" in result.stdout
+    assert "fake-inherited-key" not in result.stdout
 
 
 @windows_only

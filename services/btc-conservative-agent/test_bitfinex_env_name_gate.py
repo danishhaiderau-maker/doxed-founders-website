@@ -203,10 +203,151 @@ def test_btc_conservative_agent_wires_gate():
     assert "_refuse_bitfinex_process_env_names" in text
 
 
-def test_analyzer_v62_wires_gate_on_main():
+def test_analyzer_v62_wires_gate_before_heavy_imports():
     text = (_HERE / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
-    assert "assert_no_bitfinex_process_env_names" in text
-    # Gate runs under the __main__ entry (launched process), not at import.
-    main_idx = text.rfind('if __name__ == "__main__":')
-    gate_idx = text.find("assert_no_bitfinex_process_env_names", main_idx)
-    assert main_idx > 0 and gate_idx > main_idx
+    # Early __main__ gate must precede pandas import so refusal works without deps.
+    early_main = text.find('if __name__ == "__main__":')
+    gate_idx = text.find("assert_no_bitfinex_process_env_names", early_main)
+    pandas_idx = text.find("import pandas")
+    assert 0 <= early_main < gate_idx < pandas_idx
+
+
+def _clean_child_env(**extra: str) -> dict[str, str]:
+    """Process env without BITFINEX_* KEY/SECRET/TOKEN; LIVE_ENABLED exact 0."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not str(k).upper().startswith("BITFINEX_")
+    }
+    env["BITFINEX_LIVE_ENABLED"] = "0"
+    env.update(extra)
+    return env
+
+
+def test_real_process_btc_conservative_agent_refuses_injected_key():
+    """HM HOLD ec34b9b9d0d9 (2): real entry process + fake KEY → exit 79."""
+    env = _clean_child_env(BITFINEX_API_KEY="fake-not-real-key")
+    result = subprocess.run(
+        [sys.executable, str(_HERE / "btc_conservative_agent.py")],
+        capture_output=True,
+        text=True,
+        cwd=str(_HERE),
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == gate.REFUSAL_EXIT, result.stderr + result.stdout
+    assert "BITFINEX_ENV_NAME_COUNT count=1" in result.stdout
+    assert "REFUSED_BITFINEX_ENV_NAMES" in result.stderr
+    assert "fake-not-real-key" not in result.stdout
+    assert "fake-not-real-key" not in result.stderr
+
+
+def test_real_process_btc_conservative_agent_clean_env_does_not_refuse():
+    """Clean env: gate prints count=0 then continues (kill after proof; not exit 79)."""
+    env = _clean_child_env()
+    proc = subprocess.Popen(
+        [sys.executable, str(_HERE / "btc_conservative_agent.py")],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(_HERE),
+        env=env,
+    )
+    try:
+        # Gate runs before bot import; first stdout line is the count.
+        line = proc.stdout.readline() if proc.stdout else ""
+        assert "BITFINEX_ENV_NAME_COUNT count=0" in line, (line, proc.stderr.read() if proc.stderr else "")
+        assert proc.poll() != gate.REFUSAL_EXIT
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_real_process_analyzer_v62_refuses_injected_key():
+    env = _clean_child_env(BITFINEX_API_KEY="fake-v62-key")
+    result = subprocess.run(
+        [sys.executable, str(_HERE / "analyzer_research_engine_v62.py")],
+        capture_output=True,
+        text=True,
+        cwd=str(_HERE),
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == gate.REFUSAL_EXIT, result.stderr + result.stdout
+    assert "BITFINEX_ENV_NAME_COUNT count=1" in result.stdout
+    assert "REFUSED_BITFINEX_ENV_NAMES" in result.stderr
+    assert "fake-v62-key" not in result.stdout + result.stderr
+
+
+def test_real_process_analyzer_v62_clean_env_does_not_refuse_with_79():
+    """Clean env: gate passes (count=0); later failures must not be exit 79."""
+    env = _clean_child_env()
+    env.pop("BTC_AGENT_DATA_DIR", None)
+    env.pop("BTC_AGENT_REPORT_DIR", None)
+    result = subprocess.run(
+        [sys.executable, str(_HERE / "analyzer_research_engine_v62.py")],
+        capture_output=True,
+        text=True,
+        cwd=str(_HERE),
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode != gate.REFUSAL_EXIT, result.stderr + result.stdout
+    assert "BITFINEX_ENV_NAME_COUNT count=0" in result.stdout
+    assert "REFUSED_BITFINEX_ENV_NAMES" not in result.stderr
+
+
+def test_real_process_supervisor_child_assert_refuses_injected_key():
+    """Supervisor child path: run-analyzer-once Assert via common.ps1 (pwsh/powershell)."""
+    import shutil
+
+    ps = shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
+    if not ps:
+        pytest.skip("PowerShell required for supervisor-child Assert proof")
+    common = _HERE.parents[1] / "scripts" / "laptop-chain-common.ps1"
+    script = (
+        f". '{common}'; "
+        "[Environment]::SetEnvironmentVariable('BITFINEX_API_KEY','fake-supervisor-child','Process'); "
+        "[Environment]::SetEnvironmentVariable('BITFINEX_LIVE_ENABLED','0','Process'); "
+        "Assert-BitfinexProcessEnvAbsent"
+    )
+    result = subprocess.run(
+        [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == gate.REFUSAL_EXIT, result.stdout + result.stderr
+    assert "BITFINEX_ENV_NAME_COUNT count=1" in result.stdout
+    assert "REFUSED_BITFINEX_ENV_NAMES" in result.stdout
+    assert "fake-supervisor-child" not in result.stdout
+
+
+def test_real_process_supervisor_child_assert_clean_env_passes():
+    import shutil
+
+    ps = shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
+    if not ps:
+        pytest.skip("PowerShell required for supervisor-child Assert proof")
+    common = _HERE.parents[1] / "scripts" / "laptop-chain-common.ps1"
+    script = (
+        f". '{common}'; "
+        "Remove-Item Env:BITFINEX_API_KEY -ErrorAction SilentlyContinue; "
+        "[Environment]::SetEnvironmentVariable('BITFINEX_LIVE_ENABLED','0','Process'); "
+        "Assert-BitfinexProcessEnvAbsent; "
+        "Write-Output 'clean-ok'"
+    )
+    result = subprocess.run(
+        [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "BITFINEX_ENV_NAME_COUNT count=0" in result.stdout
+    assert "clean-ok" in result.stdout

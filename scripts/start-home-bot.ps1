@@ -167,8 +167,8 @@ if (-not (Test-Path $VaultEnv)) {
   exit 1
 }
 
-# RK 08:26: starters = allowlist filter only (no pre-strip / Assert refusal).
-# Exit-79 lives inside the launched bot process (bitfinex_env_name_gate).
+# RK 09:33: vault allowlist only — do NOT strip inherited BITFINEX_*.
+# Inherited KEY/SECRET/TOKEN reach in-process exit 79 (bitfinex_env_name_gate).
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
 Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
 
@@ -178,8 +178,7 @@ Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
 $env:FORCE_PAPER_MODE = "1"
 $env:LIVE_TRADING_ENABLED = "0"
 $env:LIVE_ARMED = "0"
-[void](Clear-BitfinexProcessEnvNames)
-# RK 08:26 (A): restore explicit BITFINEX_LIVE_ENABLED=0 (gate exempts exact '0').
+# Explicit paper live flag (exact '0' exempt from gate); does not clear KEY names.
 $env:BITFINEX_LIVE_ENABLED = "0"
 
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"

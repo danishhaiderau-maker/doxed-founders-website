@@ -40,6 +40,22 @@ v66: Bitfinex sync metadata verification, AI_REJECT funnel counts, bot version c
 v63: MFE/MAE, bull/bear spread, structure_score, MTF alignment, contradiction index,
 exit forensics, TIME_EXIT deep dive, edge×structure×MTF combos, factor-gate funnel.
 """
+# Minimal imports first so __main__ can refuse BITFINEX_* KEY/SECRET/TOKEN before
+# heavy deps (pandas) load — HM HOLD ec34b9b9d0d9 / RK 08:26.
+import os
+import sys
+
+if __name__ == "__main__":
+    # Exit-79 refusal inside launched analyzer before any heavy import.
+    try:
+        from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names as _refuse_bfx_early
+    except ImportError:
+        _script_dir_early = os.path.dirname(os.path.abspath(__file__))
+        if _script_dir_early not in sys.path:
+            sys.path.insert(0, _script_dir_early)
+        from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names as _refuse_bfx_early
+    _refuse_bfx_early()
+
 import pandas as pd
 import numpy as np
 import time
@@ -47,13 +63,11 @@ import math
 import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-import os
 import json
 import ast
 import copy
 import glob
 import shutil
-import sys
 import traceback
 import faulthandler
 import re
@@ -23934,17 +23948,7 @@ def finalize_analyzer_outputs(
 
 
 if __name__ == "__main__":
-    # RK 08:26: exit-79 refusal inside launched analyzer (incl. v62). Starters
-    # do not pre-strip-check; KEY/SECRET/TOKEN names refuse; LIVE_ENABLED='0' ok.
-    try:
-        from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names as _refuse_bfx
-    except ImportError:
-        _script_dir_for_gate = os.path.dirname(os.path.abspath(__file__))
-        if _script_dir_for_gate not in sys.path:
-            sys.path.insert(0, _script_dir_for_gate)
-        from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names as _refuse_bfx
-    _refuse_bfx()
-
+    # Gate already ran at file top (before pandas). Remaining __main__ body:
     # The analyzer writes derived reports into the source/report directory.  A
     # direct launch without the canonical mirror used to fall back to cwd and
     # could therefore replace valid reports with an all-zero cohort.  Runtime
