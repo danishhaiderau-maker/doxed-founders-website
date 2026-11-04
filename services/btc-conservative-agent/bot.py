@@ -148,6 +148,7 @@ import pytz
 import bitfinex_cost_profile
 import research_freeze as _research_freeze
 import regime_bars_3m
+import strategy_package_loader
 
 from combo_pathway_config import (
     tile_card_sections as combo_tile_card_sections,
@@ -38077,6 +38078,14 @@ def build_static_pathway_lane_specs() -> dict:
             "policy_epoch": lane_spec["policy_epoch"],
             "relay_eligible": False,
         })
+    # R47 strategy packages: auto-render a card per registered YAML package.
+    # Never mixed into ACTIVE_TILE_ORDER / lanes (freeze roster stays byte-identical).
+    # Packages are never activated by presence alone (each needs own R22 + RK PASS).
+    try:
+        strategy_package_tiles = strategy_package_loader.build_dashboard_tile_specs()
+    except strategy_package_loader.StrategyPackageRefuse as exc:
+        logger.error(f"[STRATEGY_PACKAGE] registry refuse: {exc}")
+        strategy_package_tiles = []
     return {
         "architecture_frozen": True,
         "architecture_freeze_note": "Registry-owned tiles only; add/remove only through the atomic lifecycle contract",
@@ -38096,6 +38105,7 @@ def build_static_pathway_lane_specs() -> dict:
         "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "legacy_lanes_retired": sorted(RETIRED_TILE_LANES),
         "lanes": _annotate_lanes_with_exec_mode(lanes),
+        "strategy_package_tiles": strategy_package_tiles,
     }
 
 def _truthful_approve_to_fill_pct(approves: int, fills: int, reported) -> float:
@@ -41291,6 +41301,8 @@ DASHBOARD_JS = """(function () {
     }
     function pathwayLaneToggleState(d, spec) {
       if (!spec || spec.planned) return null;
+      if (spec.strategy_package && !spec.strategy_package_activated) return false;
+      if (spec.status === 'NOT_ACTIVATED') return false;
       if (spec.status === 'RETIRED') return false;
       if (spec.status === 'BENCHMARK') return false;
       const key = spec.toggle_key;
@@ -41305,6 +41317,8 @@ DASHBOARD_JS = """(function () {
     }
     function pathwayLaneToggleFn(spec, on) {
       if (!spec || spec.planned || spec.status === 'RETIRED') return '';
+      if (spec.strategy_package && !spec.strategy_package_activated) return '';
+      if (spec.status === 'NOT_ACTIVATED') return '';
       if (spec.status === 'BENCHMARK') return '';
       if (spec.toggle_key === 'research_lane_enabled') {
         return "setResearchLane('" + spec.lane + "', " + (!on) + ")";
@@ -41312,6 +41326,7 @@ DASHBOARD_JS = """(function () {
       return '';
     }
     function pathwayLaneBorderColor(spec) {
+      if (spec.strategy_package || spec.status === 'NOT_ACTIVATED') return '#6e7681';
       if (spec.status === 'BENCHMARK') return '#d4a72c';
       if (spec.status === 'RETIRED' || spec.status === 'DATA_RETIRED') return '#484f58';
       if (spec.is_benchmark || spec.status === 'PRIMARY_PRODUCTION') return '#d4a72c';
@@ -41324,7 +41339,8 @@ DASHBOARD_JS = """(function () {
     }
     function renderPathwayLab(d) {
       const specsPayload = d.pathway_lane_specs || {};
-      const specs = specsPayload.lanes || [];
+      // Active registry lanes first; strategy packages auto-append (never activated by presence).
+      const specs = (specsPayload.lanes || []).concat(specsPayload.strategy_package_tiles || []);
       const retiredNote = document.getElementById('pathwayLabRetiredNote');
       if (retiredNote) retiredNote.textContent = specsPayload.retired_tiles_note || '';
       const tiles = document.getElementById('pathwayLaneTiles');

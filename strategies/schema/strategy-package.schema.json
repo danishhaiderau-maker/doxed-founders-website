@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doxxedcrypto.digital/schemas/strategy-package.schema.json",
+  "title": "StrategyPackage",
+  "description": "YAML strategy package tile spec (R47). paper_only must be true. No packages are activated by this schema alone — each tile still needs its own R22 + RK PASS.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "name",
+    "thesis",
+    "series_stamp",
+    "kind",
+    "entry",
+    "exit",
+    "regime_filter",
+    "sizing",
+    "daily_loss_cap_usd",
+    "costs",
+    "data_requires",
+    "evidence",
+    "paper_only"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]{1,63}$"
+    },
+    "name": { "type": "string", "minLength": 1 },
+    "thesis": { "type": "string", "minLength": 1 },
+    "series_stamp": {
+      "type": "string",
+      "minLength": 1,
+      "description": "R52/P5 series stamp — required; refuse pooled series across breaks"
+    },
+    "kind": { "type": "string", "enum": ["single", "regime_set"] },
+    "members": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "regime_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["priority", "tiebreak"],
+      "properties": {
+        "priority": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "tiebreak": { "type": "string", "minLength": 1 }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal", "params", "cooldown_min"],
+      "properties": {
+        "signal": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" },
+        "cooldown_min": { "type": "number", "minimum": 0 }
+      }
+    },
+    "exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["composite", "thesis_cut", "hard_stop_pct", "tp", "max_hold_min"],
+      "properties": {
+        "composite": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "thesis_cut": { "type": ["string", "boolean", "object", "null"] },
+        "hard_stop_pct": { "type": "number" },
+        "tp": { "type": ["number", "string", "object", "null"] },
+        "max_hold_min": { "type": "number", "minimum": 0 }
+      }
+    },
+    "regime_filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "params"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" }
+      }
+    },
+    "sizing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["margin_usd", "leverage"],
+      "properties": {
+        "margin_usd": { "type": "number", "minimum": 0.2, "maximum": 0.25 },
+        "leverage": { "type": "number", "const": 100 }
+      }
+    },
+    "daily_loss_cap_usd": { "type": "number", "exclusiveMinimum": 0 },
+    "costs": { "type": "string", "const": "REALISTIC_V1" },
+    "data_requires": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["book10", "trades", "funding", "liquidations", "premium", "cvd"]
+      },
+      "uniqueItems": true
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "window", "oos_22m_summary", "combos_searched", "fdr"],
+      "properties": {
+        "status": { "type": "string", "enum": ["LEAD", "OOS_PASS", "FWD_PASS"] },
+        "window": { "type": "string", "minLength": 1 },
+        "oos_22m_summary": { "type": ["string", "object"] },
+        "combos_searched": { "type": "integer", "minimum": 0 },
+        "fdr": { "type": ["number", "string", "object", "null"] }
+      }
+    },
+    "paper_only": { "type": "boolean", "const": true }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "regime_set" } } },
+      "then": {
+        "required": ["members", "regime_set"],
+        "properties": {
+          "members": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "single" } } },
+      "then": {
+        "properties": {
+          "members": { "maxItems": 1 }
+        }
+      }
+    }
+  ]
+}
