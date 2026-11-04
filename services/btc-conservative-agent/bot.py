@@ -35532,12 +35532,18 @@ _READ_ONLY_GET_PATHS = {
     "/api/monitor/summary", "/api/monitor/lanes", "/static/dashboard.js",
     "/restart-cause", "/api/restart-cause",
 }
-# Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
-# that token is never accepted by _admin_authed() or any other route.
+# Authenticated by its own handler with MONITOR_READ_TOKEN and/or
+# LAPTOP_MONITOR_READ_TOKEN (404 when both unset); neither token is accepted by
+# _admin_authed() or any non-GET route.
 _MONITOR_DIGEST_PATH = "/api/monitor/digest"
-# Admin token OR the read-only MONITOR_READ_TOKEN bearer; authenticated in the handler.
+# Admin token OR a read-only monitor bearer; authenticated in the handler.
 _MONITOR_INTEGRITY_PATH = "/api/monitor/integrity"
 _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN)
+# Laptop-only read token for bot.py GET monitor routes. Distinct from
+# MONITOR_READ_TOKEN (Nest assertBotReadToken is not GET-only). Never accepted
+# on non-GET, never by _admin_authed(), never as a write credential.
+_LAPTOP_MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(
+    os.getenv("LAPTOP_MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN)
 # Read-only tile audit data API: same auth as integrity (admin or the monitor
 # bearer), checked in each handler; never public, never a write.
 _MONITOR_TILE_PATHS = frozenset({
@@ -49105,9 +49111,11 @@ def monitor_lanes():
 
 @app.route('/api/monitor/digest')
 def monitor_digest():
-    if not _MONITOR_READ_TOKEN:
+    if not _MONITOR_READ_TOKEN and not _LAPTOP_MONITOR_READ_TOKEN:
         return _monitor_response({"error": "not found"}, 256, status=404)
-    if not monitor_api.bearer_matches(request.headers.get("Authorization"), _MONITOR_READ_TOKEN):
+    auth = request.headers.get("Authorization")
+    monitor_ok = bool(_MONITOR_READ_TOKEN) and monitor_api.bearer_matches(auth, _MONITOR_READ_TOKEN)
+    if not (monitor_ok or _laptop_monitor_read_authorized()):
         return _monitor_response({"error": "unauthorized"}, 256, status=401)
     with _SYSTEM_HEALTH_LOCK:
         _restore_system_health_state()
@@ -49120,7 +49128,8 @@ def monitor_digest():
 def monitor_integrity():
     """Read-only: 1 s tape continuity, AI call window, fill markouts, process identity (monitor_integrity.py).
 
-    Auth: X-Bot-Admin-Token (or admin cookie) or ``Authorization: Bearer <MONITOR_READ_TOKEN>``.
+    Auth: X-Bot-Admin-Token (or admin cookie), ``Authorization: Bearer <MONITOR_READ_TOKEN>``,
+    or (GET only) ``Authorization: Bearer <LAPTOP_MONITOR_READ_TOKEN>``.
     No state lock, no trade lock, no file I/O on the request path.
     """
     if not monitor_integrity_authorized():
@@ -49142,10 +49151,22 @@ def monitor_integrity():
     return _monitor_response(payload, _monitor_integrity.MAX_BYTES + 1024)
 
 
+def _laptop_monitor_read_authorized() -> bool:
+    """True only for GET + Bearer LAPTOP_MONITOR_READ_TOKEN. Never on non-GET."""
+    if (request.method or "").upper() != "GET":
+        return False
+    token = _LAPTOP_MONITOR_READ_TOKEN
+    if not token:
+        return False
+    return monitor_api.bearer_matches(request.headers.get("Authorization"), token)
+
+
 def monitor_integrity_authorized() -> bool:
-    return _monitor_integrity is not None and _monitor_integrity.is_authorized(
-        admin_ok=_admin_authed(), authorization=request.headers.get("Authorization"),
-        monitor_token=_MONITOR_READ_TOKEN, bearer_matches=monitor_api.bearer_matches)
+    if _monitor_integrity is not None and _monitor_integrity.is_authorized(
+            admin_ok=_admin_authed(), authorization=request.headers.get("Authorization"),
+            monitor_token=_MONITOR_READ_TOKEN, bearer_matches=monitor_api.bearer_matches):
+        return True
+    return _laptop_monitor_read_authorized()
 
 
 

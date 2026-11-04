@@ -151,7 +151,7 @@ def test_supervisor_and_cycle_fail_closed_on_bitfinex_env_names():
 
 
 def test_bot_allowlist_names_justified_or_dropped():
-    """RK 09:33 / HM HOLD 716511e8582d: DEEPSEEK + MONITOR dropped from BotAllowlist."""
+    """RK 09:33 / HM HOLD 716511e8582d: DEEPSEEK + MONITOR dropped; laptop GET token added."""
     common = _source("laptop-chain-common.ps1")
     bot_names = _ps_allowlist_names(common, "LaptopChainBotVaultAllowlist")
     assert "DEEPSEEK_API_KEY" not in bot_names
@@ -165,6 +165,7 @@ def test_bot_allowlist_names_justified_or_dropped():
         "CRASH_NOTIFY_WEBHOOK",
         "LIFECYCLE_LAPTOP_ATTESTATION_KEY",
         "LIFECYCLE_CLEANUP_ENABLED",
+        "LAPTOP_MONITOR_READ_TOKEN",
     }
     assert set(bot_names) == expected
     # Nest POST ops that accept MONITOR via assertBotReadToken (not GET-only).
@@ -179,6 +180,10 @@ def test_bot_allowlist_names_justified_or_dropped():
     assert "assertBotReadToken" in service
     assert "DROPPED MONITOR_READ_TOKEN" in common
     assert "NOT GET-only" in common
+    assert "ADDED LAPTOP_MONITOR_READ_TOKEN" in common
+    # Bot process only — AdminTokenOnly chain must NOT export the laptop monitor token.
+    admin_names = _ps_allowlist_names(common, "LaptopChainVaultAllowlist")
+    assert "LAPTOP_MONITOR_READ_TOKEN" not in admin_names
 
 
 def test_bot_auto_restart_does_not_relaunch_on_exit_79():

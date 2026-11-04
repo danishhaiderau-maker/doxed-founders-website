@@ -221,6 +221,8 @@ $script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
 #   only auth on POST ops pause + POST ops refresh-flat-audit
 #   (trading-agents.controller.ts). Separate apps/api PR (other worker) must
 #   require assertBotAdminToken on those POSTs; do not vault-export here.
+# ADDED LAPTOP_MONITOR_READ_TOKEN — bot.py GET-only monitor routes
+#   (_laptop_monitor_read_authorized); never Nest POST; bot process only.
 $script:LaptopChainBotVaultAllowlist = @(
   'BOT_ADMIN_TOKEN',
   'BOT_CONTROL_SECRET',
@@ -228,7 +230,8 @@ $script:LaptopChainBotVaultAllowlist = @(
   'SHOWCASE_RELAY_WEBHOOK_URL',
   'CRASH_NOTIFY_WEBHOOK',
   'LIFECYCLE_LAPTOP_ATTESTATION_KEY',
-  'LIFECYCLE_CLEANUP_ENABLED'
+  'LIFECYCLE_CLEANUP_ENABLED',
+  'LAPTOP_MONITOR_READ_TOKEN'
 )
 $script:BitfinexEnvRefusalExitCode = 79
 
