@@ -43,6 +43,22 @@ def _attach_startup_logs() -> None:
 _attach_startup_logs()
 
 
+def _refuse_bitfinex_process_env_names() -> None:
+    """RK 08:26: exit 79 inside launched bot if KEY/SECRET/TOKEN present.
+
+    BITFINEX_LIVE_ENABLED exactly '0' is exempt. Names only (R10).
+    """
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names
+
+    assert_no_bitfinex_process_env_names()
+
+
+_refuse_bitfinex_process_env_names()
+
+
 def _read_boot_revision() -> str:
     """Read the checkout revision before the full bot import.
 
