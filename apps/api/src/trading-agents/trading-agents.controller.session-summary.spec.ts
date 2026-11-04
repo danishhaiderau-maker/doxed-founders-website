@@ -116,11 +116,12 @@ test('ops already-flat recovery authenticates before execution and requires exac
 });
 
 test('ops pause authenticates before all mutation and uses canonical pause settlement', async () => {
+  const prevAdmin = process.env.BOT_ADMIN_TOKEN;
+  process.env.BOT_ADMIN_TOKEN = 'valid-token';
   const calls: string[] = [];
   const tradingAgents = {
     getOpsRelayStatus: async (_slug: string, _userId: string, token: string) => {
       calls.push(`auth:${token}`);
-      if (token !== 'valid-token') throw new Error('Invalid BOT_ADMIN_TOKEN');
       return { status: 'ACTIVE' };
     },
   };
@@ -139,7 +140,7 @@ test('ops pause authenticates before all mutation and uses canonical pause settl
     controller.opsPause('conservative-btc', body, 'wrong-token', undefined),
     /Invalid BOT_ADMIN_TOKEN/,
   );
-  assert.deepEqual(calls, ['auth:wrong-token']);
+  assert.deepEqual(calls, []);
 
   await assert.rejects(
     controller.opsPause(
@@ -147,19 +148,23 @@ test('ops pause authenticates before all mutation and uses canonical pause settl
     ),
     /confirmation must equal PAUSE_AND_SETTLE_MANAGED_ENTRIES/,
   );
-  assert.deepEqual(calls, ['auth:wrong-token', 'auth:valid-token']);
+  assert.deepEqual(calls, ['auth:valid-token']);
 
   assert.deepEqual(
     await controller.opsPause('conservative-btc', body, 'valid-token', undefined),
     { ok: true, status: 'PAUSED', relay: { cancelledOrders: 1 } },
   );
   assert.deepEqual(calls, [
-    'auth:wrong-token', 'auth:valid-token', 'auth:valid-token',
+    'auth:valid-token', 'auth:valid-token',
     'pause:user-a:conservative-btc:true',
   ]);
+  if (prevAdmin === undefined) delete process.env.BOT_ADMIN_TOKEN;
+  else process.env.BOT_ADMIN_TOKEN = prevAdmin;
 });
 
 test('ops flat-audit refresh authenticates paused disarmed state and runs the read-only audit', async () => {
+  const prevAdmin = process.env.BOT_ADMIN_TOKEN;
+  process.env.BOT_ADMIN_TOKEN = 'admin-token';
   const calls: unknown[][] = [];
   const controller = new TradingAgentsController(
     { getOpsRelayStatus: async (...args: unknown[]) => {
@@ -190,9 +195,13 @@ test('ops flat-audit refresh authenticates paused disarmed state and runs the re
     ['conservative-btc', 'private-user', 'admin-token', undefined],
     ['private-user', 'conservative-btc'],
   ]);
+  if (prevAdmin === undefined) delete process.env.BOT_ADMIN_TOKEN;
+  else process.env.BOT_ADMIN_TOKEN = prevAdmin;
 });
 
 test('ops flat-audit refresh refuses armed state before dispatch', async () => {
+  const prevAdmin = process.env.BOT_ADMIN_TOKEN;
+  process.env.BOT_ADMIN_TOKEN = 'admin-token';
   let wakes = 0;
   const controller = new TradingAgentsController(
     { getOpsRelayStatus: async () => ({
@@ -211,6 +220,8 @@ test('ops flat-audit refresh refuses armed state before dispatch', async () => {
     /paused, disarmed relay/,
   );
   assert.equal(wakes, 0);
+  if (prevAdmin === undefined) delete process.env.BOT_ADMIN_TOKEN;
+  else process.env.BOT_ADMIN_TOKEN = prevAdmin;
 });
 
 test('ops emergency reconcile requires admin-scoped paused mismatch and explicit confirmation', async () => {
