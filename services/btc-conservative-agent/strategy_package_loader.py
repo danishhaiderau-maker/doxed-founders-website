@@ -11,30 +11,44 @@ Hard refuses (fail closed):
 - ``paper_only`` is not exactly true
 - any credential / secret / key field present anywhere in the document
 - evidence.status outside {LEAD, OOS_PASS, FWD_PASS}
+- OOS_PASS / FWD_PASS without 22m label HOLDS or with leak_suspect != false
+- any ``strategies/*.yaml`` while numeric-bars follow-up is still required
+
+Missing PyYAML / jsonschema → soft fallback: **no package tiles** (dashboard
+stays up). CI installs both via ``requirements.txt``.
 
 R53(c): only ``evidence.status == FWD_PASS`` may feed the R53(c) gate helper.
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Mapping
 
-try:
-    import yaml
-except ImportError as exc:  # pragma: no cover - CI installs PyYAML via requirements
-    raise RuntimeError("PyYAML is required to load strategy packages") from exc
+logger = logging.getLogger(__name__)
 
 try:
-    import jsonschema
-except ImportError as exc:  # pragma: no cover
-    raise RuntimeError("jsonschema is required to validate strategy packages") from exc
+    import yaml as _yaml
+except ImportError:  # pragma: no cover - exercised via deps_available tests
+    _yaml = None
+
+try:
+    import jsonschema as _jsonschema
+except ImportError:  # pragma: no cover
+    _jsonschema = None
 
 
 SCHEMA_NAME = "strategy_package_v1"
 EVIDENCE_STATUSES = frozenset({"LEAD", "OOS_PASS", "FWD_PASS"})
 R53C_ELIGIBLE_STATUS = "FWD_PASS"
+HOLDS_LABEL = "HOLDS"
+
+# Numeric bars (HOLDS PF/trades/quarters/slippage, R53(c) folds, kill rule,
+# REALISTIC_V1 drift) are documented in strategies/NUMERIC-BARS-FOLLOWUP.md and
+# gate ANY strategies/*.yaml until implemented + RK PASS. Flip only after that.
+NUMERIC_BARS_FOLLOWUP_REQUIRED = True
 
 # Credential / secret field names refused anywhere in the document (casefold).
 _CREDENTIAL_KEY_EXACT = frozenset({
@@ -62,11 +76,29 @@ class StrategyPackageRefuse(ValueError):
     """Hard-refuse a strategy package (paper-bot loader fail-closed)."""
 
 
+def deps_available() -> bool:
+    """True when PyYAML and jsonschema both import."""
+    return _yaml is not None and _jsonschema is not None
+
+
+def missing_deps() -> tuple[str, ...]:
+    missing: list[str] = []
+    if _yaml is None:
+        missing.append("PyYAML")
+    if _jsonschema is None:
+        missing.append("jsonschema")
+    return tuple(missing)
+
+
 def schema_path() -> Path:
     return DEFAULT_SCHEMA_PATH
 
 
 def load_schema(path: Path | None = None) -> dict[str, Any]:
+    if _jsonschema is None:
+        raise StrategyPackageRefuse(
+            "jsonschema not installed — pip install -r services/btc-conservative-agent/requirements.txt"
+        )
     p = path or schema_path()
     with p.open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -104,6 +136,24 @@ def _require_mapping(raw: Any, *, source: str) -> dict[str, Any]:
     return dict(raw)
 
 
+def _label_is_holds(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().upper() == HOLDS_LABEL
+    if isinstance(value, Mapping):
+        for key in ("label", "status", "verdict", "result"):
+            if str(value.get(key) or "").strip().upper() == HOLDS_LABEL:
+                return True
+    return False
+
+
+def oos_22m_holds(evidence: Mapping[str, Any]) -> bool:
+    """True when the 22m OOS label is HOLDS (``oos_22m`` or legacy ``oos_22m_summary``)."""
+    for key in ("oos_22m", "oos_22m_summary"):
+        if key in evidence and _label_is_holds(evidence.get(key)):
+            return True
+    return False
+
+
 def validate_package_dict(
     raw: Mapping[str, Any],
     *,
@@ -111,6 +161,12 @@ def validate_package_dict(
     schema: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate + hard-refuse. Returns a plain dict copy on success."""
+    if not deps_available():
+        raise StrategyPackageRefuse(
+            f"{source}: missing deps {missing_deps()} — "
+            "pip install -r services/btc-conservative-agent/requirements.txt"
+        )
+
     data = _require_mapping(raw, source=source)
 
     creds = find_credential_keys(data)
@@ -137,10 +193,22 @@ def validate_package_dict(
             f"allowed={sorted(EVIDENCE_STATUSES)}"
         )
 
+    if status in ("OOS_PASS", "FWD_PASS"):
+        if not oos_22m_holds(evidence):
+            raise StrategyPackageRefuse(
+                f"{source}: evidence.status={status} requires 22m label HOLDS "
+                f"(set evidence.oos_22m or oos_22m_summary to {HOLDS_LABEL!r})"
+            )
+        if evidence.get("leak_suspect") is not False:
+            raise StrategyPackageRefuse(
+                f"{source}: evidence.status={status} requires leak_suspect: false "
+                f"(got {evidence.get('leak_suspect')!r})"
+            )
+
     sch = schema if schema is not None else load_schema()
     try:
-        jsonschema.validate(instance=data, schema=sch)
-    except jsonschema.ValidationError as exc:
+        _jsonschema.validate(instance=data, schema=sch)
+    except _jsonschema.ValidationError as exc:
         raise StrategyPackageRefuse(
             f"{source}: bad spec — {exc.message} (path={list(exc.path)})"
         ) from exc
@@ -157,7 +225,15 @@ def feeds_r53c_gate(package: Mapping[str, Any]) -> bool:
     evidence = package.get("evidence") if isinstance(package, Mapping) else None
     if not isinstance(evidence, Mapping):
         return False
-    return evidence.get("status") == R53C_ELIGIBLE_STATUS
+    if evidence.get("status") != R53C_ELIGIBLE_STATUS:
+        return False
+    # FWD_PASS already required HOLDS + leak_suspect false at validate time;
+    # re-check so a hand-built dict cannot sneak through.
+    if not oos_22m_holds(evidence):
+        return False
+    if evidence.get("leak_suspect") is not False:
+        return False
+    return True
 
 
 def assert_r53c_eligible(package: Mapping[str, Any], *, source: str = "<package>") -> None:
@@ -168,7 +244,7 @@ def assert_r53c_eligible(package: Mapping[str, Any], *, source: str = "<package>
             status = evidence.get("status")
         raise StrategyPackageRefuse(
             f"{source}: R53(c) gate refuses evidence.status={status!r}; "
-            f"only {R53C_ELIGIBLE_STATUS} may feed R53(c)"
+            f"only {R53C_ELIGIBLE_STATUS} with HOLDS + leak_suspect false may feed R53(c)"
         )
 
 
@@ -177,14 +253,19 @@ def load_package_file(
     *,
     schema: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if _yaml is None:
+        raise StrategyPackageRefuse(
+            f"{path}: PyYAML not installed — "
+            "pip install -r services/btc-conservative-agent/requirements.txt"
+        )
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         raise StrategyPackageRefuse(f"{p}: cannot read ({exc})") from exc
     try:
-        raw = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
+        raw = _yaml.safe_load(text)
+    except _yaml.YAMLError as exc:
         raise StrategyPackageRefuse(f"{p}: bad YAML ({exc})") from exc
     return validate_package_dict(raw, source=str(p), schema=schema)
 
@@ -199,15 +280,52 @@ def iter_strategy_yaml_paths(strategies_dir: Path | str | None = None) -> list[P
     )
 
 
+def assert_numeric_bars_gate(
+    strategies_dir: Path | str | None = None,
+    *,
+    enforce: bool | None = None,
+) -> None:
+    """Refuse any registered strategies/*.yaml while numeric-bars follow-up is open."""
+    do_enforce = NUMERIC_BARS_FOLLOWUP_REQUIRED if enforce is None else bool(enforce)
+    if not do_enforce:
+        return
+    paths = iter_strategy_yaml_paths(strategies_dir)
+    if not paths:
+        return
+    raise StrategyPackageRefuse(
+        "numeric bars follow-up required before any strategies/*.yaml "
+        "(HOLDS: PF≥1.10, ≥200 trades, ≥60% quarters positive, net>0 at 1.5× slippage; "
+        "R53(c): ≥200 OOS trades, ≥70% monthly folds positive; per-tile kill; "
+        "paper-fill vs REALISTIC_V1 drift). "
+        "See strategies/NUMERIC-BARS-FOLLOWUP.md. Files: "
+        + ", ".join(p.name for p in paths)
+    )
+
+
 def load_registered_packages(
     strategies_dir: Path | str | None = None,
     *,
     schema: Mapping[str, Any] | None = None,
+    enforce_numeric_bars_gate: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Load every ``strategies/<id>.yaml``. Fail closed on the first refuse."""
+    """Load every ``strategies/<id>.yaml``. Fail closed on the first refuse.
+
+    When the directory is empty, schema is **not** loaded (no YAML → skip).
+    Missing PyYAML/jsonschema → empty list (dashboard soft-fallback).
+    """
+    paths = iter_strategy_yaml_paths(strategies_dir)
+    if not paths:
+        return []
+    if not deps_available():
+        logger.warning(
+            "[STRATEGY_PACKAGE] deps missing %s — returning no package tiles",
+            missing_deps(),
+        )
+        return []
+    assert_numeric_bars_gate(strategies_dir, enforce=enforce_numeric_bars_gate)
     sch = schema if schema is not None else load_schema()
     packages: list[dict[str, Any]] = []
-    for path in iter_strategy_yaml_paths(strategies_dir):
+    for path in paths:
         packages.append(load_package_file(path, schema=sch))
     return packages
 
@@ -216,13 +334,30 @@ def build_dashboard_tile_specs(
     packages: list[Mapping[str, Any]] | None = None,
     *,
     strategies_dir: Path | str | None = None,
+    enforce_numeric_bars_gate: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """One dashboard tile card per registered package (never activated)."""
-    pkgs = (
-        list(packages)
-        if packages is not None
-        else load_registered_packages(strategies_dir)
-    )
+    """One dashboard tile card per registered package (never activated).
+
+    Soft-fallback: missing deps or empty dir → ``[]`` (no schema load).
+    """
+    if packages is None:
+        if not deps_available():
+            logger.warning(
+                "[STRATEGY_PACKAGE] deps missing %s — no package tiles",
+                missing_deps(),
+            )
+            return []
+        try:
+            pkgs = load_registered_packages(
+                strategies_dir,
+                enforce_numeric_bars_gate=enforce_numeric_bars_gate,
+            )
+        except Exception as exc:  # noqa: BLE001 — dashboard must not crash (incl. refuse)
+            logger.error("[STRATEGY_PACKAGE] load failed: %s", exc)
+            return []
+    else:
+        pkgs = list(packages)
+
     tiles: list[dict[str, Any]] = []
     for idx, pkg in enumerate(pkgs, start=1):
         pid = str(pkg.get("id") or f"pkg_{idx}")
@@ -295,7 +430,7 @@ def build_dashboard_tile_specs(
                 "risk": [
                     "Paper only — not activated",
                     f"Daily loss cap: ${pkg.get('daily_loss_cap_usd')}",
-                    f"R53(c) eligible: {'yes' if feeds_r53c_gate(pkg) else 'no (need FWD_PASS)'}",
+                    f"R53(c) eligible: {'yes' if feeds_r53c_gate(pkg) else 'no (need FWD_PASS+HOLDS)'}",
                 ],
             },
             "session_stats": {

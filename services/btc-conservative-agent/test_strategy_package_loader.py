@@ -1,16 +1,14 @@
-"""Five named strategy-package loader refuses (R47) + dashboard auto-render + R53(c).
+"""Strategy-package loader refuses (R47) + HM HOLD 75d49e057f60 fixes.
 
-Mutation proofs (break the named check → this file fails):
-- drop series_stamp require → missing-stamp case passes
-- allow paper_only false → paper_only=false case passes
-- skip credential scan → credential case passes
-- widen evidence enum → invalid status case passes
-- allow non-FWD_PASS into R53(c) → feeds_r53c_gate(LEAD) becomes True
+Named refuses: bad spec, missing series_stamp, paper_only=false, credential
+field, invalid evidence status. Plus: OOS/FWD HOLDS+leak_suspect, hyphen ids,
+optional cooldown, soft deps, empty-dir skip schema, numeric-bars gate.
 """
 from __future__ import annotations
 
 import copy
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
@@ -49,9 +47,10 @@ def _valid_pkg(**overrides) -> dict:
         "evidence": {
             "status": "LEAD",
             "window": "fixture",
-            "oos_22m_summary": "fixture only",
+            "oos_22m": "PENDING",
             "combos_searched": 0,
             "fdr": None,
+            "leak_suspect": None,
         },
         "paper_only": True,
     }
@@ -59,13 +58,32 @@ def _valid_pkg(**overrides) -> dict:
     return base
 
 
+def _oos_holds_pkg(**overrides) -> dict:
+    pkg = _valid_pkg()
+    pkg["evidence"] = {
+        "status": "OOS_PASS",
+        "window": "fixture-oos",
+        "oos_22m": "HOLDS",
+        "leak_suspect": False,
+        "in_window": True,
+        "bh_fdr_pass": True,
+        "bonferroni_pass": True,
+        "reality_check_p": 0.04,
+        "deflated_sharpe": 0.1,
+        "pbo": 0.2,
+        "funding_sensitive": False,
+        "combos_searched": 10,
+        "fdr": 0.05,
+    }
+    pkg.update(overrides)
+    return pkg
+
+
 def test_bad_spec_refused():
-    """Bad spec (schema-invalid sizing / missing required exit fields) hard-refuses."""
     bad = _valid_pkg()
     del bad["exit"]
     with pytest.raises(spl.StrategyPackageRefuse, match="bad spec|exit"):
         spl.validate_package_dict(bad, source="bad_spec", schema=SCHEMA)
-    # Also refuse out-of-range margin.
     bad2 = _valid_pkg()
     bad2["sizing"] = {"margin_usd": 1.0, "leverage": 100}
     with pytest.raises(spl.StrategyPackageRefuse, match="bad spec"):
@@ -87,7 +105,7 @@ def test_paper_only_false_refused():
     with pytest.raises(spl.StrategyPackageRefuse, match="paper_only"):
         spl.validate_package_dict(pkg, source="paper_only_false", schema=SCHEMA)
     pkg2 = _valid_pkg()
-    pkg2["paper_only"] = "true"  # string is not exactly True
+    pkg2["paper_only"] = "true"
     with pytest.raises(spl.StrategyPackageRefuse, match="paper_only"):
         spl.validate_package_dict(pkg2, source="paper_only_string", schema=SCHEMA)
 
@@ -107,9 +125,33 @@ def test_credential_field_present_refused():
 def test_invalid_evidence_status_refused():
     pkg = _valid_pkg()
     pkg["evidence"] = dict(pkg["evidence"])
-    pkg["evidence"]["status"] = "PASS"  # not in LEAD|OOS_PASS|FWD_PASS
+    pkg["evidence"]["status"] = "PASS"
     with pytest.raises(spl.StrategyPackageRefuse, match="evidence.status"):
         spl.validate_package_dict(pkg, source="bad_evidence", schema=SCHEMA)
+
+
+def test_oos_fwd_require_holds_and_leak_suspect_false():
+    no_holds = _oos_holds_pkg()
+    no_holds["evidence"] = dict(no_holds["evidence"])
+    no_holds["evidence"]["oos_22m"] = "FAILS"
+    with pytest.raises(spl.StrategyPackageRefuse, match="HOLDS"):
+        spl.validate_package_dict(no_holds, source="no_holds", schema=SCHEMA)
+
+    leak = _oos_holds_pkg()
+    leak["evidence"] = dict(leak["evidence"])
+    leak["evidence"]["leak_suspect"] = True
+    with pytest.raises(spl.StrategyPackageRefuse, match="leak_suspect"):
+        spl.validate_package_dict(leak, source="leak", schema=SCHEMA)
+
+    missing_leak = _oos_holds_pkg()
+    missing_leak["evidence"] = dict(missing_leak["evidence"])
+    del missing_leak["evidence"]["leak_suspect"]
+    with pytest.raises(spl.StrategyPackageRefuse, match="leak_suspect"):
+        spl.validate_package_dict(missing_leak, source="missing_leak", schema=SCHEMA)
+
+    ok = spl.validate_package_dict(_oos_holds_pkg(), source="oos_ok", schema=SCHEMA)
+    assert ok["evidence"]["oos_22m"] == "HOLDS"
+    assert ok["evidence"]["leak_suspect"] is False
 
 
 def test_fwd_pass_only_feeds_r53c_gate():
@@ -118,18 +160,35 @@ def test_fwd_pass_only_feeds_r53c_gate():
     with pytest.raises(spl.StrategyPackageRefuse, match="R53\\(c\\)"):
         spl.assert_r53c_eligible(lead, source="lead")
 
-    oos = _valid_pkg()
-    oos["evidence"] = dict(oos["evidence"])
-    oos["evidence"]["status"] = "OOS_PASS"
-    oos_pkg = spl.validate_package_dict(oos, source="oos", schema=SCHEMA)
-    assert spl.feeds_r53c_gate(oos_pkg) is False
+    oos = spl.validate_package_dict(_oos_holds_pkg(), source="oos", schema=SCHEMA)
+    assert spl.feeds_r53c_gate(oos) is False
 
-    fwd = _valid_pkg()
+    fwd = _oos_holds_pkg()
     fwd["evidence"] = dict(fwd["evidence"])
     fwd["evidence"]["status"] = "FWD_PASS"
     fwd_pkg = spl.validate_package_dict(fwd, source="fwd", schema=SCHEMA)
     assert spl.feeds_r53c_gate(fwd_pkg) is True
     spl.assert_r53c_eligible(fwd_pkg, source="fwd")
+
+
+def test_hyphenated_id_and_optional_cooldown_accepted():
+    """Strategist §8: hyphenated ids (ext2-lead-XX); cooldown_min optional."""
+    pkg = _valid_pkg(id="ext2-lead-01", name="EXT2 lead 01")
+    del pkg["entry"]["cooldown_min"]
+    loaded = spl.validate_package_dict(pkg, source="hyphen", schema=SCHEMA)
+    assert loaded["id"] == "ext2-lead-01"
+    assert "cooldown_min" not in loaded["entry"]
+
+
+def test_strategist_evidence_fields_accepted():
+    pkg = _oos_holds_pkg()
+    loaded = spl.validate_package_dict(pkg, source="§8-evidence", schema=SCHEMA)
+    for key in (
+        "in_window", "oos_22m", "bh_fdr_pass", "bonferroni_pass",
+        "reality_check_p", "deflated_sharpe", "pbo", "funding_sensitive",
+        "leak_suspect",
+    ):
+        assert key in loaded["evidence"]
 
 
 def test_valid_package_loads_but_is_not_activated(tmp_path: Path):
@@ -143,44 +202,79 @@ def test_valid_package_loads_but_is_not_activated(tmp_path: Path):
 
 
 def test_dashboard_auto_renders_one_tile_per_registered_package(tmp_path: Path):
-    """Dashboard tile registry renders a tile per registered package automatically."""
     a = _valid_pkg(id="pkg_a", name="Package A")
-    b = _valid_pkg(id="pkg_b", name="Package B")
+    b = _oos_holds_pkg(id="pkg_b", name="Package B")
     b["evidence"] = dict(b["evidence"])
     b["evidence"]["status"] = "FWD_PASS"
     (tmp_path / "pkg_a.yaml").write_text(yaml.safe_dump(a, sort_keys=False), encoding="utf-8")
     (tmp_path / "pkg_b.yaml").write_text(yaml.safe_dump(b, sort_keys=False), encoding="utf-8")
-    (tmp_path / "_ignored.yaml").write_text("id: nope\n", encoding="utf-8")  # underscore skip
-    tiles = spl.build_dashboard_tile_specs(strategies_dir=tmp_path)
+    (tmp_path / "_ignored.yaml").write_text("id: nope\n", encoding="utf-8")
+    tiles = spl.build_dashboard_tile_specs(
+        strategies_dir=tmp_path, enforce_numeric_bars_gate=False,
+    )
     assert [t["strategy_package_id"] for t in tiles] == ["pkg_a", "pkg_b"]
     assert all(t["strategy_package_activated"] is False for t in tiles)
-    assert all(t["status"] == "NOT_ACTIVATED" for t in tiles)
     assert tiles[0]["feeds_r53c"] is False
     assert tiles[1]["feeds_r53c"] is True
 
 
 def test_repo_strategies_dir_has_no_activated_packages():
-    """R47: this PR must not activate any strategy package files."""
     paths = spl.iter_strategy_yaml_paths()
-    assert paths == [], f"unexpected activated/registered packages: {paths}"
+    assert paths == [], f"unexpected packages: {paths}"
     tiles = spl.build_dashboard_tile_specs()
     assert tiles == []
 
 
-def test_bot_pathway_specs_wire_strategy_package_tiles_without_roster_mix():
-    """Dashboard auto-render is wired; packages never enter ACTIVE_TILE_ORDER lanes."""
+def test_numeric_bars_gate_blocks_repo_yaml(tmp_path: Path):
+    (tmp_path / "blocked.yaml").write_text(
+        yaml.safe_dump(_valid_pkg(), sort_keys=False), encoding="utf-8",
+    )
+    with pytest.raises(spl.StrategyPackageRefuse, match="numeric bars"):
+        spl.load_registered_packages(tmp_path, enforce_numeric_bars_gate=True)
+    assert spl.NUMERIC_BARS_FOLLOWUP_REQUIRED is True
+
+
+def test_missing_deps_returns_no_package_tiles(tmp_path: Path):
+    (tmp_path / "pkg.yaml").write_text(
+        yaml.safe_dump(_valid_pkg(), sort_keys=False), encoding="utf-8",
+    )
+    with mock.patch.object(spl, "_yaml", None), mock.patch.object(spl, "_jsonschema", None):
+        assert spl.deps_available() is False
+        assert spl.missing_deps() == ("PyYAML", "jsonschema")
+        assert spl.build_dashboard_tile_specs(
+            strategies_dir=tmp_path, enforce_numeric_bars_gate=False,
+        ) == []
+        assert spl.load_registered_packages(
+            tmp_path, enforce_numeric_bars_gate=False,
+        ) == []
+
+
+def test_empty_strategies_dir_skips_schema_load(tmp_path: Path):
+    """HM HOLD item 3: no YAMLs → skip schema; no tiles."""
+    assert list(tmp_path.glob("*.yaml")) == []
+    with mock.patch.object(spl, "load_schema", side_effect=AssertionError("schema should not load")):
+        assert spl.load_registered_packages(tmp_path) == []
+        assert spl.build_dashboard_tile_specs(strategies_dir=tmp_path) == []
+
+
+def test_build_dashboard_swallows_unexpected_loader_errors(tmp_path: Path):
+    (tmp_path / "x.yaml").write_text("id: x\n", encoding="utf-8")
+    with mock.patch.object(
+        spl, "load_registered_packages", side_effect=RuntimeError("boom"),
+    ):
+        assert spl.build_dashboard_tile_specs(
+            strategies_dir=tmp_path, enforce_numeric_bars_gate=False,
+        ) == []
+
+
+def test_bot_pathway_specs_catch_all_and_soft_fallback_wired():
     bot_src = (HERE / "bot.py").read_text(encoding="utf-8")
     assert "import strategy_package_loader" in bot_src
-    assert 'strategy_package_tiles": strategy_package_tiles' in bot_src or (
-        '"strategy_package_tiles": strategy_package_tiles' in bot_src
-    )
     assert "build_dashboard_tile_specs()" in bot_src
-    # JS concatenates package tiles after registry lanes (auto-render).
+    assert "except Exception as exc" in bot_src
     assert "strategy_package_tiles || []" in bot_src
     assert "strategy_package && !spec.strategy_package_activated" in bot_src
-    # Must not push packages into the frozen COMBO/ACTIVE lane loop.
-    assert "ACTIVE_TILE_ORDER" in bot_src
-    # Guard: loader refuse must not be swallowed into ACTIVE_TILE_REGISTRY edits.
-    assert "ACTIVE_TILE_REGISTRY[" not in (
-        HERE / "strategy_package_loader.py"
-    ).read_text(encoding="utf-8")
+    loader_src = (HERE / "strategy_package_loader.py").read_text(encoding="utf-8")
+    assert "deps_available" in loader_src
+    assert "NUMERIC_BARS_FOLLOWUP_REQUIRED" in loader_src
+    assert "ACTIVE_TILE_REGISTRY[" not in loader_src

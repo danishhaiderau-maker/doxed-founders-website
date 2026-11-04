@@ -38081,10 +38081,12 @@ def build_static_pathway_lane_specs() -> dict:
     # R47 strategy packages: auto-render a card per registered YAML package.
     # Never mixed into ACTIVE_TILE_ORDER / lanes (freeze roster stays byte-identical).
     # Packages are never activated by presence alone (each needs own R22 + RK PASS).
+    # Soft-fallback: missing PyYAML/jsonschema, empty dir (no schema load), or any
+    # loader error → no package tiles (dashboard must not crash).
     try:
         strategy_package_tiles = strategy_package_loader.build_dashboard_tile_specs()
-    except strategy_package_loader.StrategyPackageRefuse as exc:
-        logger.error(f"[STRATEGY_PACKAGE] registry refuse: {exc}")
+    except Exception as exc:  # noqa: BLE001 — catch-all; pathway specs must stay up
+        logger.error(f"[STRATEGY_PACKAGE] registry load failed (no package tiles): {exc}")
         strategy_package_tiles = []
     return {
         "architecture_frozen": True,
