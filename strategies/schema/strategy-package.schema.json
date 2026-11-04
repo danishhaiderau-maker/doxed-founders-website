@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://doxxedcrypto.digital/schemas/strategy-package.schema.json",
   "title": "StrategyPackage",
-  "description": "YAML strategy package tile spec (R47 / Strategist PLAN-EXT2 §8). paper_only must be true. No packages are activated by this schema alone — each tile still needs its own R22 + RK PASS. Numeric bars follow-up gates any strategies/*.yaml until implemented.",
+  "description": "YAML strategy package tile spec (R47 / Strategist PLAN-EXT2 §8 + Boss extras 2026-11-04). paper_only must be true. No packages are activated by this schema alone — each tile still needs its own R22 + RK PASS. Numeric bars follow-up gates any strategies/*.yaml until implemented.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -54,6 +54,14 @@
         "tiebreak": { "type": "string", "minLength": 1 }
       }
     },
+    "holdout_spent": {
+      "type": "boolean",
+      "description": "Boss/Strategist optional: whether the holdout window was spent"
+    },
+    "holdout_spent_note": {
+      "type": "string",
+      "description": "Optional free-text note accompanying holdout_spent"
+    },
     "entry": {
       "type": "object",
       "additionalProperties": false,
@@ -71,7 +79,7 @@
     "exit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["composite", "thesis_cut", "hard_stop_pct", "tp", "max_hold_min"],
+      "required": ["composite", "thesis_cut", "tp"],
       "properties": {
         "composite": {
           "type": "array",
@@ -79,10 +87,29 @@
           "minItems": 1
         },
         "thesis_cut": { "type": ["string", "boolean", "object", "null"] },
-        "hard_stop_pct": { "type": "number" },
+        "hard_stop_pct": {
+          "type": "number",
+          "description": "Optional stop in percent points (0.31 → 31 bp). Absent only when trail_pct or max_hold_min is set."
+        },
+        "stop_bp": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional explicit stop in basis points; used with sizing.max_stop_bp"
+        },
+        "trail_pct": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional trail; allows hard_stop_pct to be absent"
+        },
         "tp": { "type": ["number", "string", "object", "null"] },
         "max_hold_min": { "type": "number", "minimum": 0 }
-      }
+      },
+      "anyOf": [
+        { "required": ["hard_stop_pct"] },
+        { "required": ["stop_bp"] },
+        { "required": ["trail_pct"] },
+        { "required": ["max_hold_min"] }
+      ]
     },
     "regime_filter": {
       "type": "object",
@@ -99,17 +126,50 @@
       "required": ["margin_usd", "leverage"],
       "properties": {
         "margin_usd": { "type": "number", "minimum": 0.2, "maximum": 0.25 },
-        "leverage": { "type": "number", "const": 100 }
+        "leverage": { "type": "number", "const": 100 },
+        "max_stop_bp": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional cap; loader enforces stop_bp <= max_stop_bp"
+        }
       }
     },
     "daily_loss_cap_usd": { "type": "number", "exclusiveMinimum": 0 },
-    "costs": { "type": "string", "const": "REALISTIC_V1" },
+    "costs": {
+      "description": "REALISTIC_V1 string, or object with optional note (Boss/Strategist)",
+      "oneOf": [
+        { "type": "string", "const": "REALISTIC_V1" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model"],
+          "properties": {
+            "model": { "type": "string", "const": "REALISTIC_V1" },
+            "note": { "type": "string" }
+          }
+        }
+      ]
+    },
     "data_requires": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "string",
-        "enum": ["book10", "trades", "funding", "liquidations", "premium", "cvd"]
+        "enum": [
+          "book10",
+          "trades",
+          "funding",
+          "liquidations",
+          "premium",
+          "cvd",
+          "spot1s",
+          "perp1s",
+          "metrics",
+          "depth",
+          "basis1s",
+          "bfx1s",
+          "dvol"
+        ]
       },
       "uniqueItems": true
     },
@@ -121,11 +181,11 @@
         "status": { "type": "string", "enum": ["LEAD", "OOS_PASS", "FWD_PASS"] },
         "window": { "type": "string", "minLength": 1 },
         "oos_22m": {
-          "type": ["string", "object"],
-          "description": "22m OOS label; OOS_PASS/FWD_PASS require HOLDS (loader-enforced)"
+          "type": ["string", "object", "null"],
+          "description": "22m OOS label; may be null or NOT_RUN; OOS_PASS/FWD_PASS require HOLDS"
         },
         "oos_22m_summary": {
-          "type": ["string", "object"],
+          "type": ["string", "object", "null"],
           "description": "Legacy alias for oos_22m; HOLDS accepted"
         },
         "in_window": { "type": ["boolean", "string", "object", "null"] },

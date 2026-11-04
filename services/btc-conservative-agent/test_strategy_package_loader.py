@@ -278,3 +278,136 @@ def test_bot_pathway_specs_catch_all_and_soft_fallback_wired():
     assert "deps_available" in loader_src
     assert "NUMERIC_BARS_FOLLOWUP_REQUIRED" in loader_src
     assert "ACTIVE_TILE_REGISTRY[" not in loader_src
+
+
+# --- Boss/Strategist schema extras (a)–(f) ---
+
+
+def test_extra_a_holdout_spent_bool_and_optional_note():
+    pkg = _valid_pkg(holdout_spent=True, holdout_spent_note="spent on LEAD window only")
+    loaded = spl.validate_package_dict(pkg, source="holdout", schema=SCHEMA)
+    assert loaded["holdout_spent"] is True
+    assert "LEAD" in loaded["holdout_spent_note"]
+    # bool alone OK
+    ok = spl.validate_package_dict(_valid_pkg(holdout_spent=False), source="holdout_false", schema=SCHEMA)
+    assert ok["holdout_spent"] is False
+
+
+def test_extra_b_data_requires_extended_enum():
+    extras = ["spot1s", "perp1s", "metrics", "depth", "basis1s", "bfx1s", "dvol"]
+    pkg = _valid_pkg(data_requires=["book10", "trades", *extras])
+    loaded = spl.validate_package_dict(pkg, source="data_req", schema=SCHEMA)
+    for name in extras:
+        assert name in loaded["data_requires"]
+    bad = _valid_pkg(data_requires=["book10", "not_a_real_feed"])
+    with pytest.raises(spl.StrategyPackageRefuse, match="bad spec"):
+        spl.validate_package_dict(bad, source="bad_feed", schema=SCHEMA)
+
+
+def test_extra_c_trail_pct_allows_absent_stop_and_refuses_empty_exit():
+    # Stop absent OK when trail_pct set.
+    trail_only = _valid_pkg()
+    trail_only["exit"] = {
+        "composite": ["ATR_TRAIL", "TIME_EXIT"],
+        "thesis_cut": False,
+        "trail_pct": 1.5,
+        "tp": None,
+        "max_hold_min": 90,
+    }
+    del trail_only["exit"]  # rebuild cleanly without hard_stop
+    trail_only["exit"] = {
+        "composite": ["ATR_TRAIL"],
+        "thesis_cut": False,
+        "trail_pct": 1.5,
+        "tp": None,
+        "max_hold_min": 90,
+    }
+    loaded = spl.validate_package_dict(trail_only, source="trail", schema=SCHEMA)
+    assert "hard_stop_pct" not in loaded["exit"]
+    assert loaded["exit"]["trail_pct"] == 1.5
+
+    # Stop absent OK when only max_hold_min set.
+    hold_only = _valid_pkg()
+    hold_only["exit"] = {
+        "composite": ["TIME_EXIT"],
+        "thesis_cut": False,
+        "tp": None,
+        "max_hold_min": 60,
+    }
+    spl.validate_package_dict(hold_only, source="hold_only", schema=SCHEMA)
+
+    # No exit at all → refuse.
+    no_exit = _valid_pkg()
+    del no_exit["exit"]
+    with pytest.raises(spl.StrategyPackageRefuse, match="exit"):
+        spl.validate_package_dict(no_exit, source="no_exit", schema=SCHEMA)
+
+    # Exit present but empty of stop/trail/hold → refuse.
+    empty_mech = _valid_pkg()
+    empty_mech["exit"] = {
+        "composite": ["NONE"],
+        "thesis_cut": False,
+        "tp": None,
+    }
+    with pytest.raises(spl.StrategyPackageRefuse, match="no stop/trail/max_hold|bad spec"):
+        spl.validate_package_dict(empty_mech, source="empty_exit", schema=SCHEMA)
+
+
+def test_extra_d_max_stop_bp_refuses_31bp_at_100x():
+    """Boss: loader enforces stop_bp <= max_stop_bp; test 31 bp @ 100x."""
+    over = _valid_pkg()
+    over["sizing"] = {"margin_usd": 0.25, "leverage": 100, "max_stop_bp": 30}
+    over["exit"] = dict(over["exit"])
+    over["exit"]["hard_stop_pct"] = 0.31  # → 31 bp
+    assert spl.resolve_stop_bp(over["exit"]) == pytest.approx(31.0)
+    with pytest.raises(spl.StrategyPackageRefuse, match="max_stop_bp|31"):
+        spl.validate_package_dict(over, source="31bp", schema=SCHEMA)
+
+    # Explicit stop_bp 31 also refused.
+    over2 = _valid_pkg()
+    over2["sizing"] = {"margin_usd": 0.25, "leverage": 100, "max_stop_bp": 30}
+    over2["exit"] = {
+        "composite": ["HARD_STOP"],
+        "thesis_cut": False,
+        "stop_bp": 31,
+        "tp": None,
+        "max_hold_min": 60,
+    }
+    with pytest.raises(spl.StrategyPackageRefuse, match="max_stop_bp"):
+        spl.validate_package_dict(over2, source="31bp_explicit", schema=SCHEMA)
+
+    # 30 bp at cap passes.
+    ok = _valid_pkg()
+    ok["sizing"] = {"margin_usd": 0.25, "leverage": 100, "max_stop_bp": 30}
+    ok["exit"] = dict(ok["exit"])
+    ok["exit"]["hard_stop_pct"] = 0.30
+    spl.validate_package_dict(ok, source="30bp_ok", schema=SCHEMA)
+
+
+def test_extra_e_costs_note_free_text():
+    pkg = _valid_pkg(
+        costs={
+            "model": "REALISTIC_V1",
+            "note": "REALISTIC_V1 proxy, no book walk",
+        }
+    )
+    loaded = spl.validate_package_dict(pkg, source="costs_note", schema=SCHEMA)
+    assert loaded["costs"]["model"] == "REALISTIC_V1"
+    assert "no book walk" in loaded["costs"]["note"]
+    # String form still accepted.
+    spl.validate_package_dict(_valid_pkg(costs="REALISTIC_V1"), source="costs_str", schema=SCHEMA)
+
+
+def test_extra_f_oos_22m_null_or_not_run():
+    for label in (None, "NOT_RUN"):
+        pkg = _valid_pkg()
+        pkg["evidence"] = dict(pkg["evidence"])
+        pkg["evidence"]["oos_22m"] = label
+        loaded = spl.validate_package_dict(pkg, source=f"oos_{label}", schema=SCHEMA)
+        assert loaded["evidence"]["oos_22m"] == label
+    # OOS_PASS still requires HOLDS (null refused).
+    bad = _oos_holds_pkg()
+    bad["evidence"] = dict(bad["evidence"])
+    bad["evidence"]["oos_22m"] = None
+    with pytest.raises(spl.StrategyPackageRefuse, match="HOLDS"):
+        spl.validate_package_dict(bad, source="oos_null_pass", schema=SCHEMA)

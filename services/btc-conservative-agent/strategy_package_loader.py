@@ -205,6 +205,9 @@ def validate_package_dict(
                 f"(got {evidence.get('leak_suspect')!r})"
             )
 
+    _assert_exit_present(data, source=source)
+    _assert_stop_within_max(data, source=source)
+
     sch = schema if schema is not None else load_schema()
     try:
         _jsonschema.validate(instance=data, schema=sch)
@@ -218,6 +221,50 @@ def validate_package_dict(
     out["_source"] = source
     out["_activated"] = False  # never activated by loader alone
     return out
+
+
+def resolve_stop_bp(exit_policy: Mapping[str, Any] | None) -> float | None:
+    """Return stop in basis points from ``stop_bp`` or ``hard_stop_pct`` (pct points × 100)."""
+    if not isinstance(exit_policy, Mapping):
+        return None
+    if exit_policy.get("stop_bp") is not None:
+        return float(exit_policy["stop_bp"])
+    if exit_policy.get("hard_stop_pct") is not None:
+        # hard_stop_pct is percent points (0.31 → 31 bp), matching fixture convention.
+        return float(exit_policy["hard_stop_pct"]) * 100.0
+    return None
+
+
+def _assert_exit_present(data: Mapping[str, Any], *, source: str) -> None:
+    """Refuse a tile with no exit at all; stop may be absent only with trail or max_hold."""
+    exit_p = data.get("exit")
+    if not isinstance(exit_p, Mapping) or not exit_p:
+        raise StrategyPackageRefuse(f"{source}: exit is required (no exit at all)")
+    has_stop = exit_p.get("hard_stop_pct") is not None or exit_p.get("stop_bp") is not None
+    has_trail = exit_p.get("trail_pct") is not None
+    has_hold = exit_p.get("max_hold_min") is not None
+    if not has_stop and not has_trail and not has_hold:
+        raise StrategyPackageRefuse(
+            f"{source}: exit has no stop/trail/max_hold — refuse empty exit "
+            "(stop may be absent only when trail_pct or max_hold_min is set)"
+        )
+
+
+def _assert_stop_within_max(data: Mapping[str, Any], *, source: str) -> None:
+    """Loader enforces stop_bp <= sizing.max_stop_bp when the cap is declared."""
+    sizing = data.get("sizing") if isinstance(data.get("sizing"), Mapping) else {}
+    exit_p = data.get("exit") if isinstance(data.get("exit"), Mapping) else {}
+    max_stop = sizing.get("max_stop_bp")
+    if max_stop is None:
+        return
+    stop_bp = resolve_stop_bp(exit_p)
+    if stop_bp is None:
+        return
+    if float(stop_bp) > float(max_stop):
+        raise StrategyPackageRefuse(
+            f"{source}: stop_bp {stop_bp:g} exceeds sizing.max_stop_bp {float(max_stop):g} "
+            f"(leverage={sizing.get('leverage')})"
+        )
 
 
 def feeds_r53c_gate(package: Mapping[str, Any]) -> bool:
