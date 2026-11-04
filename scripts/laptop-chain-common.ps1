@@ -221,6 +221,8 @@ $script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
 #   only auth on POST ops pause + POST ops refresh-flat-audit
 #   (trading-agents.controller.ts). Separate apps/api PR (other worker) must
 #   require assertBotAdminToken on those POSTs; do not vault-export here.
+# ADDED LAPTOP_MONITOR_READ_TOKEN — bot.py GET-only monitor routes
+#   (_laptop_monitor_read_authorized); never Nest POST; bot process only.
 $script:LaptopChainBotVaultAllowlist = @(
   'BOT_ADMIN_TOKEN',
   'BOT_CONTROL_SECRET',
@@ -228,9 +230,12 @@ $script:LaptopChainBotVaultAllowlist = @(
   'SHOWCASE_RELAY_WEBHOOK_URL',
   'CRASH_NOTIFY_WEBHOOK',
   'LIFECYCLE_LAPTOP_ATTESTATION_KEY',
-  'LIFECYCLE_CLEANUP_ENABLED'
+  'LIFECYCLE_CLEANUP_ENABLED',
+  'LAPTOP_MONITOR_READ_TOKEN'
 )
 $script:BitfinexEnvRefusalExitCode = 79
+# RK 12:27: bot starters refuse when LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN.
+$script:LaptopMonitorTokenRefusalExitCode = 78
 
 function Test-LaptopChainVaultNameAllowed {
   param(
@@ -354,6 +359,50 @@ function Import-LaptopChainVaultAllowlist {
     $value = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name $name -Mode $Mode
     if (-not $value) { continue }
     [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+  }
+}
+
+# Read a vault line by exact name for compare-only (never exports into process env;
+# never prints the value). Used to detect LAPTOP == MONITOR without vault-exporting MONITOR.
+function Read-VaultEnvLineCompareOnly {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if (-not $Name) { return $null }
+  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { return $null }
+  $pattern = '^\s*' + [regex]::Escape($Name) + '=(.*)$'
+  foreach ($line in Get-Content -LiteralPath $VaultEnv -ErrorAction SilentlyContinue) {
+    if ($line -match $pattern) {
+      return [string]$Matches[1].Trim().Trim('"').Trim("'")
+    }
+  }
+  return $null
+}
+
+# RK 12:27: bot process start refuses when LAPTOP_MONITOR_READ_TOKEN is empty/short
+# or equals MONITOR_READ_TOKEN. Names/reasons only — never prints values.
+function Assert-LaptopMonitorReadTokenForBotStart {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv
+  )
+  $minLen = 24
+  $laptop = [Environment]::GetEnvironmentVariable('LAPTOP_MONITOR_READ_TOKEN', 'Process')
+  if (-not $laptop) { $laptop = '' }
+  $laptop = $laptop.Trim()
+  if ($laptop.Length -lt $minLen) {
+    Write-Host 'REFUSED_LAPTOP_MONITOR_READ_TOKEN empty_or_short'
+    exit $script:LaptopMonitorTokenRefusalExitCode
+  }
+  $monitor = [Environment]::GetEnvironmentVariable('MONITOR_READ_TOKEN', 'Process')
+  if (-not $monitor) {
+    $monitor = Read-VaultEnvLineCompareOnly -VaultEnv $VaultEnv -Name 'MONITOR_READ_TOKEN'
+  }
+  if (-not $monitor) { $monitor = '' }
+  $monitor = $monitor.Trim()
+  if ($monitor.Length -gt 0 -and [string]::Equals($laptop, $monitor, [StringComparison]::Ordinal)) {
+    Write-Host 'REFUSED_LAPTOP_MONITOR_READ_TOKEN equals_MONITOR_READ_TOKEN'
+    exit $script:LaptopMonitorTokenRefusalExitCode
   }
 }
 

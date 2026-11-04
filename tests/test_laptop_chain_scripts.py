@@ -125,6 +125,7 @@ def test_bot_starters_route_vault_through_true_bot_allowlist(script_name):
     assert "Import-LaptopChainVaultAllowlist" in source
     assert "BotAllowlist" in source
     assert "Assert-BitfinexProcessEnvAbsent" not in source
+    assert "Assert-LaptopMonitorReadTokenForBotStart" in source
     assert "laptop-chain-common.ps1" in source
     assert not re.search(
         r"Get-Content\s+\$\w*[Vv]ault\w*\s*\|[^\n]*ForEach-Object",
@@ -151,7 +152,7 @@ def test_supervisor_and_cycle_fail_closed_on_bitfinex_env_names():
 
 
 def test_bot_allowlist_names_justified_or_dropped():
-    """RK 09:33 / HM HOLD 716511e8582d: DEEPSEEK + MONITOR dropped from BotAllowlist."""
+    """RK 09:33 / HM HOLD 716511e8582d: DEEPSEEK + MONITOR dropped; laptop GET token added."""
     common = _source("laptop-chain-common.ps1")
     bot_names = _ps_allowlist_names(common, "LaptopChainBotVaultAllowlist")
     assert "DEEPSEEK_API_KEY" not in bot_names
@@ -165,6 +166,7 @@ def test_bot_allowlist_names_justified_or_dropped():
         "CRASH_NOTIFY_WEBHOOK",
         "LIFECYCLE_LAPTOP_ATTESTATION_KEY",
         "LIFECYCLE_CLEANUP_ENABLED",
+        "LAPTOP_MONITOR_READ_TOKEN",
     }
     assert set(bot_names) == expected
     # Nest POST ops that accept MONITOR via assertBotReadToken (not GET-only).
@@ -179,6 +181,13 @@ def test_bot_allowlist_names_justified_or_dropped():
     assert "assertBotReadToken" in service
     assert "DROPPED MONITOR_READ_TOKEN" in common
     assert "NOT GET-only" in common
+    assert "ADDED LAPTOP_MONITOR_READ_TOKEN" in common
+    # Bot process only — AdminTokenOnly chain must NOT export the laptop monitor token.
+    admin_names = _ps_allowlist_names(common, "LaptopChainVaultAllowlist")
+    assert "LAPTOP_MONITOR_READ_TOKEN" not in admin_names
+    assert "Assert-LaptopMonitorReadTokenForBotStart" in common
+    assert "LaptopMonitorTokenRefusalExitCode" in common
+    assert "REFUSED_LAPTOP_MONITOR_READ_TOKEN" in common
 
 
 def test_bot_auto_restart_does_not_relaunch_on_exit_79():
@@ -191,6 +200,10 @@ def test_bot_auto_restart_does_not_relaunch_on_exit_79():
     refuse_idx = source.find("BitfinexEnvRefusalExitCode")
     crash_idx = source.find("$consecutiveCrashes++")
     assert 0 <= refuse_idx < crash_idx
+    # RK 12:27: exit 78 (laptop monitor token refuse) also stands down.
+    assert "LaptopMonitorTokenRefusalExitCode" in source
+    assert "laptop_monitor_token_refused" in source
+    assert source.find("LaptopMonitorTokenRefusalExitCode") < crash_idx
 
 
 def test_fees_system_health_node_do_not_export_vault_bitfinex_into_process():
@@ -422,20 +435,18 @@ def _iso(delta_minutes: float = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=delta_minutes)).isoformat()
 
 
-def _vault_fixture(tmp_path) -> Path:
+def _vault_fixture(tmp_path, **extra) -> Path:
     fixture = tmp_path / "home-bot.env"
-    fixture.write_text(
-        "\n".join(
-            [
-                "BOT_ADMIN_TOKEN=fixture-admin-token-not-real",
-                "BITFINEX_API_KEY=fixture-should-not-export",
-                "BITFINEX_API_SECRET=fixture-should-not-export-either",
-                "OTHER_SECRET=fixture-also-not",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    lines = [
+        "BOT_ADMIN_TOKEN=fixture-admin-token-not-real",
+        "BITFINEX_API_KEY=fixture-should-not-export",
+        "BITFINEX_API_SECRET=fixture-should-not-export-either",
+        "OTHER_SECRET=fixture-also-not",
+    ]
+    for key, value in extra.items():
+        lines.append(f"{key}={value}")
+    lines.append("")
+    fixture.write_text("\n".join(lines), encoding="utf-8")
     return fixture
 
 
@@ -513,6 +524,68 @@ def test_bot_starter_bot_allowlist_never_exports_vault_bitfinex_keeps_inherited(
     )
     assert "fixture-should-not-export" not in result.stdout
     assert "preexisting" not in result.stdout
+
+
+@windows_only
+def test_assert_laptop_monitor_token_refuses_empty(chain, tmp_path):
+    """RK 12:27 (a): empty LAPTOP_MONITOR_READ_TOKEN → exit 78."""
+    fixture = _vault_fixture(tmp_path)  # no LAPTOP_MONITOR_READ_TOKEN line
+    script = (
+        _common_prelude(chain)
+        + "Remove-Item Env:LAPTOP_MONITOR_READ_TOKEN -ErrorAction SilentlyContinue; "
+        + "Remove-Item Env:MONITOR_READ_TOKEN -ErrorAction SilentlyContinue; "
+        + f"Import-LaptopChainVaultAllowlist -VaultEnv '{fixture}' -Mode BotAllowlist; "
+        + f"Assert-LaptopMonitorReadTokenForBotStart -VaultEnv '{fixture}'"
+    )
+    result = _ps(script, _clean_chain_env(chain))
+    assert result.returncode == 78, (result.returncode, result.stdout, result.stderr)
+    assert "REFUSED_LAPTOP_MONITOR_READ_TOKEN empty_or_short" in result.stdout
+    assert "fixture-admin-token-not-real" not in result.stdout
+
+
+@windows_only
+def test_assert_laptop_monitor_token_refuses_equal_monitor(chain, tmp_path):
+    """RK 12:27 (a): LAPTOP_MONITOR_READ_TOKEN == MONITOR_READ_TOKEN → exit 78."""
+    shared = "shared-monitor-and-laptop-token-VALUE"
+    fixture = _vault_fixture(
+        tmp_path,
+        LAPTOP_MONITOR_READ_TOKEN=shared,
+        MONITOR_READ_TOKEN=shared,
+    )
+    script = (
+        _common_prelude(chain)
+        + "Remove-Item Env:LAPTOP_MONITOR_READ_TOKEN -ErrorAction SilentlyContinue; "
+        + "Remove-Item Env:MONITOR_READ_TOKEN -ErrorAction SilentlyContinue; "
+        + f"Import-LaptopChainVaultAllowlist -VaultEnv '{fixture}' -Mode BotAllowlist; "
+        + f"Assert-LaptopMonitorReadTokenForBotStart -VaultEnv '{fixture}'"
+    )
+    result = _ps(script, _clean_chain_env(chain))
+    assert result.returncode == 78, (result.returncode, result.stdout, result.stderr)
+    assert "REFUSED_LAPTOP_MONITOR_READ_TOKEN equals_MONITOR_READ_TOKEN" in result.stdout
+    assert shared not in result.stdout
+
+
+@windows_only
+def test_assert_laptop_monitor_token_accepts_distinct(chain, tmp_path):
+    """RK 12:27 (a): distinct non-empty laptop token allows start assert to pass."""
+    fixture = _vault_fixture(
+        tmp_path,
+        LAPTOP_MONITOR_READ_TOKEN="laptop-only-token-for-tests-ABCDEF12",
+        MONITOR_READ_TOKEN="monitor-read-token-for-tests-0123456789",
+    )
+    script = (
+        _common_prelude(chain)
+        + "Remove-Item Env:LAPTOP_MONITOR_READ_TOKEN -ErrorAction SilentlyContinue; "
+        + "Remove-Item Env:MONITOR_READ_TOKEN -ErrorAction SilentlyContinue; "
+        + f"Import-LaptopChainVaultAllowlist -VaultEnv '{fixture}' -Mode BotAllowlist; "
+        + f"Assert-LaptopMonitorReadTokenForBotStart -VaultEnv '{fixture}'; "
+        + "Write-Output 'assert_ok'"
+    )
+    result = _ps(script, _clean_chain_env(chain))
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert "assert_ok" in result.stdout
+    assert "laptop-only-token" not in result.stdout
+    assert "monitor-read-token" not in result.stdout
 
 
 @windows_only

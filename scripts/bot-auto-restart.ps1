@@ -106,6 +106,8 @@ try {
   . (Join-Path $scriptDir 'laptop-chain-common.ps1')
   if (Test-Path $VaultEnv) {
     Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
+    # RK 12:27: refuse start when LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN.
+    Assert-LaptopMonitorReadTokenForBotStart -VaultEnv $VaultEnv
   }
 
   # Script port wins over anything in home-bot.env (vault must not override :7002).
@@ -174,6 +176,7 @@ try {
     # without requiring a monitor respawn. RK 09:33: no inherited-env strip.
     if (Test-Path $VaultEnv) {
       Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
+      Assert-LaptopMonitorReadTokenForBotStart -VaultEnv $VaultEnv
     }
     $env:PORT = "$Port"
     $env:DASHBOARD_PORT = "$Port"
@@ -330,6 +333,12 @@ try {
       # HM HOLD 716511e8582d: never relaunch — relaunching would loop the same refuse.
       if ($code -eq $script:BitfinexEnvRefusalExitCode) {
         Write-RestartLog "bitfinex_env_refused	pid=$currentPid	code=$code	no_restart"
+        break
+      }
+
+      # Exit 78 = LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN (RK 12:27).
+      if ($code -eq $script:LaptopMonitorTokenRefusalExitCode) {
+        Write-RestartLog "laptop_monitor_token_refused	pid=$currentPid	code=$code	no_restart"
         break
       }
 

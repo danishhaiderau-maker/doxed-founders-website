@@ -288,6 +288,7 @@ test_integrity_gaps.py
 test_keep_manifest.py
 test_lane_ledger_wl_price_bp.py
 test_lane_memory_exposure_validation.py
+test_laptop_monitor_read_token.py
 test_latency_schedule_replay.py
 test_lead_lag_report.py
 test_ledger_delete_by_sha.py
