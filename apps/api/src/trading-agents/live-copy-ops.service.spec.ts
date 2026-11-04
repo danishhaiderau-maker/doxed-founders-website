@@ -19,16 +19,23 @@ test('parses Bitfinex key permissions and exposes withdraw/trade flags', () => {
 
 test('admin token is required and compared exactly', () => {
   const prev = process.env.BOT_ADMIN_TOKEN;
+  const prevMonitor = process.env.MONITOR_READ_TOKEN;
   try {
     delete process.env.BOT_ADMIN_TOKEN;
+    delete process.env.MONITOR_READ_TOKEN;
     assert.throws(() => assertBotAdminToken('x'));
     process.env.BOT_ADMIN_TOKEN = 'tok-123';
+    process.env.MONITOR_READ_TOKEN = 'monitor-tok';
     assert.throws(() => assertBotAdminToken('tok-12'));
     assert.throws(() => assertBotAdminToken(undefined, undefined));
+    assert.throws(() => assertBotAdminToken('monitor-tok'));
+    assert.throws(() => assertBotAdminToken(undefined, 'Bearer monitor-tok'));
     assert.doesNotThrow(() => assertBotAdminToken('tok-123'));
     assert.doesNotThrow(() => assertBotAdminToken(undefined, 'Bearer tok-123'));
   } finally {
     if (prev === undefined) delete process.env.BOT_ADMIN_TOKEN; else process.env.BOT_ADMIN_TOKEN = prev;
+    if (prevMonitor === undefined) delete process.env.MONITOR_READ_TOKEN;
+    else process.env.MONITOR_READ_TOKEN = prevMonitor;
   }
 });
 

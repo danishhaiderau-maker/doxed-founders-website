@@ -361,7 +361,7 @@ export class TradingAgentsController {
    * Cookie-free operator pause that retains the ordinary money-path contract:
    * managed entries are cancelled and settled before their participants are
    * expired.  Authentication deliberately runs before confirmation or any
-   * instance/exchange mutation.
+   * instance/exchange mutation. Auth: BOT_ADMIN_TOKEN only (not MONITOR_READ_TOKEN).
    */
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60000 } })
@@ -372,6 +372,7 @@ export class TradingAgentsController {
     @Headers('x-bot-admin-token') adminHeader?: string,
     @Headers('authorization') authorization?: string,
   ) {
+    assertBotAdminToken(adminHeader, authorization);
     await this.tradingAgents.getOpsRelayStatus(
       slug, body?.userId, adminHeader, authorization,
     );
@@ -414,7 +415,10 @@ export class TradingAgentsController {
     return result;
   }
 
-  /** Refresh private exchange audit evidence for an already-paused relay. */
+  /**
+   * Refresh private exchange audit evidence for an already-paused relay.
+   * Auth: BOT_ADMIN_TOKEN only (not MONITOR_READ_TOKEN).
+   */
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post(':slug/ops/refresh-flat-audit')
@@ -424,6 +428,7 @@ export class TradingAgentsController {
     @Headers('x-bot-admin-token') adminHeader?: string,
     @Headers('authorization') authorization?: string,
   ) {
+    assertBotAdminToken(adminHeader, authorization);
     const status = await this.tradingAgents.getOpsRelayStatus(
       slug, body?.userId, adminHeader, authorization,
     );
