@@ -142,6 +142,22 @@ def configured_monitor_token(value: str | None, admin_token: str | None) -> str:
     return token
 
 
+def configured_laptop_monitor_token(
+    value: str | None, admin_token: str | None, monitor_read_token: str | None,
+) -> str:
+    """LAPTOP_MONITOR_READ_TOKEN usable value, or "" when empty/short/admin-equal/equals MONITOR_READ_TOKEN.
+
+    RK 12:27: refuse to authorise when empty or equal to MONITOR_READ_TOKEN (distinct secret).
+    """
+    token = configured_monitor_token(value, admin_token)
+    if not token:
+        return ""
+    monitor = (monitor_read_token or "").strip()
+    if monitor and hmac.compare_digest(token, monitor):
+        return ""
+    return token
+
+
 def bearer_matches(authorization: str | None, expected: str) -> bool:
     if not expected or not authorization:
         return False

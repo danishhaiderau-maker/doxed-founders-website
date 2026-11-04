@@ -35542,8 +35542,9 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 # Laptop-only read token for bot.py GET monitor routes. Distinct from
 # MONITOR_READ_TOKEN (Nest assertBotReadToken is not GET-only). Never accepted
 # on non-GET, never by _admin_authed(), never as a write credential.
-_LAPTOP_MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(
-    os.getenv("LAPTOP_MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN)
+# RK 12:27: empty or equal to MONITOR_READ_TOKEN → "" (authorise refused).
+_LAPTOP_MONITOR_READ_TOKEN = monitor_api.configured_laptop_monitor_token(
+    os.getenv("LAPTOP_MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN, os.getenv("MONITOR_READ_TOKEN"))
 # Read-only tile audit data API: same auth as integrity (admin or the monitor
 # bearer), checked in each handler; never public, never a write.
 _MONITOR_TILE_PATHS = frozenset({

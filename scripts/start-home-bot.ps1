@@ -171,6 +171,8 @@ if (-not (Test-Path $VaultEnv)) {
 # Inherited KEY/SECRET/TOKEN reach in-process exit 79 (bitfinex_env_name_gate).
 . (Join-Path $scriptDir 'laptop-chain-common.ps1')
 Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
+# RK 12:27: refuse start when LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN.
+Assert-LaptopMonitorReadTokenForBotStart -VaultEnv $VaultEnv
 
 # The :7002 process is the canonical paper showcase. Real funds are handled by
 # the per-user website relay after explicit consent; the showcase must never

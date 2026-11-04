@@ -10,6 +10,7 @@ import pytest
 ADMIN = "health-test-token"
 MONITOR = "monitor-read-token-for-tests-0123456789"
 LAPTOP = "laptop-monitor-read-token-for-tests-ABCDEF"
+WRONG = "random-wrong-token-zzzzzzzzzzzzzzzzzz"
 REMOTE = {"REMOTE_ADDR": "198.51.100.7"}
 HERE = Path(__file__).resolve().parent
 
@@ -36,10 +37,25 @@ def test_laptop_token_is_distinct_env_not_monitor_read_token():
     """Mutation: renaming LAPTOP getenv to MONITOR_READ_TOKEN must fail this assert."""
     src = (HERE / "bot.py").read_text(encoding="utf-8")
     assert 'os.getenv("LAPTOP_MONITOR_READ_TOKEN")' in src
-    assert "_LAPTOP_MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(" in src
+    assert "_LAPTOP_MONITOR_READ_TOKEN = monitor_api.configured_laptop_monitor_token(" in src
+    assert "configured_laptop_monitor_token" in (HERE / "monitor_api.py").read_text(encoding="utf-8")
     # Must not collapse into MONITOR_READ_TOKEN.
     assert 'os.getenv("MONITOR_READ_TOKEN")' in src
     assert src.count("_LAPTOP_MONITOR_READ_TOKEN") >= 3
+
+
+def test_configured_laptop_token_refuses_empty_or_equal_monitor():
+    """RK 12:27 (a): empty / equal MONITOR_READ_TOKEN → not authorisable."""
+    assert monitor_api.configured_laptop_monitor_token("", ADMIN, MONITOR) == ""
+    assert monitor_api.configured_laptop_monitor_token("short", ADMIN, MONITOR) == ""
+    assert monitor_api.configured_laptop_monitor_token(None, ADMIN, MONITOR) == ""
+    assert monitor_api.configured_laptop_monitor_token(MONITOR, ADMIN, MONITOR) == ""
+    assert monitor_api.configured_laptop_monitor_token(f"  {MONITOR}  ", ADMIN, MONITOR) == ""
+    assert monitor_api.configured_laptop_monitor_token(LAPTOP, ADMIN, MONITOR) == LAPTOP
+    assert monitor_api.configured_laptop_monitor_token(LAPTOP, ADMIN, "") == LAPTOP
+    assert monitor_api.configured_laptop_monitor_token(LAPTOP, ADMIN, None) == LAPTOP
+    # Still refuse admin-equal (inherited from configured_monitor_token).
+    assert monitor_api.configured_laptop_monitor_token(ADMIN + "-padded-to-24chars!!", ADMIN + "-padded-to-24chars!!", MONITOR) == ""
 
 
 def test_laptop_token_accepted_on_get_monitor_routes(bot):
@@ -49,6 +65,15 @@ def test_laptop_token_accepted_on_get_monitor_routes(bot):
         ok = client.get(path, headers=headers, environ_base=REMOTE)
         assert ok.status_code == 200, path
         assert ok.headers.get("Cache-Control") == "no-store"
+
+
+def test_random_wrong_token_refused_on_get_monitor_routes(bot):
+    """RK 12:27 (b): a random wrong bearer is refused on GET monitor routes."""
+    client = bot.app.test_client()
+    headers = {"Authorization": f"Bearer {WRONG}"}
+    for path in ("/api/monitor/integrity", "/api/monitor/digest", "/api/monitor/tiles/specs"):
+        resp = client.get(path, headers=headers, environ_base=REMOTE)
+        assert resp.status_code == 401, path
 
 
 def test_laptop_token_rejected_on_any_non_get(bot):
@@ -72,6 +97,43 @@ def test_laptop_token_rejected_on_any_non_get(bot):
     assert client.post("/api/pause", headers=headers, json={}, environ_base=REMOTE).status_code == 401
     assert client.get("/debug_state", headers=headers, environ_base=REMOTE).status_code == 401
     assert client.get("/api/exchange_exposure_audit", headers=headers, environ_base=REMOTE).status_code == 401
+
+
+def test_laptop_token_in_x_bot_admin_header_refused_on_admin_and_post(bot):
+    """RK 12:27 (b): laptop secret in X-Bot-Admin-Token never grants admin or POST."""
+    client = bot.app.test_client()
+    headers = {"X-Bot-Admin-Token": LAPTOP}
+    # Admin-gated GET
+    assert client.get("/debug_state", headers=headers, environ_base=REMOTE).status_code == 401
+    assert client.get("/api/exchange_exposure_audit", headers=headers, environ_base=REMOTE).status_code == 401
+    # POST mutation
+    assert client.post("/api/pause", headers=headers, json={}, environ_base=REMOTE).status_code == 401
+    assert client.post("/api/system-health/report", headers=headers, json={"schema": "x"},
+                       environ_base=REMOTE).status_code == 401
+    # Monitor GET must not accept admin-header laptop token either (Bearer only).
+    assert client.get("/api/monitor/integrity", headers=headers, environ_base=REMOTE).status_code == 401
+    assert client.get("/api/monitor/digest", headers=headers, environ_base=REMOTE).status_code == 401
+
+
+def test_empty_or_equal_monitor_laptop_token_does_not_authorise(bot, monkeypatch):
+    """RK 12:27 (a): authorise path refuses when configured laptop token is empty."""
+    monkeypatch.setattr(bot, "_LAPTOP_MONITOR_READ_TOKEN", "")
+    client = bot.app.test_client()
+    assert client.get(
+        "/api/monitor/integrity",
+        headers={"Authorization": f"Bearer {LAPTOP}"},
+        environ_base=REMOTE,
+    ).status_code == 401
+    # Equal-to-MONITOR case: configured helper returns "" so auth uses MONITOR path only.
+    assert monitor_api.configured_laptop_monitor_token(MONITOR, ADMIN, MONITOR) == ""
+    monkeypatch.setattr(bot, "_LAPTOP_MONITOR_READ_TOKEN",
+                        monitor_api.configured_laptop_monitor_token(MONITOR, ADMIN, MONITOR))
+    # Presenting the shared value as laptop Bearer: MONITOR path may still accept if
+    # _MONITOR_READ_TOKEN is set — helper itself must stay False.
+    with bot.app.test_request_context(
+            "/api/monitor/integrity", method="GET",
+            headers={"Authorization": f"Bearer {MONITOR}"}):
+        assert bot._laptop_monitor_read_authorized() is False
 
 
 def test_laptop_helper_refuses_non_get_even_when_token_matches(bot, monkeypatch):
