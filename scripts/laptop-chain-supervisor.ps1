@@ -23,6 +23,9 @@ try {
   $common = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File')
   $roots = @('-RepoRoot', $cfg.RepoRoot, '-CanonicalRoot', $cfg.CanonicalRoot, '-StateDir', $cfg.StateDir)
 
+  # RK 08:26: refuse KEY/SECRET/TOKEN (LIVE_ENABLED='0' exempt) inside supervisor.
+  Assert-BitfinexProcessEnvAbsent -Config $cfg -LogName $logName
+
   # RK 20:20 / R22 (#972 REV7): Fly-only steps 1–3 REMOVED (segment pull,
   # fly_* status snapshots, v2c-auto-ff). Flag-off VIOLATES R22. Task stays
   # Enabled so steps 4–9 (analyzer / dashboard ensure / monitor / proof /
