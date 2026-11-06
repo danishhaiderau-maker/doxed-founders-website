@@ -42,15 +42,19 @@ def _attach_startup_logs() -> None:
 
 _attach_startup_logs()
 
+# Bound before any LOCAL_FRESH / boot-revision work. Laptop sealed start calls
+# ``_read_boot_revision`` from ``ensure_series_break`` long before the late
+# path-bootstrap block that previously defined this name (NameError at ~L73).
+_SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SERVICE_DIR not in sys.path:
+    sys.path.insert(0, _SERVICE_DIR)
+
 
 def _refuse_bitfinex_process_env_names() -> None:
     """RK 08:26: exit 79 inside launched bot if KEY/SECRET/TOKEN present.
 
     BITFINEX_LIVE_ENABLED exactly '0' is exempt. Names only (R10).
     """
-    _here = os.path.dirname(os.path.abspath(__file__))
-    if _here not in sys.path:
-        sys.path.insert(0, _here)
     from bitfinex_env_name_gate import assert_no_bitfinex_process_env_names
 
     assert_no_bitfinex_process_env_names()
@@ -120,9 +124,6 @@ _LOCAL_FRESH = _local_fresh_requested()
 
 if _LOCAL_FRESH:
     # Local paper owner after Fly delete — fail closed on trade keys / live / Fly env.
-    _service_preload = os.path.dirname(os.path.abspath(__file__))
-    if _service_preload not in sys.path:
-        sys.path.insert(0, _service_preload)
     from local_fresh_runtime import (  # noqa: E402
         apply_local_fresh_environ,
         build_health_payload,
@@ -275,10 +276,6 @@ else:
     os.environ["RESEARCH_DASHBOARD_PUBLIC_URL"] = (
         "https://doxed-btc-bot.fly.dev/analysis"
     )
-
-_SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SERVICE_DIR not in sys.path:
-    sys.path.insert(0, _SERVICE_DIR)
 
 _port = int(os.getenv("DASHBOARD_PORT") or os.getenv("PORT") or "7002")
 if _port == 7810:
