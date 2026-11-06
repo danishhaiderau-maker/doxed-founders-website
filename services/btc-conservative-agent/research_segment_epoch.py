@@ -8,8 +8,10 @@ the manifest or keys said "a wipe happened", and nothing compared the counters. 
 * ``resolve_prefix`` / ``resolve_state_dir``: optional per-wipe key prefix (``v3-w<epoch_ts>``), so a wipe
   can never reuse sequence numbers or object names of an archived epoch. Opt-in via
   ``RESEARCH_SEGMENTS_PREFIX_PER_WIPE=1``; default off, so deploying this changes no key.
-* ``sync_verdict``: RED on published_seq < applied_seq, on Fly ack 0 while laptop applied > 0, on an
-  epoch/prefix mismatch and on a pending "laptop reset required" marker; AMBER on ack lag > 5 min.
+* ``sync_verdict``: RED on missing laptop beacon (R27/R36), on beacon age ≥ 30 min (shared
+  ``BEACON_STALE_*`` family; AMBER at ≥ 10 min), on published_seq < applied_seq, on Fly ack 0 while
+  laptop applied > 0 past the amber window, on an epoch/prefix mismatch and on a pending
+  "laptop reset required" marker; AMBER on ack lag > 5 min.
 * ``validate_beacon``: the small laptop status document POSTed to ``.../laptop-status`` each pull.
 * the "laptop reset required" marker written by the wipe (see ``clean_epoch_wipe.execute``).
 
@@ -54,7 +56,14 @@ RESET_MARKER_SCHEMA = "laptop_reset_required_v1"
 RESET_MARKER_NAME = "laptop-reset-required.json"
 ACK_LAG_AMBER_SEC = 5 * 60
 ACK_LAG_RED_SEC = 15 * 60
-BEACON_STALE_SEC = 30 * 60
+# Shared beacon-staleness family (card seal 9fd17232b95b / R27 / R36):
+# one base drives AMBER@10m and RED@30m — no divergent hard-codes in evaluators.
+BEACON_STALE_AMBER_SEC = 10 * 60
+BEACON_STALE_RED_SEC = 3 * BEACON_STALE_AMBER_SEC  # 30 min
+BEACON_STALE_SEC = BEACON_STALE_RED_SEC  # alias: RED-tier age (callers / older tests)
+# Laptop pull-loop cadence upper bound (scripts/research-segment-pull-loop.ps1 default 120).
+BEACON_POST_CADENCE_MAX_SEC = 300
+BEACON_POST_CADENCE_DEFAULT_SEC = 120
 MAX_BEACON_BYTES = 4096
 
 _BEACON_INT_FIELDS = ("applied_seq", "pull_exit", "cycle_exit")
@@ -240,7 +249,10 @@ def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | No
     if beacon:
         applied = int(beacon.get("applied_seq") or 0)
         age = None if beacon_received_at is None else now - float(beacon_received_at)
-        if age is not None and age > BEACON_STALE_SEC:
+        # Shared AMBER@10m / RED@30m tiers (R27/R36): missing handled below as RED.
+        if age is not None and age >= BEACON_STALE_RED_SEC:
+            red.append(f"BEACON_STALE: laptop status {int(age / 60)} min old")
+        elif age is not None and age >= BEACON_STALE_AMBER_SEC:
             amber.append(f"BEACON_STALE: laptop status {int(age / 60)} min old")
         if applied > published:
             red.append(f"SEQ_REGRESSION: laptop applied {applied} > Fly published {published}")
@@ -287,10 +299,10 @@ def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | No
     ack_ts = _iso_to_ts(ack_received_at)
     ack_age = None if ack_ts is None else max(0.0, now - ack_ts)
     beacon_age = None if (not beacon or beacon_received_at is None) else max(0.0, now - float(beacon_received_at))
-    if beacon is None and not red:
+    if beacon is None:
+        # R27/R36: missing beacon is always RED (never soft-AMBER / UNKNOWN for the missing key).
+        # Ack receipt may still supply applied_seq evidence, but the missing-beacon key stays RED.
         if acked > 0:
-            # No client posts a laptop beacon today; the laptop's ack receipt IS the applied-seq evidence (same
-            # numbering as published_seq, one source). Say so explicitly instead of an unexplained UNKNOWN/RED.
             applied, applied_source = acked, "ACK_RECEIPT"
             lag = published - acked
             if lag > 0 and ack_age is not None and ack_age > ACK_LAG_RED_SEC:
@@ -298,14 +310,12 @@ def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | No
                            f"Fly published {published} ({lag} behind)")
             elif lag > 0 and ack_age is not None and ack_age > ACK_LAG_AMBER_SEC:
                 amber.append(f"ACK_LAG: laptop ack through {acked} for {int(ack_age / 60)} min, Fly published {published}")
-            amber.append(f"NO_LAPTOP_BEACON: no beacon posted; applied seq taken from the ack receipt ({acked}, "
-                         f"{'age unknown' if ack_age is None else f'{int(ack_age)} s old'})")
-            status = "RED" if red else "AMBER"
+            red.append(f"NO_LAPTOP_BEACON: no beacon posted; applied seq taken from the ack receipt ({acked}, "
+                       f"{'age unknown' if ack_age is None else f'{int(ack_age)} s old'})")
         else:
-            status = "UNKNOWN"
-            amber.append("NO_LAPTOP_BEACON_NO_ACK: no beacon and no ack receipt (acked_seq 0): laptop applied seq unknown")
-    else:
-        status = "RED" if red else "AMBER" if amber else "GREEN"
+            red.append("NO_LAPTOP_BEACON_NO_ACK: no beacon and no ack receipt (acked_seq 0): "
+                       "laptop applied seq unknown")
+    status = "RED" if red else "AMBER" if amber else "GREEN"
     reasons_all = red + amber
     if status == "RED" and not red:  # a RED verdict always carries its reason
         reasons_all = ["RED_UNSPECIFIED: verdict RED without a recorded reason"] + reasons_all
