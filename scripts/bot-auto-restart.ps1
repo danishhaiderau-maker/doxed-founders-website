@@ -102,12 +102,12 @@ try {
   if (-not $VaultEnv) {
     $VaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
   }
+  # RK 09:33: vault allowlist only — do NOT strip inherited BITFINEX_*.
+  . (Join-Path $scriptDir 'laptop-chain-common.ps1')
   if (Test-Path $VaultEnv) {
-    Get-Content $VaultEnv | ForEach-Object {
-      if ($_ -match '^\s*([^#=]+)=(.*)$') {
-        Set-Item -Path "env:$($matches[1].Trim())" -Value $matches[2].Trim()
-      }
-    }
+    Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
+    # RK 12:27: refuse start when LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN.
+    Assert-LaptopMonitorReadTokenForBotStart -VaultEnv $VaultEnv
   }
 
   # Script port wins over anything in home-bot.env (vault must not override :7002).
@@ -117,8 +117,8 @@ try {
   # is the sole component permitted to place real Bitfinex orders.
   $env:FORCE_PAPER_MODE = "1"
   $env:LIVE_TRADING_ENABLED = "0"
-  $env:BITFINEX_LIVE_ENABLED = "0"
   $env:LIVE_ARMED = "0"
+  $env:BITFINEX_LIVE_ENABLED = "0"
 
   # --- Crash report (mirrors start-home-bot.ps1 Write-CrashReport) -------------
   function Write-CrashReport([int]$CrashedPid, [int]$Code, [string]$Message) {
@@ -173,19 +173,17 @@ try {
   # --- Relaunch the bot exactly like start-home-bot.ps1 -NoWait ---------------
   function Import-VaultEnv {
     # Re-read vault on every relaunch so new secrets (e.g. BOT_ADMIN_TOKEN) apply
-    # without requiring a monitor respawn.
-    if (-not (Test-Path $VaultEnv)) { return }
-    Get-Content $VaultEnv | ForEach-Object {
-      if ($_ -match '^\s*([^#=]+)=(.*)$') {
-        Set-Item -Path "env:$($matches[1].Trim())" -Value $matches[2].Trim()
-      }
+    # without requiring a monitor respawn. RK 09:33: no inherited-env strip.
+    if (Test-Path $VaultEnv) {
+      Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
+      Assert-LaptopMonitorReadTokenForBotStart -VaultEnv $VaultEnv
     }
     $env:PORT = "$Port"
     $env:DASHBOARD_PORT = "$Port"
     $env:FORCE_PAPER_MODE = "1"
     $env:LIVE_TRADING_ENABLED = "0"
-    $env:BITFINEX_LIVE_ENABLED = "0"
     $env:LIVE_ARMED = "0"
+    $env:BITFINEX_LIVE_ENABLED = "0"
   }
 
   function Start-BotHidden {
@@ -328,6 +326,19 @@ try {
       # Exit code 0 = intentional shutdown (e.g. user stop-home-bot). Don't restart.
       if ($code -eq 0) {
         Write-RestartLog "clean_exit	pid=$currentPid	code=0	no_restart"
+        break
+      }
+
+      # Exit 79 = BITFINEX env-name refusal (bitfinex_env_name_gate / Assert).
+      # HM HOLD 716511e8582d: never relaunch — relaunching would loop the same refuse.
+      if ($code -eq $script:BitfinexEnvRefusalExitCode) {
+        Write-RestartLog "bitfinex_env_refused	pid=$currentPid	code=$code	no_restart"
+        break
+      }
+
+      # Exit 78 = LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN (RK 12:27).
+      if ($code -eq $script:LaptopMonitorTokenRefusalExitCode) {
+        Write-RestartLog "laptop_monitor_token_refused	pid=$currentPid	code=$code	no_restart"
         break
       }
 

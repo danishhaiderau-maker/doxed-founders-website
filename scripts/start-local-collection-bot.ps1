@@ -40,11 +40,12 @@ if (-not (Test-Path $vaultEnv)) {
   exit 1
 }
 
-Get-Content $vaultEnv | ForEach-Object {
-  if ($_ -match '^\s*([^#=]+)=(.*)$') {
-    Set-Item -Path ("env:" + $matches[1].Trim()) -Value $matches[2].Trim()
-  }
-}
+# RK 09:33: vault allowlist only — do NOT strip inherited BITFINEX_*.
+. (Join-Path $scriptDir 'laptop-chain-common.ps1')
+Import-LaptopChainVaultAllowlist -VaultEnv $vaultEnv -Mode BotAllowlist
+# RK 12:27: refuse start when LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN.
+Assert-LaptopMonitorReadTokenForBotStart -VaultEnv $vaultEnv
+$env:BITFINEX_LIVE_ENABLED = "0"
 
 $env:PORT = "$Port"
 $env:DASHBOARD_PORT = "$Port"

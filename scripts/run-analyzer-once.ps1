@@ -23,6 +23,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'laptop-chain-common.ps1')
 $cfg = Get-LaptopChainConfig -RepoRoot $RepoRoot -CanonicalRoot $CanonicalRoot -StateDir $StateDir
 $logName = 'analyzer-run'
+# RK 08:26: supervisor-child refusal (KEY/SECRET/TOKEN; LIVE_ENABLED='0' exempt).
+Assert-BitfinexProcessEnvAbsent -Config $cfg -LogName $logName
 $launcher = Join-Path $cfg.RepoRoot 'scripts\start-home-analyzer.ps1'
 
 function Get-AnalyzerStatus {

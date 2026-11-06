@@ -35,6 +35,8 @@ function Get-LaptopChainConfig {
     RunDir = Join-Path $StateDir 'run'
     QuarantineDir = Join-Path $StateDir 'quarantine'
     AlertDir = Join-Path $StateDir 'alerts'
+    # Path only — never load the vault here. Admin token enters process env
+    # solely via Import-LaptopChainVaultAllowlist / Get-AdminToken (allowlist).
     VaultEnv = Join-Path (Split-Path -Parent $CanonicalRoot) 'doxedcryptofounder-secrets\vault\home-bot.env'
     WatcherStatus = Join-Path $StateDir 'laptop-ack-watcher.status.json'
     WatcherLock = Join-Path $StateDir 'laptop-ack-watcher.lock.json'
@@ -197,12 +199,218 @@ function Publish-UpstreamIdentity {
   return [pscustomobject]$identity
 }
 
+# RK 05:12 / HM HOLD 7767d31f7f94 + b5700e72694d + RK 08:26: never put
+# BITFINEX_* into supervisor/bot process env from home-bot.env. Values never
+# printed. True allowlists only (denylist mode removed). Each BotAllowlist
+# name is justified (code ref) or dropped — see allowlist table in #981 asks.
+$script:LaptopChainVaultAllowlist = @('BOT_ADMIN_TOKEN')
+# Bot starters: explicit non-BITFINEX names only (disaster-recovery / showcase).
+# Dropped vs rev3: PLATFORM_* (snapshots load via home-bot-vault-env), 
+# LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID (no getenv reader).
+# Keep reasons (RK 09:33 / HM HOLD 716511e8582d) — full table in #981 asks:
+# BOT_ADMIN_TOKEN — bot admin auth (btc_conservative_agent / bot.py)
+# BOT_CONTROL_SECRET — relay/control HMAC (bot.py)
+# SHOWCASE_WEBHOOK_SECRET — showcase webhook HMAC (bot.py)
+# SHOWCASE_RELAY_WEBHOOK_URL — paper relay delivery URL (bot.py)
+# CRASH_NOTIFY_WEBHOOK — crash notify (start-home-bot / bot-auto-restart)
+# LIFECYCLE_LAPTOP_ATTESTATION_KEY — lifecycle cleanup attest (bot.py)
+# LIFECYCLE_CLEANUP_ENABLED — lifecycle cleanup toggle (bot.py)
+# DROPPED DEEPSEEK_API_KEY — code path exists (bot.py getenv) but no observed
+#   monthly R50 USD figure in-repo; RK 09:33 requires real cost or drop.
+# DROPPED MONITOR_READ_TOKEN — NOT GET-only: Nest assertBotReadToken is the
+#   only auth on POST ops pause + POST ops refresh-flat-audit
+#   (trading-agents.controller.ts). Separate apps/api PR (other worker) must
+#   require assertBotAdminToken on those POSTs; do not vault-export here.
+# ADDED LAPTOP_MONITOR_READ_TOKEN — bot.py GET-only monitor routes
+#   (_laptop_monitor_read_authorized); never Nest POST; bot process only.
+$script:LaptopChainBotVaultAllowlist = @(
+  'BOT_ADMIN_TOKEN',
+  'BOT_CONTROL_SECRET',
+  'SHOWCASE_WEBHOOK_SECRET',
+  'SHOWCASE_RELAY_WEBHOOK_URL',
+  'CRASH_NOTIFY_WEBHOOK',
+  'LIFECYCLE_LAPTOP_ATTESTATION_KEY',
+  'LIFECYCLE_CLEANUP_ENABLED',
+  'LAPTOP_MONITOR_READ_TOKEN'
+)
+$script:BitfinexEnvRefusalExitCode = 79
+# RK 12:27: bot starters refuse when LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN.
+$script:LaptopMonitorTokenRefusalExitCode = 78
+
+function Test-LaptopChainVaultNameAllowed {
+  param(
+    [string]$Name,
+    [ValidateSet('AdminTokenOnly', 'BotAllowlist')][string]$Mode = 'AdminTokenOnly'
+  )
+  if (-not $Name) { return $false }
+  if ($Name.StartsWith('BITFINEX_', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+  $list = if ($Mode -eq 'BotAllowlist') {
+    $script:LaptopChainBotVaultAllowlist
+  } else {
+    $script:LaptopChainVaultAllowlist
+  }
+  foreach ($allowed in $list) {
+    if ([string]::Equals($allowed, $Name, [StringComparison]::Ordinal)) { return $true }
+  }
+  return $false
+}
+
+function Read-LaptopChainVaultValue {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [ValidateSet('AdminTokenOnly', 'BotAllowlist')][string]$Mode = 'AdminTokenOnly'
+  )
+  if (-not (Test-LaptopChainVaultNameAllowed -Name $Name -Mode $Mode)) { return $null }
+  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { return $null }
+  $pattern = '^\s*' + [regex]::Escape($Name) + '=(.*)$'
+  foreach ($line in Get-Content -LiteralPath $VaultEnv -ErrorAction SilentlyContinue) {
+    if ($line -match $pattern) {
+      return [string]$Matches[1].Trim().Trim('"').Trim("'")
+    }
+  }
+  return $null
+}
+
+# True when a BITFINEX_* binding must refuse (RK 08:26): KEY/SECRET/TOKEN in
+# the name, or BITFINEX_LIVE_ENABLED whose value is not exactly '0'.
+function Test-BitfinexEnvNameRefused {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [AllowNull()][string]$Value
+  )
+  if (-not ($Name -like 'BITFINEX_*')) { return $false }
+  if ([string]::Equals($Name, 'BITFINEX_LIVE_ENABLED', [StringComparison]::OrdinalIgnoreCase)) {
+    return ($Value -cne '0')
+  }
+  $upper = $Name.ToUpperInvariant()
+  return ($upper.Contains('KEY') -or $upper.Contains('SECRET') -or $upper.Contains('TOKEN'))
+}
+
+# COUNT of refused BITFINEX_* names in this process env. Never returns/prints values.
+function Get-BitfinexProcessEnvNameCount {
+  $count = 0
+  $vars = [Environment]::GetEnvironmentVariables('Process')
+  foreach ($key in @($vars.Keys)) {
+    $name = [string]$key
+    if (Test-BitfinexEnvNameRefused -Name $name -Value ([string]$vars[$key])) { $count++ }
+  }
+  return $count
+}
+
+# Remove every BITFINEX_* name from process env. Returns how many names were
+# cleared. Never prints values. Starters re-set BITFINEX_LIVE_ENABLED=0 after.
+function Clear-BitfinexProcessEnvNames {
+  $cleared = 0
+  foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+    if ([string]$key -like 'BITFINEX_*') {
+      [Environment]::SetEnvironmentVariable([string]$key, $null, 'Process')
+      $cleared++
+    }
+  }
+  return $cleared
+}
+
+# Log names-only refused count; exit 79 if any refused name remains (fail closed).
+# Used inside launched processes / supervisor children — NOT in bot starters
+# (RK 08:26: starters = allowlist filter only; no pre-strip refusal).
+function Assert-BitfinexProcessEnvAbsent {
+  param(
+    $Config = $null,
+    [string]$LogName = ''
+  )
+  $count = Get-BitfinexProcessEnvNameCount
+  $message = "BITFINEX_ENV_NAME_COUNT count=$count"
+  if ($Config -and $LogName) {
+    Write-ChainLog -Config $Config -Name $LogName -Message $message
+  } else {
+    Write-Host $message
+  }
+  if ($count -gt 0) {
+    $refuse = "REFUSED_BITFINEX_ENV_NAMES count=$count"
+    if ($Config -and $LogName) {
+      Write-ChainLog -Config $Config -Name $LogName -Message $refuse
+    } else {
+      Write-Host $refuse
+    }
+    exit $script:BitfinexEnvRefusalExitCode
+  }
+}
+
+# AdminTokenOnly (default): BOT_ADMIN_TOKEN only (laptop chain / analyzer cycle).
+# BotAllowlist: explicit non-BITFINEX bot starter names only (true allowlist).
+# Never prints values. RK 09:33: do NOT strip inherited BITFINEX_* — vault never
+# sets those names; inherited KEY/SECRET/TOKEN must reach in-process exit 79.
+function Import-LaptopChainVaultAllowlist {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv,
+    [ValidateSet('AdminTokenOnly', 'BotAllowlist')][string]$Mode = 'AdminTokenOnly'
+  )
+  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) {
+    return
+  }
+  $names = if ($Mode -eq 'BotAllowlist') {
+    $script:LaptopChainBotVaultAllowlist
+  } else {
+    $script:LaptopChainVaultAllowlist
+  }
+  foreach ($name in $names) {
+    if (-not (Test-LaptopChainVaultNameAllowed -Name $name -Mode $Mode)) { continue }
+    $value = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name $name -Mode $Mode
+    if (-not $value) { continue }
+    [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+  }
+}
+
+# Read a vault line by exact name for compare-only (never exports into process env;
+# never prints the value). Used to detect LAPTOP == MONITOR without vault-exporting MONITOR.
+function Read-VaultEnvLineCompareOnly {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if (-not $Name) { return $null }
+  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { return $null }
+  $pattern = '^\s*' + [regex]::Escape($Name) + '=(.*)$'
+  foreach ($line in Get-Content -LiteralPath $VaultEnv -ErrorAction SilentlyContinue) {
+    if ($line -match $pattern) {
+      return [string]$Matches[1].Trim().Trim('"').Trim("'")
+    }
+  }
+  return $null
+}
+
+# RK 12:27: bot process start refuses when LAPTOP_MONITOR_READ_TOKEN is empty/short
+# or equals MONITOR_READ_TOKEN. Names/reasons only — never prints values.
+function Assert-LaptopMonitorReadTokenForBotStart {
+  param(
+    [Parameter(Mandatory = $true)][string]$VaultEnv
+  )
+  $minLen = 24
+  $laptop = [Environment]::GetEnvironmentVariable('LAPTOP_MONITOR_READ_TOKEN', 'Process')
+  if (-not $laptop) { $laptop = '' }
+  $laptop = $laptop.Trim()
+  if ($laptop.Length -lt $minLen) {
+    Write-Host 'REFUSED_LAPTOP_MONITOR_READ_TOKEN empty_or_short'
+    exit $script:LaptopMonitorTokenRefusalExitCode
+  }
+  $monitor = [Environment]::GetEnvironmentVariable('MONITOR_READ_TOKEN', 'Process')
+  if (-not $monitor) {
+    $monitor = Read-VaultEnvLineCompareOnly -VaultEnv $VaultEnv -Name 'MONITOR_READ_TOKEN'
+  }
+  if (-not $monitor) { $monitor = '' }
+  $monitor = $monitor.Trim()
+  if ($monitor.Length -gt 0 -and [string]::Equals($laptop, $monitor, [StringComparison]::Ordinal)) {
+    Write-Host 'REFUSED_LAPTOP_MONITOR_READ_TOKEN equals_MONITOR_READ_TOKEN'
+    exit $script:LaptopMonitorTokenRefusalExitCode
+  }
+}
+
 function Get-AdminToken([string]$VaultEnv) {
   if ($env:BOT_ADMIN_TOKEN) { return $env:BOT_ADMIN_TOKEN }
-  if (-not (Test-Path -LiteralPath $VaultEnv -PathType Leaf)) { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
-  $raw = Get-Content -LiteralPath $VaultEnv -Raw
-  if ($raw -notmatch '(?m)^BOT_ADMIN_TOKEN=(.+)$') { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
-  return $Matches[1].Trim().Trim('"').Trim("'")
+  $token = Read-LaptopChainVaultValue -VaultEnv $VaultEnv -Name 'BOT_ADMIN_TOKEN' -Mode 'AdminTokenOnly'
+  if (-not $token) { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }
+  return $token
 }
 
 # ACKs are proven by the immutable terminal membership receipts the sync

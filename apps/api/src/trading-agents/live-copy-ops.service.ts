@@ -15,14 +15,27 @@ export { assertBotReadToken };
 import { LiveCopyFlyReporterService, liveCopyAccountLabel, summarizeCopyStatus, reporterVerdict, worstVerdict } from './live-copy-fly-reporter';
 import { readPersistedRelayExecutorHealth } from './signal-subscriber-execution.service';
 
-/** BOT_ADMIN_TOKEN (X-Bot-Admin-Token or Bearer), constant-time. */
+/**
+ * BOT_ADMIN_TOKEN only (X-Bot-Admin-Token or Bearer), constant-time.
+ * MONITOR_READ_TOKEN must never authorize admin routes — refused explicitly
+ * when it is configured and distinct from BOT_ADMIN_TOKEN, whether presented
+ * via X-Bot-Admin-Token or Authorization Bearer.
+ */
 export function assertBotAdminToken(adminHeader?: string, authorization?: string): void {
   const expected = (process.env.BOT_ADMIN_TOKEN ?? '').trim();
   if (!expected) throw new UnauthorizedException('BOT_ADMIN_TOKEN is not configured');
   const bearer = typeof authorization === 'string' && authorization.toLowerCase().startsWith('bearer ')
     ? authorization.slice(7).trim()
     : '';
-  const a = Buffer.from((adminHeader?.trim() || bearer).trim(), 'utf8');
+  const presented = (adminHeader?.trim() || bearer).trim();
+  const a = Buffer.from(presented, 'utf8');
+  const monitor = (process.env.MONITOR_READ_TOKEN ?? '').trim();
+  if (monitor && monitor !== expected) {
+    const m = Buffer.from(monitor, 'utf8');
+    if (a.length > 0 && a.length === m.length && timingSafeEqual(a, m)) {
+      throw new UnauthorizedException('Invalid BOT_ADMIN_TOKEN');
+    }
+  }
   const b = Buffer.from(expected, 'utf8');
   if (a.length === 0 || a.length !== b.length || !timingSafeEqual(a, b)) {
     throw new UnauthorizedException('Invalid BOT_ADMIN_TOKEN');

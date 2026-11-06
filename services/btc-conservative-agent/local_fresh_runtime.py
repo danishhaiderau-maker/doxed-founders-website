@@ -139,6 +139,11 @@ def apply_local_fresh_environ(
     """Force paper-safe defaults for local fresh start. Mutates environ."""
     env: MutableMapping[str, str] = environ if environ is not None else os.environ
     env["FORCE_PAPER_MODE"] = "1"
+    # RK 08:26 (A): strip credential BITFINEX_* names, then restore exact =0
+    # (gate exempts BITFINEX_LIVE_ENABLED when value is exactly '0').
+    for key in list(env.keys()):
+        if str(key).upper().startswith("BITFINEX_"):
+            env.pop(key, None)
     env["BITFINEX_LIVE_ENABLED"] = "0"
     env["HOME_BOT_LOCAL"] = "1"
     env["HOME_RESEARCH_FULL"] = "1"

@@ -63,6 +63,7 @@ test_baseline_row_index_exit.py
 test_baseline_schema_fail_closed.py
 test_bbo_refresh_nonblocking.py
 test_best_policy_research_dashboard.py
+test_bitfinex_env_name_gate.py
 test_bitfinex_live_switch.py
 test_bitfinex_pair_constraints.py
 test_blindspot_runtime_telemetry.py
@@ -70,6 +71,7 @@ test_book_gap_stats.py
 test_book_limit_entry.py
 test_book_missing_seconds.py
 test_booktail_incremental.py
+test_boot_revision_service_dir.py
 test_bot_data_epoch_stamping.py
 test_bot_destructive_research_reset.py
 test_bot_orphan_head_reset_boundary.py
@@ -285,6 +287,7 @@ test_integrity_gaps.py
 test_keep_manifest.py
 test_lane_ledger_wl_price_bp.py
 test_lane_memory_exposure_validation.py
+test_laptop_monitor_read_token.py
 test_latency_schedule_replay.py
 test_lead_lag_report.py
 test_ledger_delete_by_sha.py

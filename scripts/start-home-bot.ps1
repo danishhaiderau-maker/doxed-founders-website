@@ -167,21 +167,21 @@ if (-not (Test-Path $VaultEnv)) {
   exit 1
 }
 
-Get-Content $VaultEnv | ForEach-Object {
-  if ($_ -match '^\s*([^#=]+)=(.*)$') {
-    $name = $matches[1].Trim()
-    $val = $matches[2].Trim()
-    Set-Item -Path "env:$name" -Value $val
-  }
-}
+# RK 09:33: vault allowlist only — do NOT strip inherited BITFINEX_*.
+# Inherited KEY/SECRET/TOKEN reach in-process exit 79 (bitfinex_env_name_gate).
+. (Join-Path $scriptDir 'laptop-chain-common.ps1')
+Import-LaptopChainVaultAllowlist -VaultEnv $VaultEnv -Mode BotAllowlist
+# RK 12:27: refuse start when LAPTOP_MONITOR_READ_TOKEN empty or equals MONITOR_READ_TOKEN.
+Assert-LaptopMonitorReadTokenForBotStart -VaultEnv $VaultEnv
 
 # The :7002 process is the canonical paper showcase. Real funds are handled by
 # the per-user website relay after explicit consent; the showcase must never
 # inherit a stale live flag from a local config or parent environment.
 $env:FORCE_PAPER_MODE = "1"
 $env:LIVE_TRADING_ENABLED = "0"
-$env:BITFINEX_LIVE_ENABLED = "0"
 $env:LIVE_ARMED = "0"
+# Explicit paper live flag (exact '0' exempt from gate); does not clear KEY names.
+$env:BITFINEX_LIVE_ENABLED = "0"
 
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 if (-not (Test-Path $agentDir)) {
