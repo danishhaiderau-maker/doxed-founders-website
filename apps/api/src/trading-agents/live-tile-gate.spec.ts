@@ -32,7 +32,7 @@ test('every live-copy tile prefix has a stable tile code; codes are unique and n
 
 test('tile key from trade id ignores adopt/relink wrappers and unknown prefixes', () => {
   assert.equal(tileKeyForTradeId('gs1-abc'), 'gs1');
-  assert.equal(tileKeyForTradeId('ADOPT:gb2-x'), 'gb2');
+  assert.equal(tileKeyForTradeId('ADOPT:gb2-x'), null);  // retired/reserved
   assert.equal(tileKeyForTradeId('relink:rnd-1'), 'rnd');
   assert.equal(tileKeyForTradeId('dsl-1'), null);
   assert.equal(tileKeyForTradeId('gs1-'), null);

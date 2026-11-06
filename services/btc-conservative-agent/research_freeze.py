@@ -120,9 +120,10 @@ MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # 2026-10-25 (owner, #877): gf3 GS-FADE3-TP30 PAPER tile joined the registry (slot 6); score_led and hypothesis pins moved.
 # 2026-10-28 (owner): GS-06 R22 retire + GS-FADE3-LOOSE mid-epoch add (remove one / add one); pins recomputed below.
 # 2026-10-30 / #972 (owner via RK 20:20): R22 retire FADE3-TP30 + FADE3-LOOSE only; B1/B2 kept; pins recomputed below.
+# 2026-11-04 / #982 (owner via RK 09:20): R22 retire B1 + B2; roster CTRL + GS-01 only; pins recomputed below.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "967e0c884da7f250070461cec707ab3bee1ae00424427ac2f74ca57dfaed3e51",
-    "hypothesis": "119353794df3748626a080e46d21a981463e6b5b78b24496fac98cd596fdc05b",
+    "score_led": "82e8202a639413075762b8b8aec8f752a93876d7e3e613c3cea540d2337b16f4",
+    "hypothesis": "d079c1eecba39298e5a911c58609225afad272c97c1d208cb0ea751b1db6b21f",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
@@ -134,10 +135,11 @@ FREEZE_OPENING_SEC = 3600
 # Set to {"approved_by": ..., "approved_utc": ..., "reason": ...} only with the
 # owner's explicit approval to change the frozen registry or epoch in code.
 CODE_OVERRIDE: Optional[Mapping[str, str]] = {
-    "approved_by": "Danish (owner) via RK 20:20 #972 keep-fade3 split, 2026-11-03",
-    "approved_utc": "2026-11-03T00:00:00Z",
-    "reason": ("#972: retire GS-FADE3-TP30 + GS-FADE3-LOOSE under Rule 22 only; "
-               "B1/B2 remain active (GSB split is a separate PR); CTRL+GS-01 kept; no arm/Soft B/wipe"),
+    "approved_by": "Danish (owner) via RK 09:20 AEDT retire B1/B2, 2026-11-04",
+    "approved_utc": "2026-11-04T00:00:00Z",
+    "reason": ("Retire Tile 3 B1 + Tile 4 B2 (FAMILY_GSB1_CVD_DIV_REGIME, FAMILY_GSB2_REGIME_SWITCHER) "
+               "under Rule 22 (Danish t221u/t226u; RK 09:20 AEDT); FADE3 already retired #972; "
+               "keep CTRL + GS-01 only; no arm/Soft B/wipe; R21 keep historical data"),
 }
 
 ERROR = "RESEARCH_FREEZE_ACTIVE"

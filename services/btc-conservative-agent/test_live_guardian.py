@@ -444,7 +444,8 @@ def test_live_guardian_route_returns_a_response():
 # ------------------------------------------------- two-tile live gate: every live tile, tile attribution (24 Oct)
 import live_tile_gate as _ltg
 
-GB2_LANE = "FAMILY_GSB2_REGIME_SWITCHER"
+GB2_LANE = "FAMILY_GSB2_REGIME_SWITCHER"  # R22 retired
+GS01_LANE = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
 
 
 def _tiles(v, code):
@@ -453,9 +454,17 @@ def _tiles(v, code):
 
 def test_guardian_covers_every_live_tile_not_only_gs01():
     assert g.LANE_NEEDLE == ""
-    c = {"correlation_id": "gb2-1", "lane": GB2_LANE, "fill_at_ts": NOW - 6}
+    # R22: gb2 ABSENT from active TILE_KEY_CODES; guardian attributes via active gs1 only.
+    assert "gb2" not in _ltg.TILE_KEY_CODES
+    assert "gb2" in _ltg.RESERVED_TILE_KEY_CODES
+    assert _ltg.tile_key_for_lane(GB2_LANE) is None
+    c = {"correlation_id": "gs1-1", "lane": GS01_LANE, "fill_at_ts": NOW - 6}
     v = g.evaluate([c], dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle="")
-    assert "STOP_MISSING_GT_5S" in codes(v) and _tiles(v, "STOP_MISSING_GT_5S") == {"gb2"}
+    assert "STOP_MISSING_GT_5S" in codes(v) and _tiles(v, "STOP_MISSING_GT_5S") == {"gs1"}
+    # retired gb2 lane yields no tile attribution
+    v_ret = g.evaluate([{"correlation_id": "gb2-1", "lane": GB2_LANE, "fill_at_ts": NOW - 6}],
+                       dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle="")
+    assert "gb2" not in _tiles(v_ret, "STOP_MISSING_GT_5S")
 
 
 def test_mutex_breach_two_open_live_positions():
@@ -467,10 +476,15 @@ def test_mutex_breach_two_open_live_positions():
 
 
 def test_stop_placement_failed_and_slow_stop_disarm_with_tile():
-    c = {"correlation_id": "gb2-1", "lane": GB2_LANE, "fill_at_ts": NOW - 60, "stop_confirmed": True,
+    assert "gb2" not in _ltg.TILE_KEY_CODES
+    c = {"correlation_id": "gs1-2", "lane": GS01_LANE, "fill_at_ts": NOW - 60, "stop_confirmed": True,
          "errors": [{"type": "STOP_FAILED"}]}
     v = g.evaluate([c], dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle="")
-    assert _tiles(v, "STOP_PLACEMENT_FAILED") == {"gb2"}
+    assert _tiles(v, "STOP_PLACEMENT_FAILED") == {"gs1"}
+    assert _tiles(g.evaluate([{"correlation_id": "gb2-1", "lane": GB2_LANE, "fill_at_ts": NOW - 60,
+                               "stop_confirmed": True, "errors": [{"type": "STOP_FAILED"}]}],
+                              dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle=""),
+                  "STOP_PLACEMENT_FAILED") != {"gb2"}
     slow = {"correlation_id": "gs1-1", "lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "fill_at_ts": NOW - 60,
             "stop_confirmed": True, "stop_confirmed_at_ts": NOW - 54}
     v = g.evaluate([slow], dict(MIR, positions=[{"id": 1}]), {}, NOW, lane_needle="")
@@ -480,14 +494,21 @@ def test_stop_placement_failed_and_slow_stop_disarm_with_tile():
 
 
 def test_tile_key_mismatch_entry_order_without_its_tile_chain_after_grace():
-    order = {"id": 7, "type": "LIMIT", "reduce_only": False, "cid": _ltg.encode_cid("gb2", 12345)}
+    # R22: gb2 cannot encode — ABSENT from TILE_KEY_CODES; use active gs1 cid.
+    assert "gb2" not in _ltg.TILE_KEY_CODES
+    try:
+        _ltg.encode_cid("gb2", 12345)
+        raise AssertionError("gb2 must not encode after R22 retire")
+    except KeyError:
+        pass
+    order = {"id": 7, "type": "LIMIT", "reduce_only": False, "cid": _ltg.encode_cid("gs1", 12345)}
     m = dict(MIR, open_orders=[order])
     st = {}
     assert "TILE_KEY_MISMATCH" not in codes(g.evaluate([], m, st, NOW, lane_needle=""))     # inside grace
     v = g.evaluate([], m, st, NOW + g.LEDGER_GRACE_SEC, lane_needle="")
-    assert _tiles(v, "TILE_KEY_MISMATCH") == {"gb2"}
+    assert _tiles(v, "TILE_KEY_MISMATCH") == {"gs1"}
     # matching non-closed chain of that tile (however old its order): no mismatch, state cleared
-    pend = {"correlation_id": "gb2-1", "lane": GB2_LANE, "order_sent_at_ts": NOW - 900}
+    pend = {"correlation_id": "gs1-1", "lane": GS01_LANE, "order_sent_at_ts": NOW - 900}
     st2 = {}
     for t in (NOW, NOW + 30):
         assert "TILE_KEY_MISMATCH" not in codes(g.evaluate([pend], m, st2, t, lane_needle=""))

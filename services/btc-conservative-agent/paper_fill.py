@@ -789,10 +789,6 @@ TILE_FILL_SITES = {
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
     "FAMILY_GS01_XV_PREMIUM_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
                                           ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
-    "FAMILY_GSB1_CVD_DIV_REGIME": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
-    "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
-                                          ("tile_fill.py", "price_exit_resident"), ("tile_fill.py", "price_exit_forced")),
 }
 # R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
 # (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five
@@ -802,7 +798,7 @@ TILE_FILL_SITES = {
 # baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
 # non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
 # Step B (HM 13:16): DISLOC and DISLOC-FOI migrated (both removed 23 Oct 2026).
-# R22 #972: FADE3/LOOSE fill-site rows deleted; B1/B2 kept (GSB split is a separate PR).
+# R22 #972: FADE3/LOOSE fill-site rows deleted; R22 2026-11-04: B1/B2 fill-site rows deleted.
 PENDING_MIGRATION = frozenset()  # 16 Oct 2026: tiles 1-5 migrated (tile_fill.py); must stay empty
 PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this (may shrink)
 ALLOWED_FILL_MODELS = frozenset({FILL_MODEL})

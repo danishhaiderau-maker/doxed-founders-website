@@ -96,9 +96,9 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
     )
     assert result.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        # 2026-10-28 (#924): pin moved deliberately — GS-06 R22 retire + FADE3-LOOSE mid-epoch add
+        # 2026-11-04 (#982): pin moved deliberately — B1/B2 R22 retire; roster CTRL + GS-01
         # (score_led = research_freeze.MID_EPOCH_REGISTRY_SIGNATURES["score_led"]).
-        "967e0c884da7f250070461cec707ab3bee1ae00424427ac2f74ca57dfaed3e51",
+        "82e8202a639413075762b8b8aec8f752a93876d7e3e613c3cea540d2337b16f4",
     ]
 
 

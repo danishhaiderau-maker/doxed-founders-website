@@ -514,7 +514,8 @@ def test_operator_off_and_output_off_end_without_spending(tmp_path):
 
 def test_bootstrap_two_lanes_one_trade_each(tmp_path):
     other = ACTIVE_TILE_ORDER[1]
-    third = ACTIVE_TILE_ORDER[2]
+    # Roster is CTRL + GS-01 only (R22 B1/B2 retire); third lane is synthetic to prove the cap.
+    third = "FAMILY_BOOTSTRAP_CAP_PROBE"
     b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=_Clock())
     assert b.enable(LANE)[0] and b.enable(other)[0]
     ok, snap = b.enable(third)

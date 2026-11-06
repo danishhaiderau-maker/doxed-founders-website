@@ -84,16 +84,16 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     rows += [_fill(RND, f"b{i}", 1.0, T0 + i * 600) for i in range(4)]
     rows += [_fill(CFT, f"b{i}", 2.0, T0 + i * 600, reason="PATH_END_90M") for i in range(4)]
     report = _report(rows)
-    # R22 #972: FADE3/LOOSE retired; CTRL + GS-01 + B1 + B2 remain.
-    assert tuple(ACTIVE_TILE_ORDER) == (RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER")
+    # R22: active roster is exactly CTRL + GS-01; GSB1/GSB2/gf3/gf3l ABSENT.
+    assert tuple(ACTIVE_TILE_ORDER) == (RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP")
     assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
-    assert report["tile_order"][:3] == [RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME"]
-    # Shared-call tiles pair (control + B2); evaluator-clock tiles never do.
-    # H-A / B3 / GS-06 / FADE3 retired; GS-01 / B1 are clock (not shared-call pair).
-    assert report["all_tiles_paired"]["paired_tiles"] == [
-        RND, "FAMILY_GSB2_REGIME_SWITCHER"]
-    assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
-        (RND, "FAMILY_GSB2_REGIME_SWITCHER")}
+    assert "FAMILY_GSB1_CVD_DIV_REGIME" not in report["tile_order"]
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in report["tile_order"]
+    assert "FAMILY_GSB1_CVD_DIV_REGIME" not in _ACTIVE
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in _ACTIVE
+    # GS-01 is evaluator-clock (not shared-call pair); control alone has no challenger pair on active roster.
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in report["all_tiles_paired"]["paired_tiles"]
+    assert not any(p.get("challenger") == "FAMILY_GSB2_REGIME_SWITCHER" for p in report["paired"])
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])
     assert set(report["pre_registered"]) == set(ACTIVE_TILE_ORDER)
     json.dumps(report, allow_nan=False)

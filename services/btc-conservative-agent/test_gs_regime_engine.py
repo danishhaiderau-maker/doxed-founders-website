@@ -88,10 +88,11 @@ def test_gs02_classifier_has_no_trend_state():
 
 
 def test_reprice_schedules_match_the_preregistration():
-    b = cfg.COMBO_LANE_SPECS["FAMILY_GSB2_REGIME_SWITCHER"]["entry_policy"]["regime_exec"]
-    assert reprice_ages(b["QUIET"]) == list(range(60, 600, 60))
-    assert reprice_ages(b["TREND"]) == [120, 240, 300, 420, 540, 600, 720, 840]
-    assert reprice_ages(b["VIOLENT"]) == []
+    # R22: FAMILY_GSB2_REGIME_SWITCHER retired — schedule pin removed with the tile.
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in cfg.COMBO_LANE_SPECS
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in cfg.ACTIVE_TILE_REGISTRY
+    assert tuple(cfg.ACTIVE_TILE_ORDER) == (
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP")
 
 
 def _profile(lane, name):
@@ -117,20 +118,17 @@ def test_first_rule_in_profile_order_wins_a_tie():
 
 
 def test_main_exit_beats_tp1_on_the_same_tick_and_tp1_needs_tp1_below_tp():
-    prof = _profile("FAMILY_GSB1_CVD_DIV_REGIME", "MOM_QUIET")
-    st = stack.new_state()
-    hit = stack.evaluate_tick(prof, st, cur_bp=10.5, age_sec=30, atr_bp=4.0)
-    assert hit["rule"] == "ATR_TAKE_PROFIT" and not hit["maker"] and hit["book_bp"] == 10.0  # REALISM_V2: no maker TP
-    lv = stack.levels({**prof, "tp1_atr": 5.0}, 4.0)
-    assert lv["tp1"] is None
+    # R22: FAMILY_GSB1_CVD_DIV_REGIME retired — profile ABSENT from live specs.
+    assert "FAMILY_GSB1_CVD_DIV_REGIME" not in cfg.COMBO_LANE_SPECS
+    assert "FAMILY_GSB1_CVD_DIV_REGIME" not in cfg.ACTIVE_TILE_REGISTRY
 
 
 def test_profit_only_shock_needs_break_even_armed():
-    prof = _profile("FAMILY_GSB2_REGIME_SWITCHER", "REV_QUIET")
-    st = stack.new_state()
+    # R22: FAMILY_GSB2_REGIME_SWITCHER retired — REV_QUIET shock profile ABSENT.
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in cfg.COMBO_LANE_SPECS
+    assert "FAMILY_GSB2_REGIME_SWITCHER" not in cfg.ACTIVE_TILE_REGISTRY
     shock = {"r60_bp": 20.0, "ret60_bp": -15.0}
-    assert stack.evaluate_tick(prof, st, cur_bp=-1.0, age_sec=30, atr_bp=4.0, shock=shock, side_sign=1) is None
-    mom = _profile("FAMILY_GSB3_COMMITTED_FADE_REGIME", "MOM_QUIET")
+    mom = _profile("FAMILY_GSB3_COMMITTED_FADE_REGIME", "MOM_QUIET")  # kept-policy module still specs GSB3
     hit = stack.evaluate_tick(mom, stack.new_state(), cur_bp=-1.0, age_sec=30, atr_bp=4.0, shock=shock, side_sign=1)
     assert hit["rule"] == "VOL_SHOCK"
 
@@ -158,21 +156,17 @@ def _fills(lane, n, bp, hours=1.0, now=None):
 
 
 def test_gs_verdict_harm_kill_and_day21_outcomes():
+    # R22: FAMILY_GSB1_CVD_DIV_REGIME retired — not in active pre_registered cohort.
     lane = "FAMILY_GSB1_CVD_DIV_REGIME"
+    assert lane not in cfg.ACTIVE_TILE_REGISTRY
+    assert lane not in cfg.ACTIVE_TILE_ORDER
     now = time.time()
     rep = tpc.build_report(trades=_fills(lane, 35, -5.0, now=now), registry=cfg.ACTIVE_TILE_REGISTRY,
                            tile_order=cfg.ACTIVE_TILE_ORDER, now_ts=now)
-    v = rep["pre_registered"][lane]["verdict"]
-    assert v["status"] == "KILL" and "HARM" in v["kill_reasons"]
-    later = now + 22 * 86400
-    few = tpc.build_report(trades=_fills(lane, 10, 5.0, now=later), registry=cfg.ACTIVE_TILE_REGISTRY,
-                           tile_order=cfg.ACTIVE_TILE_ORDER, now_ts=later)
-    assert few["pre_registered"][lane]["verdict"]["status"] == "INSUFFICIENT"
-    rows = [dict(r, net_pnl_usd=(6.0 + (i % 3)) * 25.0 / 1e4) for i, r in enumerate(_fills(lane, 40, 0, now=later))]
-    good = tpc.build_report(trades=rows, registry=cfg.ACTIVE_TILE_REGISTRY, tile_order=cfg.ACTIVE_TILE_ORDER,
-                            now_ts=later)
-    v = good["pre_registered"][lane]["verdict"]
-    assert v["status"] == "PASS_FORWARD" and v["promotion_checks"]["beats_offline_random_control"] == "OFFLINE"
+    assert lane not in rep["pre_registered"]
+    assert set(rep["pre_registered"]) <= set(cfg.ACTIVE_TILE_ORDER)
+    assert tuple(cfg.ACTIVE_TILE_ORDER) == (
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP")
 
 
 def test_breakeven_lock_never_books_below_lock_floor():
