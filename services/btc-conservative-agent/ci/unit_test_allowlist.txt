@@ -635,6 +635,7 @@ test_storage_links.py
 test_strategist_streams_collector.py
 test_strategy_fixes_stage1.py
 test_strategy_lab_insights.py
+test_strategy_package_loader.py
 test_strategy_progress_watchdog.py
 test_streams_health_log_files.py
 test_system_health_alerts.py
