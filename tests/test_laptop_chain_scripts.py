@@ -846,15 +846,34 @@ def test_real_pwsh_file_launch_clean_env_does_not_refuse(chain, tmp_path, script
 
 
 def _bot_auto_restart_harness(tmp_path: Path) -> Path:
-    """Temp checkout copy without fly-canonical.lock so disaster-recovery opt-in can run."""
+    """Temp checkout copy without fly-canonical.lock so disaster-recovery opt-in can run.
+
+    Harness-only patch: after WaitForExit, honor ``DCF_TEST_FORCE_EXIT_CODE`` so the
+    real stand-down / relaunch decision runs with a known code. CI showed
+    ``Get-Process`` ``ExitCode`` can be empty for a watched child (log ``code=``),
+    which skips the exit-79 branch and falsely relaunches — that is a harness
+    observability gap, not a production soft-exclude.
+    """
     harness = tmp_path / "restart-harness"
     scripts = harness / "scripts"
     scripts.mkdir(parents=True)
     agent = harness / "services" / "btc-conservative-agent"
     agent.mkdir(parents=True)
     (harness / "logs").mkdir()
-    for name in ("bot-auto-restart.ps1", "home-stack-common.ps1", "laptop-chain-common.ps1"):
+    for name in ("home-stack-common.ps1", "laptop-chain-common.ps1"):
         shutil.copy2(SCRIPTS / name, scripts / name)
+    src = (SCRIPTS / "bot-auto-restart.ps1").read_text(encoding="utf-8-sig")
+    needle = "$code = $p.ExitCode"
+    assert src.count(needle) == 1, "expected one ExitCode read for harness patch"
+    patched = src.replace(
+        needle,
+        (
+            "if (-not [string]::IsNullOrEmpty($env:DCF_TEST_FORCE_EXIT_CODE)) { "
+            "$code = [int]$env:DCF_TEST_FORCE_EXIT_CODE } else { $code = $p.ExitCode }"
+        ),
+        1,
+    )
+    (scripts / "bot-auto-restart.ps1").write_text(patched, encoding="utf-8")
     (agent / "combo_pathway_config.py").write_text(
         'RESEARCH_STACK_VERSION = "test-harness-no-restart-79"\n',
         encoding="utf-8",
@@ -863,19 +882,12 @@ def _bot_auto_restart_harness(tmp_path: Path) -> Path:
 
 
 def _run_bot_auto_restart_watching_exit(harness: Path, exit_code: int, timeout: int = 90):
-    """Start a short-lived child that exits ``exit_code``, then run the real monitor."""
+    """Run the harness monitor against a short-lived child; force the exit code under test."""
     # Stay alive long enough for the monitor to attach and WaitForExit (not the
-    # gone-before-attach path that forces code=-1 and would relaunch).
-    fake = subprocess.Popen(
-        [
-            POWERSHELL,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            f"Start-Sleep -Seconds 4; exit {int(exit_code)}",
-        ],
-    )
+    # gone-before-attach path that forces code=-1 and would relaunch). Python
+    # child avoids pwsh-on-pwsh ExitCode quirks; forced code still drives the
+    # decision branch after WaitForExit returns.
+    fake = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(4)"])
     env = {
         k: v
         for k, v in os.environ.items()
@@ -885,6 +897,7 @@ def _run_bot_auto_restart_watching_exit(harness: Path, exit_code: int, timeout: 
     env["DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER"] = (
         "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
     )
+    env["DCF_TEST_FORCE_EXIT_CODE"] = str(int(exit_code))
     # Missing vault → skip Import/Assert-LaptopMonitorReadToken (token path is #984).
     missing_vault = harness / "missing-home-bot.env"
     result = subprocess.run(
@@ -925,7 +938,7 @@ def _run_bot_auto_restart_watching_exit(harness: Path, exit_code: int, timeout: 
 
 @windows_only
 def test_bot_auto_restart_behavioural_does_not_relaunch_on_exit_79(tmp_path):
-    """Behavioural (not static): watching a pid that exits 79 must stand down."""
+    """Behavioural: monitor decision with code 79 must stand down (no relaunch)."""
     harness = _bot_auto_restart_harness(tmp_path)
     result, log_text = _run_bot_auto_restart_watching_exit(harness, exit_code=79, timeout=90)
     combined = result.stdout + result.stderr + log_text
@@ -939,7 +952,7 @@ def test_bot_auto_restart_behavioural_does_not_relaunch_on_exit_79(tmp_path):
 
 @windows_only
 def test_bot_auto_restart_behavioural_nonzero_non79_takes_relaunch_path(tmp_path):
-    """Mutation contrast: exit 1 hits crashed/restarting (proves 79 stand-down is special)."""
+    """Mutation contrast: forced exit 1 hits crashed/restarting (79 stand-down is special)."""
     harness = _bot_auto_restart_harness(tmp_path)
     result, log_text = _run_bot_auto_restart_watching_exit(harness, exit_code=1, timeout=120)
     combined = result.stdout + result.stderr + log_text
