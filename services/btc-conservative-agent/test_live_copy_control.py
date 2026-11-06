@@ -513,8 +513,13 @@ def test_operator_off_and_output_off_end_without_spending(tmp_path):
 
 
 def test_bootstrap_two_lanes_one_trade_each(tmp_path):
+    # R22 roster is exactly CTRL + GS-01 (len 2); third probe uses a retired/non-roster lane token.
+    assert tuple(ACTIVE_TILE_ORDER) == (
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP")
+    assert len(ACTIVE_TILE_ORDER) == 2
     other = ACTIVE_TILE_ORDER[1]
-    third = ACTIVE_TILE_ORDER[2]
+    third = "FAMILY_GSB2_REGIME_SWITCHER"  # retired — must NOT be in ACTIVE_TILE_ORDER
+    assert third not in ACTIVE_TILE_ORDER
     b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=_Clock())
     assert b.enable(LANE)[0] and b.enable(other)[0]
     ok, snap = b.enable(third)
