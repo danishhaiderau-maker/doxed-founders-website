@@ -387,5 +387,160 @@ def test_status_shipper_carries_custody_stall_fields():
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     body = src[src.index("def _volume_transfer_snapshot"):src.index("def _volume_health_snapshot")]
     assert "_mg_custody.custody_stall(transfer, now)" in body
+    assert "resolve_live_custody_for_lag" in body
+    assert "apply_live_custody_to_transfer" in body
+    assert "custody_through_seq_status" in body
+    # T5: lag path must never call /head or research_segment_server for custody.
+    impl = "".join(body.split('"""')[0::2])  # drop docstrings
+    assert "research_segment_server" not in impl
+    assert "._head" not in impl and " /head" not in impl and '"/head"' not in impl
     fields = src[src.index("_SEGMENT_STATUS_FIELDS = ("):][:1500]
     assert '"laptop_ack_advanced_at"' in fields and '"shipped_seq"' in fields and '"laptop_acked_seq"' in fields
+
+
+def test_t1_frozen_status_5093_does_not_keep_lag_red_when_live_caught_up():
+    """T1: status custody_through_seq=5093, live ≈ shipped → SHIPPED_MINUS_CUSTODY_LAG OFF."""
+    import time as _t
+    now = 2_000_000_000.0
+    iso = lambda ts: _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(ts))
+    live = mg.resolve_live_custody_for_lag(
+        "/unused", "v3-w1792263671",
+        reader=lambda *_: {"through_seq": 9919, "received_at": iso(now - 60)},
+    )
+    assert live["ok"] is True and live["through_seq"] == 9919
+    transfer = mg.apply_live_custody_to_transfer(
+        {"shipped_seq": 9919, "custody_through_seq": 5093, "laptop_acked_seq": 9919,
+         "custody_received_at": iso(now - 9 * 3600)},
+        live,
+    )
+    assert transfer["custody_through_seq_status"] == 5093
+    assert transfer["custody_through_seq"] == 9919
+    assert transfer["custody_source"] == "live"
+    c = mg.CustodyLag(clock=lambda: now)
+    out = c.observe(transfer)
+    assert out["alerts"] == [] and out["level"] == "GREEN"
+    assert out["custody_stall_red"] is False and out["laptop_ack_stall_red"] is False
+    assert out["custody_stall_reason"] is None
+
+
+def test_t2_live_caught_up_clears_stall_even_after_2h_wall_clock():
+    """T2: live equals shipped; status still 5093; wall ≥2h since live advance → still GREEN."""
+    import time as _t
+    now = 2_000_000_000.0
+    iso = lambda ts: _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(ts))
+    live = mg.resolve_live_custody_for_lag(
+        "/unused", "v3-w1792263671",
+        reader=lambda *_: {"through_seq": 9919, "received_at": iso(now - 2 * 3600 - 60)},
+    )
+    transfer = mg.apply_live_custody_to_transfer(
+        {"shipped_seq": 9919, "custody_through_seq": 5093,
+         "custody_received_at": iso(now - 9 * 3600)},
+        live,
+    )
+    c = mg.CustodyLag(clock=lambda: now)
+    out = c.observe(transfer)
+    assert out["level"] == "GREEN" and out["custody_stall_red"] is False
+    assert out["laptop_ack_stall_red"] is False
+    assert out["custody_stall_reason"] is None
+    # Mutation: lag still reading status 5093 only → would stay RED after 2h.
+    mutant = mg.CustodyLag(clock=lambda: now)
+    bad = mutant.observe({"shipped_seq": 9919, "custody_through_seq": 5093,
+                          "custody_received_at": iso(now - 2 * 3600 - 60)})
+    assert bad["level"] == "RED" and bad["custody_stall_reason"] == mg.SHIPPED_MINUS_CUSTODY_LAG
+
+
+def test_t2b_live_custody_advance_resets_stall_clock():
+    """T2b (HM non-blocking): a live custody advance resets the stall clock."""
+    import time as _t
+    clock = Clock(t=2_000_000_000.0)
+    iso = lambda ts: _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(ts))
+    c = mg.CustodyLag(clock=clock)
+    # Status frozen at 5093; live starts behind and stalled → RED.
+    first_live = mg.apply_live_custody_to_transfer(
+        {"shipped_seq": 6000, "custody_through_seq": 5093,
+         "custody_received_at": iso(clock.t - 9 * 3600)},
+        {"ok": True, "through_seq": 5093, "received_at": iso(clock.t - 9 * 3600), "source": "live"},
+    )
+    first = c.observe(first_live)
+    assert first["level"] == "RED" and first["custody_stall_reason"] == mg.SHIPPED_MINUS_CUSTODY_LAG
+    clock.t += 60
+    # Live custody advances (still behind shipped) → stall clock resets → GREEN.
+    second_live = mg.apply_live_custody_to_transfer(
+        {"shipped_seq": 6000, "custody_through_seq": 5093,
+         "custody_received_at": iso(clock.t - 9 * 3600)},
+        {"ok": True, "through_seq": 5200, "received_at": iso(clock.t - 9 * 3600), "source": "live"},
+    )
+    second = c.observe(second_live)
+    assert second["level"] == "GREEN" and second["custody_stall_reason"] is None
+    assert second["custody_lag_segments"] == 800
+    clock.t += 2 * 3600 + 120
+    third_live = mg.apply_live_custody_to_transfer(
+        {"shipped_seq": 6100, "custody_through_seq": 5093,
+         "custody_received_at": iso(clock.t - 9 * 3600)},
+        {"ok": True, "through_seq": 5200, "received_at": iso(clock.t - 9 * 3600), "source": "live"},
+    )
+    third = c.observe(third_live)
+    assert third["level"] == "RED" and third["alerts"] == [mg.SHIPPED_MINUS_CUSTODY_LAG]
+
+
+def test_t3_real_live_lag_stays_red_after_2h():
+    """T3: live still far behind shipped + stall >2h → RED stays (no masking)."""
+    import time as _t
+    now = 2_000_000_000.0
+    iso = lambda ts: _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(ts))
+    transfer = mg.apply_live_custody_to_transfer(
+        {"shipped_seq": 9919, "custody_through_seq": 5093,
+         "custody_received_at": iso(now - 9 * 3600)},
+        {"ok": True, "through_seq": 7000, "received_at": iso(now - 3 * 3600), "source": "live"},
+    )
+    c = mg.CustodyLag(clock=lambda: now)
+    out = c.observe(transfer)
+    assert out["level"] == "RED" and out["custody_stall_reason"] == mg.SHIPPED_MINUS_CUSTODY_LAG
+    assert out["custody_lag_segments"] == 9919 - 7000
+
+
+def test_t4_t6_live_custody_unavailable_is_red_never_5093():
+    """T4/T6: live reader raises/None/unusable → RED CUSTODY_SOURCE_UNAVAILABLE; never 5093."""
+    now = 2_000_000_000.0
+
+    def boom(*_a, **_k):
+        raise RuntimeError("store down")
+
+    for reader in (boom, lambda *_: None, lambda *_: {"through_seq": "bad"}, lambda *_: {}):
+        live = mg.resolve_live_custody_for_lag("/unused", "v3-w1792263671", reader=reader)
+        assert live["ok"] is False and live["error"] == mg.CUSTODY_SOURCE_UNAVAILABLE
+        transfer = mg.apply_live_custody_to_transfer(
+            {"shipped_seq": 9919, "custody_through_seq": 5093}, live)
+        assert transfer["custody_through_seq"] is None  # never status 5093
+        assert transfer["custody_through_seq_status"] == 5093
+        assert transfer["custody_source"] == "unavailable"
+        c = mg.CustodyLag(clock=lambda: now)
+        out = c.observe(transfer)
+        assert out["level"] == "RED"
+        assert out["custody_stall_reason"] == mg.CUSTODY_SOURCE_UNAVAILABLE
+        assert out["custody_stall_red"] is True and out["laptop_ack_stall_red"] is True
+        assert out["alerts"] == [mg.CUSTODY_SOURCE_UNAVAILABLE]
+    # Mutation: force GREEN / substitute 5093 when source down → must fail T4/T6 contract.
+    mutant = mg.apply_live_custody_to_transfer(
+        {"shipped_seq": 9919, "custody_through_seq": 5093},
+        {"ok": False, "error": mg.CUSTODY_SOURCE_UNAVAILABLE, "source": "unavailable"},
+    )
+    assert mutant["custody_through_seq"] is None  # must not be 5093
+    assert mg.custody_stall(mutant, now)["custody_stall_reason"] == mg.CUSTODY_SOURCE_UNAVAILABLE
+
+
+def test_t5_lag_helpers_never_read_head_custody():
+    """T5: shared lag helpers must not wire to /head custody_through_seq."""
+    src = (ROOT / "monitor_gaps.py").read_text(encoding="utf-8")
+    start = src.index("def resolve_live_custody_for_lag")
+    end = src.index("def custody_stall")
+    body = src[start:end]
+    impl = "".join(body.split('"""')[0::2])  # drop docstrings (may mention /head as forbidden)
+    assert "research_segment_server" not in impl
+    assert "._head" not in impl and '"/head"' not in impl and " /head" not in impl
+    assert "_default_latest_custody" in src and "latest_custody" in src
+    # Mutation: a helper that returns status/head custody_through_seq as lag truth fails T1/T2.
+    live = mg.resolve_live_custody_for_lag(
+        "/x", "p", reader=lambda *_: {"through_seq": 9919})
+    t = mg.apply_live_custody_to_transfer({"custody_through_seq": 5093, "shipped_seq": 9919}, live)
+    assert t["custody_through_seq"] == 9919 and t["custody_through_seq_status"] == 5093
