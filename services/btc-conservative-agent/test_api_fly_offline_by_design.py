@@ -41,6 +41,21 @@ def test_bot_bridge_refuses_retired_fly_without_cache_armed_live():
     )
 
 
+def test_trading_agents_callers_drop_analyzer_via_fly_r22():
+    """HM #978 / RK 01:30: neutralize dead Fly via unlocked callers only.
+
+    Mutation proof: restore botBridge.fetchAnalyzerSummary/Genome/MirrorReceipt
+    calls in trading-agents.service.ts → this assert fails.
+    """
+    src = _read(API / "trading-agents.service.ts")
+    assert "botBridge.fetchAnalyzerSummary(" not in src
+    assert "botBridge.fetchAnalyzerMirrorReceipt(" not in src
+    assert "botBridge.fetchAnalyzerGenome(" not in src
+    assert "fetchCumulativeSessionMetrics" in src
+    assert "normalizeAnalyzerGenomeStatus(null)" in src
+    assert "RK 01:30" in src
+
+
 def test_live_copy_reporter_skips_five_second_loop_when_retired():
     src = _read(REPORTER)
     assert "shouldRegisterNeonBackgroundTimers()" in src

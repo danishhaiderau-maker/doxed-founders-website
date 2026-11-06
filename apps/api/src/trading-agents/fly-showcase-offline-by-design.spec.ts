@@ -3,7 +3,8 @@
  * no error loop, no retry storm, no cached armed/live fallback.
  *
  * Mutation proof: flip `FLY_SHOWCASE_RUNTIME_RETIRED` to false, drop
- * `offline, by design` from the label, or remove `live_armed: false` /
+ * `offline, by design` from the label, restore trading-agents caller
+ * fetchAnalyzerSummary/Genome/MirrorReceipt, or remove `live_armed: false` /
  * `refuseRetiredFlyRuntime` / reporter loop guard → this file fails.
  */
 import assert from 'node:assert/strict';
@@ -100,6 +101,18 @@ test('bot-bridge refuses retired Fly and clears armed/live cache path', () => {
     src.split('refuseRetiredFlyRuntime(): boolean')[1]?.slice(0, 800) ?? '',
     /live_armed:\s*true/,
   );
+});
+
+test('trading-agents callers drop analyzer-via-Fly (RK 01:30 / R22; locked bot-bridge untouched)', () => {
+  // HM #978: dashboard hit botBridge.fetchAnalyzer* → deleted fly.dev.
+  // RK forbids editing locked bot-bridge.service.ts — delete callers instead.
+  const src = read('trading-agents.service.ts');
+  assert.doesNotMatch(src, /botBridge\.fetchAnalyzerSummary\s*\(/);
+  assert.doesNotMatch(src, /botBridge\.fetchAnalyzerMirrorReceipt\s*\(/);
+  assert.doesNotMatch(src, /botBridge\.fetchAnalyzerGenome\s*\(/);
+  assert.match(src, /private async buildAnalyzerSummary[\s\S]*fetchCumulativeSessionMetrics/);
+  assert.match(src, /async getAnalyzerGenome[\s\S]*normalizeAnalyzerGenomeStatus\(null\)/);
+  assert.match(src, /RK 01:30 \/ R22/);
 });
 
 test('trading-status / bot health / dashboard stamp offline-by-design', () => {

@@ -860,87 +860,16 @@ export class TradingAgentsService implements OnModuleInit {
     if (slug !== 'conservative-btc') {
       return { ok: false, error: 'analyzer summary only available for conservative-btc' };
     }
-    const raw = await this.botBridge.fetchAnalyzerSummary();
-    if (raw) {
-      const STARTING = 500;
-      const perf = (raw.performance as Record<string, number> | undefined) ?? {};
-      const realEdge = (raw.real_edge as Record<string, unknown> | undefined) ?? {};
-      const stale = (raw.stale as Record<string, unknown> | undefined) ?? {};
-      const netPnlUsd = Number(perf.net_pnl_usd ?? 0);
-      const winRate = Number(perf.win_rate_pct ?? 0);
-      const trades = Number(perf.trades ?? 0);
-      const approveAttempts = Number(realEdge.approve_attempts ?? 0);
-      // Empty/zeroed analyzer envelopes (intermittent :9001) must not publish fabricated
-      // $500 / 0 trades / $0 PnL — fall through to canonical full /api/state metrics.
-      const hasRealAnalyzerData =
-        (Number.isFinite(trades) && trades > 0) ||
-        (Number.isFinite(netPnlUsd) && netPnlUsd !== 0);
-      if (hasRealAnalyzerData) {
-        const botStartIso = typeof stale.bot_start_iso === 'string' ? stale.bot_start_iso : null;
-        const freshStartIso =
-          typeof stale.fresh_collection_start_iso === 'string' ? stale.fresh_collection_start_iso : null;
-        const sessionStart = freshStartIso ?? botStartIso ?? null;
-        let sessionHours: number | undefined;
-        if (sessionStart) {
-          // Shared helper: AEST/AEDT/"Melbourne time" stamps resolve daylight saving from the zone.
-          const startMs = parseMelbourneTimestampMs(sessionStart);
-          if (startMs != null && Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
-        } else if (typeof raw.executive_text === 'string') {
-          const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
-          if (m) sessionHours = Number(m[1]);
-        }
-        const currentBalance = Number((STARTING + netPnlUsd).toFixed(2));
-        const totalPnlUsd = Number(netPnlUsd.toFixed(2));
-        const totalPnlPct = Number(((netPnlUsd / STARTING) * 100).toFixed(2));
-        const generatedAt =
-          typeof raw.generated_at === 'string' ? raw.generated_at : new Date().toISOString();
-        // Seed last-known-good so intermittent analyzer/:9001 blips keep real metrics
-        // instead of falling through to fabricated or empty envelopes.
-        this.botBridge.seedCumulativeSessionMetrics({
-          starting_balance: STARTING,
-          current_balance: currentBalance,
-          total_pnl_usd: totalPnlUsd,
-          total_pnl_pct: totalPnlPct,
-          daily_pnl_usd: totalPnlUsd,
-          trade_count: trades,
-          win_rate: Number(winRate.toFixed(1)),
-          session_start: normalizeAnalyzerSessionStartIso(sessionStart) ?? sessionStart,
-          session_hours: sessionHours != null ? Number(sessionHours.toFixed(2)) : undefined,
-          bot_version: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : null,
-          bot_start_time: null,
-          last_fresh_reset_ts: null,
-          generated_at: generatedAt,
-        });
-        return {
-          ok: true,
-          source: 'analyzer :9001 via bot proxy',
-          session_start: sessionStart,
-          session_hours: sessionHours,
-          starting_balance: STARTING,
-          current_balance: currentBalance,
-          total_pnl_usd: totalPnlUsd,
-          total_pnl_pct: totalPnlPct,
-          trade_count: trades,
-          win_rate: Number(winRate.toFixed(1)),
-          approve_count: approveAttempts,
-          executed_count: trades,
-          coverage_status: String(raw.coverage_status ?? '—'),
-          data_scope: String(raw.data_scope ?? raw.scope ?? '—'),
-          executive_text: typeof raw.executive_text === 'string' ? raw.executive_text : undefined,
-          analyzer_sync_id: typeof realEdge.analyzer_sync_id === 'string' ? realEdge.analyzer_sync_id : undefined,
-          generated_at: generatedAt,
-        };
-      }
-    }
-
-    // Fallback: analyzer missing/empty — derive metrics from canonical showcase /api/state only.
+    // RK 01:30 / R22: analyzer-via-Fly summary caller deleted (locked BotBridge
+    // still owns the dead HTTP proxy — do not invoke it). Dashboard loads used
+    // to "fetch failed" here. Cumulative metrics refuse when Fly is retired.
     const metrics = await this.botBridge.fetchCumulativeSessionMetrics();
     if (!metrics) {
       return {
         ok: false,
         source: 'bot /api/state cumulative',
         error:
-          'cumulative session metrics unavailable — the desktop analyzer is offline or authenticated full Fly state is temporarily unavailable',
+          'cumulative session metrics unavailable — showcase Fly analyzer proxy retired; desktop analyzer offline or authenticated state unavailable',
       };
     }
     return this.analyzerSummaryFromMetrics(metrics);
@@ -977,24 +906,22 @@ export class TradingAgentsService implements OnModuleInit {
         analyzerMirror: { available: false, fresh: false, status: 'unreachable' },
       };
     }
-    const [flyProbe, canonical, mirrorReceipt, analyzerSummary] = await Promise.all([
+    // RK 01:30 / R22: analyzer mirror/summary via locked BotBridge Fly proxy
+    // deleted at the caller (not flag-gated).
+    const [flyProbe, canonical] = await Promise.all([
       probePublicBotHealth(CANONICAL_SHOWCASE_BOT_URL),
       this.botBridge.fetchPublicShowcaseState(true).catch(() => null),
-      this.botBridge.fetchAnalyzerMirrorReceipt().catch(() => null),
-      this.botBridge.fetchAnalyzerSummary().catch(() => null),
     ]);
-    const mirrorInput =
-      mirrorReceipt && mirrorReceipt.available === true ? mirrorReceipt : analyzerSummary;
     return {
       ...summarizeCanonicalBotHealth(flyProbe, canonical),
       analyzerMirror: summarizeAnalyzerMirrorHealth(
-        mirrorInput, Date.now(), ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
+        null, Date.now(), ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
         canonical?.source_git_rev ?? null,
       ),
     };
   }
 
-  /** Decision genome from the analyzer (:9001) via bot proxy. */
+  /** Decision genome — Fly analyzer proxy caller deleted (RK 01:30 / R22). */
   async getAnalyzerGenome(slug: string): Promise<{
     ok: boolean;
     source?: string;
@@ -1008,8 +935,8 @@ export class TradingAgentsService implements OnModuleInit {
     if (slug !== 'conservative-btc') {
       return { ok: false, error: 'genome only available for conservative-btc' };
     }
-    const raw = await this.botBridge.fetchAnalyzerGenome();
-    return normalizeAnalyzerGenomeStatus(raw);
+    // Genome-via-Fly caller deleted — locked BotBridge path hits deleted host.
+    return normalizeAnalyzerGenomeStatus(null);
   }
 
   async getBotBridgeStatusAdmin() {
@@ -2477,16 +2404,6 @@ function formatAnalyzerSessionStartLabel(raw: string | null | undefined): string
   return raw;
 }
 
-function normalizeAnalyzerSessionStartIso(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const direct = new Date(raw);
-  if (!Number.isNaN(direct.getTime())) return direct.toISOString();
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+(\S+))?$/);
-  if (!m) return null;
-  const [, y, mo, d, h, mi, s] = m;
-  const dt = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}+10:00`);
-  return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
-}
 
 function mapShowcaseExitReasonToTrigger(
   exitReason: string | null,
