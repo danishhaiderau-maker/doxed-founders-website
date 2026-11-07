@@ -27,18 +27,13 @@ from research.causal_grammar_v1.contracts_v1 import (
 from research.causal_grammar_v1.enumerate import enumerate_fixture
 from research.causal_grammar_v1.features import features_at
 from research.causal_grammar_v1.grammar import evaluate_signals
+from research.causal_grammar_v1 import guards as guards_mod
 from research.causal_grammar_v1.guards import (
     CommandClock,
-    assert_receipt_size,
-    assert_rss,
-    assert_workers,
-    audit_sources,
     guarded_read_text,
     guarded_write_text,
     load_package_sources,
-    peak_rss_bytes,
     pin_substantive_bytes,
-    scan_obj,
 )
 from research.causal_grammar_v1.normalized_adapter import normalize_manifest
 
@@ -74,17 +69,23 @@ def run_fixture(
     command: list[str],
     clock: CommandClock,
 ) -> dict:
-    assert_workers(workers)
+    guards_mod.assert_workers(workers)
     if pin_base != AUTHORIZED_BASE:
         raise ContractError("PIN_BASE_MISMATCH")
     assert_pin_head(pin_head)
+    guards_mod.preemptive_checkpoint(clock)
     sources = load_package_sources(PACKAGE_ROOT)
-    imports = audit_sources(sources, test_names=TEST_FILES)
+    guards_mod.outer_containment_scan(sources)
+    imports = guards_mod.audit_sources(sources, test_names=TEST_FILES)
+    guards_mod.preemptive_checkpoint(clock)
     definitions = enumerate_fixture(spec)
+    guards_mod.preemptive_checkpoint(clock)
     normalized = normalize_manifest(manifest)
+    guards_mod.preemptive_checkpoint(clock)
     feature_rows = features_at(normalized["records"], spec["feature"])
+    guards_mod.preemptive_checkpoint(clock)
     signals = evaluate_signals(definitions, normalized["records"])
-    clock.assert_open()
+    guards_mod.preemptive_checkpoint(clock)
     substantive = pin_substantive_bytes(PACKAGE_ROOT)
     compatibility = blocked_compatibility(spec["producer_spec_references"])
     complete = all(set(POLICY_KEYS) <= set(definition["policy"]) for definition in definitions)
@@ -98,6 +99,7 @@ def run_fixture(
         "pin_base": pin_base,
         "pin_head": pin_head,
         "pin_head_source": "cli_argument",
+        "git_head_self_pin": False,
         "runtime": {
             "python": sys.version.split()[0],
             "implementation": sys.implementation.name,
@@ -138,12 +140,14 @@ def run_fixture(
         "signals": signals,
         "resources": {
             "cpu_workers": workers,
-            "peak_rss_bytes": peak_rss_bytes(),
+            "peak_rss_bytes": guards_mod.peak_rss_bytes(),
             "elapsed_seconds": clock.elapsed(),
             "event_count": len(manifest["segment"]["members"]),
             "definition_count": len(definitions),
             "receipt_bytes": 0,
             "cap_status": "WITHIN_CAPS",
+            "ceiling_proof": False,
+            "enforcement": guards_mod.ENFORCEMENT_DISCLOSURE,
         },
     }
     for _ in range(4):
@@ -154,9 +158,10 @@ def run_fixture(
         receipt["resources"]["receipt_bytes"] = size
     else:
         raise ContractError("RECEIPT_SIZE_UNSTABLE")
-    assert_receipt_size(len(canonical_bytes(receipt)))
-    assert_rss(receipt["resources"]["peak_rss_bytes"])
-    scan_obj(receipt)
+    guards_mod.assert_receipt_size(len(canonical_bytes(receipt)))
+    guards_mod.preemptive_checkpoint(clock)
+    guards_mod.outer_scan_text(canonical_bytes(receipt).decode("utf-8"))
+    guards_mod.scan_obj(receipt)
     return receipt
 
 

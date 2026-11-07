@@ -1,4 +1,9 @@
-"""Strictly prior features. No interpolation, forward-fill, or future fit."""
+"""Strictly prior features. No interpolation, forward-fill, or future fit.
+
+A revision chain contributes only its latest eligible strictly prior version.
+Separate first releases stay independent. Superseded rows remain in the
+normalized history for accounting; they are not added into the feature value.
+"""
 
 from __future__ import annotations
 
@@ -11,11 +16,42 @@ def append_series(bound_series: str, record: dict) -> None:
         raise ContractError("CROSS_SERIES_STATE")
 
 
+def assert_series_boundary(bound_series: str, series_id: str) -> None:
+    if bound_series != series_id:
+        raise ContractError("CROSS_SERIES_STATE")
+
+
 def include_in_prior(record: dict, cutoff_ms: int) -> bool:
     availability_ms = record.get("availability_ms")
     if availability_ms is None or availability_ms >= cutoff_ms:
         return False
     return asof_mod.is_eligible(record, cutoff_ms)
+
+
+def revision_root(record: dict) -> str:
+    revision_of = record.get("revision_of")
+    if isinstance(revision_of, str) and revision_of:
+        return revision_of
+    return record["linkage"]
+
+
+def collapse_latest_eligible(records: list[dict]) -> list[dict]:
+    """One latest eligible version per revision chain. Distinct first releases stay."""
+    groups: dict[str, list[dict]] = {}
+    for record in records:
+        groups.setdefault(revision_root(record), []).append(record)
+    chosen: list[dict] = []
+    for group in groups.values():
+        group.sort(
+            key=lambda item: (
+                item["timestamps"]["publication_ms"],
+                item["receive_monotonic_ns"],
+                item["linkage"],
+            )
+        )
+        chosen.append(group[-1])
+    chosen.sort(key=lambda item: (item["availability_ms"], item["linkage"]))
+    return chosen
 
 
 def fill_gap(last_value: object) -> object:
@@ -56,8 +92,7 @@ def prior_mean(
     *,
     bound_series: str,
 ) -> dict:
-    if bound_series != series_id:
-        raise ContractError("CROSS_SERIES_STATE")
+    assert_series_boundary(bound_series, series_id)
     if feature_spec["interpolation"] != "prohibited" or feature_spec["forward_fill"] != "prohibited":
         raise ContractError("UNSUPPORTED_SPEC")
     if feature_spec["warmup"] != "unknown_if_insufficient":
@@ -68,7 +103,6 @@ def prior_mean(
     for record in records:
         if record["series_id"] != series_id:
             continue
-        append_series(bound_series, record)
         availability_ms = record.get("availability_ms")
         if availability_ms is None:
             continue
@@ -78,7 +112,7 @@ def prior_mean(
             expired.append(record)
         else:
             future.append(record)
-    eligible.sort(key=lambda record: (record["availability_ms"], record["linkage"]))
+    eligible = collapse_latest_eligible(eligible)
     expired.sort(key=lambda record: (record["availability_ms"], record["linkage"]))
     future.sort(key=lambda record: (record["availability_ms"], record["linkage"]))
     min_periods = feature_spec["min_periods"]

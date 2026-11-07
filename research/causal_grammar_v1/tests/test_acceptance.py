@@ -39,6 +39,7 @@ from research.causal_grammar_v1.contracts_v1 import (
 PKG = Path(__file__).resolve().parents[1]
 SUITE_STARTED = time.perf_counter()
 MUTATIONS: list[dict] = []
+MATRIX: list[dict] = []
 CANARY = "CANARY-SECRET-FIXTURE-9f3a"
 
 # Handwritten id-set oracle. Do not derive this from enumerate_fixture.
@@ -89,22 +90,119 @@ def oracle_canonical(obj: object) -> bytes:
     ).encode("utf-8")
 
 
-def expect_killed(fault_id: str, fault: str, assertion_name: str, fn) -> None:
+class _SymbolPatch:
+    def __init__(self, owner: object, name: str, fn: object) -> None:
+        self.owner = owner
+        self.name = name
+        self.fn = fn
+        self.saved = None
+
+    def on(self) -> None:
+        self.saved = getattr(self.owner, self.name)
+        setattr(self.owner, self.name, self.fn)
+
+    def off(self) -> None:
+        setattr(self.owner, self.name, self.saved)
+
+    def restored(self) -> bool:
+        return getattr(self.owner, self.name) is self.saved
+
+
+class _GlobalPatch:
+    def __init__(self, name: str, fn: object) -> None:
+        self.name = name
+        self.fn = fn
+        self.saved = None
+
+    def on(self) -> None:
+        self.saved = globals()[self.name]
+        globals()[self.name] = self.fn
+
+    def off(self) -> None:
+        globals()[self.name] = self.saved
+
+    def restored(self) -> bool:
+        return globals()[self.name] is self.saved
+
+
+class _ComboPatch:
+    def __init__(self, patches: list[object]) -> None:
+        self.patches = patches
+
+    def on(self) -> None:
+        for patch in self.patches:
+            patch.on()
+
+    def off(self) -> None:
+        for patch in reversed(self.patches):
+            patch.off()
+
+    def restored(self) -> bool:
+        return all(patch.restored() for patch in self.patches)
+
+
+def run_matrix(
+    *,
+    fault_id: str,
+    symbol: str,
+    call_path: str,
+    assertion_id: str,
+    sentinel: str,
+    note: str,
+    base,
+    control_patch,
+    control,
+    intact,
+    weak_patch,
+    weak,
+) -> None:
+    row = {
+        "fault_id": fault_id,
+        "symbol": symbol,
+        "call_path": call_path,
+        "assertion_id": assertion_id,
+        "sentinel": sentinel,
+        "note": note,
+        "base": "ERROR",
+        "control": "ERROR",
+        "intact": "ERROR",
+        "weak": "ERROR",
+        "restored": False,
+    }
     try:
-        fn()
-    except AssertionError:
-        MUTATIONS.append(
-            {
-                "receipt_schema": "causal_grammar.mutation_kill.v1",
-                "fault_id": fault_id,
-                "deliberate_fault": fault,
-                "failed_assertion": assertion_name,
-                "killed": True,
-                "exception_type": "AssertionError",
-            }
-        )
-        return
-    raise AssertionError("MUTATION_SURVIVED:" + fault_id)
+        base()
+        row["base"] = "HELD"
+        control_patch.on()
+        try:
+            control()
+            row["control"] = "HELD"
+        finally:
+            control_patch.off()
+        intact()
+        row["intact"] = "HELD"
+        weak_patch.on()
+        try:
+            try:
+                weak()
+            except AssertionError:
+                row["weak"] = "ORACLE_VIOLATED"
+            except Exception as exc:
+                row["weak"] = "ERROR:" + type(exc).__name__ + ":" + str(exc)
+        finally:
+            weak_patch.off()
+            row["restored"] = weak_patch.restored()
+    except Exception as exc:
+        if row["base"] != "HELD":
+            row["base"] = "ERROR:" + type(exc).__name__ + ":" + str(exc)
+        elif row["control"] != "HELD":
+            row["control"] = "ERROR:" + type(exc).__name__ + ":" + str(exc)
+        elif row["intact"] != "HELD":
+            row["intact"] = "ERROR:" + type(exc).__name__ + ":" + str(exc)
+        MATRIX.append(row)
+        raise
+    MATRIX.append(row)
+    if row["weak"] != "ORACLE_VIOLATED" or not row["restored"]:
+        raise AssertionError(fault_id + ":" + row["weak"] + ":restored=" + str(row["restored"]))
 
 
 def row(
@@ -355,6 +453,63 @@ def perturbed_rows() -> list[dict]:
     )
     rows.append(row("m-c3", 7, "C", 9, 5000, 70))
     return rows
+
+
+def _capture_main(args: list[str]) -> tuple[int, str]:
+    held = sys.stderr
+    chunks: list[str] = []
+
+    class _Err:
+        def write(self, text: str) -> None:
+            chunks.append(text)
+
+        def flush(self) -> None:
+            return None
+
+    sys.stderr = _Err()
+    try:
+        code = fixture_cli.main(args)
+    finally:
+        sys.stderr = held
+    return code, "".join(chunks)
+
+
+def _cli_args(receipt: Path, workers: str = "1") -> list[str]:
+    return [
+        "--fixture-only",
+        "--spec",
+        str(PKG / "fixtures" / "tiny-spec.json"),
+        "--events",
+        str(PKG / "fixtures" / "committed-events.json"),
+        "--receipt",
+        str(receipt),
+        "--pin-base",
+        AUTHORIZED_BASE,
+        "--pin-head",
+        AUTHORIZED_BASE,
+        "--workers",
+        workers,
+    ]
+
+
+def _ordered_only(pairs: list[list[str]]) -> dict:
+    spec = clone(load_spec())
+    spec["families"]["singles"] = ["A"]
+    spec["families"]["unordered_pairs"] = []
+    spec["families"]["unordered_triples"] = []
+    spec["families"]["ordered_pairs"] = pairs
+    return spec
+
+
+class _SlowClock:
+    def __init__(self) -> None:
+        self.started = 0.0
+
+    def elapsed(self) -> float:
+        return 121.0
+
+    def assert_open(self) -> None:
+        guards.assert_elapsed(self.elapsed())
 
 
 class StageAAcceptance(unittest.TestCase):
@@ -746,6 +901,10 @@ class StageAAcceptance(unittest.TestCase):
             self.assertLess(receipt["resources"]["receipt_bytes"], 8 * 1024 * 1024)
             self.assertEqual(receipt["resources"]["event_count"], 7)
             self.assertEqual(receipt["resources"]["cap_status"], "WITHIN_CAPS")
+            self.assertIs(receipt["git_head_self_pin"], False)
+            self.assertIs(receipt["resources"]["ceiling_proof"], False)
+            self.assertIn("not_zero_overshoot", receipt["resources"]["enforcement"])
+            self.assertIn("under_limit_run_is_not_ceiling_proof", receipt["resources"]["enforcement"])
             for relative, digest in receipt["substantive_bytes_sha256"].items():
                 payload = (PKG / relative).read_bytes()
                 self.assertEqual(digest, hashlib.sha256(payload).hexdigest(), relative)
@@ -782,241 +941,591 @@ class StageAAcceptance(unittest.TestCase):
             self.assertEqual(inside, 3)
             self.assertFalse((PKG / "fixtures" / "blocked-receipt.json").exists())
 
+    def test_prior_mean_uses_latest_revision_and_keeps_history(self) -> None:
+        feature_spec = load_spec()["feature"]
+        chain = [
+            row("m-a1", 0, "A", 1, 1000, 1),
+            row(
+                "m-a1r",
+                1,
+                "A",
+                9,
+                1000,
+                2,
+                release="revision",
+                revision_of=link("m-a1", 0),
+                source=1000,
+                pub=1500,
+                bar=1500,
+                recv=1500,
+            ),
+        ]
+        chain_records = normalized(chain)["records"]
+        self.assertEqual({item["linkage"] for item in chain_records}, {link("m-a1", 0), link("m-a1r", 1)})
+        chain_only = features_mod.prior_mean(chain_records, "A", 2000, feature_spec, bound_series="A")
+        self.assertEqual(chain_only["status"], "UNKNOWN")
+        self.assertIsNone(chain_only["value"])
+        eligible = [
+            item
+            for item in chain_records
+            if features_mod.include_in_prior(item, 2000)
+        ]
+        self.assertEqual(len(eligible), 2)
+        self.assertEqual(len(features_mod.collapse_latest_eligible(eligible)), 1)
+        signals = grammar.evaluate_signals(compiled(), chain_records)
+        self.assertEqual(len([item for item in signals if item["strategy_id"] == "S:A"]), 2)
+        mixed = chain + [row("m-a2", 2, "A", 3, 1600, 3)]
+        mixed_records = normalized(mixed)["records"]
+        mixed_feature = features_mod.prior_mean(mixed_records, "A", 2000, feature_spec, bound_series="A")
+        self.assertEqual(mixed_feature["status"], "DEFINED")
+        self.assertEqual(mixed_feature["value"], 6)
+        blocked = [
+            row("m-a1", 0, "A", 1, 1000, 1),
+            row("m-a2", 1, "A", 3, 1100, 2),
+            row(
+                "m-a1r",
+                2,
+                "A",
+                100,
+                1000,
+                4,
+                release="revision",
+                revision_of=link("m-a1", 0),
+                source=1000,
+                pub=1500,
+                bar=1500,
+                recv=1500,
+                book_from=9000,
+            ),
+        ]
+        blocked_feature = features_mod.prior_mean(
+            normalized(blocked)["records"], "A", 2000, feature_spec, bound_series="A"
+        )
+        self.assertEqual(blocked_feature["value"], 2)
+
+    def test_revision_does_not_change_earlier_feature_bytes(self) -> None:
+        feature_spec = load_spec()["feature"]
+        early = [row("m-a1", 0, "A", 1, 1000, 1), row("m-a2", 1, "A", 3, 1100, 2)]
+        late = early + [
+            row(
+                "m-a1r",
+                2,
+                "A",
+                9,
+                1000,
+                3,
+                release="revision",
+                revision_of=link("m-a1", 0),
+                source=1000,
+                pub=5000,
+                bar=5000,
+                recv=5000,
+                book_from=5000,
+            )
+        ]
+        left = features_mod.prior_mean(normalized(early)["records"], "A", 1200, feature_spec, bound_series="A")
+        right_records = normalized(late)["records"]
+        right = features_mod.prior_mean(right_records, "A", 1200, feature_spec, bound_series="A")
+        self.assertEqual(oracle_canonical(left), oracle_canonical(right))
+        self.assertIn(link("m-a1r", 2), {item["linkage"] for item in right_records})
+
+    def test_schema_structure_accepts_emitted_record(self) -> None:
+        schema = json.loads((PKG / "contracts-v1.schema.json").read_text(encoding="utf-8"))
+        guards.schema_record_consistent(schema)
+        record = normalized([row("m-a1", 0, "A", 1, 1000, 1)])["records"][0]
+        guards.assert_record_matches_schema_structure(record, schema)
+        broken = json.loads(json.dumps(schema))
+        del broken["$defs"]["normalized_record"]["properties"]["linkage"]
+        self.assertEqual(tuple(broken["$defs"]["normalized_record"]["required"]), NORMALIZED_REQUIRED)
+        with self.assertRaises(ContractError) as caught:
+            guards.schema_record_consistent(broken)
+        self.assertEqual(caught.exception.code, "SCHEMA_INCONSISTENT")
+        extra = dict(record)
+        extra["unknown_field"] = 1
+        with self.assertRaises(ContractError) as caught:
+            guards.assert_record_matches_schema_structure(extra, schema)
+        self.assertEqual(caught.exception.code, "SCHEMA_INCONSISTENT")
+
+    def test_dynamic_import_audit_and_outer_layer(self) -> None:
+        planted_call = "__import__('socket')\n"
+        planted_module = "importlib.import_module('socket')\n"
+        planted_import = "import socket\n"
+        for source in (planted_call, planted_module, planted_import):
+            with self.assertRaises(guards.ProhibitedAccess) as caught:
+                guards.audit_sources({"planted.py": source}, test_names=set())
+            self.assertEqual(caught.exception.code, "PROHIBITED:import")
+            with self.assertRaises(guards.ProhibitedAccess) as outer:
+                guards.outer_containment_scan({"planted.py": source})
+            self.assertEqual(outer.exception.code, "PROHIBITED:outer-import")
+
+    def _ids(self, spec: dict | None = None) -> list[str]:
+        return [item["strategy_id"] for item in fixture_enumerate.enumerate_fixture(spec or load_spec())]
+
     def test_m01_drop_ordered_pair(self) -> None:
-        mutant = [item for item in HANDWRITTEN_IDS if item != "O:A>B"]
+        real = fixture_enumerate.strategy_id_for
 
-        def assertion() -> None:
-            self.assertEqual(mutant, list(HANDWRITTEN_IDS))
+        def keep(kind: str, members: list[str]) -> str:
+            return real(kind, members)
 
-        expect_killed("M01_DROP_ORDERED_PAIR", "removed ordered pair O:A>B", "handwritten_oracle_id_set_equality", assertion)
+        def drop(kind: str, members: list[str]) -> str:
+            strategy_id = real(kind, members)
+            if strategy_id == "O:A>B":
+                return "O:MISSING"
+            return strategy_id
+
+        def oracle() -> None:
+            ids = self._ids()
+            assert ids == list(HANDWRITTEN_IDS)
+            assert "O:A>B" in ids
+
+        run_matrix(
+            fault_id="M01_DROP_ORDERED_PAIR",
+            symbol="enumerate.strategy_id_for",
+            call_path="enumerate_fixture",
+            assertion_id="handwritten_ids_include_O:A>B",
+            sentinel="O:A>B",
+            note="production id builder omits O:A>B",
+            base=oracle,
+            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", drop),
+            weak=oracle,
+        )
 
     def test_m02_reverse_ordered_pair(self) -> None:
-        mutant = ["O:B>A" if item == "O:A>B" else item for item in HANDWRITTEN_IDS]
+        real = fixture_enumerate.strategy_id_for
+        spec = _ordered_only([["A", "B"]])
 
-        def assertion() -> None:
-            self.assertEqual(mutant, list(HANDWRITTEN_IDS))
+        def keep(kind: str, members: list[str]) -> str:
+            return real(kind, members)
 
-        expect_killed("M02_REVERSE_ORDERED_PAIR", "reversed O:A>B into O:B>A", "handwritten_oracle_id_set_equality", assertion)
+        def reverse(kind: str, members: list[str]) -> str:
+            if kind == "ordered_pair" and list(members) == ["A", "B"]:
+                return real(kind, ["B", "A"])
+            return real(kind, members)
+
+        def oracle() -> None:
+            ids = self._ids(spec)
+            assert "O:A>B" in ids and "O:B>A" not in ids
+
+        run_matrix(
+            fault_id="M02_REVERSE_ORDERED_PAIR",
+            symbol="enumerate.strategy_id_for",
+            call_path="enumerate_fixture",
+            assertion_id="ordered_A_to_B_keeps_direction",
+            sentinel="O:A>B",
+            note="single ordered pair reversed by the id builder",
+            base=oracle,
+            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", reverse),
+            weak=oracle,
+        )
 
     def test_m03_sort_ordered_pair(self) -> None:
-        mutant = []
-        for item in HANDWRITTEN_IDS:
-            if item.startswith("O:"):
-                left, right = item[2:].split(">")
-                ordered = sorted([left, right])
-                mutant.append("O:" + ordered[0] + ">" + ordered[1])
-            else:
-                mutant.append(item)
+        real = fixture_enumerate.canonicalize_members
+        spec = _ordered_only([["B", "A"]])
 
-        def assertion() -> None:
-            self.assertEqual(mutant, list(HANDWRITTEN_IDS))
+        def keep(kind: str, members: list[str]) -> list[str]:
+            return real(kind, members)
 
-        expect_killed("M03_SORT_ORDERED_PAIR", "sorted ordered-pair members", "handwritten_oracle_id_set_equality", assertion)
+        def sort_ordered(kind: str, members: list[str]) -> list[str]:
+            if kind == "ordered_pair":
+                return sorted(members)
+            return real(kind, members)
+
+        def oracle() -> None:
+            definitions = fixture_enumerate.enumerate_fixture(spec)
+            ordered = next(item for item in definitions if item["ordered"])
+            assert ordered["strategy_id"] == "O:B>A"
+            assert ordered["members"] == ["B", "A"]
+
+        run_matrix(
+            fault_id="M03_SORT_ORDERED_PAIR",
+            symbol="enumerate.canonicalize_members",
+            call_path="enumerate_fixture",
+            assertion_id="ordered_B_to_A_not_sorted",
+            sentinel="O:B>A",
+            note="canonicalize_members sorts an ordered pair",
+            base=oracle,
+            control_patch=_SymbolPatch(fixture_enumerate, "canonicalize_members", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(fixture_enumerate, "canonicalize_members", sort_ordered),
+            weak=oracle,
+        )
 
     def test_m04_direction_collapse(self) -> None:
-        def collapsed(signals: list[dict]) -> set[tuple[str, str]]:
-            found = set()
-            for signal in ordered_fires(signals):
-                left, right = signal["strategy_id"][2:].split(">")
-                pair = tuple(sorted([left, right]))
-                found.add((pair[0], pair[1]))
-            return found
+        real = grammar.evaluate_ordered
 
-        def assertion() -> None:
+        def keep(defn: dict, records: list[dict]) -> list[dict]:
+            return real(defn, records)
+
+        def collapse(defn: dict, records: list[dict]) -> list[dict]:
+            pair = sorted(defn["members"])
+            label = "O:" + pair[0] + ">" + pair[1]
+            forward = dict(defn)
+            forward["members"] = [pair[0], pair[1]]
+            forward["strategy_id"] = label
+            backward = dict(defn)
+            backward["members"] = [pair[1], pair[0]]
+            backward["strategy_id"] = label
+            return real(forward, records) + real(backward, records)
+
+        def oracle() -> None:
             forward, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 200, 2)])
             backward, _ = signals_for([row("m-b1", 0, "B", 0, 0, 1), row("m-a1", 1, "A", 0, 200, 2)])
-            self.assertNotEqual(collapsed(forward), collapsed(backward))
+            left = {item["strategy_id"] for item in ordered_fires(forward)}
+            right = {item["strategy_id"] for item in ordered_fires(backward)}
+            assert left == {"O:A>B"}
+            assert right == {"O:B>A"}
 
-        expect_killed(
-            "M04_DIRECTION_COLLAPSE",
-            "compared ordered pairs after sorting away direction",
-            "A_before_B_distinct_from_B_before_A",
-            assertion,
+        run_matrix(
+            fault_id="M04_DIRECTION_COLLAPSE",
+            symbol="grammar.evaluate_ordered",
+            call_path="evaluate_signals",
+            assertion_id="A_before_B_distinct_from_B_before_A",
+            sentinel="O:A>B_vs_O:B>A",
+            note="control keeps distinct fires; weak collapse makes the sets equal",
+            base=oracle,
+            control_patch=_SymbolPatch(grammar, "evaluate_ordered", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(grammar, "evaluate_ordered", collapse),
+            weak=oracle,
         )
 
     def test_m05_lag_endpoint_exclusive(self) -> None:
         real = grammar.classify_delay
+
+        def keep(delay: int, policy: dict) -> str:
+            return real(delay, policy)
 
         def exclusive(delay: int, policy: dict) -> str:
             patched = dict(policy)
             patched["lag_inclusive"] = False
             return real(delay, patched)
 
-        grammar.classify_delay = exclusive
-        try:
-            def assertion() -> None:
-                signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 100, 2)])
-                self.assertEqual(len(ordered_fires(signals, "O:A>B")), 1)
+        def oracle() -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 100, 2)])
+            assert len(ordered_fires(signals, "O:A>B")) == 1
 
-            expect_killed("M05_LAG_ENDPOINT_EXCLUSIVE", "lag endpoint treated as exclusive", "lag_100_fires", assertion)
-        finally:
-            grammar.classify_delay = real
+        run_matrix(
+            fault_id="M05_LAG_ENDPOINT_EXCLUSIVE",
+            symbol="grammar.classify_delay",
+            call_path="evaluate_ordered",
+            assertion_id="lag_100_fires",
+            sentinel="ORDERED_FIRE",
+            note="inclusive lag boundary",
+            base=oracle,
+            control_patch=_SymbolPatch(grammar, "classify_delay", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(grammar, "classify_delay", exclusive),
+            weak=oracle,
+        )
 
     def test_m06_expiry_inclusive(self) -> None:
         real = grammar.classify_delay
+
+        def keep(delay: int, policy: dict) -> str:
+            return real(delay, policy)
 
         def inclusive(delay: int, policy: dict) -> str:
             patched = dict(policy)
             patched["expiry_inclusive"] = True
             return real(delay, patched)
 
-        grammar.classify_delay = inclusive
-        try:
-            def assertion() -> None:
-                signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 1000, 2)])
-                self.assertEqual(ordered_fires(signals, "O:A>B"), [])
+        def oracle() -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 1000, 2)])
+            assert ordered_fires(signals, "O:A>B") == []
 
-            expect_killed("M06_EXPIRY_INCLUSIVE", "expiry endpoint treated as inclusive", "expiry_1000_does_not_fire", assertion)
-        finally:
-            grammar.classify_delay = real
+        run_matrix(
+            fault_id="M06_EXPIRY_INCLUSIVE",
+            symbol="grammar.classify_delay",
+            call_path="evaluate_ordered",
+            assertion_id="expiry_1000_does_not_fire",
+            sentinel="no_fire",
+            note="exclusive expiry boundary",
+            base=oracle,
+            control_patch=_SymbolPatch(grammar, "classify_delay", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(grammar, "classify_delay", inclusive),
+            weak=oracle,
+        )
 
     def test_m07_tie_fires(self) -> None:
         real = grammar.classify_delay
+
+        def keep(delay: int, policy: dict) -> str:
+            return real(delay, policy)
 
         def ties_fire(delay: int, policy: dict) -> str:
             if delay == 0:
                 return "fire"
             return real(delay, policy)
 
-        grammar.classify_delay = ties_fire
-        try:
-            def assertion() -> None:
-                signals, _ = signals_for([row("m-a1", 0, "A", 0, 500, 1), row("m-b1", 1, "B", 0, 500, 2)])
-                self.assertEqual(ordered_fires(signals), [])
+        def oracle() -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 500, 1), row("m-b1", 1, "B", 0, 500, 2)])
+            assert ordered_fires(signals) == []
 
-            expect_killed("M07_TIE_FIRES", "simultaneous availability fires an ordered pair", "tie_does_not_fire", assertion)
-        finally:
-            grammar.classify_delay = real
+        run_matrix(
+            fault_id="M07_TIE_FIRES",
+            symbol="grammar.classify_delay",
+            call_path="evaluate_ordered",
+            assertion_id="tie_does_not_fire",
+            sentinel="no_fire",
+            note="delay 0 is a tie",
+            base=oracle,
+            control_patch=_SymbolPatch(grammar, "classify_delay", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(grammar, "classify_delay", ties_fire),
+            weak=oracle,
+        )
 
     def test_m08_duplicate_retriggers(self) -> None:
         real = grammar.duplicate_seen
-        grammar.duplicate_seen = lambda seen, linkage: False
-        try:
-            def assertion() -> None:
-                _signals, produced = signals_for([row("m-a1", 0, "A", 1, 1000, 1)])
-                duplicate = next(record for record in produced["records"] if record["member_id"] == "m-a1")
-                signals = grammar.evaluate_signals(compiled(), [duplicate, dict(duplicate)])
-                singles = [item for item in signals if item["strategy_id"] == "S:A"]
-                self.assertEqual(len(singles), 1)
 
-            expect_killed("M08_DUPLICATE_RETRIGGERS", "exact duplicate linkage processed again", "duplicate_linkage_one_signal", assertion)
-        finally:
-            grammar.duplicate_seen = real
+        def keep(seen: set[str], linkage: str) -> bool:
+            return real(seen, linkage)
+
+        def allow(seen: set[str], linkage: str) -> bool:
+            del seen, linkage
+            return False
+
+        def oracle() -> None:
+            _signals, produced = signals_for([row("m-a1", 0, "A", 1, 1000, 1)])
+            duplicate = next(record for record in produced["records"] if record["member_id"] == "m-a1")
+            signals = grammar.evaluate_signals(compiled(), [duplicate, dict(duplicate)])
+            assert len([item for item in signals if item["strategy_id"] == "S:A"]) == 1
+
+        run_matrix(
+            fault_id="M08_DUPLICATE_RETRIGGERS",
+            symbol="grammar.duplicate_seen",
+            call_path="evaluate_single",
+            assertion_id="duplicate_linkage_one_signal",
+            sentinel="one_S:A",
+            note="repeated linkage",
+            base=oracle,
+            control_patch=_SymbolPatch(grammar, "duplicate_seen", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(grammar, "duplicate_seen", allow),
+            weak=oracle,
+        )
 
     def test_m09_retrigger_without_reset(self) -> None:
         real = grammar.consume_pending
+
+        def keep(pending: dict | None, kind: str) -> dict | None:
+            return real(pending, kind)
 
         def keep_on_fire(pending: dict | None, kind: str) -> dict | None:
             if kind == "expire":
                 return None
             return pending
 
-        grammar.consume_pending = keep_on_fire
-        try:
-            def assertion() -> None:
-                signals, _ = signals_for(
-                    [
-                        row("m-a1", 0, "A", 0, 0, 1),
-                        row("m-b1", 1, "B", 0, 200, 2),
-                        row("m-b2", 2, "B", 0, 400, 3),
-                    ]
-                )
-                self.assertEqual([item["decision_ms"] for item in ordered_fires(signals, "O:A>B")], [200])
+        def oracle() -> None:
+            signals, _ = signals_for(
+                [
+                    row("m-a1", 0, "A", 0, 0, 1),
+                    row("m-b1", 1, "B", 0, 200, 2),
+                    row("m-b2", 2, "B", 0, 400, 3),
+                ]
+            )
+            assert [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [200]
 
-            expect_killed("M09_RETRIGGER_WITHOUT_RESET", "ordered fire does not consume the antecedent", "second_consequent_does_not_fire", assertion)
-        finally:
-            grammar.consume_pending = real
+        run_matrix(
+            fault_id="M09_RETRIGGER_WITHOUT_RESET",
+            symbol="grammar.consume_pending",
+            call_path="evaluate_ordered",
+            assertion_id="second_consequent_does_not_fire",
+            sentinel="200",
+            note="fire must consume the antecedent",
+            base=oracle,
+            control_patch=_SymbolPatch(grammar, "consume_pending", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(grammar, "consume_pending", keep_on_fire),
+            weak=oracle,
+        )
 
     def test_m10_expiry_without_reset(self) -> None:
         real = grammar.consume_pending
+
+        def keep(pending: dict | None, kind: str) -> dict | None:
+            return real(pending, kind)
 
         def keep_on_expire(pending: dict | None, kind: str) -> dict | None:
             if kind == "fire":
                 return None
             return pending
 
-        grammar.consume_pending = keep_on_expire
-        try:
-            def assertion() -> None:
-                signals, _ = signals_for(
-                    [
-                        row("m-a1", 0, "A", 0, 0, 1),
-                        row("m-b1", 1, "B", 0, 1000, 2),
-                        row("m-b2", 2, "B", 0, 1100, 3),
-                        row("m-a2", 3, "A", 0, 2000, 4),
-                        row("m-b3", 4, "B", 0, 2200, 5),
-                    ]
-                )
-                self.assertEqual([item["decision_ms"] for item in ordered_fires(signals, "O:A>B")], [2200])
+        def oracle() -> None:
+            signals, _ = signals_for(
+                [
+                    row("m-a1", 0, "A", 0, 0, 1),
+                    row("m-b1", 1, "B", 0, 1000, 2),
+                    row("m-b2", 2, "B", 0, 1100, 3),
+                    row("m-a2", 3, "A", 0, 2000, 4),
+                    row("m-b3", 4, "B", 0, 2200, 5),
+                ]
+            )
+            assert [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [2200]
 
-            expect_killed("M10_EXPIRY_WITHOUT_RESET", "expiry does not reset the pending antecedent", "new_antecedent_can_fire_after_expiry", assertion)
-        finally:
-            grammar.consume_pending = real
+        run_matrix(
+            fault_id="M10_EXPIRY_WITHOUT_RESET",
+            symbol="grammar.consume_pending",
+            call_path="evaluate_ordered",
+            assertion_id="new_antecedent_can_fire_after_expiry",
+            sentinel="2200",
+            note="expiry must clear the pending antecedent",
+            base=oracle,
+            control_patch=_SymbolPatch(grammar, "consume_pending", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(grammar, "consume_pending", keep_on_expire),
+            weak=oracle,
+        )
 
     def test_m11_post_cutoff_included(self) -> None:
-        base = view_through(pinned_rows())
+        saved = view_through
 
-        def assertion() -> None:
-            mutated = dict(base)
-            mutated["records"] = normalized(perturbed_rows())["records"]
-            self.assertEqual(oracle_canonical(mutated), oracle_canonical(base))
+        def keep(rows: list[dict], cutoff_ms: int = 1500) -> dict:
+            return saved(rows, cutoff_ms)
 
-        expect_killed("M11_POST_CUTOFF_VIEW", "view through t includes post-cutoff records", "byte_identity_through_cutoff", assertion)
+        def unfiltered(rows: list[dict], cutoff_ms: int = 1500) -> dict:
+            del cutoff_ms
+            produced = normalized(rows)
+            spec = load_spec()
+            return {
+                "records": produced["records"],
+                "features": features_mod.features_at(produced["records"], spec["feature"]),
+                "signals": grammar.evaluate_signals(compiled(), produced["records"]),
+                "rejections": produced["rejections"],
+            }
+
+        def oracle() -> None:
+            view = view_through(pinned_rows())
+            assert all(item["member_id"] != "m-a2" for item in view["records"])
+            assert oracle_canonical(view_through(pinned_rows())) == oracle_canonical(view_through(perturbed_rows()))
+
+        run_matrix(
+            fault_id="M11_POST_CUTOFF_VIEW",
+            symbol="view_through",
+            call_path="normalize_manifest+features_at+evaluate_signals",
+            assertion_id="byte_identity_through_cutoff",
+            sentinel="m-a2_absent",
+            note="filter removed; production bytes still come from the real normalizer",
+            base=oracle,
+            control_patch=_GlobalPatch("view_through", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_GlobalPatch("view_through", unfiltered),
+            weak=oracle,
+        )
 
     def test_m12_source_time_only(self) -> None:
         record = normalized([row("m-a1", 0, "A", 1, 1000, 1, source=1000, pub=5000, bar=1000, recv=1000)])["records"][0]
         real = asof.causal_times_ok
 
+        def keep(item: dict, cutoff_ms: int) -> bool:
+            return real(item, cutoff_ms)
+
         def source_only(item: dict, cutoff_ms: int) -> bool:
             value = item["timestamps"]["source_ms"]
             return value is not None and value <= cutoff_ms
 
-        asof.causal_times_ok = source_only
-        try:
-            def assertion() -> None:
-                self.assertFalse(asof.is_eligible(record, 2000))
+        def oracle() -> None:
+            assert asof.is_eligible(record, 2000) is False
 
-            expect_killed("M12_SOURCE_TIME_ONLY", "eligibility uses source time only", "delayed_publication_not_eligible", assertion)
-        finally:
-            asof.causal_times_ok = real
+        run_matrix(
+            fault_id="M12_SOURCE_TIME_ONLY",
+            symbol="asof.causal_times_ok",
+            call_path="is_eligible",
+            assertion_id="delayed_publication_not_eligible",
+            sentinel="False",
+            note="publication 5000 blocks cutoff 2000",
+            base=oracle,
+            control_patch=_SymbolPatch(asof, "causal_times_ok", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(asof, "causal_times_ok", source_only),
+            weak=oracle,
+        )
 
     def test_m13_future_calibration(self) -> None:
-        rows = [
-            row("m-c1", 0, "C", 1, 1000, 1),
-            row("m-c2", 1, "C", 1, 1200, 2),
-            row("m-c3", 2, "C", 9, 5000, 3),
-        ]
-        records = normalized(rows)["records"]
+        records = normalized(
+            [
+                row("m-c1", 0, "C", 1, 1000, 1),
+                row("m-c2", 1, "C", 1, 1200, 2),
+                row("m-c3", 2, "C", 9, 5000, 3),
+            ]
+        )["records"]
         real = features_mod.include_in_prior
-        features_mod.include_in_prior = lambda record, cutoff_ms: True
-        try:
-            def assertion() -> None:
-                feature = features_mod.prior_mean(records, "C", 2000, load_spec()["feature"], bound_series="C")
-                self.assertEqual(feature["value"], 1)
+        feature_spec = load_spec()["feature"]
 
-            expect_killed("M13_FUTURE_CALIBRATION", "prior mean includes observations available after cutoff", "prior_mean_excludes_future", assertion)
-        finally:
-            features_mod.include_in_prior = real
+        def keep(record: dict, cutoff_ms: int) -> bool:
+            return real(record, cutoff_ms)
+
+        def everything(record: dict, cutoff_ms: int) -> bool:
+            del record, cutoff_ms
+            return True
+
+        def oracle() -> None:
+            feature = features_mod.prior_mean(records, "C", 2000, feature_spec, bound_series="C")
+            assert feature["value"] == 1
+
+        run_matrix(
+            fault_id="M13_FUTURE_CALIBRATION",
+            symbol="features.include_in_prior",
+            call_path="prior_mean",
+            assertion_id="prior_mean_excludes_future",
+            sentinel="1",
+            note="post-cutoff value 9",
+            base=oracle,
+            control_patch=_SymbolPatch(features_mod, "include_in_prior", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(features_mod, "include_in_prior", everything),
+            weak=oracle,
+        )
 
     def test_m14_nullable_substitution(self) -> None:
         manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1, source=None)])
         real = adapter.source_timestamp_ms
+
+        def keep(member: dict) -> object:
+            return real(member)
 
         def substitute(member: dict) -> object:
             if member["source_timestamp_ms"] is None:
                 return member["receive_time_ms"]
             return member["source_timestamp_ms"]
 
-        adapter.source_timestamp_ms = substitute
-        try:
-            def assertion() -> None:
-                record = adapter.normalize_manifest(manifest)["records"][0]
-                self.assertIsNone(record["timestamps"]["source_ms"])
-                self.assertEqual(record["availability"], "UNKNOWN")
+        def oracle() -> None:
+            record = adapter.normalize_manifest(manifest)["records"][0]
+            assert record["timestamps"]["source_ms"] is None
+            assert record["availability"] == "UNKNOWN"
 
-            expect_killed("M14_NULLABLE_SUBSTITUTION", "missing exchange timestamp replaced with receive time", "source_timestamp_remains_null", assertion)
-        finally:
-            adapter.source_timestamp_ms = real
+        run_matrix(
+            fault_id="M14_NULLABLE_SUBSTITUTION",
+            symbol="normalized_adapter.source_timestamp_ms",
+            call_path="to_record",
+            assertion_id="source_timestamp_remains_null",
+            sentinel="UNKNOWN",
+            note="receive time must not fill a null exchange timestamp",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "source_timestamp_ms", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "source_timestamp_ms", substitute),
+            weak=oracle,
+        )
 
     def test_m15_revision_before_publication(self) -> None:
         records = normalized(
@@ -1040,23 +1549,38 @@ class StageAAcceptance(unittest.TestCase):
         )["records"]
         real = asof.causal_times_ok
 
+        def keep(item: dict, cutoff_ms: int) -> bool:
+            return real(item, cutoff_ms)
+
         def source_only(item: dict, cutoff_ms: int) -> bool:
             value = item["timestamps"]["source_ms"]
             return value is not None and value <= cutoff_ms
 
-        asof.causal_times_ok = source_only
-        try:
-            def assertion() -> None:
-                visible = asof.visible_at(records, 2000)
-                self.assertEqual([item["value"] for item in visible], [1])
+        def oracle() -> None:
+            visible = asof.visible_at(records, 2000)
+            assert [item["value"] for item in visible] == [1]
 
-            expect_killed("M15_REVISION_BEFORE_PUBLICATION", "revision visible from source time before publication", "revision_hidden_until_publication", assertion)
-        finally:
-            asof.causal_times_ok = real
+        run_matrix(
+            fault_id="M15_REVISION_BEFORE_PUBLICATION",
+            symbol="asof.causal_times_ok",
+            call_path="visible_at",
+            assertion_id="revision_hidden_until_publication",
+            sentinel="1",
+            note="revision publication is 5000",
+            base=oracle,
+            control_patch=_SymbolPatch(asof, "causal_times_ok", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(asof, "causal_times_ok", source_only),
+            weak=oracle,
+        )
 
     def test_m16_bar_close_ignored(self) -> None:
         record = normalized([row("m-a1", 0, "A", 1, 1000, 1, source=1000, pub=1000, bar=5000, recv=1000)])["records"][0]
         real = asof.causal_times_ok
+
+        def keep(item: dict, cutoff_ms: int) -> bool:
+            return real(item, cutoff_ms)
 
         def no_bar(item: dict, cutoff_ms: int) -> bool:
             for key in ("source_ms", "publication_ms", "receive_ms"):
@@ -1065,32 +1589,51 @@ class StageAAcceptance(unittest.TestCase):
                     return False
             return True
 
-        asof.causal_times_ok = no_bar
-        try:
-            def assertion() -> None:
-                self.assertFalse(asof.is_eligible(record, 2000))
+        def oracle() -> None:
+            assert asof.is_eligible(record, 2000) is False
 
-            expect_killed("M16_BAR_CLOSE_IGNORED", "bar-close time omitted from eligibility", "late_bar_close_not_eligible", assertion)
-        finally:
-            asof.causal_times_ok = real
+        run_matrix(
+            fault_id="M16_BAR_CLOSE_IGNORED",
+            symbol="asof.causal_times_ok",
+            call_path="is_eligible",
+            assertion_id="late_bar_close_not_eligible",
+            sentinel="False",
+            note="bar close 5000",
+            base=oracle,
+            control_patch=_SymbolPatch(asof, "causal_times_ok", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(asof, "causal_times_ok", no_bar),
+            weak=oracle,
+        )
 
     def test_m17_member_digest_skipped(self) -> None:
         manifest = build_manifest(pinned_rows())
         manifest["segment"]["members"][0]["member_digest"] = "0" * 64
-        real = adapter.assert_member_digest
-        adapter.assert_member_digest = lambda actual, declared: None
-        try:
-            def assertion() -> None:
-                try:
-                    adapter.normalize_manifest(manifest)
-                except ContractError as exc:
-                    self.assertEqual(exc.code, "MEMBER_DIGEST_MISMATCH")
-                    return
-                raise AssertionError("MEMBER_LINKAGE_IGNORED")
+        real_digest = adapter.assert_member_digest
 
-            expect_killed("M17_MEMBER_DIGEST_SKIPPED", "member digest check removed while segment digest still matches", "corrupted_member_rejected", assertion)
-        finally:
-            adapter.assert_member_digest = real
+        def oracle() -> None:
+            try:
+                adapter.normalize_manifest(manifest)
+            except ContractError as exc:
+                assert exc.code == "MEMBER_DIGEST_MISMATCH"
+                return
+            raise AssertionError("MEMBER_LINKAGE_IGNORED")
+
+        run_matrix(
+            fault_id="M17_MEMBER_DIGEST_SKIPPED",
+            symbol="normalized_adapter.assert_member_digest",
+            call_path="verify_committed_prefix",
+            assertion_id="corrupted_member_rejected",
+            sentinel="MEMBER_DIGEST_MISMATCH",
+            note="segment digest still matches",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "assert_member_digest", real_digest),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "assert_member_digest", lambda actual, declared: None),
+            weak=oracle,
+        )
 
     def test_m18_truncation_accepted(self) -> None:
         manifest = build_manifest(pinned_rows())
@@ -1104,29 +1647,62 @@ class StageAAcceptance(unittest.TestCase):
                 raise ContractError("SEGMENT_DIGEST_MISMATCH")
             return sorted(committed, key=lambda item: item["record_index"])
 
-        adapter.verify_committed_prefix = segment_only
-        try:
-            def assertion() -> None:
-                try:
-                    adapter.normalize_manifest(manifest)
-                except ContractError as exc:
-                    self.assertEqual(exc.code, "TRUNCATED_MEMBER")
-                    return
-                raise AssertionError("TRUNCATION_ACCEPTED")
+        def oracle() -> None:
+            try:
+                adapter.normalize_manifest(manifest)
+            except ContractError as exc:
+                assert exc.code == "TRUNCATED_MEMBER"
+                return
+            raise AssertionError("TRUNCATION_ACCEPTED")
 
-            expect_killed("M18_TRUNCATION_ACCEPTED", "verifier trusts the whole-segment digest and skips member slices", "truncated_member_rejected", assertion)
-        finally:
-            adapter.verify_committed_prefix = real
+        run_matrix(
+            fault_id="M18_TRUNCATION_ACCEPTED",
+            symbol="normalized_adapter.verify_committed_prefix",
+            call_path="normalize_manifest",
+            assertion_id="truncated_member_rejected",
+            sentinel="TRUNCATED_MEMBER",
+            note="segment-digest-only verifier",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", real),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
+            weak=oracle,
+        )
 
     def test_m19_uncommitted_tail_usable(self) -> None:
-        produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+        real = adapter.normalize_manifest
 
-        def assertion() -> None:
-            mutated = list(produced["records"])
-            mutated.append({"linkage": "fx-seg-1:m-tail:tail", "usable": True})
-            self.assertTrue(all(not item["linkage"].endswith(":tail") for item in mutated))
+        def keep(manifest: dict) -> dict:
+            return real(manifest)
 
-        expect_killed("M19_UNCOMMITTED_TAIL_USABLE", "uncommitted tail appended to usable records", "tail_absent_from_usable_records", assertion)
+        def include_tail(manifest: dict) -> dict:
+            result = real(manifest)
+            records = list(result["records"])
+            for member in manifest["segment"]["members"]:
+                if member.get("committed") is False:
+                    records.append({"linkage": member["linkage"], "usable": True, "member_id": member.get("member_id")})
+            return {"records": records, "rejections": list(result["rejections"]), "trace": list(result["trace"])}
+
+        def oracle() -> None:
+            produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+            assert all(not str(item.get("linkage", "")).endswith(":tail") for item in produced["records"])
+            assert any(item["code"] == "UNCOMMITTED_TAIL" for item in produced["rejections"])
+
+        run_matrix(
+            fault_id="M19_UNCOMMITTED_TAIL_USABLE",
+            symbol="normalized_adapter.normalize_manifest",
+            call_path="normalize_manifest",
+            assertion_id="tail_absent_from_usable_records",
+            sentinel="UNCOMMITTED_TAIL",
+            note="inline committed check is frozen; the symbol replacement reintroduces the tail",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "normalize_manifest", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "normalize_manifest", include_tail),
+            weak=oracle,
+        )
 
     def test_m20_record_index_accepted(self) -> None:
         manifest = build_manifest(pinned_rows())
@@ -1139,74 +1715,132 @@ class StageAAcceptance(unittest.TestCase):
                 raise ContractError("SEGMENT_DIGEST_MISMATCH")
             return list(committed)
 
-        adapter.verify_committed_prefix = segment_only
-        try:
-            def assertion() -> None:
-                try:
-                    adapter.normalize_manifest(manifest)
-                except ContractError as exc:
-                    self.assertIn(exc.code, {"RECORD_INDEX_SEQUENCE", "LINKAGE_MISMATCH"})
-                    return
-                raise AssertionError("RECORD_INDEX_ACCEPTED")
+        def oracle() -> None:
+            try:
+                adapter.normalize_manifest(manifest)
+            except ContractError as exc:
+                assert exc.code in {"RECORD_INDEX_SEQUENCE", "LINKAGE_MISMATCH"}
+                return
+            raise AssertionError("RECORD_INDEX_ACCEPTED")
 
-            expect_killed("M20_RECORD_INDEX_ACCEPTED", "record-index change accepted after a segment-digest-only check", "record_index_change_rejected", assertion)
-        finally:
-            adapter.verify_committed_prefix = real
+        run_matrix(
+            fault_id="M20_RECORD_INDEX_ACCEPTED",
+            symbol="normalized_adapter.verify_committed_prefix",
+            call_path="normalize_manifest",
+            assertion_id="record_index_change_rejected",
+            sentinel="RECORD_INDEX_SEQUENCE",
+            note="segment-digest-only verifier",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", real),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
+            weak=oracle,
+        )
 
     def test_m21_forward_fill(self) -> None:
         records = normalized([row("m-a1", 0, "A", 7, 1000, 1, book_to=1500)])["records"]
-        real = features_mod.fill_gap
-        features_mod.fill_gap = lambda last_value: last_value
-        try:
-            def assertion() -> None:
-                feature = features_mod.prior_mean(records, "A", 2000, load_spec()["feature"], bound_series="A")
-                self.assertEqual(feature["status"], "UNKNOWN")
-                self.assertIsNone(feature["value"])
+        feature_spec = load_spec()["feature"]
 
-            expect_killed("M21_FORWARD_FILL", "expired book value carried across a validity gap", "gap_feature_unknown", assertion)
-        finally:
-            features_mod.fill_gap = real
+        def carry(last_value: object) -> object:
+            return last_value
+
+        def oracle() -> None:
+            feature = features_mod.prior_mean(records, "A", 2000, feature_spec, bound_series="A")
+            assert feature["status"] == "UNKNOWN"
+            assert feature["value"] is None
+
+        run_matrix(
+            fault_id="M21_FORWARD_FILL",
+            symbol="features.fill_gap",
+            call_path="prior_mean",
+            assertion_id="gap_feature_unknown",
+            sentinel="UNKNOWN",
+            note="book ends at 1500",
+            base=oracle,
+            control_patch=_SymbolPatch(features_mod, "fill_gap", lambda last_value: None),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(features_mod, "fill_gap", carry),
+            weak=oracle,
+        )
 
     def test_m22_prune_pure_interaction(self) -> None:
-        definitions = compiled()
-        signals, _ = signals_for(pinned_rows())
+        real = fixture_enumerate.strategy_id_for
 
-        def prune() -> list[str]:
-            unsuccessful = set()
-            for signal in signals:
-                if signal["marginal_outcome"] == "unsuccessful":
-                    unsuccessful.add(signal["strategy_id"].split(":")[1])
-            kept = []
-            for definition in definitions:
-                if definition["kind"] != "single" and any(member in unsuccessful for member in definition["members"]):
-                    continue
-                kept.append(definition["strategy_id"])
-            return kept
+        def keep(kind: str, members: list[str]) -> str:
+            return real(kind, members)
 
-        def assertion() -> None:
-            self.assertEqual(prune(), list(HANDWRITTEN_IDS))
+        def drop(kind: str, members: list[str]) -> str:
+            strategy_id = real(kind, members)
+            if strategy_id == "U:A+B":
+                return "U:DROPPED"
+            return strategy_id
 
-        expect_killed("M22_PRUNE_PURE_INTERACTION", "conjunctions containing unsuccessful marginals were dropped", "pure_interaction_remains_in_family", assertion)
+        def oracle() -> None:
+            ids = self._ids()
+            assert "U:A+B" in ids
+            assert ids == list(HANDWRITTEN_IDS)
+
+        run_matrix(
+            fault_id="M22_PRUNE_PURE_INTERACTION",
+            symbol="enumerate.strategy_id_for",
+            call_path="enumerate_fixture",
+            assertion_id="pure_interaction_remains_in_family",
+            sentinel="U:A+B",
+            note="id builder renames the pure interaction out of the family",
+            base=oracle,
+            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", drop),
+            weak=oracle,
+        )
 
     def test_m23_missing_field_defaulted(self) -> None:
-        def faulty(manifest: dict) -> dict:
-            del manifest
-            return {"records": [{"usable": True, "timestamps": {"source_ms": 0}}]}
+        real = adapter.require_keys
 
-        def assertion() -> None:
+        def keep(obj: dict, keys: object, label: str) -> None:
+            return real(obj, keys, label)
+
+        def fill_source(obj: dict, keys: object, label: str) -> None:
+            if isinstance(obj, dict) and "member_id" in obj and "source_timestamp_ms" not in obj:
+                obj["source_timestamp_ms"] = 0
+            return real(obj, keys, label)
+
+        def oracle() -> None:
+            missing = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
+            del missing["segment"]["members"][0]["source_timestamp_ms"]
             try:
-                faulty(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
+                adapter.normalize_manifest(missing)
             except ContractError as exc:
-                self.assertEqual(exc.code, "MISSING_FIELD:source_timestamp_ms")
+                assert exc.code == "MISSING_FIELD:source_timestamp_ms"
                 return
             raise AssertionError("MISSING_DEFAULTED")
 
-        expect_killed("M23_MISSING_FIELD_DEFAULTED", "missing source timestamp defaulted to a usable record", "missing_field_fails_closed", assertion)
+        def clean() -> None:
+            adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
+
+        run_matrix(
+            fault_id="M23_MISSING_FIELD_DEFAULTED",
+            symbol="normalized_adapter.require_keys",
+            call_path="normalize_manifest",
+            assertion_id="missing_field_fails_closed",
+            sentinel="MISSING_FIELD:source_timestamp_ms",
+            note="control uses a complete manifest; weak fills the missing timestamp",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "require_keys", fill_source),
+            control=clean,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "require_keys", fill_source),
+            weak=oracle,
+        )
 
     def test_m24_unknown_version_accepted(self) -> None:
-        manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
-        manifest["manifest_schema"] = "hm.raw_event.v9"
         real = adapter._validate_envelope
+
+        def keep(item: dict) -> None:
+            return real(item)
 
         def skip_schema(item: dict) -> None:
             saved = item["manifest_schema"]
@@ -1216,95 +1850,218 @@ class StageAAcceptance(unittest.TestCase):
             finally:
                 item["manifest_schema"] = saved
 
-        adapter._validate_envelope = skip_schema
-        try:
-            def assertion() -> None:
-                try:
-                    adapter.normalize_manifest(manifest)
-                except ContractError as exc:
-                    self.assertEqual(exc.code, "UNKNOWN_VERSION")
-                    return
-                raise AssertionError("UNKNOWN_VERSION_ACCEPTED")
+        def oracle() -> None:
+            manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
+            manifest["manifest_schema"] = "hm.raw_event.v9"
+            try:
+                adapter.normalize_manifest(manifest)
+            except ContractError as exc:
+                assert exc.code == "UNKNOWN_VERSION"
+                return
+            raise AssertionError("UNKNOWN_VERSION_ACCEPTED")
 
-            expect_killed("M24_UNKNOWN_VERSION_ACCEPTED", "unknown manifest schema rewritten to the fixture schema", "unknown_version_fails_closed", assertion)
-        finally:
-            adapter._validate_envelope = real
+        run_matrix(
+            fault_id="M24_UNKNOWN_VERSION_ACCEPTED",
+            symbol="normalized_adapter._validate_envelope",
+            call_path="normalize_manifest",
+            assertion_id="unknown_version_fails_closed",
+            sentinel="UNKNOWN_VERSION",
+            note="unknown schema rewritten to the fixture schema",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "_validate_envelope", keep),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "_validate_envelope", skip_schema),
+            weak=oracle,
+        )
 
     def test_m25_nonfinite_coerced(self) -> None:
-        manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
-        manifest["segment"]["members"][0]["value"] = float("nan")
-        real = adapter.assert_finite_value
-        adapter.assert_finite_value = lambda value: None
-        try:
-            def assertion() -> None:
-                try:
-                    adapter.normalize_manifest(manifest)
-                except ContractError as exc:
-                    self.assertEqual(exc.code, "NONFINITE:value")
-                    return
-                raise AssertionError("ACCEPTED_NONFINITE")
+        def manifest() -> dict:
+            built = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
+            built["segment"]["members"][0]["value"] = float("nan")
+            return built
 
-            expect_killed("M25_NONFINITE_COERCED", "nonfinite value check removed", "nonfinite_value_fails_closed", assertion)
-        finally:
-            adapter.assert_finite_value = real
+        def oracle() -> None:
+            try:
+                adapter.normalize_manifest(manifest())
+            except ContractError as exc:
+                assert exc.code == "NONFINITE:value"
+                return
+            raise AssertionError("ACCEPTED_NONFINITE")
+
+        def clean() -> None:
+            adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
+
+        run_matrix(
+            fault_id="M25_NONFINITE_COERCED",
+            symbol="normalized_adapter.assert_finite_value",
+            call_path="normalize_manifest",
+            assertion_id="nonfinite_value_fails_closed",
+            sentinel="NONFINITE:value",
+            note="frozen canonical_bytes still raises CANONICAL_REJECT after the finite check is removed",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "assert_finite_value", lambda value: None),
+            control=clean,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "assert_finite_value", lambda value: None),
+            weak=oracle,
+        )
 
     def test_m26_cross_series_allowed(self) -> None:
-        real = features_mod.append_series
-        features_mod.append_series = lambda bound, record: None
-        try:
-            def assertion() -> None:
-                try:
-                    features_mod.append_series("A", {"series_id": "B"})
-                except ContractError as exc:
-                    self.assertEqual(exc.code, "CROSS_SERIES_STATE")
-                    return
-                raise AssertionError("CROSS_SERIES_ALLOWED")
+        records = normalized([row("m-b1", 0, "B", 4, 1000, 1), row("m-b2", 1, "B", 6, 1200, 2)])["records"]
+        feature_spec = load_spec()["feature"]
 
-            expect_killed("M26_CROSS_SERIES_ALLOWED", "series boundary check removed", "cross_series_state_fails_closed", assertion)
-        finally:
-            features_mod.append_series = real
+        def matched() -> None:
+            feature = features_mod.prior_mean(records, "B", 2000, feature_spec, bound_series="B")
+            assert feature["value"] == 5
+
+        def crossed() -> None:
+            try:
+                features_mod.prior_mean(records, "B", 2000, feature_spec, bound_series="A")
+            except ContractError as exc:
+                assert exc.code == "CROSS_SERIES_STATE"
+                return
+            raise AssertionError("CROSS_SERIES_ALLOWED")
+
+        run_matrix(
+            fault_id="M26_CROSS_SERIES_ALLOWED",
+            symbol="features.assert_series_boundary",
+            call_path="prior_mean",
+            assertion_id="cross_series_state_fails_closed",
+            sentinel="CROSS_SERIES_STATE",
+            note="prior_mean integration, not only append_series",
+            base=crossed,
+            control_patch=_SymbolPatch(features_mod, "assert_series_boundary", lambda bound, series: None),
+            control=matched,
+            intact=crossed,
+            weak_patch=_SymbolPatch(features_mod, "assert_series_boundary", lambda bound, series: None),
+            weak=crossed,
+        )
 
     def test_m27_unsupported_domain_dropped(self) -> None:
-        spec = clone(load_spec())
-        spec["families"]["singles"] = ["A", "D"]
+        real = fixture_enumerate._check_member
 
-        def faulty(item: dict) -> list[dict]:
-            edited = clone(item)
-            edited["families"]["singles"] = [member for member in edited["families"]["singles"] if member in {"A", "B", "C"}]
-            return fixture_enumerate.enumerate_fixture(edited)
+        def keep(member: object) -> str:
+            return real(member)
 
-        def assertion() -> None:
+        def allow(member: object) -> str:
+            if not isinstance(member, str):
+                raise ContractError("UNSUPPORTED_DOMAIN")
+            return member
+
+        def bad() -> None:
+            spec = clone(load_spec())
+            spec["families"]["singles"] = ["A", "D"]
             try:
-                faulty(spec)
-            except ContractError:
+                fixture_enumerate.enumerate_fixture(spec)
+            except ContractError as exc:
+                assert exc.code == "UNSUPPORTED_DOMAIN"
                 return
-            raise AssertionError("SILENT_SMALLER_FAMILY")
+            raise AssertionError("SILENT_UNSUPPORTED")
 
-        expect_killed("M27_UNSUPPORTED_DOMAIN_DROPPED", "unsupported member D dropped and a smaller family returned", "unsupported_domain_fails_visibly", assertion)
+        def good() -> None:
+            assert self._ids() == list(HANDWRITTEN_IDS)
+
+        run_matrix(
+            fault_id="M27_UNSUPPORTED_DOMAIN_DROPPED",
+            symbol="enumerate._check_member",
+            call_path="enumerate_fixture",
+            assertion_id="unsupported_domain_fails_visibly",
+            sentinel="UNSUPPORTED_DOMAIN",
+            note="member D is accepted instead of rejected",
+            base=bad,
+            control_patch=_SymbolPatch(fixture_enumerate, "_check_member", keep),
+            control=good,
+            intact=bad,
+            weak_patch=_SymbolPatch(fixture_enumerate, "_check_member", allow),
+            weak=bad,
+        )
 
     def test_m28_canary_leak(self) -> None:
-        real = guards.scan_text
-        guards.scan_text = lambda text: None
-        try:
-            def assertion() -> None:
-                guards.scan_text(CANARY)
-                raise AssertionError("LEAK_NOT_SCANNED")
+        rows = [row("m-a1", 0, "A", 1, 1000, 1)]
+        rows[0]["connection_epoch"] = CANARY
+        manifest = build_manifest(rows)
 
-            expect_killed("M28_CANARY_LEAK", "leakage scan disabled", "canary_scan_fails_closed", assertion)
-        finally:
-            guards.scan_text = real
+        def leaked_text() -> str:
+            produced = adapter.normalize_manifest(manifest)
+            return oracle_canonical(produced).decode("utf-8")
+
+        def oracle() -> None:
+            try:
+                text = leaked_text()
+            except ContractError as exc:
+                assert exc.code == "PAYLOAD_LEAK"
+                assert CANARY not in str(exc)
+                return
+            raise AssertionError("CANARY_ACCEPTED")
+
+        def weak() -> None:
+            text = leaked_text()
+            outer_code = ""
+            try:
+                guards.outer_scan_text(text)
+            except guards.ProhibitedAccess as exc:
+                outer_code = exc.code
+            if outer_code != "PROHIBITED:outer-leak":
+                raise RuntimeError("OUTER_MISSED")
+            assert CANARY not in text
+
+        def clean() -> None:
+            adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
+
+        run_matrix(
+            fault_id="M28_CANARY_LEAK",
+            symbol="guards.scan_text",
+            call_path="normalize_manifest->scan_obj",
+            assertion_id="canary_absent_from_output",
+            sentinel="PAYLOAD_LEAK",
+            note="canary is in the allowed connection_epoch field; outer scan stays on",
+            base=oracle,
+            control_patch=_SymbolPatch(guards, "scan_text", lambda text: None),
+            control=clean,
+            intact=oracle,
+            weak_patch=_SymbolPatch(guards, "scan_text", lambda text: None),
+            weak=weak,
+        )
 
     def test_m29_network_not_blocked(self) -> None:
-        real = guards.reject_prohibited
-        guards.reject_prohibited = lambda kind: None
-        try:
-            def assertion() -> None:
-                guards.reject_prohibited("network")
-                raise AssertionError("NETWORK_NOT_BLOCKED")
+        planted = "__import__('socket')\n"
 
-            expect_killed("M29_NETWORK_NOT_BLOCKED", "network attempt allowed", "network_attempt_blocked", assertion)
-        finally:
-            guards.reject_prohibited = real
+        def clean() -> None:
+            guards.audit_sources({"clean.py": "x = 1\n"}, test_names=set())
+
+        def planted_oracle() -> None:
+            try:
+                guards.audit_sources({"planted.py": planted}, test_names=set())
+            except guards.ProhibitedAccess as exc:
+                assert exc.code == "PROHIBITED:import"
+                return
+            raise AssertionError("DYNAMIC_IMPORT_ACCEPTED")
+
+        def weak() -> None:
+            outer_code = ""
+            try:
+                guards.outer_containment_scan({"planted.py": planted})
+            except guards.ProhibitedAccess as exc:
+                outer_code = exc.code
+            if outer_code != "PROHIBITED:outer-import":
+                raise RuntimeError("OUTER_MISSED")
+            planted_oracle()
+
+        run_matrix(
+            fault_id="M29_NETWORK_NOT_BLOCKED",
+            symbol="guards.reject_prohibited",
+            call_path="audit_sources",
+            assertion_id="dynamic_import_rejected",
+            sentinel="PROHIBITED:import",
+            note="source string only; outer_containment_scan is not patched",
+            base=planted_oracle,
+            control_patch=_SymbolPatch(guards, "reject_prohibited", lambda kind: None),
+            control=clean,
+            intact=planted_oracle,
+            weak_patch=_SymbolPatch(guards, "reject_prohibited", lambda kind: None),
+            weak=weak,
+        )
 
     def test_m30_compatibility_pass(self) -> None:
         manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
@@ -1316,16 +2073,25 @@ class StageAAcceptance(unittest.TestCase):
             claimed["compatibility_status"] = "PASS"
             return claimed
 
-        adapter.blocked_compatibility = claim_pass
-        try:
-            def assertion() -> None:
-                record = adapter.normalize_manifest(manifest)["records"][0]
-                self.assertEqual(record["provenance"]["compatibility_status"], "BLOCKED")
-                self.assertNotEqual(record["provenance"]["compatibility"], "PASS")
+        def oracle() -> None:
+            record = adapter.normalize_manifest(manifest)["records"][0]
+            assert record["provenance"]["compatibility_status"] == "BLOCKED"
+            assert record["provenance"]["compatibility"] != "PASS"
 
-            expect_killed("M30_COMPATIBILITY_PASS", "provenance compatibility forced to PASS", "compatibility_remains_blocked", assertion)
-        finally:
-            adapter.blocked_compatibility = real
+        run_matrix(
+            fault_id="M30_COMPATIBILITY_PASS",
+            symbol="normalized_adapter.blocked_compatibility",
+            call_path="to_record",
+            assertion_id="compatibility_remains_blocked",
+            sentinel="BLOCKED",
+            note="provenance forced to PASS",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "blocked_compatibility", real),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "blocked_compatibility", claim_pass),
+            weak=oracle,
+        )
 
     def test_m31_prefix_digest_ignored(self) -> None:
         manifest = build_manifest(pinned_rows())
@@ -1338,19 +2104,28 @@ class StageAAcceptance(unittest.TestCase):
                 raise ContractError("SEGMENT_DIGEST_MISMATCH")
             return sorted(committed, key=lambda item: item["record_index"])
 
-        adapter.verify_committed_prefix = segment_only
-        try:
-            def assertion() -> None:
-                try:
-                    adapter.normalize_manifest(manifest)
-                except ContractError as exc:
-                    self.assertEqual(exc.code, "PREFIX_DIGEST_MISMATCH")
-                    return
-                raise AssertionError("PREFIX_LINKAGE_IGNORED")
+        def oracle() -> None:
+            try:
+                adapter.normalize_manifest(manifest)
+            except ContractError as exc:
+                assert exc.code == "PREFIX_DIGEST_MISMATCH"
+                return
+            raise AssertionError("PREFIX_LINKAGE_IGNORED")
 
-            expect_killed("M31_PREFIX_DIGEST_IGNORED", "prefix digest ignored when the whole-segment digest matches", "corrupted_prefix_rejected", assertion)
-        finally:
-            adapter.verify_committed_prefix = real
+        run_matrix(
+            fault_id="M31_PREFIX_DIGEST_IGNORED",
+            symbol="normalized_adapter.verify_committed_prefix",
+            call_path="normalize_manifest",
+            assertion_id="corrupted_prefix_rejected",
+            sentinel="PREFIX_DIGEST_MISMATCH",
+            note="segment digest still matches",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", real),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
+            weak=oracle,
+        )
 
     def test_m32_interpolation(self) -> None:
         records = normalized(
@@ -1359,24 +2134,264 @@ class StageAAcceptance(unittest.TestCase):
                 row("m-a2", 1, "A", 10, 3000, 2, book_from=3000),
             ]
         )["records"]
-        real = features_mod.resolve_gap
+        feature_spec = load_spec()["feature"]
 
         def interpolate(left_value: object, right_value: object, left_ms: int, right_ms: int, cutoff_ms: int) -> float:
             del left_ms, right_ms, cutoff_ms
-            return (float(left_value) + float(right_value)) / 2
+            return (float(left_value) + float(right_value)) / 2.0
 
-        features_mod.resolve_gap = interpolate
-        try:
-            def assertion() -> None:
-                feature = features_mod.prior_mean(records, "A", 2000, load_spec()["feature"], bound_series="A")
-                self.assertEqual(feature["status"], "UNKNOWN")
-                self.assertIsNone(feature["value"])
+        def oracle() -> None:
+            feature = features_mod.prior_mean(records, "A", 2000, feature_spec, bound_series="A")
+            assert feature["status"] == "UNKNOWN"
+            assert feature["value"] is None
 
-            expect_killed("M32_INTERPOLATION", "gap between observations interpolated", "gap_not_interpolated", assertion)
-        finally:
-            features_mod.resolve_gap = real
+        run_matrix(
+            fault_id="M32_INTERPOLATION",
+            symbol="features.resolve_gap",
+            call_path="prior_mean",
+            assertion_id="gap_not_interpolated",
+            sentinel="UNKNOWN",
+            note="gap between 1200 and 3000",
+            base=oracle,
+            control_patch=_SymbolPatch(features_mod, "resolve_gap", lambda *args: None),
+            control=oracle,
+            intact=oracle,
+            weak_patch=_SymbolPatch(features_mod, "resolve_gap", interpolate),
+            weak=oracle,
+        )
 
-    def test_z_mutation_resource_and_suite_caps(self) -> None:
+    def test_cap_rss_checkpoint(self) -> None:
+        limit = (512 * 1024 * 1024) + 1
+
+        def success() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "receipt.json"
+                code, _err = _capture_main(_cli_args(path))
+                assert code == 0 and path.exists()
+
+        def over() -> None:
+            saved = guards.peak_rss_bytes
+            guards.peak_rss_bytes = lambda: limit
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    path = Path(temp_dir) / "receipt.json"
+                    code, err = _capture_main(_cli_args(path))
+                    assert code == 4 and "INCOMPLETE:CAP_RSS" in err and not path.exists()
+            finally:
+                guards.peak_rss_bytes = saved
+
+        run_matrix(
+            fault_id="CAP_RSS",
+            symbol="guards.assert_rss",
+            call_path="fixture_cli.run_fixture->preemptive_checkpoint",
+            assertion_id="over_rss_writes_no_receipt",
+            sentinel="INCOMPLETE:CAP_RSS",
+            note="synthetic meter; not a physical 512MiB allocation; not ceiling proof",
+            base=success,
+            control_patch=_SymbolPatch(guards, "assert_rss", lambda value: None),
+            control=success,
+            intact=over,
+            weak_patch=_SymbolPatch(guards, "assert_rss", lambda value: None),
+            weak=over,
+        )
+
+    def test_cap_command_checkpoint(self) -> None:
+        saved_clock = fixture_cli.CommandClock
+
+        def success() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "receipt.json"
+                code, _err = _capture_main(_cli_args(path))
+                assert code == 0 and path.exists()
+
+        def over() -> None:
+            fixture_cli.CommandClock = _SlowClock
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    path = Path(temp_dir) / "receipt.json"
+                    code, err = _capture_main(_cli_args(path))
+                    assert code == 4 and "INCOMPLETE:CAP_COMMAND_SECONDS" in err and not path.exists()
+            finally:
+                fixture_cli.CommandClock = saved_clock
+
+        run_matrix(
+            fault_id="CAP_COMMAND",
+            symbol="guards.assert_elapsed",
+            call_path="fixture_cli.run_fixture->preemptive_checkpoint",
+            assertion_id="over_command_writes_no_receipt",
+            sentinel="INCOMPLETE:CAP_COMMAND_SECONDS",
+            note="synthetic 121s clock; wall clock was not 121s; not ceiling proof",
+            base=success,
+            control_patch=_SymbolPatch(guards, "assert_elapsed", lambda *args, **kwargs: None),
+            control=success,
+            intact=over,
+            weak_patch=_ComboPatch(
+                [
+                    _SymbolPatch(fixture_cli, "CommandClock", _SlowClock),
+                    _SymbolPatch(guards, "assert_elapsed", lambda *args, **kwargs: None),
+                ]
+            ),
+            weak=over,
+        )
+
+    def test_cap_suite_checkpoint(self) -> None:
+        def ok() -> None:
+            guards.preemptive_checkpoint(None)
+
+        def over() -> None:
+            saved = guards.process_elapsed
+            guards.process_elapsed = lambda: 601.0
+            try:
+                try:
+                    guards.preemptive_checkpoint(None)
+                except guards.CapExhausted as exc:
+                    assert exc.code == "INCOMPLETE:CAP_SUITE_SECONDS"
+                    return
+                raise AssertionError("SUITE_CAP_MISSED")
+            finally:
+                guards.process_elapsed = saved
+
+        run_matrix(
+            fault_id="CAP_SUITE",
+            symbol="guards.assert_elapsed",
+            call_path="preemptive_checkpoint",
+            assertion_id="suite_over_600_halts",
+            sentinel="INCOMPLETE:CAP_SUITE_SECONDS",
+            note="synthetic process elapsed; not a 600s wall clock",
+            base=ok,
+            control_patch=_SymbolPatch(guards, "assert_elapsed", lambda *args, **kwargs: None),
+            control=ok,
+            intact=over,
+            weak_patch=_ComboPatch(
+                [
+                    _SymbolPatch(guards, "process_elapsed", lambda: 601.0),
+                    _SymbolPatch(guards, "assert_elapsed", lambda *args, **kwargs: None),
+                ]
+            ),
+            weak=over,
+        )
+
+    def test_cap_workers_checkpoint(self) -> None:
+        def success() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "receipt.json"
+                code, _err = _capture_main(_cli_args(path, "1"))
+                assert code == 0 and path.exists()
+
+        def over() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "receipt.json"
+                code, err = _capture_main(_cli_args(path, "3"))
+                assert code == 4 and "INCOMPLETE:CAP_WORKERS" in err and not path.exists()
+
+        run_matrix(
+            fault_id="CAP_WORKERS",
+            symbol="guards.assert_workers",
+            call_path="fixture_cli.run_fixture",
+            assertion_id="three_workers_writes_no_receipt",
+            sentinel="INCOMPLETE:CAP_WORKERS",
+            note="integer gate only; no extra processes are spawned",
+            base=success,
+            control_patch=_SymbolPatch(guards, "assert_workers", lambda workers: None),
+            control=success,
+            intact=over,
+            weak_patch=_SymbolPatch(guards, "assert_workers", lambda workers: None),
+            weak=over,
+        )
+
+    def test_cap_events_checkpoint(self) -> None:
+        manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
+        manifest["segment"]["members"] = [{} for _ in range(2049)]
+
+        def oracle() -> None:
+            try:
+                adapter.normalize_manifest(manifest)
+            except ContractError as exc:
+                assert exc.code == "INCOMPLETE:CAP_EVENTS"
+                return
+            raise AssertionError("EVENTS_TRUNCATED_OR_ACCEPTED")
+
+        run_matrix(
+            fault_id="CAP_EVENTS",
+            symbol="normalized_adapter.assert_event_count",
+            call_path="normalize_manifest",
+            assertion_id="2049_events_halt_before_members",
+            sentinel="INCOMPLETE:CAP_EVENTS",
+            note="count gate; members are empty dicts and are not truncated to 2048",
+            base=oracle,
+            control_patch=_SymbolPatch(adapter, "assert_event_count", lambda count: None),
+            control=lambda: adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])),
+            intact=oracle,
+            weak_patch=_SymbolPatch(adapter, "assert_event_count", lambda count: None),
+            weak=oracle,
+        )
+
+    def test_cap_definitions_checkpoint(self) -> None:
+        spec = clone(load_spec())
+        spec["families"]["singles"] = ["A"] * 257
+        spec["families"]["unordered_pairs"] = []
+        spec["families"]["unordered_triples"] = []
+        spec["families"]["ordered_pairs"] = []
+
+        def oracle() -> None:
+            try:
+                fixture_enumerate.enumerate_fixture(spec)
+            except ContractError as exc:
+                assert exc.code == "INCOMPLETE:CAP_DEFINITIONS"
+                return
+            raise AssertionError("DEFINITIONS_TRUNCATED_OR_ACCEPTED")
+
+        run_matrix(
+            fault_id="CAP_DEFINITIONS",
+            symbol="enumerate.assert_definition_count",
+            call_path="enumerate_fixture",
+            assertion_id="257_definitions_halt",
+            sentinel="INCOMPLETE:CAP_DEFINITIONS",
+            note="count gate before emit",
+            base=oracle,
+            control_patch=_SymbolPatch(fixture_enumerate, "assert_definition_count", lambda count: None),
+            control=lambda: self._ids(),
+            intact=oracle,
+            weak_patch=_SymbolPatch(fixture_enumerate, "assert_definition_count", lambda count: None),
+            weak=oracle,
+        )
+
+    def test_cap_receipt_bytes(self) -> None:
+        payload = "x" * ((8 * 1024 * 1024) + 1)
+
+        def write_over() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "too-big.json"
+                try:
+                    guards.guarded_write_text(path, payload, ROOT)
+                except guards.CapExhausted as exc:
+                    assert exc.code == "INCOMPLETE:CAP_RECEIPT_BYTES"
+                    assert not path.exists()
+                    return
+                raise AssertionError("OVERSIZE_RECEIPT_WRITTEN")
+
+        def write_small() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "small.json"
+                guards.guarded_write_text(path, "{}", ROOT)
+                assert path.exists()
+
+        run_matrix(
+            fault_id="CAP_RECEIPT",
+            symbol="guards.assert_receipt_size",
+            call_path="guarded_write_text",
+            assertion_id="over_8mib_writes_no_file",
+            sentinel="INCOMPLETE:CAP_RECEIPT_BYTES",
+            note="real 8388609-byte payload outside the checkout",
+            base=write_over,
+            control_patch=_SymbolPatch(guards, "assert_receipt_size", lambda size: None),
+            control=write_small,
+            intact=write_over,
+            weak_patch=_SymbolPatch(guards, "assert_receipt_size", lambda size: None),
+            weak=write_over,
+        )
+
+    def test_z_fault_matrix_complete(self) -> None:
         required = {
             "M01_DROP_ORDERED_PAIR",
             "M02_REVERSE_ORDERED_PAIR",
@@ -1410,17 +2425,33 @@ class StageAAcceptance(unittest.TestCase):
             "M30_COMPATIBILITY_PASS",
             "M31_PREFIX_DIGEST_IGNORED",
             "M32_INTERPOLATION",
+            "CAP_RSS",
+            "CAP_COMMAND",
+            "CAP_SUITE",
+            "CAP_WORKERS",
+            "CAP_EVENTS",
+            "CAP_DEFINITIONS",
+            "CAP_RECEIPT",
         }
-        killed = {item["fault_id"] for item in MUTATIONS if item["killed"]}
-        self.assertTrue(required <= killed)
-        self.assertTrue(all(item["exception_type"] == "AssertionError" for item in MUTATIONS))
+        seen = {item["fault_id"] for item in MATRIX}
+        self.assertTrue(required <= seen)
+        for item in MATRIX:
+            self.assertEqual(item["base"], "HELD", item["fault_id"])
+            self.assertEqual(item["control"], "HELD", item["fault_id"])
+            self.assertEqual(item["intact"], "HELD", item["fault_id"])
+            self.assertEqual(item["weak"], "ORACLE_VIOLATED", item["fault_id"])
+            self.assertIs(item["restored"], True, item["fault_id"])
+        guards.preemptive_checkpoint(None)
         self.assertLess(time.perf_counter() - SUITE_STARTED, 600)
-        self.assertLess(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024, 512 * 1024 * 1024)
+        self.assertLess(guards.peak_rss_bytes(), 512 * 1024 * 1024)
 
 
 if __name__ == "__main__":
-    outcome = unittest.main(argv=[sys.argv[0]], exit=False).result
-    print("MUTATION_KILLS", sum(1 for item in MUTATIONS if item["killed"]))
+    outcome = unittest.main(argv=[sys.argv[0]], exit=False, verbosity=2).result
+    destination = Path("/opt/cursor/artifacts/a990-fault-matrix.json")
+    destination.write_text(json.dumps({"rows": MATRIX}, indent=2) + "\n", encoding="utf-8")
+    print("MATRIX_ROWS", len(MATRIX))
+    print("MATRIX_PATH", destination)
     print("SUITE_ELAPSED_SECONDS", f"{time.perf_counter() - SUITE_STARTED:.6f}")
-    print("PEAK_RSS_BYTES", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024)
+    print("PEAK_RSS_BYTES", guards.peak_rss_bytes())
     sys.exit(0 if outcome.wasSuccessful() else 1)
