@@ -1,0 +1,83 @@
+{
+  "bounds": {
+    "command_seconds": 120,
+    "cpu_workers": 2,
+    "fixture_strategies": 256,
+    "receipt_bytes": 8388608,
+    "rss_mib": 512,
+    "suite_seconds": 600
+  },
+  "card_bytes": 9566,
+  "card_sha256": "c0b239a5b6f8b076d1d4e36535c4a4055d21d9838da18a7cafcb5b1059f3b81b",
+  "design_spec_sha256": {
+    "stage_a": "ecb42d094510f7dd507b4ebc5fb2797a2614951614745d1fcfbaa79e44bfb122",
+    "stage_b": "025082ee2c98c9d8e8637e6ea1d23f446546b2fc935ecf8119533ccbef2e9f22"
+  },
+  "design_specs_are_not_implementation_pins": true,
+  "entrypoint": "research/results_gates_v1/fixture_cli.py",
+  "entrypoint_args": [
+    "--fixture-only"
+  ],
+  "env_access": false,
+  "fixture_sha256": "dd4dc2bfc3ee7dcf9b0b68c674867a07651452e2e097b558aa84ec4940a25548",
+  "import_allowlist_library": [
+    "__future__",
+    "argparse",
+    "collections",
+    "decimal",
+    "fractions",
+    "hashlib",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "resource",
+    "select",
+    "signal",
+    "sys",
+    "time",
+    "types"
+  ],
+  "import_allowlist_tests": [
+    "__future__",
+    "argparse",
+    "ast",
+    "collections",
+    "contextlib",
+    "copy",
+    "decimal",
+    "fractions",
+    "hashlib",
+    "io",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "research",
+    "resource",
+    "select",
+    "signal",
+    "sys",
+    "tempfile",
+    "time",
+    "types",
+    "unittest"
+  ],
+  "network": false,
+  "producer_compatibility": {
+    "coverage_report": "BLOCKED_NOT_REDEFINED",
+    "stage_a": "BLOCKED",
+    "stage_b": "BLOCKED"
+  },
+  "profile_id": "synthetic-branch-profile-v1",
+  "profile_sha256": "de142854815b695b8470761330e73b7f970ab2f2422a48887b0603924e3802cf",
+  "python": ">=3.12",
+  "real_evaluation_permitted": false,
+  "real_input_mode": false,
+  "schema": "results_gates_v1_dependency_lock",
+  "schema_manifest_sha256": "43e82826280f6226605f5df0d6b53620032b6bdde8b8aafb7d224d69b9718278",
+  "stdlib_only": true,
+  "third_party": [],
+  "vault_access": false,
+  "version": "1"
+}
