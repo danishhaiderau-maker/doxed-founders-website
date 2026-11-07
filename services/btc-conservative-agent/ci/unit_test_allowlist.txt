@@ -706,3 +706,4 @@ test_fly_runtime_retired_r22.py
 ../../scripts/test_fly_resume_bootstrap.py
 ../../scripts/test_fly_resume_predeploy_abort.py
 ../../scripts/test_live_flat_verify.py
+tests/test_dashboard_viewer_mode.py

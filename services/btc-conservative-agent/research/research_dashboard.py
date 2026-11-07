@@ -64,7 +64,7 @@ def _parse_utc_dt(value):
         return None
 
 
-from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
+from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response, g
 
 try:
     from collector_v22 import research_event_generation_paths
@@ -424,6 +424,11 @@ _UNCACHED_API_PATHS = (
 
 @app.before_request
 def _serve_cached_read_api():
+    if _viewer_mode_enabled():
+        blocked = _viewer_before_get()
+        if blocked is not None:
+            return blocked
+        return None
     if request.method != "GET" or not request.path.startswith("/api/"):
         return None
     if request.path in _UNCACHED_API_PATHS:
@@ -451,6 +456,8 @@ def _cache_read_api_response(response):
     # truthful HIT evidence as a MISS.
     if response.headers.get("X-Research-Cache") == "HIT":
         return response
+    if _viewer_mode_enabled():
+        return response
     if (
         request.method == "GET"
         and request.path.startswith("/api/")
@@ -473,11 +480,24 @@ def _cache_read_api_response(response):
 
 @app.after_request
 def _inject_system_health_banner(response):
+    if _viewer_mode_enabled():
+        return response
     return _system_health_banner.inject_banner(response)
+
+
+@app.after_request
+def _viewer_stamp_and_cap(response):
+    if not _viewer_mode_enabled():
+        return response
+    return _viewer_finish_response(response)
 
 
 @app.route("/api/system-health")
 def api_system_health():
+    if _viewer_mode_enabled():
+        response = jsonify(_viewer_system_health())
+        response.headers["Cache-Control"] = "no-store"
+        return response
     state_dir = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain")
     report = _system_health_banner.read_report_file(state_dir / "health" / "system-health-latest.json")
     out = _system_health_banner.with_staleness(report)
@@ -766,12 +786,16 @@ def _scope_priority(payload: dict, *, fresh_collection: bool) -> int:
 def _iter_data_payloads(name: str):
     """Yield candidates in the fixed ``_data_file_candidates`` order.
 
-    Tie-break (HM #873): every caller keeps the first candidate on an equal
-    (scope_priority, mtime) key because it only replaces on a strictly greater
-    key, so equal timestamps resolve deterministically to the earlier candidate
-    (DATA_ROOT/name before DATA_ROOT/reports/name before ROOT copies), never to
-    filesystem or timestamp-granularity order.
+    Viewer mode never searches the canonical store. It yields one allowlisted
+    file, or nothing when that relative name is not on the explicit allowlist.
     """
+    if _viewer_mode_enabled():
+        payload = _viewer_read_json_allowlisted(name)
+        if isinstance(payload, dict):
+            yield Path(name), payload, 0.0
+        return
+    # Tie-break (HM #873): the first candidate wins an equal (scope_priority, mtime)
+    # key, so equal timestamps stay on the earlier candidate.
     for path in _data_file_candidates(name):
         if not path.is_file():
             continue
@@ -5576,6 +5600,8 @@ def download_research_pack():
 
 @app.route("/download/reports")
 def download_reports():
+    if _viewer_mode_enabled():
+        return _viewer_memory_reports_zip()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for arcname, path in _bundle_members():
@@ -10115,6 +10141,12 @@ def _self_aware_section(sa: dict) -> str:
 
 @app.route("/api/streams/self-aware-data")
 def api_self_aware_data():
+    if _viewer_mode_enabled():
+        return jsonify(_viewer_labels({
+            "status": "UNAVAILABLE (viewer mode)",
+            "network": False,
+            "reason": "self-aware :9021 stream disabled in viewer mode",
+        }))
     return jsonify(_self_aware_data())
 
 
@@ -10401,7 +10433,623 @@ def favicon():
     return "", 204
 
 
+_VIEWER_CAP_KEYS = (
+    "request_bytes",
+    "file_read_bytes",
+    "response_bytes",
+    "memory_bytes",
+    "file_count",
+    "archive_entry_count",
+    "uncompressed_bytes",
+    "wall_time_ms",
+)
+_VIEWER = {
+    "enabled": False,
+    "bind_host": None,
+    "port": None,
+    "root": None,
+    "allow": (),
+    "caps": None,
+    "listened": False,
+    "clock": time.monotonic,
+    "before_open": None,
+}
+
+
+def _viewer_mode_enabled() -> bool:
+    return bool(_VIEWER.get("enabled"))
+
+
+def reset_viewer_mode() -> None:
+    """Test helper. Production CLI calls ``apply_viewer_mode_from_argv`` instead."""
+    _VIEWER.update(
+        enabled=False, bind_host=None, port=None, root=None, allow=(),
+        caps=None, listened=False, clock=time.monotonic, before_open=None,
+    )
+
+
+def _viewer_as_of() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _viewer_fixture_label():
+    payload = _viewer_read_json_allowlisted("viewer/fixture.json")
+    if isinstance(payload, dict) and payload.get("fixture"):
+        return str(payload.get("fixture"))
+    return None
+
+
+def _viewer_labels(payload: dict, *, read_fixture: bool = True) -> dict:
+    body = dict(payload)
+    body["source"] = body.get("source") or "viewer-allowlist"
+    body["as_of"] = body.get("as_of") or _viewer_as_of()
+    if "fixture" in body:
+        pass
+    elif read_fixture:
+        body["fixture"] = _viewer_fixture_label()
+    else:
+        body["fixture"] = None
+    return body
+
+
+def require_projection_labels(payload: dict) -> None:
+    missing = [key for key in ("source", "as_of", "fixture") if key not in payload]
+    if missing:
+        raise ValueError("MISSING_PROJECTION_LABELS:" + ",".join(missing))
+
+
+def _argv_option(argv: list[str], name: str):
+    if name not in argv:
+        return None
+    index = argv.index(name)
+    if index + 1 >= len(argv) or str(argv[index + 1]).startswith("--"):
+        return None
+    return argv[index + 1]
+
+
+def _argv_repeated(argv: list[str], name: str) -> list[str]:
+    values = []
+    index = 0
+    while index < len(argv):
+        if argv[index] == name and index + 1 < len(argv):
+            values.append(argv[index + 1])
+            index += 2
+            continue
+        index += 1
+    return values
+
+
+def evaluate_viewer_bind(host, port) -> str | None:
+    """Refuse every listen that is not literal 127.0.0.1 and a high port. Does not bind."""
+    if host != "127.0.0.1":
+        return "REFUSED_BIND_HOST: host must be the literal 127.0.0.1"
+    if isinstance(port, bool) or port is None:
+        return "REFUSED_PORT: missing or not an integer"
+    text = str(port)
+    if not text.isascii() or not text.isdecimal():
+        return "REFUSED_PORT: not an integer"
+    number = int(text)
+    if number < 1024 or number > 65535:
+        return "REFUSED_PORT: outside 1024-65535"
+    return None
+
+
+def _reject_relative(rel: str) -> str | None:
+    if not isinstance(rel, str) or rel == "" or rel != rel.strip():
+        return "REFUSED_ALLOW_PATH: empty"
+    if rel.startswith(("/", "\\")) or rel.startswith("//") or rel.startswith("\\\\"):
+        return "REFUSED_ALLOW_PATH: absolute"
+    if len(rel) >= 2 and rel[1] == ":":
+        return "REFUSED_ALLOW_PATH: drive"
+    parts = rel.replace("\\", "/").split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return "REFUSED_ALLOW_PATH: traversal"
+    return None
+
+
+def evaluate_viewer_root(root: str | None) -> str | None:
+    if not root or not str(root).strip():
+        return "REFUSED_DATA_ROOT: missing"
+    path = Path(root)
+    if path.is_symlink():
+        return "REFUSED_DATA_ROOT: symlink"
+    if not path.is_dir():
+        return "REFUSED_DATA_ROOT: missing or not a directory; not created"
+    return None
+
+
+def apply_viewer_mode_from_argv(argv: list[str]) -> str | None:
+    """Enable viewer mode from CLI args only. Returns an error string and does not listen."""
+    if "--viewer-mode" not in argv:
+        return None
+    host = _argv_option(argv, "--bind-host")
+    port = _argv_option(argv, "--port")
+    root = _argv_option(argv, "--data-root")
+    refusal = evaluate_viewer_bind(host, port)
+    if refusal:
+        reset_viewer_mode()
+        return refusal
+    refusal = evaluate_viewer_root(root)
+    if refusal:
+        reset_viewer_mode()
+        return refusal
+    allow = []
+    for rel in _argv_repeated(argv, "--allow"):
+        refusal = _reject_relative(rel)
+        if refusal:
+            reset_viewer_mode()
+            return refusal + ": " + rel
+        allow.append(rel.replace("\\", "/"))
+    _VIEWER.update(
+        enabled=True,
+        bind_host="127.0.0.1",
+        port=int(str(port)),
+        root=Path(root),
+        allow=tuple(allow),
+        caps=None,
+        listened=False,
+    )
+    loaded, cap_error = _viewer_load_caps()
+    if cap_error:
+        _VIEWER["caps"] = None
+        return None
+    _VIEWER["caps"] = loaded
+    return None
+
+
+def _viewer_caps_complete(caps) -> bool:
+    if not isinstance(caps, dict):
+        return False
+    for key in _VIEWER_CAP_KEYS:
+        value = caps.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    return True
+
+
+def _viewer_load_caps():
+    if "viewer/caps.json" not in _VIEWER.get("allow", ()):
+        return None, "CAP_UNSET"
+    try:
+        payload = _viewer_read_json_allowlisted("viewer/caps.json")
+    except _ViewerGuard as exc:
+        return None, exc.reason
+    if not _viewer_caps_complete(payload):
+        return None, "CAP_UNSET"
+    return {key: int(payload[key]) for key in _VIEWER_CAP_KEYS}, None
+
+
+class _ViewerGuard(Exception):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _viewer_usage() -> dict:
+    usage = getattr(g, "viewer_usage", None)
+    if usage is None:
+        usage = {
+            "request_bytes": 0, "file_read_bytes": 0, "response_bytes": 0,
+            "memory_bytes": 0, "file_count": 0, "archive_entry_count": 0,
+            "uncompressed_bytes": 0, "wall_time_ms": 0,
+        }
+        g.viewer_usage = usage
+    return usage
+
+
+def _viewer_check_usage(key: str, used: int) -> None:
+    caps = _VIEWER.get("caps")
+    if not _viewer_caps_complete(caps):
+        raise _ViewerGuard("CAP_UNSET")
+    if used > int(caps[key]):
+        raise _ViewerGuard("CAP_" + key.upper())
+
+
+def _viewer_request_bytes() -> int:
+    return len(request.method.encode("ascii", "replace")) + len((request.path or "").encode()) + len(request.query_string or b"")
+
+
+def _viewer_before_get():
+    if request.method != "GET":
+        return _viewer_error("VIEWER_METHOD_DISABLED", "viewer mode allows GET only")
+    g.viewer_started = _VIEWER["clock"]()
+    _viewer_usage()["request_bytes"] = _viewer_request_bytes()
+    if not _viewer_caps_complete(_VIEWER.get("caps")):
+        return _viewer_error("CAP_UNSET", "a viewer cap is unset")
+    try:
+        _viewer_check_usage("request_bytes", _viewer_usage()["request_bytes"])
+    except _ViewerGuard as exc:
+        return _viewer_error(exc.reason, exc.reason)
+    if request.path.startswith("/download/") and request.path != "/download/reports":
+        return _viewer_error(
+            "VIEWER_DISK_STAGING_DISABLED",
+            "disabled in viewer mode: disk staging",
+        )
+    return None
+
+
+def _viewer_error(reason: str, message: str):
+    body = _viewer_labels({
+        "ok": False,
+        "reason": reason,
+        "error": message,
+        "partial": False,
+        "qualification_allowed": False,
+        "accepted_strategy": False,
+    }, read_fixture=False)
+    response = make_response(jsonify(body), 403)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Viewer-Reason"] = reason
+    return response
+
+
+def _viewer_finish_response(response):
+    if response.headers.get("X-Viewer-Reason"):
+        return response
+    try:
+        return _viewer_finish_response_body(response)
+    except _ViewerGuard as exc:
+        return _viewer_error(exc.reason, exc.reason)
+
+
+def _viewer_finish_response_body(response):
+    started = getattr(g, "viewer_started", None)
+    if started is not None:
+        elapsed_ms = int(max(0.0, (_VIEWER["clock"]() - started) * 1000.0))
+        _viewer_usage()["wall_time_ms"] = elapsed_ms
+    mimetype = response.mimetype or ""
+    if mimetype == "application/json" and response.status_code == 200:
+        try:
+            payload = response.get_json(silent=True)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            stamped = _viewer_labels(payload)
+            response.set_data(json.dumps(stamped))
+            response.headers["Content-Type"] = "application/json"
+    elif mimetype == "text/html" and response.status_code == 200 and b"data-viewer-labels" not in response.get_data():
+        label = _viewer_labels({})
+        footer = (
+            f'<p data-viewer-labels="1">source={label["source"]} as_of={label["as_of"]} '
+            f'fixture={label["fixture"]}</p>'
+        )
+        raw = response.get_data()
+        response.set_data(raw + footer.encode("utf-8"))
+    try:
+        raw = response.get_data()
+    except RuntimeError:
+        raw = b""
+    usage = _viewer_usage()
+    usage["response_bytes"] = len(raw)
+    usage["memory_bytes"] = usage["request_bytes"] + usage["file_read_bytes"] + usage["response_bytes"]
+    if request.path != "/download/reports":
+        usage["archive_entry_count"] = 1
+        usage["uncompressed_bytes"] = usage["response_bytes"]
+    try:
+        for key in _VIEWER_CAP_KEYS:
+            _viewer_check_usage(key, int(usage[key]))
+    except _ViewerGuard as exc:
+        return _viewer_error(exc.reason, exc.reason)
+    response.headers["X-Viewer-Usage"] = json.dumps(usage, separators=(",", ":"))
+    return response
+
+
+def _viewer_open_allowlisted(rel: str) -> bytes:
+    refusal = _reject_relative(rel)
+    if refusal:
+        raise _ViewerGuard(refusal)
+    if rel not in _VIEWER.get("allow", ()):
+        raise _ViewerGuard("MISSING_SOURCE")
+    root = _VIEWER.get("root")
+    if root is None:
+        raise _ViewerGuard("REFUSED_DATA_ROOT: missing")
+    root_real = root.resolve()
+    cursor = root_real
+    for part in rel.split("/"):
+        cursor = cursor / part
+        if cursor.is_symlink() or os.path.islink(cursor):
+            raise _ViewerGuard("REFUSED_SYMLINK")
+        try:
+            cursor.resolve().relative_to(root_real)
+        except ValueError:
+            raise _ViewerGuard("REFUSED_ESCAPE")
+    if not cursor.is_file() or cursor.is_symlink():
+        raise _ViewerGuard("MISSING_SOURCE")
+    before = os.lstat(cursor)
+    if stat_is_link(before.st_mode):
+        raise _ViewerGuard("REFUSED_SYMLINK")
+    hook = _VIEWER.get("before_open")
+    if hook is not None:
+        hook(cursor)
+    try:
+        fd = os.open(cursor, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise _ViewerGuard("REFUSED_OPEN") from exc
+    try:
+        after = os.fstat(fd)
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if tuple(getattr(after, name) for name in identity) != tuple(getattr(before, name) for name in identity):
+            raise _ViewerGuard("REFUSED_RACE")
+        if stat_is_link(after.st_mode):
+            raise _ViewerGuard("REFUSED_SYMLINK")
+        blob = os.read(fd, after.st_size + 1)
+    finally:
+        os.close(fd)
+    from flask import has_request_context
+    if has_request_context():
+        usage = _viewer_usage()
+        usage["file_count"] = int(usage["file_count"]) + 1
+        usage["file_read_bytes"] = int(usage["file_read_bytes"]) + len(blob)
+        _viewer_check_usage("file_count", usage["file_count"])
+        _viewer_check_usage("file_read_bytes", usage["file_read_bytes"])
+    return blob
+
+
+def stat_is_link(mode: int) -> bool:
+    import stat
+    return stat.S_ISLNK(mode)
+
+
+def _viewer_read_json_allowlisted(name: str):
+    if not _viewer_mode_enabled():
+        return None
+    if name not in _VIEWER.get("allow", ()):
+        return None
+    from flask import has_request_context
+    if has_request_context():
+        cache = getattr(g, "viewer_json_cache", None)
+        if cache is None:
+            cache = {}
+            g.viewer_json_cache = cache
+        if name in cache:
+            return cache[name]
+    try:
+        blob = _viewer_open_allowlisted(name)
+    except _ViewerGuard as exc:
+        if str(exc.reason).startswith("CAP_") or str(exc.reason).startswith("REFUSED_"):
+            raise
+        payload = None
+    else:
+        try:
+            payload = json.loads(blob.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError):
+            payload = None
+        if not isinstance(payload, dict):
+            payload = None
+    if has_request_context():
+        g.viewer_json_cache[name] = payload
+    return payload
+
+
+def _viewer_dimension(state: str, *, as_of=None, source=None, extra=None) -> dict:
+    allowed = {
+        "runtime": {"RUNNING", "OFFLINE", "UNKNOWN"},
+        "data_freshness": {"CURRENT", "STALE", "MISSING_SOURCE", "UNKNOWN"},
+        "auth": {"OK", "AUTH_DOWN", "UNKNOWN"},
+    }
+    body = {"state": state, "as_of": as_of, "source": source}
+    if extra:
+        body.update(extra)
+    return body
+
+
+def _viewer_receipt(name: str):
+    payload = _viewer_read_json_allowlisted(name)
+    return payload if isinstance(payload, dict) else None
+
+
+def _viewer_thresholds():
+    payload = _viewer_receipt("viewer/thresholds.json")
+    if not isinstance(payload, dict):
+        return None
+    out = {}
+    for key in ("auth_max_age_sec", "freshness_max_age_sec"):
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        out[key] = value
+    return out
+
+
+def _viewer_parse_time(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def _viewer_runtime_dimension() -> dict:
+    receipt = _viewer_receipt("viewer/runtime.json")
+    if not receipt:
+        return _viewer_dimension("UNKNOWN")
+    state = receipt.get("state")
+    observed = _viewer_parse_time(receipt.get("observed_at"))
+    source = receipt.get("source") if isinstance(receipt.get("source"), str) and receipt.get("source") else None
+    if state not in {"RUNNING", "OFFLINE"} or observed is None or source is None:
+        return _viewer_dimension("UNKNOWN", extra={"contradictory": True})
+    return _viewer_dimension(state, as_of=receipt.get("observed_at"), source=source)
+
+
+def _viewer_auth_dimension(now: datetime) -> dict:
+    receipt = _viewer_receipt("viewer/auth.json")
+    thresholds = _viewer_thresholds()
+    if not receipt:
+        return _viewer_dimension("UNKNOWN")
+    state = receipt.get("state")
+    observed = _viewer_parse_time(receipt.get("observed_at"))
+    source = receipt.get("source") if isinstance(receipt.get("source"), str) and receipt.get("source") else None
+    historical = {"state": state, "as_of": receipt.get("observed_at"), "source": source}
+    if state not in {"OK", "AUTH_DOWN"} or observed is None or source is None or thresholds is None:
+        return _viewer_dimension("UNKNOWN", extra={"historical": historical, "current": False})
+    age = (now - observed).total_seconds()
+    if age > thresholds["auth_max_age_sec"]:
+        return _viewer_dimension("UNKNOWN", extra={"historical": historical, "current": False})
+    return _viewer_dimension(state, as_of=receipt.get("observed_at"), source=source, extra={"current": True, "historical": None})
+
+
+def _viewer_freshness_dimension(name: str, now: datetime) -> dict:
+    if name not in _VIEWER.get("allow", ()):
+        return _viewer_dimension("UNKNOWN")
+    receipt = _viewer_receipt(name)
+    if receipt is None:
+        return _viewer_dimension("MISSING_SOURCE", source=name)
+    state = receipt.get("state")
+    if state not in {"CURRENT", "STALE"}:
+        return _viewer_dimension("UNKNOWN", source=name)
+    observed = _viewer_parse_time(receipt.get("observed_at") or receipt.get("as_of"))
+    thresholds = _viewer_thresholds()
+    if observed is None or thresholds is None:
+        return _viewer_dimension("UNKNOWN", source=name, extra={"counts": None})
+    age = (now - observed).total_seconds()
+    if state == "CURRENT" and age > thresholds["freshness_max_age_sec"]:
+        state = "STALE"
+    counts = None
+    pipeline = _viewer_pipeline_dimension()
+    if pipeline["state"] == "CONNECTED" and isinstance(receipt.get("counts"), dict):
+        counts = receipt.get("counts")
+    return _viewer_dimension(
+        state, as_of=receipt.get("observed_at") or receipt.get("as_of"), source=name,
+        extra={"counts": counts},
+    )
+
+
+def _viewer_pipeline_dimension() -> dict:
+    receipt = _viewer_receipt("viewer/pipeline.json")
+    if not receipt or receipt.get("producer") is not True or not receipt.get("source") or not receipt.get("observed_at"):
+        return {"state": "NOT_CONNECTED" if receipt is None or receipt.get("producer") is not True else "UNKNOWN",
+                "as_of": None, "source": None, "counts": None}
+    return {"state": "CONNECTED", "as_of": receipt.get("observed_at"), "source": receipt.get("source"), "counts": None}
+
+
+def _viewer_phase_b() -> dict:
+    receipt = _viewer_receipt("viewer/phase_b_07d.json")
+    body = {
+        "evidence_class": "NON-EVIDENTIAL",
+        "audit_only": True,
+        "accepted_strategy": False,
+        "findings": None,
+        "present": receipt is not None,
+    }
+    return body
+
+
+def _viewer_system_health() -> dict:
+    now = datetime.now(timezone.utc)
+    pipeline = _viewer_pipeline_dimension()
+    body = {
+        "schema": "viewer_system_health_v1",
+        "viewer_mode": True,
+        "fly_probe": False,
+        "runtime": _viewer_runtime_dimension(),
+        "data_freshness": _viewer_freshness_dimension("viewer/data_freshness.json", now),
+        "auth": _viewer_auth_dimension(now),
+        "pipeline": pipeline,
+        "historical": _viewer_freshness_dimension("viewer/historical.json", now),
+        "forward": _viewer_freshness_dimension("viewer/forward.json", now),
+        "phase_b_07d": _viewer_phase_b(),
+        "features": viewer_feature_matrix(),
+        "qualification_allowed": False,
+        "accepted_strategy": False,
+        "verdict": "UNKNOWN",
+    }
+    return _viewer_labels(body)
+
+
+def viewer_feature_matrix() -> list[dict]:
+    """Research routes in this process, plus the main bot page which this process does not serve."""
+    gated_downloads = {
+        "/download/everything", "/download/complete", "/download/research-pack",
+        "/download/archive/<session_id>", "/download/past-analysis",
+        "/download/past-analysis/<archive_id>", "/download/all-sessions",
+        "/download/chatgpt", "/download/gpt-audit", "/download/genome",
+        "/download/accumulator",
+    }
+    rows = [
+        {"id": "main:/", "status": "UNAVAILABLE_MAIN_UI", "reason": "embedded bot.py page is a separate process"},
+        {"id": "main:/static/dashboard.js", "status": "UNAVAILABLE_MAIN_UI", "reason": "bot.py asset"},
+        {"id": "main:/api/state", "status": "UNAVAILABLE_MAIN_UI", "reason": "paper process state"},
+        {"id": "fly-system-health-uptime", "status": "GATED_VIEWER_DISABLED", "reason": "fetch_fly_uptime not called"},
+        {"id": "banner-fly-poll", "status": "GATED_VIEWER_DISABLED", "reason": "banner injection skipped"},
+        {"id": "self-aware-9021", "status": "GATED_VIEWER_DISABLED", "reason": "no network to 127.0.0.1:9021"},
+        {"id": "engine-generation-mkdir", "status": "GATED_VIEWER_DISABLED", "reason": "viewer mode does not start the engine or create directories"},
+    ]
+    for rule in app.url_map.iter_rules():
+        path = rule.rule
+        if path.startswith("/static"):
+            continue
+        if path in gated_downloads or (path.startswith("/download/") and path != "/download/reports"):
+            status, reason = "GATED_VIEWER_DISABLED", "disabled in viewer mode: disk staging"
+        elif path == "/api/streams/self-aware-data":
+            status, reason = "GATED_VIEWER_DISABLED", "UNAVAILABLE (viewer mode)"
+        else:
+            status, reason = "AVAILABLE", "research view route; data only from the explicit allowlist"
+        rows.append({"id": "research:" + path, "status": status, "reason": reason})
+    return rows
+
+
+def _viewer_memory_reports_zip():
+    if not _viewer_caps_complete(_VIEWER.get("caps")):
+        return _viewer_error("CAP_UNSET", "a viewer cap is unset")
+    members = [rel for rel in _VIEWER.get("allow", ()) if rel != "viewer/caps.json" and not rel.startswith("viewer/")]
+    usage = _viewer_usage()
+    blob = io.BytesIO()
+    try:
+        with zipfile.ZipFile(blob, "w", compression=zipfile.ZIP_STORED) as archive:
+            for rel in members:
+                raw = _viewer_open_allowlisted(rel)
+                usage["archive_entry_count"] = int(usage["archive_entry_count"]) + 1
+                usage["uncompressed_bytes"] = int(usage["uncompressed_bytes"]) + len(raw)
+                _viewer_check_usage("archive_entry_count", usage["archive_entry_count"])
+                _viewer_check_usage("uncompressed_bytes", usage["uncompressed_bytes"])
+                archive.writestr(rel, raw)
+    except _ViewerGuard as exc:
+        return _viewer_error(exc.reason, exc.reason)
+    payload = blob.getvalue()
+    usage["response_bytes"] = len(payload)
+    usage["memory_bytes"] = usage["request_bytes"] + usage["file_read_bytes"] + len(payload)
+    try:
+        _viewer_check_usage("response_bytes", len(payload))
+        _viewer_check_usage("memory_bytes", usage["memory_bytes"])
+    except _ViewerGuard as exc:
+        return _viewer_error(exc.reason, exc.reason)
+    response = send_file(io.BytesIO(payload), mimetype="application/zip", as_attachment=True, download_name="viewer_reports.zip")
+    response.headers["X-Viewer-Source"] = "viewer-allowlist"
+    response.headers["X-Viewer-As-Of"] = _viewer_as_of()
+    response.headers["X-Viewer-Fixture"] = str(_viewer_fixture_label())
+    return response
+
+
+@app.errorhandler(Exception)
+def _viewer_guard_handler(exc):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        return exc
+    if not _viewer_mode_enabled():
+        raise exc
+    if isinstance(exc, _ViewerGuard):
+        return _viewer_error(exc.reason, exc.reason)
+    return _viewer_error("VIEWER_ROUTE_FAILED", exc.__class__.__name__)
+
+
 def main():
+    if "--viewer-mode" in sys.argv:
+        refusal = apply_viewer_mode_from_argv(sys.argv)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            raise SystemExit(2)
+        if _VIEWER.get("bind_host") != "127.0.0.1" or not _viewer_mode_enabled():
+            print("REFUSED_BIND_HOST: viewer mode did not accept a listen", file=sys.stderr)
+            raise SystemExit(2)
+        print("Research dashboard viewer mode — no listen approval beyond this process call")
+        print(f"  Listen: http://127.0.0.1:{_VIEWER['port']}/")
+        _VIEWER["listened"] = True
+        app.run(host="127.0.0.1", port=int(_VIEWER["port"]), debug=False, threaded=True, use_reloader=False)
+        return
     print("=" * 60)
     print(f"Research Dashboard {RESEARCH_DASHBOARD_VERSION} — READ-ONLY")
     print(f"  Bot sync:     {EXPECTED_BOT_VERSION}")
