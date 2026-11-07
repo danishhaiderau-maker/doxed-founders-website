@@ -1,0 +1,108 @@
+{
+  "approved_stage_a_implementation_pin": null,
+  "authoritative_base": "40087a65f2157f8c6701ea3670adc5c29a28c87d",
+  "compatibility": "BLOCKED",
+  "entrypoint": "research/event_replay_v1/fixture_cli.py",
+  "entrypoint_args": [
+    "--fixture-only"
+  ],
+  "fee_verification_evidence": null,
+  "files": {
+    "research/event_replay_v1/README.md": {
+      "bytes": 4397,
+      "sha256": "4fb5354b2f4142a648c80b16b90bbbddeacdfc71e94bfd6cdd1ee1ecab309d8d"
+    },
+    "research/event_replay_v1/__init__.py": {
+      "bytes": 854,
+      "sha256": "ed18052464d27e7f07402b7bc9ff0a5f7e8166c092899aa56fe3815d0ddfdaf7"
+    },
+    "research/event_replay_v1/accounting.py": {
+      "bytes": 5256,
+      "sha256": "b2558d861f3bc51b5e97df417c78c57d5aabbb85ec6e1a4bc646da908c7d0760"
+    },
+    "research/event_replay_v1/engine.py": {
+      "bytes": 49306,
+      "sha256": "386aa5a83a0d97f71ac10eaf937958958f8140baee0ae3d75545a9913b9c43bf"
+    },
+    "research/event_replay_v1/entry.py": {
+      "bytes": 1914,
+      "sha256": "da83bd9d7d97cd9cde373afb7e37851724a843a324382cb91b13a8e409f2afda"
+    },
+    "research/event_replay_v1/exits.py": {
+      "bytes": 4992,
+      "sha256": "e3e4e553763e0714cd0a304b1a3de23e355780e4ad71ec3c5a4c24b3ecdc9397"
+    },
+    "research/event_replay_v1/fixture_cli.py": {
+      "bytes": 8570,
+      "sha256": "9f14ea0ae167593a8cdaf384ec4a7a3bd2ba4f694838340206ea0dfa2547f47f"
+    },
+    "research/event_replay_v1/fixtures/lifecycle.json": {
+      "bytes": 92372,
+      "sha256": "daf52f8aca34e9780e87e20986820de6e303784da8e7e55781d4281659181faa"
+    },
+    "research/event_replay_v1/guards.py": {
+      "bytes": 34695,
+      "sha256": "b42469f3d515e03a801346a43e5d03c71f3dead73aa2485c5b55b51f9bd10e2f"
+    },
+    "research/event_replay_v1/order_state.py": {
+      "bytes": 2820,
+      "sha256": "22aaa0de53ba4953ff7625a3c391f571f59e388fce2da9de3304064c67311729"
+    },
+    "research/event_replay_v1/pricer.py": {
+      "bytes": 6186,
+      "sha256": "4c81ebf12b0b1cfe39a4919d5bb9cc384fe321951f37b1866b39c7b31795e778"
+    },
+    "research/event_replay_v1/risk.py": {
+      "bytes": 1464,
+      "sha256": "a91b87ff57bdbf3ab383ace670e97c65f03b42c64e18924823dc0761295ffa7a"
+    },
+    "research/event_replay_v1/tests/test_acceptance.py": {
+      "bytes": 63854,
+      "sha256": "3f1f2336d8c245cecb46d51cab5f5151c55629a45bde75b3b21e4340d530ec49"
+    }
+  },
+  "fixture_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+  "head": null,
+  "imports_allow": [
+    "__future__",
+    "argparse",
+    "ast",
+    "copy",
+    "dataclasses",
+    "decimal",
+    "hashlib",
+    "heapq",
+    "itertools",
+    "json",
+    "os",
+    "pathlib",
+    "research",
+    "resource",
+    "signal",
+    "socket",
+    "subprocess",
+    "sys",
+    "tempfile",
+    "time",
+    "typing",
+    "unittest"
+  ],
+  "lock_version": 1,
+  "python_requires": ">=3.11",
+  "runtime": {
+    "aggregate_cap_bytes": 16777216,
+    "command_cap_seconds": 120,
+    "cpu_seconds_cap": null,
+    "events_cap": 2048,
+    "receipt_cap_bytes": 8388608,
+    "rss_bound_bytes": 536870912,
+    "suite_cap_seconds": 600,
+    "vas_bytes_per_process": 268435456,
+    "workers_cap": 2
+  },
+  "self_excluded": true,
+  "stage_a_design_card_sha256": "ecb42d094510f7dd507b4ebc5fb2797a2614951614745d1fcfbaa79e44bfb122",
+  "stage_a_design_role": "APPROVED_DESIGN_ONLY",
+  "third_party": [],
+  "trading_fee_explicit": "0"
+}
