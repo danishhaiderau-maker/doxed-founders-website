@@ -1,0 +1,35 @@
+name: Coverage audit synthetic
+
+on:
+  pull_request:
+    paths:
+      - "research/coverage_audit/**"
+      - ".github/workflows/coverage-audit-synthetic.yml"
+  push:
+    branches: [master]
+    paths:
+      - "research/coverage_audit/**"
+      - ".github/workflows/coverage-audit-synthetic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic:
+    name: coverage-audit-synthetic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Synthetic coverage auditor tests
+        working-directory: .
+        run: |
+          python -m unittest -v \
+            research.coverage_audit.tests.test_synthetic_formats \
+            research.coverage_audit.tests.test_cadence_semantics \
+            research.coverage_audit.tests.test_redaction_and_guards \
+            research.coverage_audit.tests.test_limits_and_integrity \
+            research.coverage_audit.tests.test_synthetic_pipeline

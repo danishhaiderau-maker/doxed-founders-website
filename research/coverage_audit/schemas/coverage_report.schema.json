@@ -1,0 +1,529 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "coverage_report_v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "report_schema",
+    "status",
+    "reasons",
+    "scope",
+    "run",
+    "hashes",
+    "feeds",
+    "gaps",
+    "unknowns",
+    "caps",
+    "parse_errors",
+    "integrity"
+  ],
+  "properties": {
+    "report_schema": {"const": "coverage_report_v1"},
+    "status": {"enum": ["COMPLETE", "UNKNOWN", "INCOMPLETE_FAIL"]},
+    "reasons": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "ALLOWLIST_HASH_MISMATCH",
+          "ALLOWLIST_INVALID",
+          "ALLOWLIST_MUTATED",
+          "ALLOWLIST_PROFILE_MISMATCH",
+          "ALLOWLIST_UNSAFE",
+          "BASE_UNPINNED",
+          "CADENCE_UNKNOWN",
+          "CALENDAR_UNVERIFIED",
+          "CLI_ARGS",
+          "CLOCK_UNPINNED",
+          "CODE_HASH_FAILED",
+          "CPU_CAP",
+          "CSV_SYNTAX",
+          "DECOMPRESSION_CAP",
+          "DUPLICATE_STORAGE_CAP",
+          "ENCODING_ERROR",
+          "ENV_READ_FORBIDDEN",
+          "FIELD_COUNT",
+          "GAP_ENUMERATION_CAP",
+          "GZIP_CORRUPT",
+          "GZIP_CRC",
+          "GZIP_MAGIC",
+          "GZIP_TRUNCATED",
+          "GZIP_TRUNCATED_TAIL",
+          "INPUT_HASH_MISMATCH",
+          "INPUT_SIZE_CAP",
+          "INPUT_SIZE_MISMATCH",
+          "JSON_MALFORMED",
+          "MEMBER_CAP",
+          "MEMBER_HASH_MISMATCH",
+          "MEMBER_MISSING",
+          "MEMBER_ORDER_MISMATCH",
+          "MEMORY_CAP",
+          "MID_READ_MUTATION",
+          "MISSING_EVIDENCE",
+          "MISSING_INPUT",
+          "MONOTONICITY_BLOCKS_CADENCE",
+          "NETWORK_FORBIDDEN",
+          "NO_TRADE_CROSSCHECK",
+          "OUTPUT_CAP",
+          "OUTPUT_SCHEMA_INVALID",
+          "PATH_TRAVERSAL_MEMBER",
+          "PROFILE_INVALID",
+          "PROBE_REJECTED",
+          "PROVEN_COVERAGE_GAP",
+          "PUBLICATION_DELAY_UNVERIFIED",
+          "PYTHON_VERSION_UNSUPPORTED",
+          "RECORD_SIZE_CAP",
+          "REDACTION_VIOLATION",
+          "REGISTRY_HASH_MISMATCH",
+          "REGISTRY_INVALID",
+          "ROW_CAP",
+          "SCHEMA_DRIFT",
+          "SCHEMA_MISMATCH",
+          "SEED_UNPINNED",
+          "SEQUENCE_NONMONOTONIC",
+          "SEQUENCE_PARSE",
+          "SOURCE_CHANGED",
+          "SOURCE_MUTATION_FORBIDDEN",
+          "TIMESTAMP_PARSE",
+          "TIMESTAMP_UNIT",
+          "UNEXPECTED_STOP",
+          "UNLISTED_MEMBER",
+          "UNSUPPORTED_FORMAT",
+          "VAULT_READ_FORBIDDEN",
+          "VERIFICATION_UNVERIFIED",
+          "WALL_CAP",
+          "ZIP_CORRUPT",
+          "ZIP_CRC",
+          "ZIP_ENCRYPTED",
+          "ZIP_TRUNCATED",
+          "ZIP_UNSUPPORTED"
+        ]
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope_id",
+        "synthetic_only",
+        "accepted_real_dates",
+        "real_interval_claim",
+        "facts_policy"
+      ],
+      "properties": {
+        "scope_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "synthetic_only": {"const": true},
+        "accepted_real_dates": {"const": null},
+        "real_interval_claim": {"const": false},
+        "facts_policy": {"const": "UNSOURCED_REAL_FACTS_REMAIN_UNVERIFIED"}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "clock_unix_ms",
+        "seed",
+        "ordering",
+        "rng_fingerprint",
+        "event_order_sha256",
+        "base_commit"
+      ],
+      "properties": {
+        "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+        "clock_unix_ms": {"type": "integer", "minimum": 0, "maximum": 4000000000000},
+        "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "ordering": {"const": "allowlist_index_member_index_event_ts_row_offset"},
+        "rng_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "event_order_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "base_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_commit",
+        "code_sha256",
+        "registry_sha256",
+        "lock_sha256",
+        "source_registry_schema_sha256",
+        "coverage_report_schema_sha256",
+        "allowlist_sha256",
+        "allowlist_observed_sha256",
+        "inputs"
+      ],
+      "properties": {
+        "base_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "code_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "registry_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "lock_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "source_registry_schema_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "coverage_report_schema_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "allowlist_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "allowlist_observed_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["logical_id", "sha256"],
+            "properties": {
+              "logical_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    "feeds": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/feed"}
+    },
+    "gaps": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/gap"}
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["feed_ref", "reason"],
+        "properties": {
+          "feed_ref": {"type": "string", "pattern": "^[a-z][a-z0-9_]+(/[a-z][a-z0-9_]+){4}$"},
+          "reason": {
+            "enum": [
+              "CADENCE_UNKNOWN",
+              "CALENDAR_UNVERIFIED",
+              "MISSING_EVIDENCE",
+              "MONOTONICITY_BLOCKS_CADENCE",
+              "NO_TRADE_CROSSCHECK",
+              "PUBLICATION_DELAY_UNVERIFIED",
+              "VERIFICATION_UNVERIFIED"
+            ]
+          }
+        }
+      }
+    },
+    "caps": {"$ref": "#/$defs/caps"},
+    "parse_errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "logical_id", "member_index", "row"],
+        "properties": {
+          "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+          "logical_id": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}]},
+          "member_index": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 1000000}]},
+          "row": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 1000000}]}
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowlist_sha256", "allowlist_observed_sha256", "inputs", "source_mutation_apis"],
+      "properties": {
+        "allowlist_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "allowlist_observed_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+        "source_mutation_apis": {"const": "denied"},
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["logical_id", "pinned_sha256", "pinned_size", "observed_sha256", "observed_size", "stable"],
+            "properties": {
+              "logical_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+              "pinned_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "pinned_size": {"type": "integer", "minimum": 0, "maximum": 8000000},
+              "observed_sha256": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+              "observed_size": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 8000000}]},
+              "stable": {"anyOf": [{"type": "null"}, {"type": "boolean"}]}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "feed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "feed_ref",
+        "venue",
+        "source",
+        "feed",
+        "instrument",
+        "series",
+        "era",
+        "format",
+        "container",
+        "encoding",
+        "members",
+        "rows",
+        "day_counts",
+        "timestamps",
+        "receive",
+        "publication",
+        "vintage",
+        "monotonicity_violations",
+        "duplicate_count",
+        "sequence",
+        "schema_fingerprint",
+        "semantics"
+      ],
+      "properties": {
+        "feed_ref": {"type": "string", "pattern": "^[a-z][a-z0-9_]+(/[a-z][a-z0-9_]+){4}$"},
+        "venue": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "source": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "feed": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "instrument": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "series": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "era": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "format": {"enum": ["header_csv", "headerless_csv", "jsonl", "json_array"]},
+        "container": {"enum": ["plain", "gzip", "zip"]},
+        "encoding": {"const": "utf-8"},
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["member_id", "index", "role", "rows", "payload_sha256"],
+            "properties": {
+              "member_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+              "index": {"type": "integer", "minimum": 0, "maximum": 1000},
+              "role": {"enum": ["file", "directory", "gzip_member", "plain"]},
+              "rows": {"type": "integer", "minimum": 0, "maximum": 1000000},
+              "payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        },
+        "rows": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "day_counts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["utc_day", "rows"],
+            "properties": {
+              "utc_day": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+              "rows": {"type": "integer", "minimum": 0, "maximum": 1000000}
+            }
+          }
+        },
+        "timestamps": {"$ref": "#/$defs/span"},
+        "receive": {"$ref": "#/$defs/span"},
+        "publication": {"$ref": "#/$defs/span"},
+        "vintage": {"$ref": "#/$defs/span"},
+        "monotonicity_violations": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "duplicate_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "sequence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason", "gap_count"],
+          "properties": {
+            "status": {"enum": ["PROVEN", "NOT_APPLICABLE", "FAILED", "NOT_CHECKED"]},
+            "reason": {
+              "enum": [
+                "NO_SEQUENCE_CONTRACT",
+                "INTERLEAVED_IDS_NOT_PER_INSTRUMENT",
+                "MONOTONIC_PROVEN",
+                "SEQUENCE_GAP",
+                "SEQUENCE_FIELD_ABSENT",
+                "SEQUENCE_NONMONOTONIC",
+                "NOT_CHECKED"
+              ]
+            },
+            "gap_count": {"type": "integer", "minimum": 0, "maximum": 1000000}
+          }
+        },
+        "schema_fingerprint": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "fields",
+            "depth_bands",
+            "executable_levels",
+            "bands_equal_walkable_book",
+            "undeclared_fields_max",
+            "depth_note",
+            "band_threshold"
+          ],
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/field_fp"}
+            },
+            "depth_bands": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/depth_fp"}
+            },
+            "executable_levels": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/depth_fp"}
+            },
+            "bands_equal_walkable_book": {"const": false},
+            "undeclared_fields_max": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "depth_note": {
+              "anyOf": [
+                {"type": "null"},
+                {"const": "BANDS_DISTINCT_FROM_WALKABLE_LEVELS"}
+              ]
+            },
+            "band_threshold": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 1000000}]}
+          }
+        },
+        "semantics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["observation", "sparse_rule", "calendar", "verification_status"],
+          "properties": {
+            "observation": {"enum": ["periodic", "sparse", "unknown"]},
+            "sparse_rule": {
+              "anyOf": [
+                {"type": "null"},
+                {"enum": ["NO_EVENT_NOT_OUTAGE", "CANDLE_CROSSCHECK_TRADES"]}
+              ]
+            },
+            "calendar": {"enum": ["UTC_CONTINUOUS", "UNVERIFIED"]},
+            "verification_status": {"enum": ["SYNTHETIC_DECLARED", "UNVERIFIED"]}
+          }
+        }
+      }
+    },
+    "field_fp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "presence"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "type": {"enum": ["timestamp", "discarded", "empty", "array", "number", "string", "bool", "null", "object", "absent"]},
+        "presence": {"enum": ["present", "absent", "partial"]}
+      }
+    },
+    "depth_fp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "presence", "count_min", "count_max"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "type": {"enum": ["array", "absent"]},
+        "presence": {"enum": ["present", "absent", "partial"]},
+        "count_min": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "count_max": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      }
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first", "min", "max", "last"],
+      "properties": {
+        "first": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"}]},
+        "min": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"}]},
+        "max": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"}]},
+        "last": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"}]}
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feed_ref", "utc_start", "utc_end", "rule", "justification", "evidence"],
+      "properties": {
+        "feed_ref": {"type": "string", "pattern": "^[a-z][a-z0-9_]+(/[a-z][a-z0-9_]+){4}$"},
+        "utc_start": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"},
+        "utc_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"},
+        "rule": {"enum": ["PERIODIC_CADENCE_V1", "SEQUENCE_CONTRACT", "CANDLE_MISSING_WHILE_TRADE_PRESENT", "PUBLICATION_DELAY_V1"]},
+        "justification": {
+          "enum": [
+            "DELTA_EXCEEDS_CADENCE_PLUS_TOLERANCE",
+            "SEQUENCE_HOLE",
+            "SEQUENCE_NONMONOTONIC",
+            "TRADE_MINUTE_WITHOUT_CANDLE",
+            "DELAY_EXCEEDS_DECLARED"
+          ]
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cadence_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
+            "tolerance_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
+            "observed_delta_ms": {"type": "integer", "minimum": 0, "maximum": 4000000000000},
+            "declared_delay_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
+            "expected_sequence": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+            "observed_sequence": {"type": "integer", "minimum": 0, "maximum": 1000000000}
+          }
+        }
+      }
+    },
+    "caps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "meter_mode",
+        "memory_bytes",
+        "cpu_ms",
+        "wall_ms",
+        "output_bytes",
+        "max_gaps",
+        "max_record_bytes",
+        "max_decompressed_bytes",
+        "max_input_bytes",
+        "max_archive_members",
+        "max_duplicate_keys",
+        "max_rows",
+        "observed"
+      ],
+      "properties": {
+        "profile_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$"},
+        "meter_mode": {"enum": ["injected", "process"]},
+        "memory_bytes": {"type": "integer", "minimum": 1, "maximum": 8000000},
+        "cpu_ms": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "wall_ms": {"type": "integer", "minimum": 1, "maximum": 60000},
+        "output_bytes": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_gaps": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "max_record_bytes": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_decompressed_bytes": {"type": "integer", "minimum": 1, "maximum": 8000000},
+        "max_input_bytes": {"type": "integer", "minimum": 1, "maximum": 8000000},
+        "max_archive_members": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "max_duplicate_keys": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "max_rows": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "observed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "memory_bytes",
+            "cpu_ms",
+            "wall_ms",
+            "output_bytes",
+            "gaps",
+            "rows",
+            "decompressed_bytes",
+            "input_bytes",
+            "members",
+            "duplicate_keys",
+            "max_record_bytes"
+          ],
+          "properties": {
+            "memory_bytes": {"type": "integer", "minimum": 0, "maximum": 8000000},
+            "cpu_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
+            "wall_ms": {"type": "integer", "minimum": 0, "maximum": 60000},
+            "output_bytes": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "gaps": {"type": "integer", "minimum": 0, "maximum": 10000},
+            "rows": {"type": "integer", "minimum": 0, "maximum": 100000},
+            "decompressed_bytes": {"type": "integer", "minimum": 0, "maximum": 8000000},
+            "input_bytes": {"type": "integer", "minimum": 0, "maximum": 8000000},
+            "members": {"type": "integer", "minimum": 0, "maximum": 1000},
+            "duplicate_keys": {"type": "integer", "minimum": 0, "maximum": 100000},
+            "max_record_bytes": {"type": "integer", "minimum": 0, "maximum": 1000000}
+          }
+        }
+      }
+    }
+  }
+}

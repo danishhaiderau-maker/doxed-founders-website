@@ -1,0 +1,22 @@
+{
+  "schema": "coverage_audit_isolated_lock_v1",
+  "python_required": "3.11",
+  "distributions": [],
+  "install": "DO_NOT_PIP_INSTALL",
+  "applies_to": "research/coverage_audit only",
+  "stdlib_modules": [
+    "argparse",
+    "hashlib",
+    "io",
+    "json",
+    "re",
+    "resource",
+    "struct",
+    "sys",
+    "time",
+    "unittest",
+    "zipfile",
+    "zlib"
+  ],
+  "notes": "No third-party distributions. Do not merge this lock into a repository-root requirements file. No implicit install."
+}
