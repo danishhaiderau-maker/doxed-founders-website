@@ -54,6 +54,10 @@ def assert_finite_value(value: object) -> None:
         raise ContractError("NONFINITE:value")
 
 
+def _member_is_uncommitted(member: dict) -> bool:
+    return member["committed"] is False
+
+
 def assert_member_digest(actual_hex: str, declared_hex: str) -> None:
     if actual_hex != declared_hex:
         raise ContractError("MEMBER_DIGEST_MISMATCH")
@@ -271,7 +275,7 @@ def normalize_manifest(manifest: dict) -> dict:
         if not isinstance(member, dict):
             raise ContractError("MISSING_FIELD:member")
         require_keys(member, MEMBER_KEYS, "member")
-        if member["committed"] is False:
+        if _member_is_uncommitted(member):
             linkage = member["linkage"] if isinstance(member["linkage"], str) else None
             rejections.append({"code": "UNCOMMITTED_TAIL", "linkage": linkage})
             trace.append("UNCOMMITTED_TAIL")

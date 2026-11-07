@@ -141,6 +141,36 @@ class _ComboPatch:
         return all(patch.restored() for patch in self.patches)
 
 
+class OracleMiss(Exception):
+    def __init__(self, assertion_id: str, downstream_code: str | None = None) -> None:
+        self.assertion_id = assertion_id
+        self.downstream_code = downstream_code
+        super().__init__(assertion_id)
+
+
+class DownstreamRefusal(Exception):
+    def __init__(self, actual_type: str, actual_code: str) -> None:
+        self.actual_type = actual_type
+        self.actual_code = actual_code
+        super().__init__(actual_code)
+
+
+def require(assertion_id: str, condition: bool) -> None:
+    if not condition:
+        raise OracleMiss(assertion_id)
+
+
+def refused(assertion_id: str, fn, code: str | tuple[str, ...]) -> None:
+    allowed = (code,) if isinstance(code, str) else code
+    try:
+        fn()
+    except ContractError as exc:
+        if exc.code in allowed:
+            return
+        raise DownstreamRefusal(type(exc).__name__, exc.code) from None
+    raise OracleMiss(assertion_id)
+
+
 def run_matrix(
     *,
     fault_id: str,
@@ -155,6 +185,7 @@ def run_matrix(
     intact,
     weak_patch,
     weak,
+    expect_weak: str = "ORACLE_VIOLATED",
 ) -> None:
     row = {
         "fault_id": fault_id,
@@ -167,6 +198,9 @@ def run_matrix(
         "control": "ERROR",
         "intact": "ERROR",
         "weak": "ERROR",
+        "actual_type": "",
+        "actual_code": "",
+        "downstream_code": "",
         "restored": False,
     }
     try:
@@ -184,10 +218,26 @@ def run_matrix(
         try:
             try:
                 weak()
-            except AssertionError:
-                row["weak"] = "ORACLE_VIOLATED"
+            except OracleMiss as exc:
+                row["actual_type"] = "OracleMiss"
+                row["actual_code"] = exc.assertion_id
+                row["downstream_code"] = exc.downstream_code or ""
+                if exc.assertion_id == assertion_id:
+                    row["weak"] = "ORACLE_VIOLATED"
+                else:
+                    row["weak"] = "ERROR"
+            except DownstreamRefusal as exc:
+                row["weak"] = "NON_KILL"
+                row["actual_type"] = exc.actual_type
+                row["actual_code"] = exc.actual_code
+            except AssertionError as exc:
+                row["weak"] = "ERROR"
+                row["actual_type"] = "AssertionError"
+                row["actual_code"] = str(exc)
             except Exception as exc:
-                row["weak"] = "ERROR:" + type(exc).__name__ + ":" + str(exc)
+                row["weak"] = "ERROR"
+                row["actual_type"] = type(exc).__name__
+                row["actual_code"] = getattr(exc, "code", "")
         finally:
             weak_patch.off()
             row["restored"] = weak_patch.restored()
@@ -201,8 +251,8 @@ def run_matrix(
         MATRIX.append(row)
         raise
     MATRIX.append(row)
-    if row["weak"] != "ORACLE_VIOLATED" or not row["restored"]:
-        raise AssertionError(fault_id + ":" + row["weak"] + ":restored=" + str(row["restored"]))
+    if row["weak"] != expect_weak or not row["restored"]:
+        raise AssertionError(fault_id + ":" + row["weak"] + ":" + row["actual_code"] + ":restored=" + str(row["restored"]))
 
 
 def row(
@@ -1063,9 +1113,7 @@ class StageAAcceptance(unittest.TestCase):
 
     def test_m01_drop_ordered_pair(self) -> None:
         real = fixture_enumerate.strategy_id_for
-
-        def keep(kind: str, members: list[str]) -> str:
-            return real(kind, members)
+        clean_spec = _ordered_only([["C", "A"]])
 
         def drop(kind: str, members: list[str]) -> str:
             strategy_id = real(kind, members)
@@ -1073,10 +1121,13 @@ class StageAAcceptance(unittest.TestCase):
                 return "O:MISSING"
             return strategy_id
 
-        def oracle() -> None:
+        def full_oracle() -> None:
             ids = self._ids()
-            assert ids == list(HANDWRITTEN_IDS)
-            assert "O:A>B" in ids
+            require("handwritten_ids_include_O:A>B", ids == list(HANDWRITTEN_IDS) and "O:A>B" in ids)
+
+        def clean_oracle() -> None:
+            ids = self._ids(clean_spec)
+            require("ids_unchanged", "O:MISSING" not in ids and "O:C>A" in ids)
 
         run_matrix(
             fault_id="M01_DROP_ORDERED_PAIR",
@@ -1084,21 +1135,19 @@ class StageAAcceptance(unittest.TestCase):
             call_path="enumerate_fixture",
             assertion_id="handwritten_ids_include_O:A>B",
             sentinel="O:A>B",
-            note="production id builder omits O:A>B",
-            base=oracle,
-            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", keep),
-            control=oracle,
-            intact=oracle,
+            note="same drop weakening; clean spec has no A to B pair",
+            base=full_oracle,
+            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", drop),
+            control=clean_oracle,
+            intact=full_oracle,
             weak_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", drop),
-            weak=oracle,
+            weak=full_oracle,
         )
 
     def test_m02_reverse_ordered_pair(self) -> None:
         real = fixture_enumerate.strategy_id_for
         spec = _ordered_only([["A", "B"]])
-
-        def keep(kind: str, members: list[str]) -> str:
-            return real(kind, members)
+        clean_spec = _ordered_only([["C", "A"]])
 
         def reverse(kind: str, members: list[str]) -> str:
             if kind == "ordered_pair" and list(members) == ["A", "B"]:
@@ -1107,7 +1156,11 @@ class StageAAcceptance(unittest.TestCase):
 
         def oracle() -> None:
             ids = self._ids(spec)
-            assert "O:A>B" in ids and "O:B>A" not in ids
+            require("ordered_A_to_B_keeps_direction", "O:A>B" in ids and "O:B>A" not in ids)
+
+        def clean_oracle() -> None:
+            ids = self._ids(clean_spec)
+            require("ordered_A_to_B_keeps_direction", ids == ["S:A", "O:C>A"])
 
         run_matrix(
             fault_id="M02_REVERSE_ORDERED_PAIR",
@@ -1115,10 +1168,10 @@ class StageAAcceptance(unittest.TestCase):
             call_path="enumerate_fixture",
             assertion_id="ordered_A_to_B_keeps_direction",
             sentinel="O:A>B",
-            note="single ordered pair reversed by the id builder",
+            note="same reverse weakening; clean spec has no A to B pair",
             base=oracle,
-            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", keep),
-            control=oracle,
+            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", reverse),
+            control=clean_oracle,
             intact=oracle,
             weak_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", reverse),
             weak=oracle,
@@ -1127,20 +1180,20 @@ class StageAAcceptance(unittest.TestCase):
     def test_m03_sort_ordered_pair(self) -> None:
         real = fixture_enumerate.canonicalize_members
         spec = _ordered_only([["B", "A"]])
-
-        def keep(kind: str, members: list[str]) -> list[str]:
-            return real(kind, members)
+        clean_spec = _ordered_only([["A", "B"]])
 
         def sort_ordered(kind: str, members: list[str]) -> list[str]:
             if kind == "ordered_pair":
                 return sorted(members)
             return real(kind, members)
 
-        def oracle() -> None:
-            definitions = fixture_enumerate.enumerate_fixture(spec)
-            ordered = next(item for item in definitions if item["ordered"])
-            assert ordered["strategy_id"] == "O:B>A"
-            assert ordered["members"] == ["B", "A"]
+        def ordered_of(item: dict) -> None:
+            definitions = fixture_enumerate.enumerate_fixture(item)
+            ordered = next(entry for entry in definitions if entry["ordered"])
+            if item is spec:
+                require("ordered_B_to_A_not_sorted", ordered["strategy_id"] == "O:B>A" and ordered["members"] == ["B", "A"])
+            else:
+                require("ordered_B_to_A_not_sorted", ordered["strategy_id"] == "O:A>B" and ordered["members"] == ["A", "B"])
 
         run_matrix(
             fault_id="M03_SORT_ORDERED_PAIR",
@@ -1148,20 +1201,17 @@ class StageAAcceptance(unittest.TestCase):
             call_path="enumerate_fixture",
             assertion_id="ordered_B_to_A_not_sorted",
             sentinel="O:B>A",
-            note="canonicalize_members sorts an ordered pair",
-            base=oracle,
-            control_patch=_SymbolPatch(fixture_enumerate, "canonicalize_members", keep),
-            control=oracle,
-            intact=oracle,
+            note="same sort weakening; clean pair is already A then B",
+            base=lambda: ordered_of(spec),
+            control_patch=_SymbolPatch(fixture_enumerate, "canonicalize_members", sort_ordered),
+            control=lambda: ordered_of(clean_spec),
+            intact=lambda: ordered_of(spec),
             weak_patch=_SymbolPatch(fixture_enumerate, "canonicalize_members", sort_ordered),
-            weak=oracle,
+            weak=lambda: ordered_of(spec),
         )
 
     def test_m04_direction_collapse(self) -> None:
         real = grammar.evaluate_ordered
-
-        def keep(defn: dict, records: list[dict]) -> list[dict]:
-            return real(defn, records)
 
         def collapse(defn: dict, records: list[dict]) -> list[dict]:
             pair = sorted(defn["members"])
@@ -1174,13 +1224,19 @@ class StageAAcceptance(unittest.TestCase):
             backward["strategy_id"] = label
             return real(forward, records) + real(backward, records)
 
-        def oracle() -> None:
+        def two_way() -> None:
             forward, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 200, 2)])
             backward, _ = signals_for([row("m-b1", 0, "B", 0, 0, 1), row("m-a1", 1, "A", 0, 200, 2)])
             left = {item["strategy_id"] for item in ordered_fires(forward)}
             right = {item["strategy_id"] for item in ordered_fires(backward)}
-            assert left == {"O:A>B"}
-            assert right == {"O:B>A"}
+            require("A_before_B_distinct_from_B_before_A", left == {"O:A>B"} and right == {"O:B>A"})
+
+        def clean_direction() -> None:
+            spec = _ordered_only([["A", "B"]])
+            produced = normalized([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 200, 2)])
+            signals = grammar.evaluate_signals(fixture_enumerate.enumerate_fixture(spec), produced["records"])
+            found = {item["strategy_id"] for item in ordered_fires(signals)}
+            require("A_before_B_distinct_from_B_before_A", found == {"O:A>B"})
 
         run_matrix(
             fault_id="M04_DIRECTION_COLLAPSE",
@@ -1188,29 +1244,26 @@ class StageAAcceptance(unittest.TestCase):
             call_path="evaluate_signals",
             assertion_id="A_before_B_distinct_from_B_before_A",
             sentinel="O:A>B_vs_O:B>A",
-            note="control keeps distinct fires; weak collapse makes the sets equal",
-            base=oracle,
-            control_patch=_SymbolPatch(grammar, "evaluate_ordered", keep),
-            control=oracle,
-            intact=oracle,
+            note="same collapse; clean input is only A before B",
+            base=two_way,
+            control_patch=_SymbolPatch(grammar, "evaluate_ordered", collapse),
+            control=clean_direction,
+            intact=two_way,
             weak_patch=_SymbolPatch(grammar, "evaluate_ordered", collapse),
-            weak=oracle,
+            weak=two_way,
         )
 
     def test_m05_lag_endpoint_exclusive(self) -> None:
         real = grammar.classify_delay
-
-        def keep(delay: int, policy: dict) -> str:
-            return real(delay, policy)
 
         def exclusive(delay: int, policy: dict) -> str:
             patched = dict(policy)
             patched["lag_inclusive"] = False
             return real(delay, patched)
 
-        def oracle() -> None:
-            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 100, 2)])
-            assert len(ordered_fires(signals, "O:A>B")) == 1
+        def fires(delay_ms: int, assertion_id: str) -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, delay_ms, 2)])
+            require(assertion_id, len(ordered_fires(signals, "O:A>B")) == 1)
 
         run_matrix(
             fault_id="M05_LAG_ENDPOINT_EXCLUSIVE",
@@ -1218,29 +1271,30 @@ class StageAAcceptance(unittest.TestCase):
             call_path="evaluate_ordered",
             assertion_id="lag_100_fires",
             sentinel="ORDERED_FIRE",
-            note="inclusive lag boundary",
-            base=oracle,
-            control_patch=_SymbolPatch(grammar, "classify_delay", keep),
-            control=oracle,
-            intact=oracle,
+            note="same exclusive weakening; clean delay 200 is inside the window",
+            base=lambda: fires(100, "lag_100_fires"),
+            control_patch=_SymbolPatch(grammar, "classify_delay", exclusive),
+            control=lambda: fires(200, "interior_fire"),
+            intact=lambda: fires(100, "lag_100_fires"),
             weak_patch=_SymbolPatch(grammar, "classify_delay", exclusive),
-            weak=oracle,
+            weak=lambda: fires(100, "lag_100_fires"),
         )
 
     def test_m06_expiry_inclusive(self) -> None:
         real = grammar.classify_delay
-
-        def keep(delay: int, policy: dict) -> str:
-            return real(delay, policy)
 
         def inclusive(delay: int, policy: dict) -> str:
             patched = dict(policy)
             patched["expiry_inclusive"] = True
             return real(delay, patched)
 
-        def oracle() -> None:
-            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 1000, 2)])
-            assert ordered_fires(signals, "O:A>B") == []
+        def quiet(delay_ms: int, assertion_id: str) -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, delay_ms, 2)])
+            require(assertion_id, ordered_fires(signals, "O:A>B") == [])
+
+        def fired(delay_ms: int, assertion_id: str) -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, delay_ms, 2)])
+            require(assertion_id, len(ordered_fires(signals, "O:A>B")) == 1)
 
         run_matrix(
             fault_id="M06_EXPIRY_INCLUSIVE",
@@ -1248,29 +1302,30 @@ class StageAAcceptance(unittest.TestCase):
             call_path="evaluate_ordered",
             assertion_id="expiry_1000_does_not_fire",
             sentinel="no_fire",
-            note="exclusive expiry boundary",
-            base=oracle,
-            control_patch=_SymbolPatch(grammar, "classify_delay", keep),
-            control=oracle,
-            intact=oracle,
+            note="same inclusive weakening; clean delay 200 stays inside",
+            base=lambda: quiet(1000, "expiry_1000_does_not_fire"),
+            control_patch=_SymbolPatch(grammar, "classify_delay", inclusive),
+            control=lambda: fired(200, "interior_unchanged"),
+            intact=lambda: quiet(1000, "expiry_1000_does_not_fire"),
             weak_patch=_SymbolPatch(grammar, "classify_delay", inclusive),
-            weak=oracle,
+            weak=lambda: quiet(1000, "expiry_1000_does_not_fire"),
         )
 
     def test_m07_tie_fires(self) -> None:
         real = grammar.classify_delay
-
-        def keep(delay: int, policy: dict) -> str:
-            return real(delay, policy)
 
         def ties_fire(delay: int, policy: dict) -> str:
             if delay == 0:
                 return "fire"
             return real(delay, policy)
 
-        def oracle() -> None:
+        def no_tie() -> None:
             signals, _ = signals_for([row("m-a1", 0, "A", 0, 500, 1), row("m-b1", 1, "B", 0, 500, 2)])
-            assert ordered_fires(signals) == []
+            require("tie_does_not_fire", ordered_fires(signals) == [])
+
+        def interior() -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 200, 2)])
+            require("non_tie_fire", len(ordered_fires(signals, "O:A>B")) == 1)
 
         run_matrix(
             fault_id="M07_TIE_FIRES",
@@ -1278,30 +1333,29 @@ class StageAAcceptance(unittest.TestCase):
             call_path="evaluate_ordered",
             assertion_id="tie_does_not_fire",
             sentinel="no_fire",
-            note="delay 0 is a tie",
-            base=oracle,
-            control_patch=_SymbolPatch(grammar, "classify_delay", keep),
-            control=oracle,
-            intact=oracle,
+            note="same tie-fire weakening; clean input is a non-zero delay",
+            base=no_tie,
+            control_patch=_SymbolPatch(grammar, "classify_delay", ties_fire),
+            control=interior,
+            intact=no_tie,
             weak_patch=_SymbolPatch(grammar, "classify_delay", ties_fire),
-            weak=oracle,
+            weak=no_tie,
         )
 
     def test_m08_duplicate_retriggers(self) -> None:
-        real = grammar.duplicate_seen
-
-        def keep(seen: set[str], linkage: str) -> bool:
-            return real(seen, linkage)
-
         def allow(seen: set[str], linkage: str) -> bool:
             del seen, linkage
             return False
 
-        def oracle() -> None:
+        def repeated() -> None:
             _signals, produced = signals_for([row("m-a1", 0, "A", 1, 1000, 1)])
             duplicate = next(record for record in produced["records"] if record["member_id"] == "m-a1")
             signals = grammar.evaluate_signals(compiled(), [duplicate, dict(duplicate)])
-            assert len([item for item in signals if item["strategy_id"] == "S:A"]) == 1
+            require("duplicate_linkage_one_signal", len([item for item in signals if item["strategy_id"] == "S:A"]) == 1)
+
+        def once() -> None:
+            signals, _produced = signals_for([row("m-a1", 0, "A", 1, 1000, 1)])
+            require("single_linkage_one_signal", len([item for item in signals if item["strategy_id"] == "S:A"]) == 1)
 
         run_matrix(
             fault_id="M08_DUPLICATE_RETRIGGERS",
@@ -1309,27 +1363,22 @@ class StageAAcceptance(unittest.TestCase):
             call_path="evaluate_single",
             assertion_id="duplicate_linkage_one_signal",
             sentinel="one_S:A",
-            note="repeated linkage",
-            base=oracle,
-            control_patch=_SymbolPatch(grammar, "duplicate_seen", keep),
-            control=oracle,
-            intact=oracle,
+            note="same not-seen weakening; clean input is one linkage",
+            base=repeated,
+            control_patch=_SymbolPatch(grammar, "duplicate_seen", allow),
+            control=once,
+            intact=repeated,
             weak_patch=_SymbolPatch(grammar, "duplicate_seen", allow),
-            weak=oracle,
+            weak=repeated,
         )
 
     def test_m09_retrigger_without_reset(self) -> None:
-        real = grammar.consume_pending
-
-        def keep(pending: dict | None, kind: str) -> dict | None:
-            return real(pending, kind)
-
         def keep_on_fire(pending: dict | None, kind: str) -> dict | None:
             if kind == "expire":
                 return None
             return pending
 
-        def oracle() -> None:
+        def two() -> None:
             signals, _ = signals_for(
                 [
                     row("m-a1", 0, "A", 0, 0, 1),
@@ -1337,7 +1386,11 @@ class StageAAcceptance(unittest.TestCase):
                     row("m-b2", 2, "B", 0, 400, 3),
                 ]
             )
-            assert [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [200]
+            require("second_consequent_does_not_fire", [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [200])
+
+        def one() -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 200, 2)])
+            require("single_consequent_fires", [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [200])
 
         run_matrix(
             fault_id="M09_RETRIGGER_WITHOUT_RESET",
@@ -1345,27 +1398,22 @@ class StageAAcceptance(unittest.TestCase):
             call_path="evaluate_ordered",
             assertion_id="second_consequent_does_not_fire",
             sentinel="200",
-            note="fire must consume the antecedent",
-            base=oracle,
-            control_patch=_SymbolPatch(grammar, "consume_pending", keep),
-            control=oracle,
-            intact=oracle,
+            note="same keep-on-fire weakening; clean input has one consequent",
+            base=two,
+            control_patch=_SymbolPatch(grammar, "consume_pending", keep_on_fire),
+            control=one,
+            intact=two,
             weak_patch=_SymbolPatch(grammar, "consume_pending", keep_on_fire),
-            weak=oracle,
+            weak=two,
         )
 
     def test_m10_expiry_without_reset(self) -> None:
-        real = grammar.consume_pending
-
-        def keep(pending: dict | None, kind: str) -> dict | None:
-            return real(pending, kind)
-
         def keep_on_expire(pending: dict | None, kind: str) -> dict | None:
             if kind == "fire":
                 return None
             return pending
 
-        def oracle() -> None:
+        def after_expiry() -> None:
             signals, _ = signals_for(
                 [
                     row("m-a1", 0, "A", 0, 0, 1),
@@ -1375,7 +1423,11 @@ class StageAAcceptance(unittest.TestCase):
                     row("m-b3", 4, "B", 0, 2200, 5),
                 ]
             )
-            assert [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [2200]
+            require("new_antecedent_can_fire_after_expiry", [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [2200])
+
+        def no_expiry() -> None:
+            signals, _ = signals_for([row("m-a1", 0, "A", 0, 0, 1), row("m-b1", 1, "B", 0, 200, 2)])
+            require("fire_without_expiry", [item["decision_ms"] for item in ordered_fires(signals, "O:A>B")] == [200])
 
         run_matrix(
             fault_id="M10_EXPIRY_WITHOUT_RESET",
@@ -1383,65 +1435,75 @@ class StageAAcceptance(unittest.TestCase):
             call_path="evaluate_ordered",
             assertion_id="new_antecedent_can_fire_after_expiry",
             sentinel="2200",
-            note="expiry must clear the pending antecedent",
-            base=oracle,
-            control_patch=_SymbolPatch(grammar, "consume_pending", keep),
-            control=oracle,
-            intact=oracle,
+            note="same keep-on-expire weakening; clean input does not expire",
+            base=after_expiry,
+            control_patch=_SymbolPatch(grammar, "consume_pending", keep_on_expire),
+            control=no_expiry,
+            intact=after_expiry,
             weak_patch=_SymbolPatch(grammar, "consume_pending", keep_on_expire),
-            weak=oracle,
+            weak=after_expiry,
         )
 
     def test_m11_post_cutoff_included(self) -> None:
-        saved = view_through
+        real = features_mod.include_in_prior
+        feature_spec = load_spec()["feature"]
 
-        def keep(rows: list[dict], cutoff_ms: int = 1500) -> dict:
-            return saved(rows, cutoff_ms)
+        def widen(record: dict, cutoff_ms: int) -> bool:
+            availability_ms = record.get("availability_ms")
+            if availability_ms is not None and availability_ms >= cutoff_ms:
+                return True
+            return real(record, cutoff_ms)
 
-        def unfiltered(rows: list[dict], cutoff_ms: int = 1500) -> dict:
-            del cutoff_ms
-            produced = normalized(rows)
-            spec = load_spec()
-            return {
-                "records": produced["records"],
-                "features": features_mod.features_at(produced["records"], spec["feature"]),
-                "signals": grammar.evaluate_signals(compiled(), produced["records"]),
-                "rejections": produced["rejections"],
-            }
+        def feature_bytes(rows: list[dict]) -> bytes:
+            records = normalized(rows)["records"]
+            rows_out = [
+                features_mod.prior_mean(records, series_id, 1500, feature_spec, bound_series=series_id)
+                for series_id in ("A", "B", "C")
+            ]
+            return oracle_canonical(rows_out)
 
-        def oracle() -> None:
-            view = view_through(pinned_rows())
-            assert all(item["member_id"] != "m-a2" for item in view["records"])
-            assert oracle_canonical(view_through(pinned_rows())) == oracle_canonical(view_through(perturbed_rows()))
+        early_rows = [item for item in pinned_rows() if item["source_timestamp_ms"] < 1500]
+        for index, item in enumerate(early_rows):
+            item["record_index"] = index
+        expected_clean = feature_bytes(early_rows)
+
+        def with_future() -> None:
+            require(
+                "earlier_feature_bytes_equal",
+                feature_bytes(pinned_rows()) == feature_bytes(perturbed_rows()),
+            )
+
+        def clean_only() -> None:
+            require("earlier_feature_bytes_equal", feature_bytes(early_rows) == expected_clean)
 
         run_matrix(
             fault_id="M11_POST_CUTOFF_VIEW",
-            symbol="view_through",
-            call_path="normalize_manifest+features_at+evaluate_signals",
-            assertion_id="byte_identity_through_cutoff",
-            sentinel="m-a2_absent",
-            note="filter removed; production bytes still come from the real normalizer",
-            base=oracle,
-            control_patch=_GlobalPatch("view_through", keep),
-            control=oracle,
-            intact=oracle,
-            weak_patch=_GlobalPatch("view_through", unfiltered),
-            weak=oracle,
+            symbol="features.include_in_prior",
+            call_path="prior_mean",
+            assertion_id="earlier_feature_bytes_equal",
+            sentinel="earlier_feature_bytes_equal",
+            note="feature bytes only; same widening; clean rows are all before cutoff 1500",
+            base=with_future,
+            control_patch=_SymbolPatch(features_mod, "include_in_prior", widen),
+            control=clean_only,
+            intact=with_future,
+            weak_patch=_SymbolPatch(features_mod, "include_in_prior", widen),
+            weak=with_future,
         )
 
     def test_m12_source_time_only(self) -> None:
-        record = normalized([row("m-a1", 0, "A", 1, 1000, 1, source=1000, pub=5000, bar=1000, recv=1000)])["records"][0]
-        real = asof.causal_times_ok
-
-        def keep(item: dict, cutoff_ms: int) -> bool:
-            return real(item, cutoff_ms)
+        delayed = normalized([row("m-a1", 0, "A", 1, 1000, 1, source=1000, pub=5000, bar=1000, recv=1000)])["records"][0]
+        ready = normalized([row("m-a1", 0, "A", 1, 1000, 1)])["records"][0]
 
         def source_only(item: dict, cutoff_ms: int) -> bool:
             value = item["timestamps"]["source_ms"]
             return value is not None and value <= cutoff_ms
 
-        def oracle() -> None:
-            assert asof.is_eligible(record, 2000) is False
+        def blocked() -> None:
+            require("delayed_publication_not_eligible", asof.is_eligible(delayed, 2000) is False)
+
+        def still() -> None:
+            require("still_eligible", asof.is_eligible(ready, 2000) is True)
 
         run_matrix(
             fault_id="M12_SOURCE_TIME_ONLY",
@@ -1449,13 +1511,13 @@ class StageAAcceptance(unittest.TestCase):
             call_path="is_eligible",
             assertion_id="delayed_publication_not_eligible",
             sentinel="False",
-            note="publication 5000 blocks cutoff 2000",
-            base=oracle,
-            control_patch=_SymbolPatch(asof, "causal_times_ok", keep),
-            control=oracle,
-            intact=oracle,
+            note="same source-only weakening; clean observation is fully available",
+            base=blocked,
+            control_patch=_SymbolPatch(asof, "causal_times_ok", source_only),
+            control=still,
+            intact=blocked,
             weak_patch=_SymbolPatch(asof, "causal_times_ok", source_only),
-            weak=oracle,
+            weak=blocked,
         )
 
     def test_m13_future_calibration(self) -> None:
@@ -1466,19 +1528,20 @@ class StageAAcceptance(unittest.TestCase):
                 row("m-c3", 2, "C", 9, 5000, 3),
             ]
         )["records"]
-        real = features_mod.include_in_prior
         feature_spec = load_spec()["feature"]
-
-        def keep(record: dict, cutoff_ms: int) -> bool:
-            return real(record, cutoff_ms)
+        early = records[:2]
 
         def everything(record: dict, cutoff_ms: int) -> bool:
             del record, cutoff_ms
             return True
 
-        def oracle() -> None:
+        def future() -> None:
             feature = features_mod.prior_mean(records, "C", 2000, feature_spec, bound_series="C")
-            assert feature["value"] == 1
+            require("prior_mean_excludes_future", feature["value"] == 1)
+
+        def no_future() -> None:
+            feature = features_mod.prior_mean(early, "C", 2000, feature_spec, bound_series="C")
+            require("no_future_row_mean", feature["value"] == 1)
 
         run_matrix(
             fault_id="M13_FUTURE_CALIBRATION",
@@ -1486,31 +1549,31 @@ class StageAAcceptance(unittest.TestCase):
             call_path="prior_mean",
             assertion_id="prior_mean_excludes_future",
             sentinel="1",
-            note="post-cutoff value 9",
-            base=oracle,
-            control_patch=_SymbolPatch(features_mod, "include_in_prior", keep),
-            control=oracle,
-            intact=oracle,
+            note="same include-everything weakening; clean rows are all before the cutoff",
+            base=future,
+            control_patch=_SymbolPatch(features_mod, "include_in_prior", everything),
+            control=no_future,
+            intact=future,
             weak_patch=_SymbolPatch(features_mod, "include_in_prior", everything),
-            weak=oracle,
+            weak=future,
         )
 
     def test_m14_nullable_substitution(self) -> None:
-        manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1, source=None)])
-        real = adapter.source_timestamp_ms
-
-        def keep(member: dict) -> object:
-            return real(member)
+        missing = build_manifest([row("m-a1", 0, "A", 1, 1000, 1, source=None)])
+        present = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
 
         def substitute(member: dict) -> object:
             if member["source_timestamp_ms"] is None:
                 return member["receive_time_ms"]
             return member["source_timestamp_ms"]
 
-        def oracle() -> None:
-            record = adapter.normalize_manifest(manifest)["records"][0]
-            assert record["timestamps"]["source_ms"] is None
-            assert record["availability"] == "UNKNOWN"
+        def stays_null() -> None:
+            record = adapter.normalize_manifest(missing)["records"][0]
+            require("source_timestamp_remains_null", record["timestamps"]["source_ms"] is None and record["availability"] == "UNKNOWN")
+
+        def stays_set() -> None:
+            record = adapter.normalize_manifest(present)["records"][0]
+            require("source_timestamp_preserved", record["timestamps"]["source_ms"] == 1000)
 
         run_matrix(
             fault_id="M14_NULLABLE_SUBSTITUTION",
@@ -1518,13 +1581,13 @@ class StageAAcceptance(unittest.TestCase):
             call_path="to_record",
             assertion_id="source_timestamp_remains_null",
             sentinel="UNKNOWN",
-            note="receive time must not fill a null exchange timestamp",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "source_timestamp_ms", keep),
-            control=oracle,
-            intact=oracle,
+            note="same substitution; clean source timestamp is already present",
+            base=stays_null,
+            control_patch=_SymbolPatch(adapter, "source_timestamp_ms", substitute),
+            control=stays_set,
+            intact=stays_null,
             weak_patch=_SymbolPatch(adapter, "source_timestamp_ms", substitute),
-            weak=oracle,
+            weak=stays_null,
         )
 
     def test_m15_revision_before_publication(self) -> None:
@@ -1547,18 +1610,24 @@ class StageAAcceptance(unittest.TestCase):
                 ),
             ]
         )["records"]
-        real = asof.causal_times_ok
-
-        def keep(item: dict, cutoff_ms: int) -> bool:
-            return real(item, cutoff_ms)
+        published = normalized(
+            [
+                row("m-a1", 0, "A", 1, 1000, 1),
+                row("m-a1r", 1, "A", 9, 1000, 2, release="revision", revision_of=link("m-a1", 0)),
+            ]
+        )["records"]
 
         def source_only(item: dict, cutoff_ms: int) -> bool:
             value = item["timestamps"]["source_ms"]
             return value is not None and value <= cutoff_ms
 
-        def oracle() -> None:
+        def hidden() -> None:
             visible = asof.visible_at(records, 2000)
-            assert [item["value"] for item in visible] == [1]
+            require("revision_hidden_until_publication", [item["value"] for item in visible] == [1])
+
+        def already() -> None:
+            visible = asof.visible_at(published, 2000)
+            require("published_revision_visible", [item["value"] for item in visible] == [9])
 
         run_matrix(
             fault_id="M15_REVISION_BEFORE_PUBLICATION",
@@ -1566,21 +1635,18 @@ class StageAAcceptance(unittest.TestCase):
             call_path="visible_at",
             assertion_id="revision_hidden_until_publication",
             sentinel="1",
-            note="revision publication is 5000",
-            base=oracle,
-            control_patch=_SymbolPatch(asof, "causal_times_ok", keep),
-            control=oracle,
-            intact=oracle,
+            note="same source-only weakening; clean revision is already published",
+            base=hidden,
+            control_patch=_SymbolPatch(asof, "causal_times_ok", source_only),
+            control=already,
+            intact=hidden,
             weak_patch=_SymbolPatch(asof, "causal_times_ok", source_only),
-            weak=oracle,
+            weak=hidden,
         )
 
     def test_m16_bar_close_ignored(self) -> None:
-        record = normalized([row("m-a1", 0, "A", 1, 1000, 1, source=1000, pub=1000, bar=5000, recv=1000)])["records"][0]
-        real = asof.causal_times_ok
-
-        def keep(item: dict, cutoff_ms: int) -> bool:
-            return real(item, cutoff_ms)
+        late = normalized([row("m-a1", 0, "A", 1, 1000, 1, source=1000, pub=1000, bar=5000, recv=1000)])["records"][0]
+        ready = normalized([row("m-a1", 0, "A", 1, 1000, 1)])["records"][0]
 
         def no_bar(item: dict, cutoff_ms: int) -> bool:
             for key in ("source_ms", "publication_ms", "receive_ms"):
@@ -1589,8 +1655,11 @@ class StageAAcceptance(unittest.TestCase):
                     return False
             return True
 
-        def oracle() -> None:
-            assert asof.is_eligible(record, 2000) is False
+        def blocked() -> None:
+            require("late_bar_close_not_eligible", asof.is_eligible(late, 2000) is False)
+
+        def still() -> None:
+            require("bar_already_closed", asof.is_eligible(ready, 2000) is True)
 
         run_matrix(
             fault_id="M16_BAR_CLOSE_IGNORED",
@@ -1598,27 +1667,28 @@ class StageAAcceptance(unittest.TestCase):
             call_path="is_eligible",
             assertion_id="late_bar_close_not_eligible",
             sentinel="False",
-            note="bar close 5000",
-            base=oracle,
-            control_patch=_SymbolPatch(asof, "causal_times_ok", keep),
-            control=oracle,
-            intact=oracle,
+            note="same bar-close omission; clean bar is already closed",
+            base=blocked,
+            control_patch=_SymbolPatch(asof, "causal_times_ok", no_bar),
+            control=still,
+            intact=blocked,
             weak_patch=_SymbolPatch(asof, "causal_times_ok", no_bar),
-            weak=oracle,
+            weak=blocked,
         )
 
     def test_m17_member_digest_skipped(self) -> None:
         manifest = build_manifest(pinned_rows())
         manifest["segment"]["members"][0]["member_digest"] = "0" * 64
-        real_digest = adapter.assert_member_digest
 
-        def oracle() -> None:
-            try:
-                adapter.normalize_manifest(manifest)
-            except ContractError as exc:
-                assert exc.code == "MEMBER_DIGEST_MISMATCH"
-                return
-            raise AssertionError("MEMBER_LINKAGE_IGNORED")
+        def skip(actual: str, declared: str) -> None:
+            del actual, declared
+
+        def rejects() -> None:
+            refused("corrupted_member_rejected", lambda: adapter.normalize_manifest(manifest), "MEMBER_DIGEST_MISMATCH")
+
+        def accepts() -> None:
+            produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+            require("clean_manifest_normalizes", bool(produced["records"]))
 
         run_matrix(
             fault_id="M17_MEMBER_DIGEST_SKIPPED",
@@ -1626,20 +1696,19 @@ class StageAAcceptance(unittest.TestCase):
             call_path="verify_committed_prefix",
             assertion_id="corrupted_member_rejected",
             sentinel="MEMBER_DIGEST_MISMATCH",
-            note="segment digest still matches",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "assert_member_digest", real_digest),
-            control=oracle,
-            intact=oracle,
-            weak_patch=_SymbolPatch(adapter, "assert_member_digest", lambda actual, declared: None),
-            weak=oracle,
+            note="same digest skip; clean manifest digest still matches",
+            base=rejects,
+            control_patch=_SymbolPatch(adapter, "assert_member_digest", skip),
+            control=accepts,
+            intact=rejects,
+            weak_patch=_SymbolPatch(adapter, "assert_member_digest", skip),
+            weak=rejects,
         )
 
     def test_m18_truncation_accepted(self) -> None:
         manifest = build_manifest(pinned_rows())
         member = manifest["segment"]["members"][0]
         member["byte_end"] = member["byte_start"] + 1
-        real = adapter.verify_committed_prefix
 
         def segment_only(segment: dict, committed: list[dict]) -> list[dict]:
             raw = base64.b64decode(segment["segment_bytes_b64"])
@@ -1647,13 +1716,12 @@ class StageAAcceptance(unittest.TestCase):
                 raise ContractError("SEGMENT_DIGEST_MISMATCH")
             return sorted(committed, key=lambda item: item["record_index"])
 
-        def oracle() -> None:
-            try:
-                adapter.normalize_manifest(manifest)
-            except ContractError as exc:
-                assert exc.code == "TRUNCATED_MEMBER"
-                return
-            raise AssertionError("TRUNCATION_ACCEPTED")
+        def rejects() -> None:
+            refused("truncated_member_rejected", lambda: adapter.normalize_manifest(manifest), "TRUNCATED_MEMBER")
+
+        def accepts() -> None:
+            produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+            require("clean_prefix_normalizes", bool(produced["records"]))
 
         run_matrix(
             fault_id="M18_TRUNCATION_ACCEPTED",
@@ -1661,53 +1729,56 @@ class StageAAcceptance(unittest.TestCase):
             call_path="normalize_manifest",
             assertion_id="truncated_member_rejected",
             sentinel="TRUNCATED_MEMBER",
-            note="segment-digest-only verifier",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", real),
-            control=oracle,
-            intact=oracle,
+            note="same segment-digest-only verifier; clean prefix is complete",
+            base=rejects,
+            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
+            control=accepts,
+            intact=rejects,
             weak_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
-            weak=oracle,
+            weak=rejects,
         )
 
     def test_m19_uncommitted_tail_usable(self) -> None:
-        real = adapter.normalize_manifest
+        def always_committed(member: dict) -> bool:
+            del member
+            return False
 
-        def keep(manifest: dict) -> dict:
-            return real(manifest)
+        def observe() -> None:
+            try:
+                produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+            except ContractError as exc:
+                raise DownstreamRefusal(type(exc).__name__, exc.code) from None
+            usable = any(str(item.get("linkage", "")).endswith(":tail") for item in produced["records"])
+            rejected = any(item.get("code") == "UNCOMMITTED_TAIL" for item in produced["rejections"])
+            require("tail_absent_from_usable_records", (not usable) and rejected)
 
-        def include_tail(manifest: dict) -> dict:
-            result = real(manifest)
-            records = list(result["records"])
-            for member in manifest["segment"]["members"]:
-                if member.get("committed") is False:
-                    records.append({"linkage": member["linkage"], "usable": True, "member_id": member.get("member_id")})
-            return {"records": records, "rejections": list(result["rejections"]), "trace": list(result["trace"])}
-
-        def oracle() -> None:
-            produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
-            assert all(not str(item.get("linkage", "")).endswith(":tail") for item in produced["records"])
-            assert any(item["code"] == "UNCOMMITTED_TAIL" for item in produced["rejections"])
+        def committed_only() -> None:
+            manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
+            manifest["segment"]["members"] = [
+                member for member in manifest["segment"]["members"] if member["committed"] is True
+            ]
+            produced = adapter.normalize_manifest(manifest)
+            require("committed_row_usable", bool(produced["records"]) and produced["rejections"] == [])
 
         run_matrix(
             fault_id="M19_UNCOMMITTED_TAIL_USABLE",
-            symbol="normalized_adapter.normalize_manifest",
+            symbol="normalized_adapter._member_is_uncommitted",
             call_path="normalize_manifest",
             assertion_id="tail_absent_from_usable_records",
             sentinel="UNCOMMITTED_TAIL",
-            note="inline committed check is frozen; the symbol replacement reintroduces the tail",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "normalize_manifest", keep),
-            control=oracle,
-            intact=oracle,
-            weak_patch=_SymbolPatch(adapter, "normalize_manifest", include_tail),
-            weak=oracle,
+            note="true predicate weakened at the member loop; no post-return append; downstream committed check is not weakened",
+            base=observe,
+            control_patch=_SymbolPatch(adapter, "_member_is_uncommitted", always_committed),
+            control=committed_only,
+            intact=observe,
+            weak_patch=_SymbolPatch(adapter, "_member_is_uncommitted", always_committed),
+            weak=observe,
+            expect_weak="NON_KILL",
         )
 
     def test_m20_record_index_accepted(self) -> None:
         manifest = build_manifest(pinned_rows())
         manifest["segment"]["members"][0]["record_index"] = 7
-        real = adapter.verify_committed_prefix
 
         def segment_only(segment: dict, committed: list[dict]) -> list[dict]:
             raw = base64.b64decode(segment["segment_bytes_b64"])
@@ -1715,13 +1786,16 @@ class StageAAcceptance(unittest.TestCase):
                 raise ContractError("SEGMENT_DIGEST_MISMATCH")
             return list(committed)
 
-        def oracle() -> None:
-            try:
-                adapter.normalize_manifest(manifest)
-            except ContractError as exc:
-                assert exc.code in {"RECORD_INDEX_SEQUENCE", "LINKAGE_MISMATCH"}
-                return
-            raise AssertionError("RECORD_INDEX_ACCEPTED")
+        def rejects() -> None:
+            refused(
+                "record_index_change_rejected",
+                lambda: adapter.normalize_manifest(manifest),
+                ("RECORD_INDEX_SEQUENCE", "LINKAGE_MISMATCH"),
+            )
+
+        def accepts() -> None:
+            produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+            require("clean_index_normalizes", bool(produced["records"]))
 
         run_matrix(
             fault_id="M20_RECORD_INDEX_ACCEPTED",
@@ -1729,26 +1803,35 @@ class StageAAcceptance(unittest.TestCase):
             call_path="normalize_manifest",
             assertion_id="record_index_change_rejected",
             sentinel="RECORD_INDEX_SEQUENCE",
-            note="segment-digest-only verifier",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", real),
-            control=oracle,
-            intact=oracle,
+            note="same segment-digest-only verifier; clean indexes are contiguous",
+            base=rejects,
+            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
+            control=accepts,
+            intact=rejects,
             weak_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
-            weak=oracle,
+            weak=rejects,
         )
 
     def test_m21_forward_fill(self) -> None:
         records = normalized([row("m-a1", 0, "A", 7, 1000, 1, book_to=1500)])["records"]
+        enough = normalized(
+            [
+                row("m-a1", 0, "A", 7, 1000, 1, book_to=2500),
+                row("m-a2", 1, "A", 9, 1100, 2, book_to=2500),
+            ]
+        )["records"]
         feature_spec = load_spec()["feature"]
 
         def carry(last_value: object) -> object:
             return last_value
 
-        def oracle() -> None:
+        def gap() -> None:
             feature = features_mod.prior_mean(records, "A", 2000, feature_spec, bound_series="A")
-            assert feature["status"] == "UNKNOWN"
-            assert feature["value"] is None
+            require("gap_feature_unknown", feature["status"] == "UNKNOWN" and feature["value"] is None)
+
+        def defined() -> None:
+            feature = features_mod.prior_mean(enough, "A", 1200, feature_spec, bound_series="A")
+            require("sufficient_window_defined", feature["status"] == "DEFINED" and feature["value"] == 8)
 
         run_matrix(
             fault_id="M21_FORWARD_FILL",
@@ -1756,20 +1839,17 @@ class StageAAcceptance(unittest.TestCase):
             call_path="prior_mean",
             assertion_id="gap_feature_unknown",
             sentinel="UNKNOWN",
-            note="book ends at 1500",
-            base=oracle,
-            control_patch=_SymbolPatch(features_mod, "fill_gap", lambda last_value: None),
-            control=oracle,
-            intact=oracle,
+            note="same carry weakening; clean window has enough eligible points",
+            base=gap,
+            control_patch=_SymbolPatch(features_mod, "fill_gap", carry),
+            control=defined,
+            intact=gap,
             weak_patch=_SymbolPatch(features_mod, "fill_gap", carry),
-            weak=oracle,
+            weak=gap,
         )
 
     def test_m22_prune_pure_interaction(self) -> None:
         real = fixture_enumerate.strategy_id_for
-
-        def keep(kind: str, members: list[str]) -> str:
-            return real(kind, members)
 
         def drop(kind: str, members: list[str]) -> str:
             strategy_id = real(kind, members)
@@ -1777,10 +1857,17 @@ class StageAAcceptance(unittest.TestCase):
                 return "U:DROPPED"
             return strategy_id
 
-        def oracle() -> None:
+        def full() -> None:
             ids = self._ids()
-            assert "U:A+B" in ids
-            assert ids == list(HANDWRITTEN_IDS)
+            require("pure_interaction_remains_in_family", "U:A+B" in ids and ids == list(HANDWRITTEN_IDS))
+
+        def singles() -> None:
+            spec = clone(load_spec())
+            spec["families"]["unordered_pairs"] = []
+            spec["families"]["unordered_triples"] = []
+            spec["families"]["ordered_pairs"] = []
+            ids = [item["strategy_id"] for item in fixture_enumerate.enumerate_fixture(spec)]
+            require("singles_unchanged", ids == ["S:A", "S:B", "S:C"])
 
         run_matrix(
             fault_id="M22_PRUNE_PURE_INTERACTION",
@@ -1788,13 +1875,13 @@ class StageAAcceptance(unittest.TestCase):
             call_path="enumerate_fixture",
             assertion_id="pure_interaction_remains_in_family",
             sentinel="U:A+B",
-            note="id builder renames the pure interaction out of the family",
-            base=oracle,
-            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", keep),
-            control=oracle,
-            intact=oracle,
+            note="same rename weakening; clean spec has no pure interaction",
+            base=full,
+            control_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", drop),
+            control=singles,
+            intact=full,
             weak_patch=_SymbolPatch(fixture_enumerate, "strategy_id_for", drop),
-            weak=oracle,
+            weak=full,
         )
 
     def test_m23_missing_field_defaulted(self) -> None:
@@ -1811,12 +1898,11 @@ class StageAAcceptance(unittest.TestCase):
         def oracle() -> None:
             missing = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
             del missing["segment"]["members"][0]["source_timestamp_ms"]
-            try:
-                adapter.normalize_manifest(missing)
-            except ContractError as exc:
-                assert exc.code == "MISSING_FIELD:source_timestamp_ms"
-                return
-            raise AssertionError("MISSING_DEFAULTED")
+            refused(
+                "missing_field_fails_closed",
+                lambda: adapter.normalize_manifest(missing),
+                "MISSING_FIELD:source_timestamp_ms",
+            )
 
         def clean() -> None:
             adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
@@ -1827,20 +1913,18 @@ class StageAAcceptance(unittest.TestCase):
             call_path="normalize_manifest",
             assertion_id="missing_field_fails_closed",
             sentinel="MISSING_FIELD:source_timestamp_ms",
-            note="control uses a complete manifest; weak fills the missing timestamp",
+            note="same fill weakening; a later truncation refusal is a wrong code and is not a kill",
             base=oracle,
             control_patch=_SymbolPatch(adapter, "require_keys", fill_source),
             control=clean,
             intact=oracle,
             weak_patch=_SymbolPatch(adapter, "require_keys", fill_source),
             weak=oracle,
+            expect_weak="NON_KILL",
         )
 
     def test_m24_unknown_version_accepted(self) -> None:
         real = adapter._validate_envelope
-
-        def keep(item: dict) -> None:
-            return real(item)
 
         def skip_schema(item: dict) -> None:
             saved = item["manifest_schema"]
@@ -1850,15 +1934,14 @@ class StageAAcceptance(unittest.TestCase):
             finally:
                 item["manifest_schema"] = saved
 
-        def oracle() -> None:
+        def rejects() -> None:
             manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
             manifest["manifest_schema"] = "hm.raw_event.v9"
-            try:
-                adapter.normalize_manifest(manifest)
-            except ContractError as exc:
-                assert exc.code == "UNKNOWN_VERSION"
-                return
-            raise AssertionError("UNKNOWN_VERSION_ACCEPTED")
+            refused("unknown_version_fails_closed", lambda: adapter.normalize_manifest(manifest), "UNKNOWN_VERSION")
+
+        def accepts() -> None:
+            produced = adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
+            require("known_schema_normalizes", bool(produced["records"]))
 
         run_matrix(
             fault_id="M24_UNKNOWN_VERSION_ACCEPTED",
@@ -1866,45 +1949,51 @@ class StageAAcceptance(unittest.TestCase):
             call_path="normalize_manifest",
             assertion_id="unknown_version_fails_closed",
             sentinel="UNKNOWN_VERSION",
-            note="unknown schema rewritten to the fixture schema",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "_validate_envelope", keep),
-            control=oracle,
-            intact=oracle,
+            note="same schema rewrite; clean manifest already uses the fixture schema",
+            base=rejects,
+            control_patch=_SymbolPatch(adapter, "_validate_envelope", skip_schema),
+            control=accepts,
+            intact=rejects,
             weak_patch=_SymbolPatch(adapter, "_validate_envelope", skip_schema),
-            weak=oracle,
+            weak=rejects,
         )
 
     def test_m25_nonfinite_coerced(self) -> None:
-        def manifest() -> dict:
+        def independent_nonfinite(value: object) -> bool:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return True
+            if isinstance(value, int):
+                return False
+            return value != value or value in (float("inf"), float("-inf"))
+
+        def observe(value: object) -> None:
             built = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
-            built["segment"]["members"][0]["value"] = float("nan")
-            return built
-
-        def oracle() -> None:
+            built["segment"]["members"][0]["value"] = value
             try:
-                adapter.normalize_manifest(manifest())
+                produced = adapter.normalize_manifest(built)
             except ContractError as exc:
-                assert exc.code == "NONFINITE:value"
-                return
-            raise AssertionError("ACCEPTED_NONFINITE")
-
-        def clean() -> None:
-            adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
+                if exc.code == "NONFINITE:value":
+                    return
+                if independent_nonfinite(value):
+                    raise OracleMiss("finite_guard_refusal_absent", downstream_code=exc.code)
+                raise DownstreamRefusal(type(exc).__name__, exc.code) from None
+            if independent_nonfinite(value):
+                raise RuntimeError("usable nonfinite record returned")
+            require("finite_value_normalizes", produced["records"][0]["value"] == value)
 
         run_matrix(
             fault_id="M25_NONFINITE_COERCED",
             symbol="normalized_adapter.assert_finite_value",
-            call_path="normalize_manifest",
-            assertion_id="nonfinite_value_fails_closed",
+            call_path="_validate_member_values",
+            assertion_id="finite_guard_refusal_absent",
             sentinel="NONFINITE:value",
-            note="frozen canonical_bytes still raises CANONICAL_REJECT after the finite check is removed",
-            base=oracle,
+            note="component guard only; canonical.py frozen; a later CANONICAL_REJECT is downstream evidence, not the kill code",
+            base=lambda: observe(float("nan")),
             control_patch=_SymbolPatch(adapter, "assert_finite_value", lambda value: None),
-            control=clean,
-            intact=oracle,
+            control=lambda: observe(1),
+            intact=lambda: observe(float("nan")),
             weak_patch=_SymbolPatch(adapter, "assert_finite_value", lambda value: None),
-            weak=oracle,
+            weak=lambda: observe(float("nan")),
         )
 
     def test_m26_cross_series_allowed(self) -> None:
@@ -1913,15 +2002,14 @@ class StageAAcceptance(unittest.TestCase):
 
         def matched() -> None:
             feature = features_mod.prior_mean(records, "B", 2000, feature_spec, bound_series="B")
-            assert feature["value"] == 5
+            require("matched_series_mean", feature["value"] == 5)
 
         def crossed() -> None:
-            try:
-                features_mod.prior_mean(records, "B", 2000, feature_spec, bound_series="A")
-            except ContractError as exc:
-                assert exc.code == "CROSS_SERIES_STATE"
-                return
-            raise AssertionError("CROSS_SERIES_ALLOWED")
+            refused(
+                "cross_series_state_fails_closed",
+                lambda: features_mod.prior_mean(records, "B", 2000, feature_spec, bound_series="A"),
+                "CROSS_SERIES_STATE",
+            )
 
         run_matrix(
             fault_id="M26_CROSS_SERIES_ALLOWED",
@@ -1939,11 +2027,6 @@ class StageAAcceptance(unittest.TestCase):
         )
 
     def test_m27_unsupported_domain_dropped(self) -> None:
-        real = fixture_enumerate._check_member
-
-        def keep(member: object) -> str:
-            return real(member)
-
         def allow(member: object) -> str:
             if not isinstance(member, str):
                 raise ContractError("UNSUPPORTED_DOMAIN")
@@ -1952,15 +2035,14 @@ class StageAAcceptance(unittest.TestCase):
         def bad() -> None:
             spec = clone(load_spec())
             spec["families"]["singles"] = ["A", "D"]
-            try:
-                fixture_enumerate.enumerate_fixture(spec)
-            except ContractError as exc:
-                assert exc.code == "UNSUPPORTED_DOMAIN"
-                return
-            raise AssertionError("SILENT_UNSUPPORTED")
+            refused(
+                "unsupported_domain_fails_visibly",
+                lambda: fixture_enumerate.enumerate_fixture(spec),
+                "UNSUPPORTED_DOMAIN",
+            )
 
         def good() -> None:
-            assert self._ids() == list(HANDWRITTEN_IDS)
+            require("handwritten_ids_held", self._ids() == list(HANDWRITTEN_IDS))
 
         run_matrix(
             fault_id="M27_UNSUPPORTED_DOMAIN_DROPPED",
@@ -1968,9 +2050,9 @@ class StageAAcceptance(unittest.TestCase):
             call_path="enumerate_fixture",
             assertion_id="unsupported_domain_fails_visibly",
             sentinel="UNSUPPORTED_DOMAIN",
-            note="member D is accepted instead of rejected",
+            note="same string-accept weakening; clean members stay inside the domain",
             base=bad,
-            control_patch=_SymbolPatch(fixture_enumerate, "_check_member", keep),
+            control_patch=_SymbolPatch(fixture_enumerate, "_check_member", allow),
             control=good,
             intact=bad,
             weak_patch=_SymbolPatch(fixture_enumerate, "_check_member", allow),
@@ -1988,12 +2070,12 @@ class StageAAcceptance(unittest.TestCase):
 
         def oracle() -> None:
             try:
-                text = leaked_text()
+                leaked_text()
             except ContractError as exc:
-                assert exc.code == "PAYLOAD_LEAK"
-                assert CANARY not in str(exc)
-                return
-            raise AssertionError("CANARY_ACCEPTED")
+                if exc.code == "PAYLOAD_LEAK" and CANARY not in str(exc):
+                    return
+                raise DownstreamRefusal(type(exc).__name__, exc.code) from None
+            raise OracleMiss("canary_absent_from_output")
 
         def weak() -> None:
             text = leaked_text()
@@ -2004,7 +2086,7 @@ class StageAAcceptance(unittest.TestCase):
                 outer_code = exc.code
             if outer_code != "PROHIBITED:outer-leak":
                 raise RuntimeError("OUTER_MISSED")
-            assert CANARY not in text
+            require("canary_absent_from_output", CANARY not in text)
 
         def clean() -> None:
             adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)]))
@@ -2031,12 +2113,11 @@ class StageAAcceptance(unittest.TestCase):
             guards.audit_sources({"clean.py": "x = 1\n"}, test_names=set())
 
         def planted_oracle() -> None:
-            try:
-                guards.audit_sources({"planted.py": planted}, test_names=set())
-            except guards.ProhibitedAccess as exc:
-                assert exc.code == "PROHIBITED:import"
-                return
-            raise AssertionError("DYNAMIC_IMPORT_ACCEPTED")
+            refused(
+                "dynamic_import_rejected",
+                lambda: guards.audit_sources({"planted.py": planted}, test_names=set()),
+                "PROHIBITED:import",
+            )
 
         def weak() -> None:
             outer_code = ""
@@ -2075,8 +2156,10 @@ class StageAAcceptance(unittest.TestCase):
 
         def oracle() -> None:
             record = adapter.normalize_manifest(manifest)["records"][0]
-            assert record["provenance"]["compatibility_status"] == "BLOCKED"
-            assert record["provenance"]["compatibility"] != "PASS"
+            require(
+                "compatibility_remains_blocked",
+                record["provenance"]["compatibility_status"] == "BLOCKED" and record["provenance"]["compatibility"] != "PASS",
+            )
 
         run_matrix(
             fault_id="M30_COMPATIBILITY_PASS",
@@ -2084,7 +2167,7 @@ class StageAAcceptance(unittest.TestCase):
             call_path="to_record",
             assertion_id="compatibility_remains_blocked",
             sentinel="BLOCKED",
-            note="provenance forced to PASS",
+            note="claim_pass has no clean BLOCKED input; control reinstalls the real function and is disclosed as that exception",
             base=oracle,
             control_patch=_SymbolPatch(adapter, "blocked_compatibility", real),
             control=oracle,
@@ -2096,7 +2179,6 @@ class StageAAcceptance(unittest.TestCase):
     def test_m31_prefix_digest_ignored(self) -> None:
         manifest = build_manifest(pinned_rows())
         manifest["segment"]["prefix_digest"] = "ab" * 32
-        real = adapter.verify_committed_prefix
 
         def segment_only(segment: dict, committed: list[dict]) -> list[dict]:
             raw = base64.b64decode(segment["segment_bytes_b64"])
@@ -2104,13 +2186,12 @@ class StageAAcceptance(unittest.TestCase):
                 raise ContractError("SEGMENT_DIGEST_MISMATCH")
             return sorted(committed, key=lambda item: item["record_index"])
 
-        def oracle() -> None:
-            try:
-                adapter.normalize_manifest(manifest)
-            except ContractError as exc:
-                assert exc.code == "PREFIX_DIGEST_MISMATCH"
-                return
-            raise AssertionError("PREFIX_LINKAGE_IGNORED")
+        def rejects() -> None:
+            refused("corrupted_prefix_rejected", lambda: adapter.normalize_manifest(manifest), "PREFIX_DIGEST_MISMATCH")
+
+        def accepts() -> None:
+            produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+            require("clean_prefix_normalizes", bool(produced["records"]))
 
         run_matrix(
             fault_id="M31_PREFIX_DIGEST_IGNORED",
@@ -2118,13 +2199,13 @@ class StageAAcceptance(unittest.TestCase):
             call_path="normalize_manifest",
             assertion_id="corrupted_prefix_rejected",
             sentinel="PREFIX_DIGEST_MISMATCH",
-            note="segment digest still matches",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", real),
-            control=oracle,
-            intact=oracle,
+            note="same segment-digest-only verifier; clean prefix digest matches",
+            base=rejects,
+            control_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
+            control=accepts,
+            intact=rejects,
             weak_patch=_SymbolPatch(adapter, "verify_committed_prefix", segment_only),
-            weak=oracle,
+            weak=rejects,
         )
 
     def test_m32_interpolation(self) -> None:
@@ -2136,14 +2217,24 @@ class StageAAcceptance(unittest.TestCase):
         )["records"]
         feature_spec = load_spec()["feature"]
 
+        covered = normalized(
+            [
+                row("m-a1", 0, "A", 0, 1000, 1, book_to=4000),
+                row("m-a2", 1, "A", 10, 3000, 2, book_from=3000, book_to=4000),
+            ]
+        )["records"]
+
         def interpolate(left_value: object, right_value: object, left_ms: int, right_ms: int, cutoff_ms: int) -> float:
             del left_ms, right_ms, cutoff_ms
             return (float(left_value) + float(right_value)) / 2.0
 
-        def oracle() -> None:
+        def gap() -> None:
             feature = features_mod.prior_mean(records, "A", 2000, feature_spec, bound_series="A")
-            assert feature["status"] == "UNKNOWN"
-            assert feature["value"] is None
+            require("gap_not_interpolated", feature["status"] == "UNKNOWN" and feature["value"] is None)
+
+        def covered_window() -> None:
+            feature = features_mod.prior_mean(covered, "A", 3500, feature_spec, bound_series="A")
+            require("covered_window_defined", feature["status"] == "DEFINED" and feature["value"] == 5)
 
         run_matrix(
             fault_id="M32_INTERPOLATION",
@@ -2151,13 +2242,13 @@ class StageAAcceptance(unittest.TestCase):
             call_path="prior_mean",
             assertion_id="gap_not_interpolated",
             sentinel="UNKNOWN",
-            note="gap between 1200 and 3000",
-            base=oracle,
-            control_patch=_SymbolPatch(features_mod, "resolve_gap", lambda *args: None),
-            control=oracle,
-            intact=oracle,
+            note="same interpolation weakening; clean cutoff is inside both books",
+            base=gap,
+            control_patch=_SymbolPatch(features_mod, "resolve_gap", interpolate),
+            control=covered_window,
+            intact=gap,
             weak_patch=_SymbolPatch(features_mod, "resolve_gap", interpolate),
-            weak=oracle,
+            weak=gap,
         )
 
     def test_cap_rss_checkpoint(self) -> None:
@@ -2167,7 +2258,7 @@ class StageAAcceptance(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp_dir:
                 path = Path(temp_dir) / "receipt.json"
                 code, _err = _capture_main(_cli_args(path))
-                assert code == 0 and path.exists()
+                require("within_rss_writes_receipt", code == 0 and path.exists())
 
         def over() -> None:
             saved = guards.peak_rss_bytes
@@ -2176,7 +2267,7 @@ class StageAAcceptance(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     path = Path(temp_dir) / "receipt.json"
                     code, err = _capture_main(_cli_args(path))
-                    assert code == 4 and "INCOMPLETE:CAP_RSS" in err and not path.exists()
+                    require("over_rss_writes_no_receipt", code == 4 and "INCOMPLETE:CAP_RSS" in err and not path.exists())
             finally:
                 guards.peak_rss_bytes = saved
 
@@ -2202,7 +2293,7 @@ class StageAAcceptance(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp_dir:
                 path = Path(temp_dir) / "receipt.json"
                 code, _err = _capture_main(_cli_args(path))
-                assert code == 0 and path.exists()
+                require("within_command_writes_receipt", code == 0 and path.exists())
 
         def over() -> None:
             fixture_cli.CommandClock = _SlowClock
@@ -2210,7 +2301,10 @@ class StageAAcceptance(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     path = Path(temp_dir) / "receipt.json"
                     code, err = _capture_main(_cli_args(path))
-                    assert code == 4 and "INCOMPLETE:CAP_COMMAND_SECONDS" in err and not path.exists()
+                    require(
+                        "over_command_writes_no_receipt",
+                        code == 4 and "INCOMPLETE:CAP_COMMAND_SECONDS" in err and not path.exists(),
+                    )
             finally:
                 fixture_cli.CommandClock = saved_clock
 
@@ -2242,12 +2336,7 @@ class StageAAcceptance(unittest.TestCase):
             saved = guards.process_elapsed
             guards.process_elapsed = lambda: 601.0
             try:
-                try:
-                    guards.preemptive_checkpoint(None)
-                except guards.CapExhausted as exc:
-                    assert exc.code == "INCOMPLETE:CAP_SUITE_SECONDS"
-                    return
-                raise AssertionError("SUITE_CAP_MISSED")
+                refused("suite_over_600_halts", lambda: guards.preemptive_checkpoint(None), "INCOMPLETE:CAP_SUITE_SECONDS")
             finally:
                 guards.process_elapsed = saved
 
@@ -2276,13 +2365,13 @@ class StageAAcceptance(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp_dir:
                 path = Path(temp_dir) / "receipt.json"
                 code, _err = _capture_main(_cli_args(path, "1"))
-                assert code == 0 and path.exists()
+                require("one_worker_writes_receipt", code == 0 and path.exists())
 
         def over() -> None:
             with tempfile.TemporaryDirectory() as temp_dir:
                 path = Path(temp_dir) / "receipt.json"
                 code, err = _capture_main(_cli_args(path, "3"))
-                assert code == 4 and "INCOMPLETE:CAP_WORKERS" in err and not path.exists()
+                require("three_workers_writes_no_receipt", code == 4 and "INCOMPLETE:CAP_WORKERS" in err and not path.exists())
 
         run_matrix(
             fault_id="CAP_WORKERS",
@@ -2304,12 +2393,11 @@ class StageAAcceptance(unittest.TestCase):
         manifest["segment"]["members"] = [{} for _ in range(2049)]
 
         def oracle() -> None:
-            try:
-                adapter.normalize_manifest(manifest)
-            except ContractError as exc:
-                assert exc.code == "INCOMPLETE:CAP_EVENTS"
-                return
-            raise AssertionError("EVENTS_TRUNCATED_OR_ACCEPTED")
+            refused(
+                "2049_events_halt_before_members",
+                lambda: adapter.normalize_manifest(manifest),
+                "INCOMPLETE:CAP_EVENTS",
+            )
 
         run_matrix(
             fault_id="CAP_EVENTS",
@@ -2317,13 +2405,14 @@ class StageAAcceptance(unittest.TestCase):
             call_path="normalize_manifest",
             assertion_id="2049_events_halt_before_members",
             sentinel="INCOMPLETE:CAP_EVENTS",
-            note="count gate; members are empty dicts and are not truncated to 2048",
+            note="count gate removed; a later field error is a wrong code and is not a kill",
             base=oracle,
             control_patch=_SymbolPatch(adapter, "assert_event_count", lambda count: None),
             control=lambda: adapter.normalize_manifest(build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])),
             intact=oracle,
             weak_patch=_SymbolPatch(adapter, "assert_event_count", lambda count: None),
             weak=oracle,
+            expect_weak="NON_KILL",
         )
 
     def test_cap_definitions_checkpoint(self) -> None:
@@ -2334,12 +2423,7 @@ class StageAAcceptance(unittest.TestCase):
         spec["families"]["ordered_pairs"] = []
 
         def oracle() -> None:
-            try:
-                fixture_enumerate.enumerate_fixture(spec)
-            except ContractError as exc:
-                assert exc.code == "INCOMPLETE:CAP_DEFINITIONS"
-                return
-            raise AssertionError("DEFINITIONS_TRUNCATED_OR_ACCEPTED")
+            refused("257_definitions_halt", lambda: fixture_enumerate.enumerate_fixture(spec), "INCOMPLETE:CAP_DEFINITIONS")
 
         run_matrix(
             fault_id="CAP_DEFINITIONS",
@@ -2347,13 +2431,14 @@ class StageAAcceptance(unittest.TestCase):
             call_path="enumerate_fixture",
             assertion_id="257_definitions_halt",
             sentinel="INCOMPLETE:CAP_DEFINITIONS",
-            note="count gate before emit",
+            note="count gate removed; a later duplicate-strategy error is a wrong code and is not a kill",
             base=oracle,
             control_patch=_SymbolPatch(fixture_enumerate, "assert_definition_count", lambda count: None),
             control=lambda: self._ids(),
             intact=oracle,
             weak_patch=_SymbolPatch(fixture_enumerate, "assert_definition_count", lambda count: None),
             weak=oracle,
+            expect_weak="NON_KILL",
         )
 
     def test_cap_receipt_bytes(self) -> None:
@@ -2364,17 +2449,17 @@ class StageAAcceptance(unittest.TestCase):
                 path = Path(temp_dir) / "too-big.json"
                 try:
                     guards.guarded_write_text(path, payload, ROOT)
-                except guards.CapExhausted as exc:
-                    assert exc.code == "INCOMPLETE:CAP_RECEIPT_BYTES"
-                    assert not path.exists()
-                    return
-                raise AssertionError("OVERSIZE_RECEIPT_WRITTEN")
+                except ContractError as exc:
+                    if exc.code == "INCOMPLETE:CAP_RECEIPT_BYTES" and not path.exists():
+                        return
+                    raise DownstreamRefusal(type(exc).__name__, exc.code) from None
+                raise OracleMiss("over_8mib_writes_no_file")
 
         def write_small() -> None:
             with tempfile.TemporaryDirectory() as temp_dir:
                 path = Path(temp_dir) / "small.json"
                 guards.guarded_write_text(path, "{}", ROOT)
-                assert path.exists()
+                require("small_receipt_written", path.exists())
 
         run_matrix(
             fault_id="CAP_RECEIPT",
@@ -2435,12 +2520,27 @@ class StageAAcceptance(unittest.TestCase):
         }
         seen = {item["fault_id"] for item in MATRIX}
         self.assertTrue(required <= seen)
+        non_kill = {
+            "M19_UNCOMMITTED_TAIL_USABLE",
+            "M23_MISSING_FIELD_DEFAULTED",
+            "CAP_EVENTS",
+            "CAP_DEFINITIONS",
+        }
         for item in MATRIX:
             self.assertEqual(item["base"], "HELD", item["fault_id"])
             self.assertEqual(item["control"], "HELD", item["fault_id"])
             self.assertEqual(item["intact"], "HELD", item["fault_id"])
-            self.assertEqual(item["weak"], "ORACLE_VIOLATED", item["fault_id"])
             self.assertIs(item["restored"], True, item["fault_id"])
+            if item["fault_id"] in non_kill:
+                self.assertEqual(item["weak"], "NON_KILL", item)
+            else:
+                self.assertEqual(item["weak"], "ORACLE_VIOLATED", item["fault_id"])
+                self.assertEqual(item["actual_code"], item["assertion_id"], item["fault_id"])
+        by_id = {item["fault_id"]: item for item in MATRIX}
+        self.assertEqual(by_id["M19_UNCOMMITTED_TAIL_USABLE"]["actual_code"], "MISSING_FIELD:committed")
+        self.assertEqual(by_id["M23_MISSING_FIELD_DEFAULTED"]["actual_code"], "TRUNCATED_MEMBER")
+        self.assertEqual(by_id["M25_NONFINITE_COERCED"]["downstream_code"], "CANONICAL_REJECT")
+        self.assertNotEqual(by_id["M25_NONFINITE_COERCED"]["actual_code"], "CANONICAL_REJECT")
         guards.preemptive_checkpoint(None)
         self.assertLess(time.perf_counter() - SUITE_STARTED, 600)
         self.assertLess(guards.peak_rss_bytes(), 512 * 1024 * 1024)
@@ -2448,7 +2548,7 @@ class StageAAcceptance(unittest.TestCase):
 
 if __name__ == "__main__":
     outcome = unittest.main(argv=[sys.argv[0]], exit=False, verbosity=2).result
-    destination = Path("/opt/cursor/artifacts/a990-fault-matrix.json")
+    destination = Path("/opt/cursor/artifacts/a990-v3-narrow-proof-matrix.json")
     destination.write_text(json.dumps({"rows": MATRIX}, indent=2) + "\n", encoding="utf-8")
     print("MATRIX_ROWS", len(MATRIX))
     print("MATRIX_PATH", destination)
