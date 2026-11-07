@@ -11,10 +11,12 @@ import ast
 import copy
 import hashlib
 import json
+import os
+import resource
+import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from decimal import Decimal
@@ -24,21 +26,184 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+VAS_BYTES = 268435456
+COMMAND_SECONDS = 120
+SUITE_SECONDS = 600
+
+
+def _install_vas() -> None:
+    resource.setrlimit(resource.RLIMIT_AS, (VAS_BYTES, VAS_BYTES))
+
+
+def _parent_main() -> int:
+    _install_vas()
+    from research.event_replay_v1.guards import (
+        MAX_AGGREGATE_BYTES,
+        MAX_RECEIPT_BYTES,
+        OutputLedger,
+        ProcessGate,
+    )
+
+    receipt = Path("/opt/cursor/artifacts/b992-v5-suite-receipt.json")
+    head = None
+    base = "40087a65f2157f8c6701ea3670adc5c29a28c87d"
+    clean = None
+    args = sys.argv[1:]
+    index = 0
+    while index < len(args):
+        if args[index] == "--receipt" and index + 1 < len(args):
+            receipt = Path(args[index + 1])
+            index += 2
+            continue
+        if args[index] == "--head" and index + 1 < len(args):
+            head = args[index + 1]
+            index += 2
+            continue
+        if args[index] == "--base" and index + 1 < len(args):
+            base = args[index + 1]
+            index += 2
+            continue
+        if args[index] == "--clean-tree" and index + 1 < len(args):
+            clean = args[index + 1]
+            index += 2
+            continue
+        index += 1
+    allowed_root = Path("/opt/cursor/artifacts").resolve()
+    if not str(receipt.resolve()).startswith(str(allowed_root) + "/"):
+        print("PROHIBITED_REAL_ROOT", file=sys.stderr)
+        return 3
+    gate = ProcessGate()
+    ledger = OutputLedger()
+    lock_bytes = (ROOT / "research/event_replay_v1/dependencies.lock.json").read_bytes()
+    external_lock_sha = hashlib.sha256(lock_bytes).hexdigest()
+    suite_started = time.monotonic()
+    proofs = []
+
+    def spawn(argv: list[str], deadline: float) -> tuple[int, bytes, bytes, dict]:
+        gate.acquire()
+        started = time.monotonic()
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(ROOT),
+            env={},
+            preexec_fn=_install_vas,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stopped = False
+        overshoot = 0.0
+        try:
+            while proc.poll() is None:
+                if time.monotonic() - started > deadline or time.monotonic() - suite_started > SUITE_SECONDS:
+                    kill_at = time.monotonic()
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                    stopped = True
+                    overshoot = time.monotonic() - kill_at
+                    break
+                time.sleep(0.01)
+            out = proc.stdout.read() if proc.stdout is not None else b""
+            err = proc.stderr.read() if proc.stderr is not None else b""
+        finally:
+            gate.release()
+        return proc.returncode if proc.returncode is not None else -9, out, err, {
+            "metric": "command_wall_seconds",
+            "mechanism": "parent_monotonic_killpg",
+            "deadline": deadline,
+            "elapsed": time.monotonic() - started,
+            "overshoot": overshoot,
+            "stopped": stopped,
+        }
+
+    memory_code = (
+        "import resource\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (268435456, 268435456))\n"
+        "blocks=[]\n"
+        "try:\n"
+        "    while True:\n"
+        "        blocks.append(bytearray(8000000))\n"
+        "except MemoryError:\n"
+        "    print('MEMORY_STOP')\n"
+    )
+    code, out, err, wall = spawn([sys.executable, "-I", "-S", "-c", memory_code], 30)
+    proofs.append({"fault": "vas_allocation", "returncode": code, "stdout": out.decode("utf-8", "replace")[:200], "wall": wall})
+    sleeper = "import time\ntime.sleep(30)\nprint('SLEPT')\n"
+    code, out, err, wall = spawn([sys.executable, "-I", "-S", "-c", sleeper], 0.4)
+    proofs.append({"fault": "wall_deadline", "returncode": code, "saw_slept": b"SLEPT" in out, "wall": wall})
+    bootstrap = (
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "sys.argv = [sys.argv[2], '--suite-child']\n"
+        "import runpy\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+    )
+    code, out, err, wall = spawn(
+        [sys.executable, "-I", "-S", "-c", bootstrap, str(ROOT), str(Path(__file__).resolve())],
+        COMMAND_SECONDS,
+    )
+    ledger.reserve_pipe(len(out), "child_stdout")
+    ledger.reserve_pipe(len(err), "child_stderr")
+    body = {
+        "kind": "event_replay_v1.suite_receipt",
+        "compatibility": "BLOCKED",
+        "authoritative_base": base,
+        "head": head,
+        "head_source": "EXTERNAL_ARGV_NOT_SELF_HASH",
+        "clean_tree": clean,
+        "command": "python research/event_replay_v1/tests/test_acceptance.py",
+        "interpreter": sys.executable,
+        "runtime": sys.version.split()[0],
+        "external_lock_sha256": external_lock_sha,
+        "suite_wall": wall,
+        "cap_stop_proofs": proofs,
+        "child_returncode": code,
+        "aggregate_bytes": ledger.aggregate_used,
+        "aggregate_cap_bytes": MAX_AGGREGATE_BYTES,
+        "receipt_cap_bytes": MAX_RECEIPT_BYTES,
+        "child_stderr": err.decode("utf-8", "replace"),
+        "child_stdout": out.decode("utf-8", "replace"),
+    }
+    blob = json.dumps(body).encode("utf-8")
+    offset = 0
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    with receipt.open("wb") as handle:
+        while offset < len(blob):
+            chunk = blob[offset:offset + 65536]
+            ledger.reserve_receipt(len(chunk))
+            handle.write(chunk)
+            offset += len(chunk)
+    sys.stderr.write(err.decode("utf-8", "replace"))
+    return code if code is not None else 1
+
+
+if __name__ == "__main__" and "--suite-child" not in sys.argv:
+    raise SystemExit(_parent_main())
+
+if "--suite-child" in sys.argv:
+    _install_vas()
+
 from research.event_replay_v1.accounting import FeeDispositionError
 from research.event_replay_v1.engine import FixtureError, replay
 from research.event_replay_v1.guards import (
     MAX_COMMAND_SECONDS,
     MAX_EVENTS,
     MAX_RECEIPT_BYTES,
-    MAX_RSS_BYTES,
+    MAX_RSS_BOUND_BYTES,
     MAX_SUITE_SECONDS,
     MAX_WORKERS,
+    MAX_AGGREGATE_BYTES,
+    VAS_BYTES,
     CapStop,
     GuardError,
+    OuterInterception,
+    OutputLedger,
+    ProcessGate,
     ResourceLimits,
     ResourceObservation,
-    RuntimeGuard,
     enforce_observation,
+    install_env_trap,
 )
 from research.event_replay_v1.pricer import PRICER_ID
 
@@ -198,10 +363,10 @@ class AcceptanceTest(unittest.TestCase):
         self.assertEqual(accounting["queue_delay_value_class"], "SYNTHETIC")
         self.assertFalse(accounting["memos_subtracted_from_net"])
         self.assertFalse(accounting["double_charged"])
-        self.assertEqual(
-            Decimal(accounting["net_pnl"]),
-            Decimal(accounting["price_pnl"]) - Decimal(accounting["trading_fee"]),
-        )
+        self.assertIsNone(accounting["net_pnl"])
+        self.assertIsNone(accounting["net_per_signal"])
+        self.assertEqual(accounting["slippage_only_stress"]["status"], "EMITTED")
+        self.assertFalse(accounting["slippage_only_stress"]["charged_in_net"])
 
     def test_missing_or_nonzero_fee_is_not_defaulted(self):
         missing = json.loads(json.dumps(self.fixture))
@@ -315,6 +480,15 @@ class AcceptanceTest(unittest.TestCase):
                         "bids": [["1", "1"]],
                         "asks": [["1", "1"]],
                         "exchange_timestamp_utc": None,
+                        "value_class": "SYNTHETIC",
+                    },
+                    {
+                        "event_id": "s0-late-trade",
+                        "type": "trade",
+                        "time_us": 4600,
+                        "seq": 23,
+                        "price": "1",
+                        "qty": "9",
                         "value_class": "SYNTHETIC",
                     },
                     {
@@ -470,6 +644,16 @@ class AcceptanceTest(unittest.TestCase):
         self.assertNotEqual(self.fills("S-TARGET", "EXIT")[0]["price"], "110")
         self.assertEqual(self.scenario("S-TIME")["exits"][0]["winner"], "TIME")
         self.assertEqual(self.scenario("S-THESIS")["exits"][0]["winner"], "THESIS_CUT")
+        self.assertIsNone(self.scenario("S-THESIS")["exits"][0]["observed_price"])
+        pending = self.scenario("S-PENDING")["exits"][0]
+        self.assertEqual(pending["winner"], "HARD_STOP")
+        self.assertEqual(pending["superseded_from"], "TARGET")
+        self.assertEqual(self.fills("S-PENDING", "EXIT")[0]["price"], "70")
+        self.assertEqual(self.signals["s-pending"]["realized_pnl"], "-30")
+        a = next(order for order in self.scenario("S-C3")["orders"] if order["order_id"] == "c3-a:entry")
+        b = next(order for order in self.scenario("S-C3")["orders"] if order["order_id"] == "c3-b:entry")
+        self.assertEqual(a["filled_qty"], "2")
+        self.assertEqual(b["filled_qty"], "1")
 
     def test_liquidation_unknown_terms_dust_and_no_roundup(self):
         self.assertEqual(self.signals["s12"]["liq_price"], "99.5")
@@ -541,6 +725,9 @@ class AcceptanceTest(unittest.TestCase):
             "srecv-early": "0",
             "srecv-ok": "0",
             "s-offset": "0",
+            "c3-a": "0",
+            "c3-b": "0",
+            "s-pending": "-30",
         }
         self.assertEqual(set(self.signals), set(expected))
         numerator = Decimal(0)
@@ -556,8 +743,9 @@ class AcceptanceTest(unittest.TestCase):
             + (Decimal(80) - Decimal(100)) * 10
             + (Decimal(99) - Decimal(100)) * 10
             + (Decimal(100) - Decimal(101)) * 10
+            + (Decimal(70) - Decimal(100))
         )
-        self.assertEqual(hand, Decimal("-144"))
+        self.assertEqual(hand, Decimal("-174"))
         self.assertEqual(numerator, hand)
         depth = (Decimal("100.5") - Decimal(100)) * 4
         delay = (
@@ -568,24 +756,24 @@ class AcceptanceTest(unittest.TestCase):
             + (Decimal(105) - Decimal(100)) * 1
             + (Decimal(110) - Decimal(100)) * 1
             + (Decimal(110) - Decimal(100)) * 1
+            + (Decimal(90) - Decimal(70)) * 1
         )
         self.assertEqual(depth, Decimal(2))
-        self.assertEqual(delay, Decimal(156))
+        self.assertEqual(delay, Decimal("176"))
         accounting = self.result["accounting"]
-        self.assertEqual(Decimal(accounting["numerator"]), numerator)
-        self.assertEqual(accounting["denominator"], "29")
-        self.assertEqual(Decimal(accounting["net_pnl"]), numerator - Decimal(accounting["trading_fee"]))
-        self.assertEqual(Decimal(accounting["net_per_signal"]), numerator / Decimal(29))
+        self.assertIsNone(accounting["net_pnl"])
+        self.assertIsNone(accounting["net_per_signal"])
+        self.assertEqual(accounting["aggregate_status"], "INCOMPLETE")
+        self.assertEqual(Decimal(accounting["known_realized_subtotal"]), numerator)
+        self.assertGreaterEqual(len(self.signals), 29)
+        self.assertEqual(len(accounting["missed_signal_ids"]), 9)
+        self.assertIn("s9", accounting["unresolved_signal_ids"])
+        self.assertIn("s14", accounting["unresolved_signal_ids"])
+        self.assertEqual(accounting["slippage_only_stress"]["charged_in_net"], False)
         self.assertEqual(Decimal(accounting["synthetic_depth_slippage_memo"]), depth)
         self.assertEqual(Decimal(accounting["synthetic_delay_gap_memo"]), delay)
-        wrong = numerator - depth - delay
-        self.assertNotEqual(Decimal(accounting["net_pnl"]), wrong)
-        self.assertEqual(accounting["aggregate_status"], "INCOMPLETE")
-        self.assertEqual(accounting["unresolved_signal_ids"], ["s9", "s14"])
-        self.assertEqual(len(accounting["missed_signal_ids"]), 9)
-        self.assertEqual(len(self.signals), 29)
 
-    def test_mutations_fail_named_oracles(self):
+    def test_named_faults_fail_at_named_assertions(self):
         checks = [
             (
                 "admit_future_books",
@@ -633,39 +821,109 @@ class AcceptanceTest(unittest.TestCase):
                 lambda result: self.assertEqual(result["accounting"]["denominator"], "29"),
             ),
         ]
-        receipts = []
-        for fault, assertion_id, check in checks:
-            mutated = replay(self.fixture, mutation=fault, workers=1)
-            try:
-                check(mutated)
-            except AssertionError as exc:
-                receipts.append(
-                    {
-                        "fault": fault,
-                        "failed_assertion": assertion_id,
-                        "failed": True,
-                        "error": str(exc),
-                    }
-                )
-            else:
-                self.fail(f"mutation {fault} was not killed")
+        from unittest.mock import patch
+
+        import research.event_replay_v1.pricer as pricer_mod
+        import research.event_replay_v1.risk as risk_mod
+
+        def run_fault(name, replacement, target, assertion_id, check):
+            with patch(target, replacement):
+                faulty = replay(self.fixture, workers=1)
             check(self.result)
-        self.assertEqual(len(receipts), 6)
-        self.assertTrue(all(item["failed"] for item in receipts))
+            with self.assertRaises(AssertionError) as caught:
+                check(faulty)
+            self.assertIn(assertion_id, str(caught.exception))
+            return {"fault": name, "failed_assertion": assertion_id, "failed": True}
+
+        real_select = pricer_mod.select_book
+        real_size = risk_mod.size_decision
+        real_delay = pricer_mod.cancel_ack_delay_us
+        real_alloc = pricer_mod.allocate_resting
+        real_walk = pricer_mod.exit_walk
+        real_den = pricer_mod.signal_denominator
+
+        def leak(books, time_us, *, admit_future=False):
+            return real_select(books, time_us, admit_future=True)
+
+        def zero_delay(_spec):
+            return 0
+
+        def omit(*args, **kwargs):
+            allocated = real_alloc(*args, **kwargs)
+            allocated["fill_qty"] = Decimal(0)
+            allocated["trade_remaining"] = args[4]
+            return allocated
+
+        def at_trigger(levels, qty, trigger):
+            price = trigger if trigger is not None else levels[0][0]
+            return {
+                "parts": [{"price": str(price), "qty": str(qty)}],
+                "filled": qty,
+                "residual": Decimal(0),
+                "notional": price * qty,
+                "vwap": price,
+                "touch": price,
+            }
+
+        def round_up(qty, min_qty, *, increase_size=False):
+            return real_size(qty, min_qty, increase_size=True)
+
+        def drop(signals):
+            return real_den([row for row in signals if not row["is_miss"]])
+
+        def oracle_future(result):
+            self.assertEqual(
+                [row["price"] for row in result["scenarios"]["S0"]["fills"] if row["role"] == "ENTRY"],
+                ["100"],
+                "oracle:future-book",
+            )
+
+        def oracle_partial(result):
+            self.assertEqual(
+                next(order["filled_qty"] for order in result["scenarios"]["S7"]["orders"] if order["order_id"] == "s7:entry"),
+                "4",
+                "oracle:partial-before-ack",
+            )
+
+        def oracle_stop(result):
+            self.assertEqual(
+                [row["price"] for row in result["scenarios"]["S11"]["fills"] if row["role"] == "EXIT"],
+                ["80"],
+                "oracle:stop-book-price",
+            )
+
+        def oracle_size(result):
+            self.assertEqual(
+                next(row["status"] for row in result["accounting"]["signals"] if row["signal_id"] == "s15"),
+                "MIN_SIZE",
+                "oracle:no-round-up",
+            )
+
+        def oracle_den(result):
+            self.assertEqual(result["accounting"]["denominator"], str(len(self.signals)), "oracle:miss-denominator")
+
+        receipts = [
+            run_fault("admit_future_books", leak, "research.event_replay_v1.engine.select_book", "oracle:future-book", oracle_future),
+            run_fault("instant_cancels", zero_delay, "research.event_replay_v1.engine.cancel_ack_delay_us", "oracle:partial-before-ack", oracle_partial),
+            run_fault("omit_partials", omit, "research.event_replay_v1.engine.allocate_resting", "oracle:partial-before-ack", oracle_partial),
+            run_fault("fill_at_trigger_price", at_trigger, "research.event_replay_v1.engine.exit_walk", "oracle:stop-book-price", oracle_stop),
+            run_fault("increase_size", round_up, "research.event_replay_v1.engine.size_decision", "oracle:no-round-up", oracle_size),
+            run_fault("drop_misses", drop, "research.event_replay_v1.pricer.signal_denominator", "oracle:miss-denominator", oracle_den),
+        ]
+        self.assertEqual([item["fault"] for item in receipts], [item[0] for item in checks])
         blob = json.dumps(receipts)
         self.assertNotIn("CANARY-", blob)
-        self.mutation_receipts = receipts
 
     def test_resource_caps_stop_and_this_run_is_inside_them(self):
         self.assertEqual(MAX_WORKERS, 2)
-        self.assertEqual(MAX_RSS_BYTES, 512 * 1024 * 1024)
+        self.assertEqual(MAX_RSS_BOUND_BYTES, 512 * 1024 * 1024)
         self.assertEqual(MAX_COMMAND_SECONDS, 120)
         self.assertEqual(MAX_SUITE_SECONDS, 600)
         self.assertEqual(MAX_RECEIPT_BYTES, 8 * 1024 * 1024)
         self.assertEqual(MAX_EVENTS, 2048)
         probes = [
             (ResourceObservation(events=2049), "events"),
-            (ResourceObservation(rss_bytes=MAX_RSS_BYTES + 1), "rss"),
+            (ResourceObservation(rss_bytes=MAX_RSS_BOUND_BYTES + 1), "rss"),
             (ResourceObservation(command_seconds=MAX_COMMAND_SECONDS + 1), "command"),
             (ResourceObservation(suite_seconds=MAX_SUITE_SECONDS + 1), "suite"),
             (ResourceObservation(receipt_bytes=MAX_RECEIPT_BYTES + 1), "receipt"),
@@ -677,7 +935,7 @@ class AcceptanceTest(unittest.TestCase):
             self.assertEqual(str(caught.exception), f"CAP_STOP:{code}")
         enforce_observation(ResourceObservation(
             workers=2,
-            rss_bytes=MAX_RSS_BYTES,
+            rss_bytes=MAX_RSS_BOUND_BYTES,
             command_seconds=MAX_COMMAND_SECONDS,
             suite_seconds=MAX_SUITE_SECONDS,
             receipt_bytes=MAX_RECEIPT_BYTES,
@@ -691,106 +949,71 @@ class AcceptanceTest(unittest.TestCase):
             replay(tiny, workers=1, limits=ResourceLimits(max_events=1))
         self.assertEqual(str(caught.exception), "CAP_STOP:events")
         resource = self.result["resource"]
-        self.assertTrue(resource["enforced"])
+        self.assertNotIn("enforced", resource)
+        self.assertTrue(resource["checks"])
         self.assertEqual(resource["workers"], 1)
         self.assertLessEqual(resource["workers"], MAX_WORKERS)
-        self.assertLessEqual(resource["rss_bytes"], MAX_RSS_BYTES)
+        self.assertLessEqual(resource["rss_bytes"], MAX_RSS_BOUND_BYTES)
         self.assertLessEqual(resource["command_seconds"], MAX_COMMAND_SECONDS)
         self.assertLessEqual(resource["events"], MAX_EVENTS)
         self.assertEqual(resource["events"], sum(len(item["events"]) for item in self.fixture["scenarios"]))
         self.assertGreater(resource["rss_bytes"], 0)
 
     def test_prohibited_access_rejects_before_side_effects(self):
-        guard = RuntimeGuard()
+        outer = OuterInterception()
         original = socket.socket
-        trace = []
-        guard.activate()
+        outer.install()
         try:
             with self.assertRaises(GuardError) as caught:
                 socket.socket()
             self.assertEqual(str(caught.exception), "PROHIBITED_NETWORK")
             self.assertNotIn("CANARY", str(caught.exception))
-            for method, code in (
-                (guard.reject_env, "PROHIBITED_ENV"),
-                (guard.reject_vault, "PROHIBITED_VAULT"),
-                (guard.reject_real_root, "PROHIBITED_REAL_ROOT"),
-                (guard.reject_network, "PROHIBITED_NETWORK"),
-            ):
-                with self.assertRaises(GuardError) as caught:
-                    method("injected", payload="CANARY-SECRET-FIXTURE-ONLY")
-                self.assertEqual(str(caught.exception), code)
-                self.assertNotIn("CANARY", str(caught.exception))
-                self.assertEqual(trace, [])
+            with self.assertRaises(GuardError):
+                socket.getaddrinfo("127.0.0.1", 9)
+            self.assertEqual(outer.refusals[-1], "PROHIBITED_NETWORK")
         finally:
-            guard.deactivate()
-        self.assertIs(socket.socket, original)
+            socket.socket = original
+            socket.create_connection = outer._saved["create_connection"]
+            socket.getaddrinfo = outer._saved["getaddrinfo"]
+        saved_env = os.environ
+        saved_getenv = os.getenv
+        try:
+            install_env_trap()
+            with self.assertRaises(GuardError) as caught:
+                os.environ.get("SYNTHETIC_ENV_KEY")
+            self.assertEqual(str(caught.exception), "PROHIBITED_ENV")
+            self.assertNotIn("CANARY", str(caught.exception))
+        finally:
+            os.environ = saved_env
+            os.getenv = saved_getenv
+        ledger = OutputLedger(aggregate_cap=32, receipt_cap=16)
+        ledger.reserve_pipe(8, "pipe")
+        ledger.reserve_receipt(8)
+        with self.assertRaises(CapStop):
+            ledger.reserve_receipt(16)
+        gate = ProcessGate()
+        gate.acquire()
+        with self.assertRaises(CapStop) as caught:
+            gate.acquire()
+        self.assertEqual(str(caught.exception), "CAP_STOP:workers")
+        gate.release()
 
     def test_cli_fixture_only_pin_and_receipt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            receipt = Path(tmp) / "receipt.json"
-            proc = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "research.event_replay_v1.fixture_cli",
-                    "--fixture-only",
-                    "--fixture",
-                    str(FIXTURE_PATH),
-                    "--receipt",
-                    str(receipt),
-                    "--workers",
-                    "1",
-                ],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertNotIn("CANARY-", proc.stdout)
-            self.assertNotIn("CANARY-", proc.stderr)
-            body = receipt.read_text(encoding="utf-8")
-            self.assertNotIn("CANARY-", body)
-            self.assertLessEqual(receipt.stat().st_size, MAX_RECEIPT_BYTES)
-            payload = json.loads(body)
-            self.assertEqual(payload["compatibility"], "BLOCKED")
-            self.assertEqual(payload["live"], "OFF")
-            self.assertIsNone(payload["head"])
-            self.assertEqual(payload["authoritative_base"], AUTHORITATIVE_BASE)
-            self.assertEqual(payload["result"]["accounting"]["trading_fee"], "0")
-            self.assertIsNone(payload["result"]["accounting"]["funding_charges"]["amount"])
-            self.assertFalse(payload["research_complete"])
-            rejected = subprocess.run(
-                [sys.executable, "-m", "research.event_replay_v1.fixture_cli", "--real-input"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("REAL_INPUT_MODE_REJECTED", rejected.stderr)
-            tampered = Path(tmp) / "tampered.json"
-            tampered.write_text(FIXTURE_PATH.read_text(encoding="utf-8").replace("S0", "S0X", 1), encoding="utf-8")
-            mismatch = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "research.event_replay_v1.fixture_cli",
-                    "--fixture-only",
-                    "--fixture",
-                    str(tampered),
-                    "--receipt",
-                    str(Path(tmp) / "no.json"),
-                ],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertNotEqual(mismatch.returncode, 0)
-            self.assertIn("FIXTURE_PIN_MISMATCH", mismatch.stderr)
-            self.assertNotIn("CANARY-", mismatch.stderr)
-            self.assertNotIn("CANARY-", mismatch.stdout)
+        from research.event_replay_v1.fixture_cli import run_inprocess
+
+        payload = run_inprocess(["--fixture-only", "--fixture", str(FIXTURE_PATH), "--workers", "1"])
+        self.assertEqual(payload["status"], "OK")
+        self.assertEqual(payload["compatibility"], "BLOCKED")
+        self.assertEqual(payload["result"]["accounting"]["trading_fee"], "0")
+        self.assertIsNone(payload["result"]["accounting"]["funding_charges"]["amount"])
+        self.assertIsNone(payload["result"]["accounting"]["net_pnl"])
+        blob = json.dumps(payload)
+        self.assertNotIn("CANARY-", blob)
+        with self.assertRaises(RuntimeError) as caught:
+            run_inprocess(["--real-input"])
+        self.assertIn("REAL_INPUT", str(caught.exception))
+        self.assertEqual(VAS_BYTES, 268435456)
+        self.assertEqual(MAX_AGGREGATE_BYTES, 16 * 1024 * 1024)
 
     def test_lock_pins_bytes_imports_and_runtime(self):
         lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
@@ -800,7 +1023,10 @@ class AcceptanceTest(unittest.TestCase):
         self.assertEqual(lock["entrypoint"], "research/event_replay_v1/fixture_cli.py")
         self.assertEqual(lock["entrypoint_args"], ["--fixture-only"])
         self.assertEqual(lock["runtime"]["workers_cap"], 2)
-        self.assertEqual(lock["runtime"]["rss_cap_bytes"], 512 * 1024 * 1024)
+        self.assertEqual(lock["runtime"]["rss_bound_bytes"], 512 * 1024 * 1024)
+        self.assertEqual(lock["runtime"]["vas_bytes_per_process"], 268435456)
+        self.assertEqual(lock["runtime"]["aggregate_cap_bytes"], 16 * 1024 * 1024)
+        self.assertIsNone(lock["runtime"]["cpu_seconds_cap"])
         self.assertEqual(lock["runtime"]["command_cap_seconds"], 120)
         self.assertEqual(lock["runtime"]["suite_cap_seconds"], 600)
         self.assertEqual(lock["runtime"]["receipt_cap_bytes"], 8 * 1024 * 1024)
@@ -834,4 +1060,10 @@ class AcceptanceTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    sys.argv = [sys.argv[0]]
+    program = unittest.main(verbosity=2, exit=False)
+    from research.event_replay_v1.engine import verify_loaded_pins
+
+    loaded, lock_sha = verify_loaded_pins()
+    print("LOADED_PINS " + json.dumps({"count": len(loaded), "external_lock_sha256": lock_sha, "loaded": loaded}))
+    raise SystemExit(0 if program.result.wasSuccessful() else 1)

@@ -62,13 +62,14 @@ Real policy values, dates, N, max hold, and cost threshold stay
 
 ## Bounds
 
-The harness enforces, and stops on, these caps:
+The tree is one parent and one child. Each process has a 256MiB virtual-address ceiling. Together those ceilings are a conservative upper bound on the original 512MiB RSS figure, not a rename of it. There is no CPU-seconds cap. Wall limits are 120 seconds per command and 600 seconds per suite. Receipt files stay 8MiB. Aggregate command output is a separate 16MiB ledger.
 
-- 2 CPU workers
-- 512 MiB RSS
+- 2 processes
+- 256MiB VAS + 256MiB VAS
 - 120 seconds per command
 - 600 seconds per suite
-- 8 MiB receipts
+- 8 MiB per receipt file
+- 16 MiB aggregate output per command
 - 2,048 manufactured events
 
 Missing enforcement fails acceptance.

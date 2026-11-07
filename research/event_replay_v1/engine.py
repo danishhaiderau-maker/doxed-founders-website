@@ -7,10 +7,12 @@ Stage A records are fixture stubs; compatibility remains BLOCKED.
 from __future__ import annotations
 
 import copy
+import hashlib
 import heapq
 import itertools
 import json
 import time
+from pathlib import Path
 from decimal import Decimal
 from typing import Any
 
@@ -30,18 +32,21 @@ from .guards import (
     CapStop,
     ResourceLimits,
     ResourceObservation,
-    RuntimeGuard,
     enforce_observation,
     monotonic_seconds,
+    require_vas_ceiling,
     sample_rss_bytes,
+    structural_redact,
 )
 from .order_state import Order
 from .pricer import (
     PRICER_ID,
     D,
     S,
+    allocate_resting,
+    cancel_ack_delay_us,
     depth_slippage,
-    passive_match,
+    exit_walk,
     select_book,
     sort_levels,
     walk_levels,
@@ -68,18 +73,7 @@ class FixtureError(Exception):
 
 
 def strip_canaries(value: Any) -> Any:
-    if isinstance(value, dict):
-        cleaned = {}
-        for key, item in value.items():
-            if "canary" in str(key).lower():
-                continue
-            cleaned[key] = strip_canaries(item)
-        return cleaned
-    if isinstance(value, list):
-        return [strip_canaries(item) for item in value]
-    if isinstance(value, str) and "CANARY-" in value:
-        return "[REDACTED]"
-    return value
+    return structural_redact(value)
 
 
 def _opt_decimal(mapping: dict, key: str) -> Decimal | None:
@@ -114,6 +108,7 @@ class _Signal:
         self.position_notional = Decimal(0)
         self.position_realized = Decimal(0)
         self.had_reduction = False
+        self.last_observed_price: Decimal | None = None
         self.exit_state = ExitState()
         self.exit_pending = None
         self.entry_order: Order | None = None
@@ -131,6 +126,7 @@ class _Signal:
         self.realized_loss_exceeds_margin = False
         self.dust_qty_refused = "0"
         self.opened = False
+        self.exit_failure: str | None = None
 
     @property
     def signal_id(self) -> str:
@@ -158,10 +154,12 @@ class _Signal:
 
 
 class _Scenario:
-    def __init__(self, spec: dict, mutation: str | None, limits: ResourceLimits) -> None:
+    def __init__(self, spec: dict, limits: ResourceLimits, policy: str | None, loss_semantics: str | None) -> None:
         self.spec = spec
-        self.mutation = mutation
         self.limits = limits
+        self.policy = policy
+        self.loss_semantics = loss_semantics if loss_semantics else "UNKNOWN"
+        self.policy_blocked = policy != "HARD_STOP_BEFORE_LIQUIDATION"
         self.q: list = []
         self.counter = itertools.count(50_000_000)
         self.seen_ids: set[str] = set()
@@ -343,7 +341,7 @@ class _Scenario:
         decision, qty, rounded = size_decision(
             D(event["qty"]),
             self.min_qty,
-            increase_size=self.mutation == "increase_size",
+            increase_size=False,
         )
         signal.rounded_up = rounded
         if decision != "OK":
@@ -495,9 +493,7 @@ class _Scenario:
             return
         order.note(time_us, "PENDING_CANCEL", payload["reason"])
         self.act(time_us, "CANCEL_REQUEST", order.signal_id, order.order_id)
-        delay = int(self.signals[order.signal_id].spec["cancel_ack_delay_us"])
-        if self.mutation == "instant_cancels":
-            delay = 0
+        delay = cancel_ack_delay_us(self.signals[order.signal_id].spec)
         self.schedule(
             time_us + delay,
             "cancel_effective",
@@ -550,22 +546,38 @@ class _Scenario:
     def _trade(self, event: dict) -> None:
         if event.get("value_class") != "SYNTHETIC":
             raise FixtureError("SYNTHETIC_TRADE_LABEL_REQUIRED")
-        if self.mutation == "omit_partials":
-            return
         price = D(event["price"])
-        qty = D(event["qty"])
-        for order in list(self.orders.values()):
-            if order.style != "PASSIVE" or order.open_qty <= 0:
-                continue
-            if order.state not in {"WORKING", "PENDING_CANCEL", "PARTIAL"}:
-                continue
-            if order.queue_ahead is None or order.limit_price is None:
-                continue
-            matched = passive_match(order.side, order.limit_price, order.queue_ahead, price, qty)
+        remaining = D(event["qty"])
+        resting = [
+            order
+            for order in self.orders.values()
+            if order.style == "PASSIVE"
+            and order.open_qty > 0
+            and order.state in {"WORKING", "PENDING_CANCEL", "PARTIAL"}
+            and order.limit_price is not None
+        ]
+
+        def _priority(order: Order):
+            if order.side == "BUY":
+                return (-order.limit_price, order.created_us, order.order_id)
+            return (order.limit_price, order.created_us, order.order_id)
+
+        for order in sorted(resting, key=_priority):
+            if remaining <= 0:
+                break
+            matched = allocate_resting(
+                order.side,
+                order.limit_price,
+                order.queue_ahead,
+                price,
+                remaining,
+                order.open_qty,
+            )
+            remaining = matched["trade_remaining"]
             order.queue_ahead = matched["queue_ahead"]
-            if matched["qty"] <= 0:
+            take = matched["fill_qty"]
+            if take <= 0:
                 continue
-            take = matched["qty"] if matched["qty"] < order.open_qty else order.open_qty
             self._record_fill(
                 self.signals[order.signal_id],
                 order,
@@ -583,13 +595,9 @@ class _Scenario:
                 trigger_price=None,
             )
 
-    def _take(self, signal: _Signal, order: Order, time_us: int, *, role: str) -> None:
+    def _take(self, signal: _Signal, order: Order, time_us: int, *, role: str, trigger_price: Decimal | None = None) -> None:
         buys = order.side == "BUY"
-        book = select_book(
-            self.catalog_books if self.mutation == "admit_future_books" else self.received_books,
-            time_us,
-            admit_future=self.mutation == "admit_future_books",
-        )
+        book = select_book(self.catalog_books, time_us, admit_future=False)
         if book is None:
             order.reject_open(time_us, "INVALID_FOR_FILLS")
             self.act(time_us, "REJECT", signal.signal_id, order.order_id)
@@ -598,20 +606,23 @@ class _Scenario:
             else:
                 signal.incomplete = True
                 signal.status = "INCOMPLETE"
+                signal.exit_failure = "INVALID_FOR_FILLS"
             return
         levels = book["asks"] if buys else book["bids"]
-        walked = walk_levels(levels, order.open_qty)
+        walked = walk_levels(levels, order.open_qty) if role == "ENTRY" else exit_walk(levels, order.open_qty, trigger_price)
         filled = walked["filled"]
         if filled <= 0 or filled < signal.min_qty:
             if filled > 0:
                 signal.dust_qty_refused = S(filled)
-            order.reject_open(time_us, "DUST" if filled > 0 else "INVALID_FOR_FILLS")
+            reason = "DUST" if filled > 0 else "INVALID_FOR_FILLS"
+            order.reject_open(time_us, reason)
             self.act(time_us, "REJECT", signal.signal_id, order.order_id)
             if role == "ENTRY" and not signal.opened:
-                self._miss(signal, "DUST" if filled > 0 else "INVALID_FOR_FILLS", time_us)
+                self._miss(signal, reason, time_us)
             else:
                 signal.incomplete = True
                 signal.status = "INCOMPLETE"
+                signal.exit_failure = reason
             return
         residual = walked["residual"]
         slip = depth_slippage(buys, walked["vwap"], walked["touch"], filled)
@@ -743,37 +754,67 @@ class _Scenario:
         )
         signal.liquidation_status = "MODELLED_FIXTURE_IDENTITY_NOT_VENUE_PROOF"
 
-    def _mark(self, event: dict) -> None:
-        signal = self.signals[event["signal_id"]]
-        if signal.position_qty <= 0 or signal.exit_pending is not None:
-            return
-        triggers = evaluate_exit(
-            side=signal.side,
-            price=D(event["price"]),
-            state=signal.exit_state,
-            protections=_protections(signal.spec.get("protections") or {}),
-            liq_price=signal.liq_price,
-            thesis=False,
-            time_due=False,
-        )
-        self._schedule_exit(signal, int(event["time_us"]), triggers, D(event["price"]))
-
-    def _thesis(self, event: dict) -> None:
-        signal = self.signals[event["signal_id"]]
-        if not signal.spec.get("thesis_cut"):
-            raise FixtureError("THESIS_NOT_ENABLED")
-        if signal.position_qty <= 0 or signal.exit_pending is not None:
-            return
-        price = signal.avg_entry() if signal.position_qty else None
-        triggers = evaluate_exit(
+    def _triggers(self, signal: _Signal, price: Decimal | None, *, thesis: bool, time_due: bool) -> list[dict]:
+        return evaluate_exit(
             side=signal.side,
             price=price,
             state=signal.exit_state,
             protections=_protections(signal.spec.get("protections") or {}),
             liq_price=signal.liq_price,
-            thesis=True,
-            time_due=False,
+            thesis=thesis,
+            time_due=time_due,
         )
+
+    def _review_pending(self, signal: _Signal, triggers: list[dict], time_us: int, price: Decimal | None) -> None:
+        pending = signal.exit_pending
+        if pending is None:
+            return
+        winner = choose_winner(triggers)
+        review = {
+            "time_us": time_us,
+            "observed_price": None if price is None else S(price),
+            "considered": [] if winner is None else winner["considered"],
+            "superseded": False,
+        }
+        pending.setdefault("reviews", []).append(review)
+        if winner is None or self.policy_blocked:
+            return
+        rank = {name: index for index, name in enumerate(FIXTURE_TIE_PRIORITY)}
+        if winner["name"] not in {"HARD_STOP", "LIQUIDATION"}:
+            return
+        if rank[winner["name"]] < rank[pending["name"]]:
+            review["superseded"] = True
+            pending["superseded_from"] = pending["name"]
+            pending["name"] = winner["name"]
+            pending["trigger_price"] = winner["trigger_price"]
+            pending["suppressed"] = winner["suppressed"]
+            pending["considered"] = winner["considered"]
+            pending["observed_price"] = None if price is None else S(price)
+            self.act(time_us, "EXIT_SUPERSEDE", signal.signal_id, None)
+
+    def _mark(self, event: dict) -> None:
+        signal = self.signals[event["signal_id"]]
+        if signal.position_qty <= 0:
+            return
+        price = D(event["price"])
+        signal.last_observed_price = price
+        triggers = self._triggers(signal, price, thesis=False, time_due=False)
+        if signal.exit_pending is not None:
+            self._review_pending(signal, triggers, int(event["time_us"]), price)
+            return
+        self._schedule_exit(signal, int(event["time_us"]), triggers, price)
+
+    def _thesis(self, event: dict) -> None:
+        signal = self.signals[event["signal_id"]]
+        if not signal.spec.get("thesis_cut"):
+            raise FixtureError("THESIS_NOT_ENABLED")
+        if signal.position_qty <= 0:
+            return
+        price = signal.last_observed_price
+        triggers = self._triggers(signal, price, thesis=True, time_due=False)
+        if signal.exit_pending is not None:
+            self._review_pending(signal, triggers, int(event["time_us"]), price)
+            return
         self._schedule_exit(signal, int(event["time_us"]), triggers, price)
 
     def _time_trigger(self, time_us: int, payload: dict) -> None:
@@ -803,6 +844,24 @@ class _Scenario:
             return
         if qty < signal.min_qty:
             signal.dust_qty_refused = S(qty)
+            signal.incomplete = True
+            self.exits.append(
+                {
+                    "time_us": time_us,
+                    "signal_id": signal.signal_id,
+                    "order_id": None,
+                    "winner": winner["name"],
+                    "reason": "BELOW_MIN_SIZE",
+                    "failed": True,
+                    "residual_qty": S(signal.position_qty),
+                    "suppressed": winner["suppressed"],
+                    "considered": winner["considered"],
+                    "trigger_price": None if winner["trigger_price"] is None else S(winner["trigger_price"]),
+                    "trigger_time_us": time_us,
+                    "observed_price": None if observed is None else S(observed),
+                    "qty": S(qty),
+                }
+            )
             return
         if winner["name"] == "LADDER":
             signal.exit_state.ladder_index += 1
@@ -839,49 +898,37 @@ class _Scenario:
         )
         self.act(time_us, "EXIT_EXEC", signal.signal_id, order.order_id)
         trigger = pending["trigger_price"]
-        if self.mutation == "fill_at_trigger_price" and trigger is not None:
-            order.apply_ack(f"{order.order_id}:arrival", time_us)
-            self._record_fill(
-                signal,
-                order,
-                time_us,
-                qty=qty,
-                price=trigger,
-                notional=trigger * qty,
-                parts=[{"price": S(trigger), "qty": S(qty)}],
-                mechanism="TRIGGER_PRICE_MUTATION",
-                evidence="TRIGGER_PRICE",
-                role="EXIT",
-                book_id=None,
-                touch=trigger,
-                depth_slip=Decimal(0),
-                trigger_price=trigger,
-            )
-        else:
-            order.apply_ack(f"{order.order_id}:arrival", time_us)
-            before = len(self.fills)
-            self._take(signal, order, time_us, role="EXIT")
-            if len(self.fills) > before and trigger is not None:
-                fill = self.fills[-1]
-                price = D(fill["price"])
-                if order.side == "SELL":
-                    gap = max(Decimal(0), (trigger - price) * D(fill["qty"]))
-                else:
-                    gap = max(Decimal(0), (price - trigger) * D(fill["qty"]))
-                fill["trigger_price"] = S(trigger)
-                fill["delay_gap_adverse"] = S(gap)
+        order.apply_ack(f"{order.order_id}:arrival", time_us)
+        before = len(self.fills)
+        self._take(signal, order, time_us, role="EXIT", trigger_price=trigger)
+        if len(self.fills) > before and trigger is not None:
+            fill = self.fills[-1]
+            price = D(fill["price"])
+            if order.side == "SELL":
+                gap = max(Decimal(0), (trigger - price) * D(fill["qty"]))
+            else:
+                gap = max(Decimal(0), (price - trigger) * D(fill["qty"]))
+            fill["trigger_price"] = S(trigger)
+            fill["delay_gap_adverse"] = S(gap)
+        failed = order.filled <= 0
         self.exits.append(
             {
                 "time_us": time_us,
                 "signal_id": signal.signal_id,
                 "order_id": order.order_id,
                 "winner": pending["name"],
+                "reason": signal.exit_failure if failed else pending["name"],
+                "failed": failed,
+                "residual_qty": S(signal.position_qty),
                 "suppressed": pending["suppressed"],
                 "considered": pending["considered"],
                 "trigger_price": None if trigger is None else S(trigger),
                 "trigger_time_us": pending["trigger_time_us"],
                 "observed_price": pending["observed_price"],
+                "superseded_from": pending.get("superseded_from"),
+                "reviews": pending.get("reviews", []),
                 "qty": S(qty),
+                "liquidation_loss_semantics": self.loss_semantics,
             }
         )
         signal.exit_pending = None
@@ -925,8 +972,15 @@ class _Scenario:
         for order in self.orders.values():
             if not order.conserved():
                 raise FixtureError("QUANTITY_NOT_CONSERVED")
+        if self.policy_blocked:
+            for row in public_signals.values():
+                row["incomplete"] = True
+                if row["status"] not in MISS_STATUSES:
+                    row["status"] = "BLOCKED_UNDEFINED_EXIT_PRIORITY"
         status = "COMPLETE"
-        if any(row["incomplete"] for row in public_signals.values()):
+        if self.policy_blocked:
+            status = "BLOCKED_UNDEFINED_EXIT_PRIORITY"
+        elif any(row["incomplete"] for row in public_signals.values()):
             if any(row["status"] == "INVALID_UNKNOWN_MAINTENANCE" for row in public_signals.values()):
                 status = "INVALID_UNKNOWN_MAINTENANCE"
             else:
@@ -971,6 +1025,9 @@ class _Scenario:
             "realized_loss_exceeds_margin": signal.realized_loss_exceeds_margin,
             "dust_qty_refused": signal.dust_qty_refused,
             "duplicate_acks_ignored": signal.duplicate_acks,
+            "last_observed_price": None if signal.last_observed_price is None else S(signal.last_observed_price),
+            "exit_priority_policy": self.policy,
+            "liquidation_loss_semantics": self.loss_semantics,
             "real_policy": {
                 "dates": None,
                 "n": None,
@@ -1027,42 +1084,62 @@ def _require_scope(fixture: dict) -> None:
             raise FixtureError("REAL_POLICY_NULL_BLOCKED")
 
 
+def verify_loaded_pins() -> tuple[dict, str]:
+    package = Path(__file__).resolve().parent
+    lock_path = package / "dependencies.lock.json"
+    lock_bytes = lock_path.read_bytes()
+    if len(lock_bytes) > 8 * 1024 * 1024:
+        raise FixtureError("LOADED_PIN_MISMATCH")
+    lock = json.loads(lock_bytes.decode("utf-8"))
+    repo = package.parents[1]
+    loaded = {}
+    for rel, meta in lock["files"].items():
+        path = repo / rel
+        cap = int(meta["bytes"]) + 1
+        data = path.read_bytes()
+        if len(data) > cap or len(data) != int(meta["bytes"]):
+            raise FixtureError("LOADED_PIN_MISMATCH")
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != meta["sha256"]:
+            raise FixtureError("LOADED_PIN_MISMATCH")
+        loaded[rel] = {"sha256": digest, "bytes": len(data)}
+    return loaded, hashlib.sha256(lock_bytes).hexdigest()
+
+
 def replay(
     fixture: dict,
     *,
-    mutation: str | None = None,
     workers: int = 1,
     limits: ResourceLimits | None = None,
 ) -> dict:
     limits = limits or DEFAULT_LIMITS
     started = time.monotonic()
+    vas_check = require_vas_ceiling(limits.vas_bytes)
+    loaded_pins, external_lock_sha = verify_loaded_pins()
     enforce_observation(
-        ResourceObservation(workers=workers, events=0, rss_bytes=sample_rss_bytes()),
+        ResourceObservation(workers=workers, events=0, rss_bytes=sample_rss_bytes(), vas_bytes=limits.vas_bytes),
         limits,
     )
     clean = strip_canaries(copy.deepcopy(fixture))
     require_fee_disposition(clean)
     _require_scope(clean)
+    policy = clean.get("exit_priority_policy")
+    loss_semantics = clean.get("liquidation_loss_semantics") or "UNKNOWN"
     manufactured = sum(len(item["events"]) for item in clean["scenarios"])
     if manufactured > limits.max_events:
         raise CapStop("events")
-    guard = RuntimeGuard()
-    guard.activate()
     scenarios = {}
-    try:
-        for spec in clean["scenarios"]:
-            runner = _Scenario(spec, mutation, limits)
-            runner.run(started)
-            scenarios[spec["scenario_id"]] = runner.finish()
-    finally:
-        guard.deactivate()
+    for spec in clean["scenarios"]:
+        runner = _Scenario(spec, limits, policy, loss_semantics)
+        runner.run(started)
+        scenarios[spec["scenario_id"]] = runner.finish()
     signals = []
     fills = []
     for spec in clean["scenarios"]:
         scenario = scenarios[spec["scenario_id"]]
         signals.extend(scenario["signals"].values())
         fills.extend(scenario["fills"])
-    accounting = build_accounting(signals, fills, drop_misses=mutation == "drop_misses")
+    accounting = build_accounting(signals, fills)
     elapsed = monotonic_seconds(started)
     rss = sample_rss_bytes()
     payload = {
@@ -1094,24 +1171,48 @@ def replay(
         "pricer_id": PRICER_ID,
         "fixture_tie_priority": list(FIXTURE_TIE_PRIORITY),
         "tie_priority_is_live_policy": False,
-        "mutation": mutation,
+        "exit_priority_policy": policy,
+        "liquidation_loss_semantics": loss_semantics,
         "scenarios": scenarios,
         "accounting": accounting,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    enforce_observation(
-        ResourceObservation(
-            workers=workers,
-            rss_bytes=rss,
-            command_seconds=elapsed,
-            suite_seconds=0,
-            receipt_bytes=len(raw),
-            events=manufactured,
-        ),
-        limits,
-    )
+    command_stopped = elapsed > limits.max_command_seconds
+    checks = [
+        vas_check,
+        {
+            "metric": "manufactured_events",
+            "mechanism": "pre_replay_count",
+            "observed": manufactured,
+            "cap": limits.max_events,
+            "stopped": False,
+        },
+        {
+            "metric": "command_wall_seconds",
+            "mechanism": "monotonic_poll_per_event",
+            "observed": elapsed,
+            "cap": limits.max_command_seconds,
+            "stopped": command_stopped,
+        },
+        {
+            "metric": "process_rss_sample",
+            "mechanism": "proc_self_vmrss_sample",
+            "observed": rss,
+            "cap": limits.max_rss_bytes,
+            "stopped": rss > limits.max_rss_bytes,
+            "note": "sample_only_not_the_tree_ceiling",
+        },
+        {
+            "metric": "inner_result_bytes",
+            "mechanism": "canonical_json_length",
+            "observed": len(raw),
+            "cap": limits.max_receipt_bytes,
+            "stopped": len(raw) > limits.max_receipt_bytes,
+        },
+    ]
+    if command_stopped or rss > limits.max_rss_bytes or len(raw) > limits.max_receipt_bytes:
+        raise CapStop("command" if command_stopped else "rss" if rss > limits.max_rss_bytes else "receipt")
     payload["resource"] = {
-        "enforced": True,
         "workers": workers,
         "workers_cap": limits.max_workers,
         "rss_bytes": rss,
@@ -1119,9 +1220,14 @@ def replay(
         "command_seconds": elapsed,
         "command_cap_seconds": limits.max_command_seconds,
         "suite_cap_seconds": limits.max_suite_seconds,
-        "receipt_bytes": len(raw),
+        "inner_result_bytes": len(raw),
         "receipt_cap_bytes": limits.max_receipt_bytes,
+        "aggregate_cap_bytes": limits.max_aggregate_bytes,
         "events": manufactured,
         "events_cap": limits.max_events,
+        "vas_cap_bytes": limits.vas_bytes,
+        "checks": checks,
+        "loaded_pins": loaded_pins,
+        "external_lock_sha256": external_lock_sha,
     }
     return payload

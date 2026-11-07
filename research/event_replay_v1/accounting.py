@@ -46,31 +46,44 @@ def require_fee_disposition(fixture: dict) -> None:
             raise FeeDispositionError("MEASURED_COST_NULL_BLOCKED")
 
 
-def build_accounting(signals: list[dict], fills: list[dict], *, drop_misses: bool) -> dict[str, Any]:
-    denominator_rows = [row for row in signals if not (drop_misses and row["is_miss"])]
+def build_accounting(signals: list[dict], fills: list[dict]) -> dict[str, Any]:
+    from .pricer import signal_denominator
+
     numerator = Decimal(0)
+    priced = True
     for row in signals:
         if row["realized_pnl"] is not None:
             numerator += Decimal(row["realized_pnl"])
+    for fill in fills:
+        if "depth_slippage" not in fill or "delay_gap_adverse" not in fill:
+            priced = False
     fee = Decimal(0)
-    net = numerator - fee
     depth = Decimal(0)
     delay = Decimal(0)
+    components = []
     for fill in fills:
-        depth += Decimal(fill["depth_slippage"])
-        delay += Decimal(fill["delay_gap_adverse"])
-    denominator = len(denominator_rows)
-    if denominator == 0:
-        per_signal = None
-    else:
-        per_signal = str(net / Decimal(denominator))
+        depth_part = Decimal(fill.get("depth_slippage", "0"))
+        delay_part = Decimal(fill.get("delay_gap_adverse", "0"))
+        depth += depth_part
+        delay += delay_part
+        components.append(
+            {
+                "fill_id": fill.get("fill_id"),
+                "depth_slippage": S(depth_part),
+                "delay_gap_adverse": S(delay_part),
+                "charged_in_net": False,
+            }
+        )
+    denominator = signal_denominator(signals)
     missed = [row["signal_id"] for row in signals if row["is_miss"]]
     unresolved = [
         row["signal_id"]
         for row in signals
         if row["incomplete"] or row["realized_pnl"] is None and not row["is_miss"]
     ]
-    incomplete = any(row["incomplete"] for row in signals)
+    incomplete = any(row["incomplete"] for row in signals) or not priced
+    stress_status = "EMITTED" if priced else "INCOMPLETE"
+    net_value = None if incomplete or denominator == 0 else str((numerator - fee) / Decimal(denominator))
     return {
         "price_pnl": S(numerator),
         "gross_pnl": S(numerator),
@@ -99,10 +112,18 @@ def build_accounting(signals: list[dict], fills: list[dict], *, drop_misses: boo
         "synthetic_delay_gap_memo": S(delay),
         "queue_delay_value_class": "SYNTHETIC",
         "memos_subtracted_from_net": False,
-        "net_pnl": S(net),
+        "slippage_only_stress": {
+            "status": stress_status,
+            "synthetic_depth_slippage_memo": S(depth),
+            "synthetic_delay_gap_memo": S(delay),
+            "charged_in_net": False,
+            "components": components,
+        },
+        "known_realized_subtotal": S(numerator),
+        "net_pnl": None if incomplete else S(numerator - fee),
         "numerator": S(numerator),
         "denominator": str(denominator),
-        "net_per_signal": per_signal,
+        "net_per_signal": net_value,
         "missed_signal_ids": missed,
         "unresolved_signal_ids": unresolved,
         "signals": signals,
