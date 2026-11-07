@@ -46,6 +46,7 @@ from research.results_gates_v1.guards import (
     PER_WORKER_VAS_BYTES,
     RECEIPT_BYTES,
     TEST_IMPORTS,
+    MonotonicClock,
     commit_receipt,
     enforce_elapsed,
     enforce_rss,
@@ -64,6 +65,7 @@ from research.results_gates_v1.statistics import benjamini_hochberg
 from research.results_gates_v1.validate import (
     CanaryRejected,
     CapStop,
+    DriftStop,
     ProfileRejected,
     SchemaError,
     canonical_bytes,
@@ -82,58 +84,99 @@ FAULTS = []
 SECRET = "CANARY_SECRET_SUPERSECRETVALUE"
 
 
-def record_fault(fault_id, assertion, module, name, mutant, exercise, oracle):
-    """Outer recorder. CONTROL and restoration must pass. WEAK must fail for real."""
+class IsolationStop(RuntimeError):
+    """A weak path raised an incidental schema error. Not a kill."""
+
+
+def fail_oracle(oracle_id):
+    error = AssertionError(oracle_id)
+    error.oracle_id = oracle_id
+    raise error
+
+
+def _observe(fn):
+    try:
+        fn()
+    except AssertionError as exc:
+        return "FAIL", type(exc).__name__, getattr(exc, "oracle_id", None)
+    except Exception as exc:
+        return "ERROR", type(exc).__name__, None
+    return "PASS", None, None
+
+
+def record_fault(fault_id, assertion, module, name, mutant, exercise, control_exercise, oracle_id, intended_type):
+    """INTACT, same-mutant CONTROL, WEAK named oracle, then restoration.
+
+    Only the named oracle identity with its exact type counts. SchemaError and
+    any other AssertionError are ERROR and are not kills.
+    """
     original = getattr(module, name)
     sentinel = object()
     setattr(original, "_c993_sentinel", sentinel)
-    try:
-        exercise()
-        intact = "PASS"
-        intact_failure = None
-    except Exception as exc:
-        intact = "FAIL"
-        intact_failure = type(exc).__name__
+    intact, intact_failure, _intact_identity = _observe(exercise)
     setattr(module, name, mutant)
     try:
-        try:
-            exercise()
-            weak = "NO_FAILURE"
-            weak_failure = None
-        except Exception as exc:
-            weak = "FAIL"
-            weak_failure = type(exc).__name__
+        control, control_failure, _control_identity = _observe(control_exercise)
+        weak, weak_failure, weak_identity = _observe(exercise)
     finally:
         setattr(module, name, original)
     restored = getattr(module, name) is original and getattr(original, "_c993_sentinel", None) is sentinel
-    try:
-        exercise()
-        restored_run = "PASS"
-    except Exception as exc:
-        restored_run = type(exc).__name__
+    restored_run, restored_failure, _restored_identity = _observe(exercise)
+    identity_ok = weak == "FAIL" and weak_failure == intended_type and weak_identity == oracle_id
     counted = (
         intact == "PASS"
-        and weak == "FAIL"
-        and weak_failure not in {None, "ImportError", "ModuleNotFoundError"}
+        and control == "PASS"
+        and identity_ok
         and restored
         and restored_run == "PASS"
     )
     row = {
         "id": fault_id,
         "assertion": assertion,
-        "base_oracle": oracle,
-        "control": intact,
+        "oracle_id": oracle_id,
+        "intended_type": intended_type,
+        "base_oracle": oracle_id,
+        "control": control,
+        "control_failure": control_failure,
         "intact": intact,
+        "intact_failure": intact_failure,
         "weak": weak,
         "failure_type": weak_failure,
-        "intact_failure": intact_failure,
+        "weak_identity": weak_identity,
         "restored": restored,
         "restored_run": restored_run,
+        "restored_failure": restored_failure,
         "counted_as_kill": counted,
     }
     FAULTS.append(row)
+    if weak_failure == "SchemaError":
+        row["disposition"] = "ERROR_STOP"
+        raise IsolationStop(row)
     if not counted:
         raise AssertionError(row)
+
+
+def consistent_family_document(count):
+    """Test-only document. Derived ids stay aligned across family, coverage, and series."""
+    doc = load()
+    base_ids = [row["id"] for row in doc["family"]]
+    if count < len(base_ids):
+        raise AssertionError("count below canonical family")
+    extras = [f"X{index:03d}" for index in range(count - len(base_ids))]
+    doc["family"] = list(doc["family"]) + [{"id": ident, "role": "CANDIDATE"} for ident in extras]
+    family_ids = base_ids + extras
+    block = doc["comparable_family"]
+    width = len(block["series"][0]["differential"])
+    block["preregistered_ids"] = list(family_ids)
+    block["presented_ids"] = list(family_ids)
+    for ident in extras:
+        block["series"].append({"id": ident, "differential": ["0"] * width})
+    coverage = doc["coverage"]
+    coverage["planned"] = list(coverage["planned"]) + extras
+    coverage["remaining"] = list(coverage["remaining"]) + extras
+    for ident in extras:
+        doc["p_values"].append({"id": ident, "evaluated": False, "p": None})
+    return doc
 
 
 def load():
@@ -691,6 +734,8 @@ class CorrectiveTests(unittest.TestCase):
             return original_bh([row for row in entries if row.get("evaluated")], q)
 
         def rc_uncentered(series, draws, *, family_exact=True):
+            if not family_exact or not series or not draws:
+                return {"status": "BLOCKED", "p": None, "real_inference": "BLOCKED"}
             width = len(series[0]["differential"])
             parsed = [[Fraction(item) for item in row["differential"]] for row in series]
             statistic = max(sum(values, Fraction(0)) / width for values in parsed)
@@ -699,7 +744,9 @@ class CorrectiveTests(unittest.TestCase):
                 peak = max(sum((parsed[k][index] for index in draw), Fraction(0)) / width for k in range(len(parsed)))
                 if peak >= statistic:
                     extreme += 1
-            return {"status": "SYNTHETIC_BRANCH_FAIL", "p": "1", "real_inference": "BLOCKED", "extreme": extreme}
+            p_value = Fraction(extreme, len(draws))
+            branch = "SYNTHETIC_BRANCH_PASS" if p_value <= Fraction("0.05") else "SYNTHETIC_BRANCH_FAIL"
+            return {"status": branch, "p": validate_mod.number_str(p_value), "real_inference": "BLOCKED"}
 
         def rc_on_presented(doc):
             block = doc["comparable_family"]
@@ -771,77 +818,79 @@ class CorrectiveTests(unittest.TestCase):
             ]
             produced = statistics_mod.benjamini_hochberg(entries, Fraction("0.05"))
             if list(produced["rejected_ids"]) != ["A", "B", "C", "D"]:
-                raise AssertionError(list(produced["rejected_ids"]))
+                fail_oracle("bh_inclusive_boundary")
 
         def exercise_p1():
             from research.results_gates_v1.coverage import reconcile
             result = gates_mod._bh(load(), reconcile(load()["coverage"]))
             if result["m"] != 7 or list(result["rejected_ids"]) != ["S1"] or result["bookkeeping_p1"] != 4:
-                raise AssertionError((result.get("m"), list(result.get("rejected_ids") or []), result.get("bookkeeping_p1")))
+                fail_oracle("bh_p1_mass_full_posted_n")
 
         def exercise_rc():
             result = gates_mod._rc(load())
             if result["p"] != "0.05":
-                raise AssertionError(result["p"])
+                fail_oracle("white_rc_centered_fixed_draws")
 
         def exercise_pool():
             doc = load()
             doc["comparable_family"]["presented_ids"] = ["S1"]
             result = gates_mod._rc(doc)
             if result["status"] != "REJECTED_NOT_FULL_FAMILY" or result["p"] is not None:
-                raise AssertionError((result["status"], result["p"]))
+                fail_oracle("white_rc_full_family_not_selected_pool")
 
         def exercise_overlap():
             result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 39, "end": 41, "token": "UNDISTURBED"})
             if result["synthetic_overlap"] != "OVERLAP" or result["false_undisturbed_claim"] != "REJECTED":
-                raise AssertionError((result["synthetic_overlap"], result["false_undisturbed_claim"]))
+                fail_oracle("exposure_overlap_reject_false_undisturbed")
             if result["untouched_validation_acceptance"] != "BLOCKED" or result["real_exposure"] != "UNKNOWN":
-                raise AssertionError("untouched moved")
+                fail_oracle("exposure_overlap_reject_false_undisturbed")
 
         def exercise_boundary():
             result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 60, "end": 70, "token": "UNDISTURBED"})
             if result["synthetic_overlap"] != "NO_OVERLAP" or result["false_undisturbed_claim"] != "NOT_REJECTED_FOR_OVERLAP":
-                raise AssertionError((result["synthetic_overlap"], result["false_undisturbed_claim"]))
+                fail_oracle("exposure_half_open_touch_is_not_overlap")
 
         def exercise_unknown():
             ledger = copy.deepcopy(load()["exposure_ledger"])
             ledger["completeness"] = "UNKNOWN"
             result = gates_mod.exposure_gate(ledger, {"start": 80, "end": 90, "token": "UNSEEN"})
             if result["synthetic_overlap"] != "UNKNOWN" or result["false_undisturbed_claim"] != "BLOCKED":
-                raise AssertionError((result["synthetic_overlap"], result["false_undisturbed_claim"]))
+                fail_oracle("exposure_unknown_ledger_not_undisturbed")
             if result["untouched_validation_acceptance"] != "BLOCKED" or result["real_exposure"] != "UNKNOWN":
-                raise AssertionError("untouched moved")
+                fail_oracle("exposure_unknown_ledger_not_undisturbed")
 
         def exercise_ge():
             if gates_mod.compare_ge("10", "10") != "SYNTHETIC_BRANCH_PASS":
-                raise AssertionError(gates_mod.compare_ge("10", "10"))
+                fail_oracle("compare_ge_inclusive_boundary")
 
         def exercise_gt():
             if gates_mod.compare_gt("0", "0") != "SYNTHETIC_BRANCH_FAIL":
-                raise AssertionError(gates_mod.compare_gt("0", "0"))
+                fail_oracle("compare_gt_strict_boundary")
 
         def exercise_le():
             if gates_mod.compare_le("0.40", "0.40") != "SYNTHETIC_BRANCH_PASS":
-                raise AssertionError(gates_mod.compare_le("0.40", "0.40"))
+                fail_oracle("compare_le_inclusive_boundary")
 
         def exercise_workers():
             try:
                 gates_mod.evaluate_fixture(load(), workers=3)
             except CapStop as exc:
                 if exc.status != "INCOMPLETE_STOP" or exc.reason != "cpu_workers":
-                    raise AssertionError(exc.reason)
+                    fail_oracle("missing_worker_cap")
                 return
-            raise AssertionError("workers cap did not stop")
+            fail_oracle("missing_worker_cap")
 
         def exercise_strategies():
-            doc = {"family": [{"id": f"S{index}", "role": "CANDIDATE"} for index in range(257)]}
+            doc = consistent_family_document(257)
             try:
                 gates_mod.evaluate_fixture(doc)
             except CapStop as exc:
-                if exc.reason != "fixture_strategies":
-                    raise AssertionError(exc.reason)
-                return
-            raise AssertionError("strategy cap did not stop")
+                if exc.status == "INCOMPLETE_STOP" and exc.reason == "fixture_strategies":
+                    return
+                fail_oracle("missing_strategy_count_cap")
+            except SchemaError:
+                raise
+            fail_oracle("missing_strategy_count_cap")
 
         def exercise_elapsed():
             class _Expired:
@@ -850,10 +899,10 @@ class CorrectiveTests(unittest.TestCase):
             try:
                 gates_mod.evaluate_fixture(load(), clock=_Expired())
             except CapStop as exc:
-                if exc.reason != "command_seconds":
-                    raise AssertionError(exc.reason)
+                if exc.reason != "command_seconds" or exc.status != "INCOMPLETE_STOP":
+                    fail_oracle("missing_command_time_cap")
                 return
-            raise AssertionError("command cap did not stop")
+            fail_oracle("missing_command_time_cap")
 
         def exercise_receipt():
             directory = Path(tempfile.mkdtemp())
@@ -862,10 +911,10 @@ class CorrectiveTests(unittest.TestCase):
                 try:
                     guards_mod.commit_receipt(path, b"x" * (RECEIPT_BYTES + 1))
                 except CapStop as exc:
-                    if path.exists() or exc.reason != "receipt_bytes":
-                        raise AssertionError("receipt cap wrote or mismatched")
+                    if path.exists() or exc.reason != "receipt_bytes" or exc.status != "INCOMPLETE_STOP":
+                        fail_oracle("missing_receipt_byte_cap")
                     return
-                raise AssertionError("receipt cap did not stop")
+                fail_oracle("missing_receipt_byte_cap")
             finally:
                 if path.exists():
                     path.unlink()
@@ -877,25 +926,25 @@ class CorrectiveTests(unittest.TestCase):
                 gates_mod.evaluate_fixture(doc)
             except SchemaError as exc:
                 if "nonzero non-fill" not in str(exc) or doc["accounting"]["signals"][4]["net"] != "1":
-                    raise AssertionError(str(exc))
+                    fail_oracle("nonzero_nonfill_rejected")
                 return
-            raise AssertionError("nonzero non-fill was accepted")
+            fail_oracle("nonzero_nonfill_rejected")
 
         def exercise_inverted():
             ledger = copy.deepcopy(load()["exposure_ledger"])
             ledger["intervals"][0]["end"] = -1
             result = gates_mod.exposure_gate(ledger, {"start": 60, "end": 70, "token": "UNDISTURBED"})
             if result["synthetic_overlap"] != "UNKNOWN" or result["real_exposure"] != "UNKNOWN":
-                raise AssertionError(result["synthetic_overlap"])
+                fail_oracle("h6_inverted_required_epoch_unknown")
             if result["untouched_validation_acceptance"] != "BLOCKED":
-                raise AssertionError("untouched moved")
+                fail_oracle("h6_inverted_required_epoch_unknown")
 
         def exercise_zero():
             ledger = copy.deepcopy(load()["exposure_ledger"])
             ledger["intervals"][0]["end"] = ledger["intervals"][0]["start"]
             result = gates_mod.exposure_gate(ledger, {"start": 60, "end": 70, "token": "UNDISTURBED"})
             if result["synthetic_overlap"] != "UNKNOWN":
-                raise AssertionError(result["synthetic_overlap"])
+                fail_oracle("h6_unmarked_zero_width_unknown")
 
         def exercise_empty():
             ledger = copy.deepcopy(load()["exposure_ledger"])
@@ -904,38 +953,143 @@ class CorrectiveTests(unittest.TestCase):
             ledger["intervals"][0]["provenance"] = "SYNTHETIC_DECLARED_EMPTY"
             result = gates_mod.exposure_gate(ledger, {"start": 60, "end": 70, "token": "UNDISTURBED"})
             if result["synthetic_overlap"] != "NO_OVERLAP":
-                raise AssertionError(result["synthetic_overlap"])
+                fail_oracle("h6_declared_empty_with_provenance_admitted")
             if result["untouched_validation_acceptance"] != "BLOCKED" or result["real_exposure"] != "UNKNOWN":
-                raise AssertionError("untouched moved")
+                fail_oracle("h6_declared_empty_with_provenance_admitted")
 
         def exercise_denominator():
             result = gates_mod.evaluate_fixture(load())
             if result["metrics"]["net_per_signal"]["denominator"] != "7":
-                raise AssertionError(result["metrics"]["net_per_signal"])
+                fail_oracle("net_per_signal_includes_nonfill_zeros")
+
+        def control_bh_inclusive():
+            from research.results_gates_v1.coverage import reconcile
+            result = gates_mod._bh(load(), reconcile(load()["coverage"]))
+            if list(result["rejected_ids"]) != ["S1"] or result["m"] != 7:
+                raise AssertionError("control")
+
+        def control_p1():
+            entries = [
+                {"id": "A", "evaluated": True, "p": "0.001"},
+                {"id": "B", "evaluated": True, "p": "0.04"},
+                {"id": "C", "evaluated": True, "p": "0.20"},
+            ]
+            produced = statistics_mod.benjamini_hochberg(entries, Fraction("0.05"))
+            if produced["m"] != 3 or produced["status"] != "SYNTHETIC_BRANCH_COMPUTED":
+                raise AssertionError("control")
+
+        def control_rc():
+            series = [
+                {"id": "Z1", "differential": ["0", "0"]},
+                {"id": "Z2", "differential": ["0", "0"]},
+            ]
+            produced = statistics_mod.white_reality_check(series, [[0, 0], [1, 1]], family_exact=True)
+            if produced["p"] != "1":
+                raise AssertionError("control")
+
+        def control_pool():
+            result = gates_mod._rc(load())
+            if result["p"] != "0.05":
+                raise AssertionError("control")
+
+        def control_overlap():
+            result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 60, "end": 70, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "NO_OVERLAP":
+                raise AssertionError("control")
+
+        def control_boundary():
+            result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 39, "end": 41, "token": "UNDISTURBED"})
+            if result["false_undisturbed_claim"] != "REJECTED":
+                raise AssertionError("control")
+
+        def control_unknown():
+            result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 60, "end": 70, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "NO_OVERLAP" or result["real_exposure"] != "UNKNOWN":
+                raise AssertionError("control")
+
+        def control_ge():
+            if gates_mod.compare_ge("11", "10") != "SYNTHETIC_BRANCH_PASS":
+                raise AssertionError("control")
+
+        def control_gt():
+            if gates_mod.compare_gt("1", "0") != "SYNTHETIC_BRANCH_PASS":
+                raise AssertionError("control")
+
+        def control_le():
+            if gates_mod.compare_le("0.30", "0.40") != "SYNTHETIC_BRANCH_PASS":
+                raise AssertionError("control")
+
+        def control_workers():
+            gates_mod.evaluate_fixture(load(), workers=1)
+
+        def control_strategies():
+            gates_mod.evaluate_fixture(load())
+
+        def control_elapsed():
+            class _Inside:
+                def elapsed(self):
+                    return 0
+            gates_mod.evaluate_fixture(load(), clock=_Inside())
+
+        def control_receipt():
+            directory = Path(tempfile.mkdtemp())
+            path = directory / "small.json"
+            try:
+                guards_mod.commit_receipt(path, b'{"ok":false}\n')
+                if not path.is_file():
+                    raise AssertionError("control")
+            finally:
+                if path.exists():
+                    path.unlink()
+
+        def control_nonfill():
+            gates_mod.evaluate_fixture(load())
+
+        def control_h6():
+            result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 60, "end": 70, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "NO_OVERLAP" or result["untouched_validation_acceptance"] != "BLOCKED":
+                raise AssertionError("control")
+
+        def control_denominator():
+            doc = load()
+            doc["accounting"]["signals"] = [row for row in doc["accounting"]["signals"] if row["state"] == "filled"]
+            result = gates_mod.evaluate_fixture(doc)
+            if result["metrics"]["net_per_signal"]["denominator"] != "4":
+                raise AssertionError("control")
 
         cases = [
-            ("F-BH-INCLUSIVE", "test_bh_boundary_is_inclusive", statistics_mod, "benjamini_hochberg", bh_less, exercise_bh_boundary, ["A", "B", "C", "D"]),
-            ("F-BH-P1-MASS", "test_bh_matches_hand_oracle_and_p1_is_not_coverage", statistics_mod, "benjamini_hochberg", bh_drop_p1, exercise_p1, {"m": 7, "rejected": ["S1"]}),
-            ("F-RC-NO-CENTER", "test_white_rc_matches_fixed_draw_oracle", statistics_mod, "white_reality_check", rc_uncentered, exercise_rc, "0.05"),
-            ("F-RC-SELECTED-POOL", "test_selected_pool_and_incomplete_family_do_not_compute_rc", gates_mod, "_rc", rc_on_presented, exercise_pool, None),
-            ("F-EXPOSURE-OVERLAP", "test_overlap_boundary_and_unknown_ledger", gates_mod, "overlaps_half_open", never_overlap, exercise_overlap, "REJECTED"),
-            ("F-EXPOSURE-BOUNDARY", "test_overlap_boundary_and_unknown_ledger", gates_mod, "overlaps_half_open", closed_overlap, exercise_boundary, "NO_OVERLAP"),
-            ("F-EXPOSURE-UNKNOWN", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_ledger_internally_complete", always_complete, exercise_unknown, "UNKNOWN"),
-            ("F-COMPARE-GE", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_ge, "SYNTHETIC_BRANCH_PASS"),
-            ("F-COMPARE-GT", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_gt, "SYNTHETIC_BRANCH_FAIL"),
-            ("F-COMPARE-LE", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_le, "SYNTHETIC_BRANCH_PASS"),
-            ("F-CAP-WORKERS", "test_caps_stop_without_truncation", gates_mod, "enforce_workers", disabled, exercise_workers, "INCOMPLETE_STOP"),
-            ("F-CAP-STRATEGIES", "test_caps_stop_without_truncation", gates_mod, "enforce_strategy_count", disabled, exercise_strategies, "INCOMPLETE_STOP"),
-            ("F-CAP-ELAPSED", "test_caps_stop_without_truncation", gates_mod, "enforce_elapsed", disabled, exercise_elapsed, "INCOMPLETE_STOP"),
-            ("F-CAP-RECEIPT", "test_caps_stop_without_truncation", guards_mod, "enforce_receipt_bytes", disabled, exercise_receipt, "INCOMPLETE_STOP"),
-            ("F-NONFILL-ZERO", "test_primary_accounting_and_cost_split", validate_mod, "assert_nonfill_zero", allow_nonzero, exercise_nonfill, "REJECT"),
-            ("F-H6-INVERTED", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", admit_inverted, exercise_inverted, "UNKNOWN"),
-            ("F-H6-UNMARKED-ZERO", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", admit_unmarked_zero, exercise_zero, "UNKNOWN"),
-            ("F-H6-DECLARED-EMPTY", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", reject_declared_empty, exercise_empty, "NO_OVERLAP"),
-            ("F-DENOMINATOR", "test_primary_accounting_and_cost_split", metrics_mod, "compute", drop_nonfills, exercise_denominator, "7"),
+            ("F-BH-INCLUSIVE", "test_bh_boundary_is_inclusive", statistics_mod, "benjamini_hochberg", bh_less, exercise_bh_boundary, control_bh_inclusive, "bh_inclusive_boundary"),
+            ("F-BH-P1-MASS", "test_bh_matches_hand_oracle_and_p1_is_not_coverage", statistics_mod, "benjamini_hochberg", bh_drop_p1, exercise_p1, control_p1, "bh_p1_mass_full_posted_n"),
+            ("F-RC-NO-CENTER", "test_white_rc_matches_fixed_draw_oracle", statistics_mod, "white_reality_check", rc_uncentered, exercise_rc, control_rc, "white_rc_centered_fixed_draws"),
+            ("F-RC-SELECTED-POOL", "test_selected_pool_and_incomplete_family_do_not_compute_rc", gates_mod, "_rc", rc_on_presented, exercise_pool, control_pool, "white_rc_full_family_not_selected_pool"),
+            ("F-EXPOSURE-OVERLAP", "test_overlap_boundary_and_unknown_ledger", gates_mod, "overlaps_half_open", never_overlap, exercise_overlap, control_overlap, "exposure_overlap_reject_false_undisturbed"),
+            ("F-EXPOSURE-BOUNDARY", "test_overlap_boundary_and_unknown_ledger", gates_mod, "overlaps_half_open", closed_overlap, exercise_boundary, control_boundary, "exposure_half_open_touch_is_not_overlap"),
+            ("F-EXPOSURE-UNKNOWN", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_ledger_internally_complete", always_complete, exercise_unknown, control_unknown, "exposure_unknown_ledger_not_undisturbed"),
+            ("F-COMPARE-GE", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_ge, control_ge, "compare_ge_inclusive_boundary"),
+            ("F-COMPARE-GT", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_gt, control_gt, "compare_gt_strict_boundary"),
+            ("F-COMPARE-LE", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_le, control_le, "compare_le_inclusive_boundary"),
+            ("F-CAP-WORKERS", "test_caps_stop_without_truncation", gates_mod, "enforce_workers", disabled, exercise_workers, control_workers, "missing_worker_cap"),
+            ("F-CAP-STRATEGIES", "test_caps_stop_without_truncation", gates_mod, "enforce_strategy_count", disabled, exercise_strategies, control_strategies, "missing_strategy_count_cap"),
+            ("F-CAP-ELAPSED", "test_caps_stop_without_truncation", gates_mod, "enforce_elapsed", disabled, exercise_elapsed, control_elapsed, "missing_command_time_cap"),
+            ("F-CAP-RECEIPT", "test_caps_stop_without_truncation", guards_mod, "enforce_receipt_bytes", disabled, exercise_receipt, control_receipt, "missing_receipt_byte_cap"),
+            ("F-NONFILL-ZERO", "test_primary_accounting_and_cost_split", validate_mod, "assert_nonfill_zero", allow_nonzero, exercise_nonfill, control_nonfill, "nonzero_nonfill_rejected"),
+            ("F-H6-INVERTED", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", admit_inverted, exercise_inverted, control_h6, "h6_inverted_required_epoch_unknown"),
+            ("F-H6-UNMARKED-ZERO", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", admit_unmarked_zero, exercise_zero, control_h6, "h6_unmarked_zero_width_unknown"),
+            ("F-H6-DECLARED-EMPTY", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", reject_declared_empty, exercise_empty, control_h6, "h6_declared_empty_with_provenance_admitted"),
+            ("F-DENOMINATOR", "test_primary_accounting_and_cost_split", metrics_mod, "compute", drop_nonfills, exercise_denominator, control_denominator, "net_per_signal_includes_nonfill_zeros"),
         ]
-        for fault_id, assertion, module, name, mutant, exercise, oracle in cases:
-            record_fault(fault_id, assertion, module, name, mutant, exercise, oracle)
+        for fault_id, assertion, module, qualname, mutant, exercise, control_exercise, oracle_id in cases:
+            record_fault(
+                fault_id,
+                assertion,
+                module,
+                qualname,
+                mutant,
+                exercise,
+                control_exercise,
+                oracle_id,
+                "AssertionError",
+            )
 
     def test_h5_nonzero_nonfill_is_rejected_not_normalized(self):
         doc = load()
@@ -1052,6 +1206,37 @@ class CorrectiveTests(unittest.TestCase):
         self.assertEqual(payload["error"], "receipt_bytes")
         self.assertNotEqual(payload["status"], "REJECTED")
 
+    def test_h4_published_pin_binds_parsed_bytes(self):
+        raw = read_canonical_verified()
+        verified = sha256_bytes(raw)
+        parsed = json.loads(raw.decode("utf-8"))
+        self.assertEqual(parsed["schema"], "results_consumer_fixture_stub_v1")
+        result = gates_mod.evaluate_fixture(parsed)
+        receipt = fixture_cli.build_receipt(
+            result,
+            clock=MonotonicClock(),
+            verified_fixture_sha256=verified,
+        )
+        self.assertEqual(receipt["pins"]["files"]["fixtures/family-traces.json"], verified)
+        real_pins = fixture_cli.pin_files
+
+        def differing_reread():
+            files = real_pins()
+            files["fixtures/family-traces.json"] = "0" * 64
+            return files
+
+        fixture_cli.pin_files = differing_reread
+        try:
+            with self.assertRaises(DriftStop):
+                fixture_cli.build_receipt(
+                    result,
+                    clock=MonotonicClock(),
+                    verified_fixture_sha256=verified,
+                )
+        finally:
+            fixture_cli.pin_files = real_pins
+        self.assertEqual(sha256_bytes(raw), verified)
+
 
 class ZzzResourceTests(unittest.TestCase):
     def test_suite_budget_and_mutation_receipt(self):
@@ -1068,6 +1253,9 @@ class ZzzResourceTests(unittest.TestCase):
             "fault_count": len(FAULTS),
             "counted_kills": sum(1 for row in FAULTS if row["counted_as_kill"]),
             "failure_types": {row["id"]: row["failure_type"] for row in FAULTS},
+            "oracle_ids": {row["id"]: row["oracle_id"] for row in FAULTS},
+            "controls": {row["id"]: row["control"] for row in FAULTS},
+            "evidence": "precommit_source_pin_bound",
             "suite_elapsed_ms": int(elapsed * 1000),
             "rss_kib": observed,
             "rss_cap_kib": 512 * 1024,

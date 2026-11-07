@@ -94,11 +94,12 @@ def _worker_main(write_fd: int) -> int:
 
     try:
         raw = read_canonical_verified()
+        verified_fixture_sha256 = sha256_bytes(raw)
         reject_canaries(raw)
         document = json.loads(raw.decode("utf-8"), parse_float=_reject_float, parse_constant=_reject_float)
         clock = MonotonicClock()
         result = evaluate_fixture(document, workers=1, clock=clock)
-        receipt = build_receipt(result, clock=clock)
+        receipt = build_receipt(result, clock=clock, verified_fixture_sha256=verified_fixture_sha256)
         _write_all(write_fd, canonical_bytes(receipt))
         return 0
     except CanaryRejected:
@@ -115,10 +116,15 @@ def _worker_main(write_fd: int) -> int:
         return 4
 
 
-def build_receipt(result, *, clock: MonotonicClock) -> dict:
+def build_receipt(result, *, clock: MonotonicClock, verified_fixture_sha256: str) -> dict:
     elapsed_ms = int(clock.elapsed() * 1000)
     enforce_elapsed(elapsed_ms / 1000, kind="command")
     plain = to_plain(result)
+    files = pin_files()
+    fixture_key = "fixtures/family-traces.json"
+    if files.get(fixture_key) != verified_fixture_sha256:
+        raise DriftStop("fixture pin mismatch")
+    files[fixture_key] = verified_fixture_sha256
     return {
         "receipt_schema": "results_gates_v1_fixture_receipt",
         "receipt_version": "1",
@@ -131,7 +137,7 @@ def build_receipt(result, *, clock: MonotonicClock) -> dict:
         "compatibility": plain["producer_compatibility"],
         "results": plain,
         "pins": {
-            "files": pin_files(),
+            "files": files,
             "entrypoint": "research/results_gates_v1/fixture_cli.py",
             "entrypoint_args": ["--fixture-only"],
             "python": sys.version.split()[0],
