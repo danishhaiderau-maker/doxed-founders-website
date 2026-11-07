@@ -11,9 +11,11 @@ import ast
 import copy
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
+import resource
 import unittest
 from fractions import Fraction
 from pathlib import Path
@@ -82,6 +84,7 @@ FIXTURE = package_root() / "fixtures" / "family-traces.json"
 SUITE_STARTED = time.monotonic()
 FAULTS = []
 SECRET = "CANARY_SECRET_SUPERSECRETVALUE"
+H2_INJECTION_CONTINUED = False
 
 
 class IsolationStop(RuntimeError):
@@ -1238,6 +1241,110 @@ class CorrectiveTests(unittest.TestCase):
         self.assertEqual(sha256_bytes(raw), verified)
 
 
+class H2LifecycleTests(unittest.TestCase):
+    def test_01_installed_timer_and_parent_vas(self):
+        delay, interval = signal.getitimer(signal.ITIMER_REAL)
+        self.assertIs(signal.getsignal(signal.SIGALRM), guards_mod._on_suite_timer)
+        self.assertEqual(interval, 0)
+        self.assertGreater(delay, COMMAND_SECONDS)
+        self.assertLessEqual(delay, guards_mod.SUITE_SECONDS)
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        self.assertEqual(soft, PER_WORKER_VAS_BYTES)
+        self.assertEqual(hard, PER_WORKER_VAS_BYTES)
+
+        def child(write_fd):
+            child_soft = resource.getrlimit(resource.RLIMIT_AS)[0]
+            os.write(write_fd, str(child_soft).encode("ascii"))
+            return 0
+
+        code, body = run_contained(child)
+        self.assertEqual(code, 0)
+        self.assertEqual(int(body.decode("ascii")), PER_WORKER_VAS_BYTES)
+
+    def test_02_child_alarm_does_not_reset_parent_timer(self):
+        before = signal.getitimer(signal.ITIMER_REAL)[0]
+        code, _body = run_contained(lambda write_fd: 0)
+        after, interval = signal.getitimer(signal.ITIMER_REAL)
+        self.assertEqual(code, 0)
+        self.assertEqual(interval, 0)
+        self.assertGreater(after, COMMAND_SECONDS)
+        self.assertLessEqual(after, before)
+        self.assertIs(signal.getsignal(signal.SIGALRM), guards_mod._on_suite_timer)
+
+    def test_03_injected_signal_continues_outer_work(self):
+        global H2_INJECTION_CONTINUED
+        probe = {"continued": False, "sentinel": False}
+
+        class _Work(unittest.TestCase):
+            def test_work(self):
+                try:
+                    guards_mod.mark_injected_signal()
+                    signal.raise_signal(signal.SIGALRM)
+                    probe["continued"] = True
+                finally:
+                    guards_mod.restore_halt_target(probe["previous"])
+
+            def test_sentinel(self):
+                probe["sentinel"] = True
+
+        result = unittest.TextTestResult(sys.stderr, False, 0)
+        probe["previous"] = guards_mod.bind_halt_runner(result.stop)
+        suite = unittest.TestSuite([_Work("test_work"), _Work("test_sentinel")])
+        suite.run(result)
+        self.assertFalse(probe["continued"])
+        self.assertFalse(probe["sentinel"])
+        self.assertFalse(guards_mod._outer_deadline_expired)
+        self.assertFalse(guards_mod._evidence_expired)
+        H2_INJECTION_CONTINUED = True
+
+    def test_04_following_outer_test_is_dispatched(self):
+        self.assertTrue(H2_INJECTION_CONTINUED)
+
+    def test_05_vas_failure_writes_no_success_receipt(self):
+        self.assertEqual(vas_ceiling_probe(), "MEMORY_ERROR")
+
+        def allocator(write_fd):
+            blob = bytearray(PER_WORKER_VAS_BYTES)
+            del blob
+            os.write(write_fd, b"ALLOCATED")
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "receipt.json"
+            code, body = run_contained(allocator)
+            self.assertEqual(code, 5)
+            text = body.decode("utf-8")
+            self.assertIn("INCOMPLETE_STOP", text)
+            self.assertIn("rss_mib", text)
+            self.assertFalse(receipt.exists())
+
+    def test_06_child_alarm_120_real_run_contained(self):
+        def sleeper(write_fd):
+            time.sleep(COMMAND_SECONDS + 30)
+            os.write(write_fd, b"LATE")
+            return 0
+
+        started = time.monotonic()
+        code, body = run_contained(sleeper)
+        elapsed = time.monotonic() - started
+        text = body.decode("utf-8")
+        print(json.dumps({
+            "control": "child_120_real_run_contained",
+            "elapsed_s": round(elapsed, 3),
+            "exit_code": code,
+            "child_status_text": text.strip(),
+            "physical_command_expiry": True,
+            "physical_suite_600_elapsed": False,
+            "installed_suite_seconds": guards_mod.SUITE_SECONDS,
+        }, sort_keys=True))
+        self.assertGreaterEqual(elapsed, COMMAND_SECONDS)
+        self.assertLess(elapsed, COMMAND_SECONDS + 15)
+        self.assertEqual(code, 5)
+        self.assertIn("command_seconds", text)
+        self.assertIn("INCOMPLETE_STOP", text)
+        self.assertNotIn("LATE", text)
+
+
 class ZzzResourceTests(unittest.TestCase):
     def test_suite_budget_and_mutation_receipt(self):
         elapsed = time.monotonic() - SUITE_STARTED
@@ -1268,6 +1375,113 @@ class ZzzResourceTests(unittest.TestCase):
             "evaluation_status": "BLOCKED_NO_APPROVED_REAL_PROFILE",
             "research_done": False,
         }, sort_keys=True))
+
+
+class ZzzSuiteHaltTests(unittest.TestCase):
+    def test_01_real_deadline_no_child_and_owned_child(self):
+        owned = {"continued": False, "sentinel": False, "kills": [], "reaps": []}
+        real_kill = os.kill
+        real_waitpid = os.waitpid
+
+        def spy_kill(pid, sig):
+            if sig == signal.SIGKILL:
+                owned["kills"].append(pid)
+            return real_kill(pid, sig)
+
+        def spy_wait(pid, options):
+            owned["reaps"].append(pid)
+            return real_waitpid(pid, options)
+
+        class _Owned(unittest.TestCase):
+            def test_work(self):
+                def sleeper(write_fd):
+                    real_kill(os.getppid(), signal.SIGALRM)
+                    time.sleep(30)
+                    os.write(write_fd, b"DONE")
+                    return 0
+
+                try:
+                    guards_mod.declare_deadline_due()
+                    run_contained(sleeper)
+                    owned["continued"] = True
+                finally:
+                    guards_mod.restore_halt_target(owned["previous"])
+
+            def test_sentinel(self):
+                owned["sentinel"] = True
+
+        os.kill = spy_kill
+        os.waitpid = spy_wait
+        try:
+            owned_result = unittest.TextTestResult(sys.stderr, False, 0)
+            owned["previous"] = guards_mod.bind_halt_runner(owned_result.stop)
+            unittest.TestSuite([
+                _Owned("test_work"),
+                _Owned("test_sentinel"),
+            ]).run(owned_result)
+        finally:
+            os.kill = real_kill
+            os.waitpid = real_waitpid
+        self.assertFalse(owned["continued"])
+        self.assertFalse(owned["sentinel"])
+        self.assertEqual(len(owned["kills"]), 1)
+        self.assertEqual(len(owned["reaps"]), 1)
+        self.assertEqual(owned["kills"][0], owned["reaps"][0])
+        self.assertTrue(guards_mod._evidence_expired)
+        self.assertFalse(guards_mod._outer_deadline_expired)
+
+        no_child = {"continued": False, "sentinel": False}
+
+        class _NoChild(unittest.TestCase):
+            def test_work(self):
+                try:
+                    signal.raise_signal(signal.SIGALRM)
+                    no_child["continued"] = True
+                finally:
+                    guards_mod.restore_halt_target(no_child["previous"])
+
+            def test_sentinel(self):
+                no_child["sentinel"] = True
+
+        no_result = unittest.TextTestResult(sys.stderr, False, 0)
+        no_child["previous"] = guards_mod.bind_halt_runner(no_result.stop)
+        unittest.TestSuite([
+            _NoChild("test_work"),
+            _NoChild("test_sentinel"),
+        ]).run(no_result)
+        self.assertFalse(no_child["continued"])
+        self.assertFalse(no_child["sentinel"])
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "receipt.json"
+            with self.assertRaises(guards_mod.SuiteHalt):
+                guards_mod.commit_receipt(receipt, b'{"ok": true}\n')
+            self.assertFalse(receipt.exists())
+
+            def invoke():
+                try:
+                    return fixture_cli.main(["--fixture-only", "--receipt", str(receipt)])
+                except guards_mod.SuiteHalt:
+                    return 5
+
+            stdout = _capture_stdout(invoke)
+        self.assertFalse(receipt.exists())
+        self.assertIn("INCOMPLETE_STOP", stdout[1])
+        self.assertIn("suite_seconds", stdout[1])
+        print(json.dumps({
+            "control": "real_deadline_practical",
+            "physical_suite_600_elapsed": False,
+            "installed_suite_delay_s": signal.getitimer(signal.ITIMER_REAL)[0],
+            "installed_suite_seconds": guards_mod.SUITE_SECONDS,
+            "sigkill_count": len(owned["kills"]),
+            "reap_count": len(owned["reaps"]),
+            "no_child_sentinel": no_child["sentinel"],
+            "owned_sentinel": owned["sentinel"],
+            "no_child_continued": no_child["continued"],
+            "owned_continued": owned["continued"],
+        }, sort_keys=True))
+
+    def test_02_sentinel_not_dispatched(self):
+        raise AssertionError("later outer test dispatched")
 
 
 def _keys(obj):
@@ -1316,4 +1530,15 @@ def _capture_stdout(fn):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    class _ArmedSuite(unittest.TestSuite):
+        def run(self, result, debug=False):
+            guards_mod.install_worker_vas_ceiling()
+            guards_mod.arm_suite_deadline(result.stop)
+            try:
+                return super().run(result, debug)
+            finally:
+                guards_mod.disarm_suite_deadline()
+
+    loaded = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    outcome = unittest.TextTestRunner(verbosity=2).run(_ArmedSuite([loaded]))
+    raise SystemExit(0 if outcome.wasSuccessful() else 1)

@@ -36,6 +36,25 @@ VAS_SUM_BYTES = RSS_MIB * 1024 * 1024
 PER_WORKER_VAS_BYTES = VAS_SUM_BYTES // CPU_WORKERS
 STREAM_CHUNK = 65536
 _IN_CHILD = False
+_suite_arm = None
+_armed_deadline = None
+_evidence_deadline = None
+_halt_runner = None
+_active_child = None
+_outer_deadline_expired = False
+_evidence_expired = False
+_proof_latch = False
+_injection_mark = False
+
+
+class SuiteHalt(BaseException):
+    """Unwinds the frame that was running when the suite deadline fired.
+
+    BaseException so except Exception and except CapStop do not resume that frame.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("suite_seconds")
 
 BOUNDS = {
     "cpu_workers": CPU_WORKERS,
@@ -267,11 +286,17 @@ def read_pipe_bounded(fd: int, pid: int, *, timeout_s: int, clock=None) -> bytes
     chunks = []
     total = 0
     while True:
-        if ticker.elapsed() > COMMAND_SECONDS:
-            _signal_child(pid)
-            raise CapStop("command_seconds")
-        ready, _, _ = select.select([fd], [], [], 0.2)
+        if _outer_deadline_expired or _evidence_expired:
+            raise SuiteHalt()
+        expired = ticker.elapsed() > COMMAND_SECONDS
+        try:
+            ready, _, _ = select.select([fd], [], [], 0 if expired else 0.2)
+        except InterruptedError:
+            continue
         if not ready:
+            if expired:
+                _signal_child(pid)
+                raise CapStop("command_seconds")
             continue
         block = os.read(fd, STREAM_CHUNK)
         if not block:
@@ -291,21 +316,71 @@ def _signal_child(pid: int) -> None:
         return
 
 
-def run_contained(child_main) -> tuple[int, bytes]:
-    """Parent plus one child. No third process. Parent reads the only receipt pipe."""
-    global _IN_CHILD
-    if _IN_CHILD:
-        raise CapStop("cpu_workers")
-    install_worker_vas_ceiling()
-    read_fd, write_fd = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        _IN_CHILD = True
-        os.close(read_fd)
-        code = 1
+def _block_sigalrm():
+    return signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+
+
+def _restore_mask(previous) -> None:
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _reap_once(pid: int, *, options: int) -> tuple[int, int]:
+    while True:
         try:
-            signal.signal(signal.SIGALRM, _raise_command_cap)
-            signal.alarm(COMMAND_SECONDS)
+            return os.waitpid(pid, options)
+        except InterruptedError:
+            continue
+
+
+def release_owned(pid: int):
+    """Masked reap of a published child. A live child is killed before the blocking reap."""
+    global _active_child
+    if pid is None or _active_child != pid:
+        return None
+    previous = _block_sigalrm()
+    status = 0
+    try:
+        if _active_child != pid:
+            return None
+        try:
+            waited, status = _reap_once(pid, options=os.WNOHANG)
+        except ChildProcessError:
+            if _active_child == pid:
+                _active_child = None
+            return None
+        if waited == 0:
+            _signal_child(pid)
+            try:
+                _waited, status = _reap_once(pid, options=0)
+            except ChildProcessError:
+                status = 0
+        if _active_child == pid:
+            _active_child = None
+        return status
+    finally:
+        _restore_mask(previous)
+
+
+def _kill_unpublished(pid: int) -> None:
+    _signal_child(pid)
+    try:
+        _reap_once(pid, options=0)
+    except ChildProcessError:
+        return
+
+
+def _child_enter(read_fd: int, write_fd: int, child_main) -> None:
+    """Child signal state, then work, then os._exit. Never returns to the parent."""
+    global _IN_CHILD
+    _IN_CHILD = True
+    code = 1
+    try:
+        os.close(read_fd)
+        signal.signal(signal.SIGALRM, _raise_command_cap)
+        signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
+        signal.alarm(COMMAND_SECONDS)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+        try:
             code = int(child_main(write_fd))
         except CapStop as exc:
             _write_all(write_fd, cap_line(exc).encode("utf-8"))
@@ -313,21 +388,183 @@ def run_contained(child_main) -> tuple[int, bytes]:
         except MemoryError:
             _write_all(write_fd, cap_line(CapStop("rss_mib")).encode("utf-8"))
             code = 5
+    except BaseException:
+        code = 1
+    finally:
         try:
             os.close(write_fd)
         except OSError:
             pass
         os._exit(code)
+
+
+def _fork_published(read_fd: int, write_fd: int, child_main) -> int:
+    """Block SIGALRM from a successful fork until the parent publishes the pid."""
+    global _active_child
+    previous = _block_sigalrm()
+    pid = None
+    published = False
+    try:
+        pid = os.fork()
+        if pid == 0:
+            _child_enter(read_fd, write_fd, child_main)
+        _active_child = pid
+        published = True
+        return pid
+    except BaseException:
+        if pid not in (None, 0) and not published:
+            _kill_unpublished(pid)
+        raise
+    finally:
+        if pid != 0:
+            _restore_mask(previous)
+
+
+def _on_suite_timer(_signum, _frame) -> None:
+    apply_suite_stop()
+
+
+def _expiry_kind() -> str | None:
+    now = time.monotonic()
+    if _armed_deadline is not None and now >= _armed_deadline:
+        return "process"
+    if _evidence_deadline is not None and now >= _evidence_deadline:
+        return "evidence"
+    return None
+
+
+def apply_suite_stop() -> None:
+    """Kill and reap a published child once, then halt the registered runner."""
+    global _active_child, _injection_mark, _proof_latch, _outer_deadline_expired, _evidence_expired
+    pid = _active_child
+    if pid is not None:
+        _signal_child(pid)
+        try:
+            _reap_once(pid, options=0)
+        except ChildProcessError:
+            pass
+        if _active_child == pid:
+            _active_child = None
+    kind = _expiry_kind()
+    injected = _injection_mark
+    _injection_mark = False
+    if injected and kind is None:
+        _proof_latch = True
+    elif kind == "evidence":
+        _evidence_expired = True
+    else:
+        _outer_deadline_expired = True
+    halt = _halt_runner
+    if halt is not None:
+        halt()
+    raise SuiteHalt()
+
+
+def arm_suite_deadline(halt_runner) -> None:
+    """One parent ITIMER_REAL of SUITE_SECONDS. A second call does not move it."""
+    global _suite_arm, _armed_deadline, _halt_runner
+    global _evidence_deadline, _outer_deadline_expired, _evidence_expired, _proof_latch, _injection_mark
+    if _IN_CHILD:
+        raise CapStop("cpu_workers")
+    if _suite_arm is not None:
+        return
+    prior_handler = signal.getsignal(signal.SIGALRM)
+    prior_timer = signal.getitimer(signal.ITIMER_REAL)
+    _halt_runner = halt_runner
+    _armed_deadline = time.monotonic() + SUITE_SECONDS
+    _evidence_deadline = None
+    _outer_deadline_expired = False
+    _evidence_expired = False
+    _proof_latch = False
+    _injection_mark = False
+    signal.signal(signal.SIGALRM, _on_suite_timer)
+    signal.setitimer(signal.ITIMER_REAL, float(SUITE_SECONDS), 0.0)
+    _suite_arm = (prior_handler, prior_timer)
+
+
+def disarm_suite_deadline() -> None:
+    """Release any owned child, then restore the handler and timer saved at arm."""
+    global _suite_arm, _halt_runner
+    try:
+        pid = _active_child
+        if pid is not None:
+            release_owned(pid)
+    finally:
+        if _suite_arm is None:
+            return
+        prior_handler, prior_timer = _suite_arm
+        signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
+        signal.signal(signal.SIGALRM, prior_handler)
+        signal.setitimer(signal.ITIMER_REAL, prior_timer[0], prior_timer[1])
+        _suite_arm = None
+        _halt_runner = None
+
+
+def bind_halt_runner(callback):
+    global _halt_runner
+    previous = _halt_runner
+    _halt_runner = callback
+    return previous
+
+
+def restore_halt_target(previous) -> None:
+    """Put the outer stop back. A real or practical deadline then invokes it and raises."""
+    global _halt_runner, _proof_latch
+    _halt_runner = previous
+    if _outer_deadline_expired or _evidence_expired:
+        pid = _active_child
+        if pid is not None:
+            release_owned(pid)
+        if previous is not None:
+            previous()
+        if sys.exc_info()[0] is None:
+            raise SuiteHalt()
+        return
+    _proof_latch = False
+
+
+def mark_injected_signal() -> None:
+    """Marks the next SIGALRM as proof only while the real and practical deadlines are still ahead."""
+    global _injection_mark
+    if _suite_arm is None:
+        raise CapStop("clock")
+    if _expiry_kind() is not None:
+        return
+    _injection_mark = True
+
+
+def declare_deadline_due() -> None:
+    """Practical monotonic deadline. Does not change SUITE_SECONDS or the installed itimer."""
+    global _evidence_deadline
+    if _suite_arm is None:
+        raise CapStop("clock")
+    _evidence_deadline = time.monotonic() - 1.0
+
+
+def run_contained(child_main) -> tuple[int, bytes]:
+    """Parent plus one child. No third process. Parent reads the only receipt pipe."""
+    if _IN_CHILD:
+        raise CapStop("cpu_workers")
+    install_worker_vas_ceiling()
+    read_fd, write_fd = os.pipe()
+    try:
+        pid = _fork_published(read_fd, write_fd, child_main)
+    except BaseException:
+        os.close(read_fd)
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+        raise
     os.close(write_fd)
     status = 0
     try:
         body = read_pipe_bounded(read_fd, pid, timeout_s=COMMAND_SECONDS)
     finally:
         os.close(read_fd)
-        try:
-            _pid, status = os.waitpid(pid, 0)
-        except ChildProcessError:
-            status = 0
+        released = release_owned(pid)
+        if released is not None:
+            status = released
     if os.WIFSIGNALED(status):
         raise CapStop("rss_mib")
     exit_code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
@@ -336,11 +573,7 @@ def run_contained(child_main) -> tuple[int, bytes]:
 
 def vas_ceiling_probe() -> str:
     """Child allocation at the per-worker ceiling. Parent does not allocate it."""
-    install_worker_vas_ceiling()
-    read_fd, write_fd = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        os.close(read_fd)
+    def child(write_fd: int) -> int:
         try:
             blob = bytearray(PER_WORKER_VAS_BYTES)
             del blob
@@ -349,17 +582,9 @@ def vas_ceiling_probe() -> str:
             _write_all(write_fd, b"MEMORY_ERROR")
         except CapStop:
             _write_all(write_fd, b"CAP")
-        os.close(write_fd)
-        os._exit(0)
-    os.close(write_fd)
-    try:
-        message = read_pipe_bounded(read_fd, pid, timeout_s=COMMAND_SECONDS)
-    finally:
-        os.close(read_fd)
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
+        return 0
+
+    _code, message = run_contained(child)
     return message.decode("utf-8")
 
 
@@ -409,6 +634,8 @@ def pin_files() -> dict:
 
 
 def commit_receipt(path: Path, body: bytes) -> None:
+    if _outer_deadline_expired or _evidence_expired:
+        raise SuiteHalt()
     enforce_receipt_bytes(len(body))
     if b'"eta"' in body:
         raise SchemaError("eta")

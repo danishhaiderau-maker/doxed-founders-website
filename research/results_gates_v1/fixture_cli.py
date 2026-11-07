@@ -22,6 +22,7 @@ from .guards import (
     CapStop,
     DriftStop,
     MonotonicClock,
+    SuiteHalt,
     ProhibitedAccess,
     admit_canonical_path,
     commit_receipt,
@@ -70,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     try:
         code, body = run_contained(_worker_main)
+    except SuiteHalt:
+        _emit_error("suite_seconds", status="INCOMPLETE_STOP")
+        raise
     except CapStop as exc:
         _emit_error(exc.reason, status="INCOMPLETE_STOP")
         return 5
@@ -83,8 +87,15 @@ def main(argv: list[str] | None = None) -> int:
     if code != 0:
         sys.stdout.write(text if text else _rejected("schema"))
         return code if code else 4
-    if args.receipt:
-        commit_receipt(Path(args.receipt), body)
+    try:
+        if args.receipt:
+            commit_receipt(Path(args.receipt), body)
+    except SuiteHalt:
+        _emit_error("suite_seconds", status="INCOMPLETE_STOP")
+        raise
+    except CapStop as exc:
+        _emit_error(exc.reason, status="INCOMPLETE_STOP")
+        return 5
     sys.stdout.write(text)
     return 0
 
