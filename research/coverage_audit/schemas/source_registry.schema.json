@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source_registry_v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry_schema", "facts_policy", "feeds"],
+  "properties": {
+    "registry_schema": {"const": "source_registry_v1"},
+    "facts_policy": {"const": "UNSOURCED_REAL_FACTS_REMAIN_UNVERIFIED"},
+    "feeds": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/feed"}
+    }
+  },
+  "$defs": {
+    "feed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "venue",
+        "source",
+        "feed",
+        "instrument",
+        "series",
+        "era",
+        "verification_status",
+        "observation",
+        "cadence_ms",
+        "tolerance_ms",
+        "calendar",
+        "sparse_rule",
+        "timestamp",
+        "optional_timestamps",
+        "permissible_publication_delay_ms",
+        "audit_publication_delay",
+        "sequence_contract",
+        "fields",
+        "format",
+        "depth",
+        "crosscheck_feed_ref"
+      ],
+      "properties": {
+        "venue": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "source": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "feed": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "instrument": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "series": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "era": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "verification_status": {"enum": ["SYNTHETIC_DECLARED", "UNVERIFIED"]},
+        "observation": {"enum": ["periodic", "sparse", "unknown"]},
+        "cadence_ms": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 86400000}]},
+        "tolerance_ms": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 86400000}]},
+        "calendar": {"enum": ["UTC_CONTINUOUS", "UNVERIFIED"]},
+        "sparse_rule": {
+          "anyOf": [
+            {"type": "null"},
+            {"enum": ["NO_EVENT_NOT_OUTAGE", "CANDLE_CROSSCHECK_TRADES"]}
+          ]
+        },
+        "timestamp": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["field", "unit", "timezone"],
+          "properties": {
+            "field": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+            "unit": {"enum": ["unix_s", "unix_ms", "unix_us", "iso_utc"]},
+            "timezone": {"const": "UTC"}
+          }
+        },
+        "optional_timestamps": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["receive", "publication", "vintage"],
+          "properties": {
+            "receive": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}]},
+            "publication": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}]},
+            "vintage": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}]}
+          }
+        },
+        "permissible_publication_delay_ms": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 86400000}]},
+        "audit_publication_delay": {"type": "boolean"},
+        "sequence_contract": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["scope", "contiguous", "id_field"],
+              "properties": {
+                "scope": {"enum": ["per_instrument", "global_interleaved"]},
+                "contiguous": {"type": "boolean"},
+                "id_field": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
+              }
+            }
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "role", "type", "index", "required"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+              "role": {
+                "enum": [
+                  "event_timestamp",
+                  "receive_timestamp",
+                  "publication_timestamp",
+                  "vintage_timestamp",
+                  "sequence",
+                  "ignored",
+                  "depth_band",
+                  "executable_level"
+                ]
+              },
+              "type": {"enum": ["timestamp", "ignored", "sequence", "array", "integer"]},
+              "index": {"type": "integer", "minimum": 0, "maximum": 64},
+              "required": {"type": "boolean"}
+            }
+          }
+        },
+        "format": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["container", "encoding", "kind", "delimiter", "quote", "header"],
+          "properties": {
+            "container": {"enum": ["plain", "gzip", "zip"]},
+            "encoding": {"const": "utf-8"},
+            "kind": {"enum": ["header_csv", "headerless_csv", "jsonl", "json_array"]},
+            "delimiter": {"const": ","},
+            "quote": {"const": "\""},
+            "header": {"type": "boolean"}
+          }
+        },
+        "depth": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "band_fields",
+                "level_fields",
+                "band_thresholds_declared",
+                "bands_are_not_executable_levels",
+                "notes_code"
+              ],
+              "properties": {
+                "band_fields": {
+                  "type": "array",
+                  "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
+                },
+                "level_fields": {
+                  "type": "array",
+                  "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
+                },
+                "band_thresholds_declared": {"const": false},
+                "bands_are_not_executable_levels": {"const": true},
+                "notes_code": {"const": "BANDS_DISTINCT_FROM_WALKABLE_LEVELS"}
+              }
+            }
+          ]
+        },
+        "crosscheck_feed_ref": {
+          "anyOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[a-z][a-z0-9_]+(/[a-z][a-z0-9_]+){4}$"}
+          ]
+        }
+      }
+    }
+  }
+}
