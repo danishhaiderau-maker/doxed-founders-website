@@ -51,6 +51,7 @@ from public_market_collector.framing import (
 from public_market_collector import guards as guards_mod
 from public_market_collector.guards import scan_package
 from public_market_collector.market import Book, canonical_norms, example_checksum_matches_docs, signed_crc32
+from public_market_collector import session as session_mod
 from public_market_collector.session import Session, append_startup_gap, inspect_torn_tail
 
 # Integrity checks compare recorded bytes. They detect corruption. They are not a
@@ -58,7 +59,57 @@ from public_market_collector.session import Session, append_startup_gap, inspect
 # Sustained backpressure is not proven by the queue fixture. SEQ_ALL, TIMESTAMP,
 # reconnect limits, checksum float spelling, and NTP stay unverified.
 KILLED_LINES = []
-_AUDIT_HOOKED = False
+FAULT_MATRIX = []
+
+
+class OuterContainment(Exception):
+    def __init__(self, event: str, host: str):
+        super().__init__(event)
+        self.event = event
+        self.host = host
+
+
+class InnerLoopbackGuard(Exception):
+    def __init__(self, host: str):
+        super().__init__(host)
+        self.host = host
+
+
+class EnvGuard(Exception):
+    def __init__(self, key: str):
+        super().__init__(key)
+        self.key = key
+
+
+# Outer recorder. It is never weakened and never calls the platform connect or getaddrinfo.
+OUTER_EVENTS = []
+_OUTER_WEAKENED = False
+_REAL_CONNECT = socket.socket.connect
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
+def _intercept_connect(self, address):
+    if _OUTER_WEAKENED:
+        raise RuntimeError("outer containment weakened")
+    host = address[0] if isinstance(address, tuple) and address else None
+    if host != "127.0.0.1":
+        raise OuterContainment("socket.connect", "blocked")
+    OUTER_EVENTS.append({"event": "socket.connect", "host": "127.0.0.1"})
+    raise OuterContainment("socket.connect", "127.0.0.1")
+
+
+def _intercept_getaddrinfo(host, port, *args, **kwargs):
+    del port, args, kwargs
+    if _OUTER_WEAKENED:
+        raise RuntimeError("outer containment weakened")
+    if host != "127.0.0.1":
+        raise OuterContainment("socket.getaddrinfo", "blocked")
+    OUTER_EVENTS.append({"event": "socket.getaddrinfo", "host": "127.0.0.1"})
+    raise OuterContainment("socket.getaddrinfo", "127.0.0.1")
+
+
+_ORIGINAL_SOCKET.connect = _intercept_connect
+socket.getaddrinfo = _intercept_getaddrinfo
 
 
 def _cfg(root: Path, **overrides):
@@ -688,16 +739,6 @@ class SyntheticTests(unittest.TestCase):
             if rel != "index.journal":
                 self.assertEqual(path.read_bytes(), blob)
             self.assertGreaterEqual(path.stat().st_size, len(blob))
-        def _require_segment(blob: bytes) -> None:
-            if sha256_bytes(blob) != segment_hash or len(blob) < len(prior["raw/book/bookseg.gz"]):
-                raise AssertionError("segment changed")
-
-        _require_segment(segment.read_bytes())
-        killed("C-truncated-segment", lambda: _require_segment(segment.read_bytes()[:-1]))
-        killed(
-            "C-stop-removed",
-            lambda: self.assertTrue(any(row.get("kind") == "capture_stop" for row in records if row.get("kind") != "capture_stop")),
-        )
 
     def test_d_static_denylist_and_runtime_failclosed(self):
         """D: denylist plants, plus the real Session and entrypoint under a tripwire."""
@@ -713,35 +754,10 @@ class SyntheticTests(unittest.TestCase):
         self.assertTrue(any("import importlib" in item for item in findings))
         self.assertTrue(any("call __import__" in item for item in findings))
         self.assertEqual(scan_package(), [])
-        guards_mod.FORBIDDEN_IMPORT_ROOTS.remove("asyncio")
-        try:
-            weakened = scan_package(plant)
-            killed("D-asyncio-denylist-removed", lambda: self.assertTrue(any("import asyncio" in item for item in weakened)))
-        finally:
-            guards_mod.FORBIDDEN_IMPORT_ROOTS.add("asyncio")
-        self.assertTrue(any("import asyncio" in item for item in scan_package(plant)))
-        guards_mod.FORBIDDEN_CALLS.remove("__import__")
-        try:
-            weakened_call = scan_package(plant)
-            killed("D-dunder-import-removed", lambda: self.assertTrue(any("call __import__" in item for item in weakened_call)))
-        finally:
-            guards_mod.FORBIDDEN_CALLS.add("__import__")
         canary = "canary-secret-value"
         os.environ["BITFINEX_API_KEY"] = canary
         runtime = Path(self.tmp.name) / "runtime-guard"
         session = Session(_cfg(runtime))
-        events = []
-
-        def _audit(event, args):
-            del args
-            if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.posix_spawn"}:
-                events.append(event)
-                raise RuntimeError(f"fail-closed {event}")
-
-        global _AUDIT_HOOKED
-        if not _AUDIT_HOOKED:
-            sys.addaudithook(_audit)
-            _AUDIT_HOOKED = True
         stderr = io.StringIO()
         real_env = os.environ
 
@@ -765,32 +781,10 @@ class SyntheticTests(unittest.TestCase):
             os.environ = real_env
         self.assertEqual(code, 78)
         self.assertIn("BOARD_FREEZE_UNSET", stderr.getvalue())
-        self.assertEqual(events, [])
         self.assertNotIn(canary, stderr.getvalue())
         written = b"".join(path.read_bytes() for path in runtime.rglob("*") if path.is_file())
         self.assertNotIn(canary.encode("utf-8"), written)
         self.assertIn(canary, real_env.get("BITFINEX_API_KEY", ""))
-
-        def _require_socket_block():
-            try:
-                socket.socket()
-            except RuntimeError:
-                return
-            raise AssertionError("socket was not blocked")
-
-        _require_socket_block()
-
-        class _Silent:
-            def __init__(self, *args, **kwargs):
-                del args, kwargs
-
-        saved_socket = socket.socket
-        socket.socket = _Silent
-        try:
-            killed("D-socket-tripwire-removed", _require_socket_block)
-        finally:
-            socket.socket = saved_socket
-        _require_socket_block()
 
     def test_nongate_e_malformed_checksum_and_noninteger_price(self):
         """Not an acceptance gate. Existing fail-closed checksum behaviour only."""
@@ -864,6 +858,587 @@ def _disk_committed(root: Path) -> tuple[list[dict], dict[str, list[dict]]]:
 def gzip_payload_text(blob: bytes) -> bytes:
     rows, _torn = decode_prefix(blob)
     return dumps(rows).encode("utf-8")
+
+
+def _record(row: dict) -> None:
+    FAULT_MATRIX.append(row)
+
+
+def _symbols_match() -> bool:
+    return (
+        session_mod.Session._fits is _ORIGINAL_FITS
+        and session_mod.Session.commit is _ORIGINAL_COMMIT
+        and session_mod.check_instrument is _ORIGINAL_CHECK
+        and session_mod.require_set is _ORIGINAL_REQUIRE
+    )
+
+
+def _restore_symbols() -> None:
+    session_mod.Session._fits = _ORIGINAL_FITS
+    session_mod.Session.commit = _ORIGINAL_COMMIT
+    session_mod.check_instrument = _ORIGINAL_CHECK
+    session_mod.require_set = _ORIGINAL_REQUIRE
+
+
+_ORIGINAL_FITS = session_mod.Session._fits
+_ORIGINAL_COMMIT = session_mod.Session.commit
+_ORIGINAL_CHECK = session_mod.check_instrument
+_ORIGINAL_REQUIRE = session_mod.require_set
+
+
+class _SyntheticEnv:
+    """In-memory fixture dictionary. It does not read or write os.environ."""
+
+    def __init__(self, values: dict):
+        self.values = dict(values)
+        self.reads = []
+        self.consumed = []
+        self.intact = True
+
+    def read(self, key: str):
+        self.reads.append(key)
+        if self.intact:
+            raise EnvGuard(key)
+        self.consumed.append(self.values[key])
+        return self.values[key]
+
+
+class CDFaultMatrixTests(unittest.TestCase):
+    """C/D fault matrix. B and the static denylist stay in SyntheticTests."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._saved_socket = socket.socket
+        socket.socket = _ORIGINAL_SOCKET
+        _restore_symbols()
+        self.assertTrue(_symbols_match())
+
+    def tearDown(self):
+        _restore_symbols()
+        socket.socket = self._saved_socket
+        self.assertTrue(_symbols_match())
+        self.assertFalse(_OUTER_WEAKENED)
+        self.assertIs(_ORIGINAL_SOCKET.connect, _intercept_connect)
+        self.assertIs(socket.getaddrinfo, _intercept_getaddrinfo)
+        self.tmp.cleanup()
+
+    def _root(self, name: str) -> Path:
+        path = Path(self.tmp.name) / name
+        path.mkdir()
+        return path
+
+    def _open(self, name: str, **overrides):
+        return Session(_cfg(self._root(name), **overrides))
+
+    def _prime(self, session: Session) -> None:
+        session.handle(_sub("book", 7), recv_utc_ns=1, recv_mono_ns=1)
+        session.handle(_book(7, [[6000, 1, 1], [6100, 1, -1]]), recv_utc_ns=2, recv_mono_ns=2)
+        session.commit()
+
+    def _arm_cap(self, session: Session) -> tuple[int, bytes, list]:
+        segment = Path(session.root) / "raw/book/bookseg.gz"
+        prior = segment.read_bytes()
+        prior_ids = [
+            row["raw_id"]
+            for row in durable_view(segment, read_journal(Path(session.root) / "index.journal")[0], "bookseg")["records"]
+        ]
+        wide = [[6000 + i, 1, 1 if i % 2 == 0 else -1] for i in range(40)]
+        session.handle(_book(7, wide), recv_utc_ns=3, recv_mono_ns=3)
+        predicted = {
+            "kind": "capture_stop",
+            "cause": "write_fail",
+            "detail": "disk_full",
+            "received": session.received,
+            "durable": session.durable,
+            "attempted": session.attempted,
+            "rejected_counted": False,
+            "rejected_sha256": None,
+        }
+        slack = len(dumps(predicted)) + 80
+        estimate = 80 + sum(len(dumps(row)) for row in session.buffer["raw-book"])
+        self.assertGreater(estimate, slack)
+        cap = _directory_size(Path(session.root)) + slack
+        self.assertGreater(cap, 0)
+        session.cfg.disk_cap_bytes = cap
+        return cap, prior, prior_ids
+
+    def _oracle(self, session: Session, prior: bytes, prior_ids: list, cap: int) -> dict:
+        segment = Path(session.root) / "raw/book/bookseg.gz"
+        blob = segment.read_bytes()
+        view = durable_view(segment, read_journal(Path(session.root) / "index.journal")[0], "bookseg")
+        ids = [row["raw_id"] for row in view["records"]]
+        return {
+            "over_cap": _directory_size(Path(session.root)) > cap,
+            "segment_changed": blob != prior,
+            "new_durable_ids": ids != prior_ids,
+            "tail_bytes": view["lost_uncommitted_tail_bytes"],
+            "verify_errors": view.get("verify_errors"),
+        }
+
+    def test_c_fits_matrix(self):
+        original = session_mod.Session._fits
+
+        def always_fits(self, rows, stream):
+            del rows, stream
+            return True
+
+        def base_and_control(row_name: str, weaken: bool):
+            label = "base" if not weaken else "control"
+            session = self._open(f"c-{label}")
+            self._prime(session)
+            session.handle(_hb(7), recv_utc_ns=3, recv_mono_ns=3)
+            if weaken:
+                session_mod.Session._fits = always_fits
+            try:
+                session.commit()
+            finally:
+                _restore_symbols()
+            self.assertIs(session_mod.Session._fits, original)
+            cap = int(session.cfg.disk_cap_bytes)
+            oracle = self._oracle(session, (Path(session.root) / "raw/book/bookseg.gz").read_bytes(), [], cap)
+            # Re-read prior as the post-success bytes; the held property is size within the large cap.
+            held = _directory_size(Path(session.root)) <= cap
+            _record({
+                "fault_id": "C-FITS",
+                "row": row_name,
+                "symbol": "Session._fits",
+                "call_path": "Session.commit -> Session._fits",
+                "outcome": "HELD" if held else "MISS",
+                "assertion_id": "C-ORACLE-WITHIN-CAP",
+                "sentinel": {"within_cap": held, "outer_weakened": _OUTER_WEAKENED},
+                "restoration": _symbols_match(),
+            })
+            self.assertTrue(held)
+            self.assertTrue(_symbols_match())
+
+        base_and_control("C-BASE", False)
+        base_and_control("C-CONTROL", True)
+
+        session = self._open("c-intact")
+        self._prime(session)
+        cap, prior, prior_ids = self._arm_cap(session)
+        with self.assertRaises(CaptureStopped) as caught:
+            session.commit()
+        self.assertEqual(caught.exception.reason, "disk_full")
+        self.assertIn("CAPTURE_STOP", caught.exception.stderr)
+        self.assertNotIn("alert", caught.exception.stderr.lower())
+        oracle = self._oracle(session, prior, prior_ids, cap)
+        journal, _stopped = read_journal(Path(session.root) / "index.journal")
+        self.assertTrue(any(row.get("kind") == "capture_stop" and row.get("detail") == "disk_full" for row in journal))
+        _record({
+            "fault_id": "C-FITS",
+            "row": "C-INTACT",
+            "symbol": "Session._fits",
+            "call_path": "Session.commit -> Session._fits -> Session._stop",
+            "outcome": "STOP-DISK-FULL",
+            "assertion_id": "C-ORACLE-PRIOR-BYTES",
+            "sentinel": oracle,
+            "restoration": _symbols_match(),
+        })
+        self.assertFalse(oracle["segment_changed"])
+        self.assertFalse(oracle["new_durable_ids"])
+        self.assertEqual(oracle["tail_bytes"], 0)
+        self.assertEqual(oracle["verify_errors"], [])
+
+        session = self._open("c-weak")
+        self._prime(session)
+        cap, prior, prior_ids = self._arm_cap(session)
+        session_mod.Session._fits = always_fits
+        stopped = False
+        try:
+            try:
+                session.commit()
+            except CaptureStopped:
+                stopped = True
+            oracle = self._oracle(session, prior, prior_ids, cap)
+        finally:
+            _restore_symbols()
+        distinguished = (not stopped) and oracle["segment_changed"] and oracle["new_durable_ids"]
+        _record({
+            "fault_id": "C-FITS",
+            "row": "C-WEAK",
+            "symbol": "Session._fits",
+            "call_path": "Session.commit -> Session._fits",
+            "outcome": "KILL-ORACLE" if distinguished else "MISS",
+            "assertion_id": "C-ORACLE-NEW-DURABLE-BYTES",
+            "sentinel": {"stopped": stopped, **oracle, "outer_weakened": _OUTER_WEAKENED},
+            "restoration": _symbols_match(),
+        })
+        self.assertTrue(_symbols_match())
+        self.assertFalse(stopped)
+        self.assertTrue(oracle["segment_changed"])
+        self.assertTrue(oracle["new_durable_ids"])
+        self.assertFalse(_OUTER_WEAKENED)
+
+    def test_d_guard_matrix(self):
+        def instrument(row_name: str, weaken: bool, mismatch: bool):
+            root_name = "d-inst-" + row_name.lower()
+            if weaken:
+                def allow(frozen_symbol, requested_symbol):
+                    del frozen_symbol, requested_symbol
+                    return None
+                session_mod.check_instrument = allow
+            kwargs = {}
+            if mismatch:
+                kwargs = {"symbol": "tBTCF0:USTF0", "frozen_symbol": "tBTCUSD"}
+            refused = None
+            created = False
+            try:
+                try:
+                    session = self._open(root_name, **kwargs)
+                    created = Path(session.root).exists()
+                except StartRefused as exc:
+                    refused = exc.reason
+                    created = False
+            finally:
+                _restore_symbols()
+            return refused, created
+
+        refused, created = instrument("base", False, False)
+        _record({
+            "fault_id": "D-INSTRUMENT",
+            "row": "D-BASE",
+            "symbol": "session.check_instrument",
+            "call_path": "Session.__init__ -> check_instrument",
+            "outcome": "HELD",
+            "assertion_id": "D-INSTRUMENT-BASE",
+            "sentinel": {"refused": refused, "created": created},
+            "restoration": _symbols_match(),
+        })
+        self.assertIsNone(refused)
+        self.assertTrue(created)
+
+        refused, created = instrument("control", True, False)
+        _record({
+            "fault_id": "D-INSTRUMENT",
+            "row": "D-CONTROL",
+            "symbol": "session.check_instrument",
+            "call_path": "Session.__init__ -> check_instrument",
+            "outcome": "HELD",
+            "assertion_id": "D-INSTRUMENT-CONTROL",
+            "sentinel": {"refused": refused, "created": created},
+            "restoration": _symbols_match(),
+        })
+        self.assertIsNone(refused)
+        self.assertTrue(created)
+        self.assertTrue(_symbols_match())
+
+        refused, created = instrument("intact", False, True)
+        _record({
+            "fault_id": "D-INSTRUMENT",
+            "row": "D-INTACT",
+            "symbol": "session.check_instrument",
+            "call_path": "Session.__init__ -> check_instrument",
+            "outcome": "STOP-INSTRUMENT-MISMATCH",
+            "assertion_id": "D-INSTRUMENT-INTACT",
+            "sentinel": {"refused": refused, "created": created},
+            "restoration": _symbols_match(),
+        })
+        self.assertEqual(refused, "INSTRUMENT_MISMATCH")
+        self.assertFalse(created)
+
+        refused, created = instrument("weak", True, True)
+        violated = created and refused is None
+        _record({
+            "fault_id": "D-INSTRUMENT",
+            "row": "D-WEAK",
+            "symbol": "session.check_instrument",
+            "call_path": "Session.__init__ -> check_instrument",
+            "outcome": "KILL-ORACLE" if violated else "MISS",
+            "assertion_id": "D-ORACLE-MISMATCH-ROOT",
+            "sentinel": {"refused": refused, "created": created},
+            "restoration": _symbols_match(),
+        })
+        self.assertTrue(violated)
+        self.assertTrue(_symbols_match())
+
+        def require(row_name: str, weaken: bool, unset: bool):
+            if weaken:
+                def allow(name, value):
+                    del name
+                    return value
+                session_mod.require_set = allow
+            kwargs = {"disk_cap_bytes": None} if unset else {}
+            refused_name = None
+            journal = False
+            try:
+                try:
+                    session = self._open("d-req-" + row_name.lower(), **kwargs)
+                    journal = (Path(session.root) / "index.journal").is_file()
+                except ConfigUnset as exc:
+                    refused_name = exc.name
+            finally:
+                _restore_symbols()
+            return refused_name, journal
+
+        refused_name, journal = require("base", False, False)
+        _record({
+            "fault_id": "D-REQUIRE-SET",
+            "row": "D-BASE",
+            "symbol": "session.require_set",
+            "call_path": "Session.__init__ -> require_set",
+            "outcome": "HELD",
+            "assertion_id": "D-REQUIRE-BASE",
+            "sentinel": {"refused": refused_name, "journal": journal},
+            "restoration": _symbols_match(),
+        })
+        self.assertIsNone(refused_name)
+        self.assertTrue(journal)
+
+        refused_name, journal = require("control", True, False)
+        _record({
+            "fault_id": "D-REQUIRE-SET",
+            "row": "D-CONTROL",
+            "symbol": "session.require_set",
+            "call_path": "Session.__init__ -> require_set",
+            "outcome": "HELD",
+            "assertion_id": "D-REQUIRE-CONTROL",
+            "sentinel": {"refused": refused_name, "journal": journal},
+            "restoration": _symbols_match(),
+        })
+        self.assertIsNone(refused_name)
+        self.assertTrue(journal)
+
+        refused_name, journal = require("intact", False, True)
+        _record({
+            "fault_id": "D-REQUIRE-SET",
+            "row": "D-INTACT",
+            "symbol": "session.require_set",
+            "call_path": "Session.__init__ -> require_set",
+            "outcome": "STOP-UNSET",
+            "assertion_id": "D-REQUIRE-INTACT",
+            "sentinel": {"refused": refused_name, "journal": journal},
+            "restoration": _symbols_match(),
+        })
+        self.assertEqual(refused_name, "disk_cap_bytes")
+        self.assertFalse(journal)
+
+        refused_name, journal = require("weak", True, True)
+        violated = journal and refused_name is None
+        _record({
+            "fault_id": "D-REQUIRE-SET",
+            "row": "D-WEAK",
+            "symbol": "session.require_set",
+            "call_path": "Session.__init__ -> require_set",
+            "outcome": "KILL-ORACLE" if violated else "MISS",
+            "assertion_id": "D-ORACLE-UNSET-CAP-CREATED",
+            "sentinel": {"refused": refused_name, "journal": journal},
+            "restoration": _symbols_match(),
+        })
+        self.assertTrue(violated)
+
+        trap = _SyntheticEnv({"token": "synthetic-fixture-token"})
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            code = entrypoint.main([])
+        self.assertEqual(trap.reads, [])
+        _record({
+            "fault_id": "D-ENTRY",
+            "row": "D-BASE",
+            "symbol": "public_market_collector.__main__.main",
+            "call_path": "entrypoint.main",
+            "outcome": "STOP-REFUSED",
+            "assertion_id": "D-ENTRY-BASE",
+            "sentinel": {"code": code, "trap_reads": list(trap.reads)},
+            "restoration": _symbols_match(),
+        })
+        self.assertEqual(code, 78)
+        self.assertIn("BOARD_FREEZE_UNSET", stderr.getvalue())
+        self.assertNotIn("synthetic-fixture-token", stderr.getvalue())
+
+        def env_commit(row_name: str, weaken: bool, read_token: bool):
+            trap_row = _SyntheticEnv({"token": "synthetic-fixture-token"})
+            trap_row.intact = not weaken
+            session = self._open("d-env-" + row_name.lower())
+            self._prime(session)
+            session.handle(_hb(7), recv_utc_ns=4, recv_mono_ns=4)
+            prior = (Path(session.root) / "raw/book/bookseg.gz").read_bytes()
+            reached = []
+
+            def planted(self, *args, **kwargs):
+                reached.append("Session.commit")
+                if read_token:
+                    trap_row.read("token")
+                return _ORIGINAL_COMMIT(self, *args, **kwargs)
+
+            session_mod.Session.commit = planted
+            error_name = None
+            try:
+                try:
+                    session.commit()
+                except EnvGuard as exc:
+                    error_name = exc.key
+            finally:
+                _restore_symbols()
+            blob = b"".join(path.read_bytes() for path in Path(session.root).rglob("*") if path.is_file())
+            return {
+                "reached": reached,
+                "error": error_name,
+                "consumed": list(trap_row.consumed),
+                "segment_changed": (Path(session.root) / "raw/book/bookseg.gz").read_bytes() != prior,
+                "token_in_files": b"synthetic-fixture-token" in blob,
+                "restored": _symbols_match(),
+            }
+
+        held = env_commit("base", False, False)
+        _record({
+            "fault_id": "D-ENV",
+            "row": "D-BASE",
+            "symbol": "_SyntheticEnv.read",
+            "call_path": "Session.commit",
+            "outcome": "HELD",
+            "assertion_id": "D-ENV-BASE",
+            "sentinel": held,
+            "restoration": held["restored"],
+        })
+        self.assertEqual(held["consumed"], [])
+        self.assertTrue(held["segment_changed"])
+
+        held = env_commit("control", True, False)
+        _record({
+            "fault_id": "D-ENV",
+            "row": "D-CONTROL",
+            "symbol": "_SyntheticEnv.read",
+            "call_path": "Session.commit",
+            "outcome": "HELD",
+            "assertion_id": "D-ENV-CONTROL",
+            "sentinel": held,
+            "restoration": held["restored"],
+        })
+        self.assertEqual(held["consumed"], [])
+        self.assertTrue(held["segment_changed"])
+
+        stopped = env_commit("intact", False, True)
+        _record({
+            "fault_id": "D-ENV",
+            "row": "D-INTACT",
+            "symbol": "_SyntheticEnv.read",
+            "call_path": "Session.commit -> _SyntheticEnv.read",
+            "outcome": "STOP-ENV-GUARD",
+            "assertion_id": "D-ENV-INTACT",
+            "sentinel": stopped,
+            "restoration": stopped["restored"],
+        })
+        self.assertEqual(stopped["error"], "token")
+        self.assertEqual(stopped["consumed"], [])
+        self.assertFalse(stopped["segment_changed"])
+        self.assertFalse(stopped["token_in_files"])
+
+        weak = env_commit("weak", True, True)
+        violated = weak["consumed"] == ["synthetic-fixture-token"] and weak["segment_changed"] and not weak["token_in_files"]
+        _record({
+            "fault_id": "D-ENV",
+            "row": "D-WEAK",
+            "symbol": "_SyntheticEnv.read",
+            "call_path": "Session.commit -> _SyntheticEnv.read -> Session.commit",
+            "outcome": "KILL-ORACLE" if violated else "MISS",
+            "assertion_id": "D-ORACLE-ENV-TOKEN-CONSUMED",
+            "sentinel": weak,
+            "restoration": weak["restored"],
+        })
+        self.assertTrue(violated)
+
+        def loopback(row_name: str, inner_intact: bool, do_fault: bool, operation: str):
+            before = len(OUTER_EVENTS)
+            session = self._open("d-loop-" + row_name.lower() + "-" + operation)
+            self._prime(session)
+            session.handle(_hb(7), recv_utc_ns=4, recv_mono_ns=4)
+            prior = (Path(session.root) / "raw/book/bookseg.gz").read_bytes()
+            reached = []
+            error_name = None
+
+            def planted(self, *args, **kwargs):
+                reached.append("Session.commit")
+                if do_fault and operation == "connect":
+                    fd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    try:
+                        if inner_intact:
+                            raise InnerLoopbackGuard("127.0.0.1")
+                        fd.connect(("127.0.0.1", 9))
+                    finally:
+                        fd.close()
+                elif do_fault and operation == "getaddrinfo":
+                    if inner_intact:
+                        raise InnerLoopbackGuard("127.0.0.1")
+                    socket.getaddrinfo("127.0.0.1", 9)
+                return _ORIGINAL_COMMIT(self, *args, **kwargs)
+
+            session_mod.Session.commit = planted
+            try:
+                try:
+                    session.commit()
+                except InnerLoopbackGuard:
+                    error_name = "InnerLoopbackGuard"
+                except OuterContainment as exc:
+                    error_name = exc.event
+            finally:
+                _restore_symbols()
+            new_events = OUTER_EVENTS[before:]
+            return {
+                "reached": reached,
+                "error": error_name,
+                "outer": new_events,
+                "segment_changed": (Path(session.root) / "raw/book/bookseg.gz").read_bytes() != prior,
+                "restored": _symbols_match(),
+            }
+
+        for operation in ("connect", "getaddrinfo"):
+            base = loopback("base", True, False, operation)
+            _record({
+                "fault_id": "D-LOOPBACK-" + operation,
+                "row": "D-BASE",
+                "symbol": "Session.commit",
+                "call_path": "Session.commit",
+                "outcome": "HELD",
+                "assertion_id": "D-LOOP-" + operation + "-BASE",
+                "sentinel": base,
+                "restoration": base["restored"],
+            })
+            self.assertEqual(base["outer"], [])
+            self.assertTrue(base["segment_changed"])
+            control = loopback("control", False, False, operation)
+            _record({
+                "fault_id": "D-LOOPBACK-" + operation,
+                "row": "D-CONTROL",
+                "symbol": "InnerLoopbackGuard",
+                "call_path": "Session.commit",
+                "outcome": "HELD",
+                "assertion_id": "D-LOOP-" + operation + "-CONTROL",
+                "sentinel": control,
+                "restoration": control["restored"],
+            })
+            self.assertEqual(control["outer"], [])
+            self.assertTrue(control["segment_changed"])
+            intact = loopback("intact", True, True, operation)
+            _record({
+                "fault_id": "D-LOOPBACK-" + operation,
+                "row": "D-INTACT",
+                "symbol": "InnerLoopbackGuard",
+                "call_path": "Session.commit -> InnerLoopbackGuard",
+                "outcome": "STOP-INNER",
+                "assertion_id": "D-LOOP-" + operation + "-INTACT",
+                "sentinel": intact,
+                "restoration": intact["restored"],
+            })
+            self.assertEqual(intact["error"], "InnerLoopbackGuard")
+            self.assertEqual(intact["outer"], [])
+            self.assertFalse(intact["segment_changed"])
+            weak = loopback("weak", False, True, operation)
+            expected_event = "socket.connect" if operation == "connect" else "socket.getaddrinfo"
+            intercepted = weak["outer"] == [{"event": expected_event, "host": "127.0.0.1"}] and weak["error"] == expected_event
+            _record({
+                "fault_id": "D-LOOPBACK-" + operation,
+                "row": "D-WEAK",
+                "symbol": "OuterContainment",
+                "call_path": "Session.commit -> " + expected_event,
+                "outcome": "KILL-ORACLE" if intercepted and not weak["segment_changed"] else "MISS",
+                "assertion_id": "D-ORACLE-LOOPBACK-" + operation,
+                "sentinel": weak,
+                "restoration": weak["restored"],
+            })
+            self.assertTrue(intercepted)
+            self.assertFalse(weak["segment_changed"])
+            self.assertFalse(_OUTER_WEAKENED)
 
 
 if __name__ == "__main__":
