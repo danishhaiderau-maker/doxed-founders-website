@@ -1,0 +1,9 @@
+{
+  "schema": "pmc_dependency_pin_v1",
+  "entrypoint": "public_market_collector/__main__.py",
+  "python": ">=3.11",
+  "third_party": [],
+  "install": [],
+  "network_imports": [],
+  "note": "Synthetic tests use the Python standard library only. This build has no runtime dependency pin beyond that."
+}
