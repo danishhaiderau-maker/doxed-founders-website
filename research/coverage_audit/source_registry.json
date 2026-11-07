@@ -1,0 +1,1157 @@
+{
+  "facts_policy": "UNSOURCED_REAL_FACTS_REMAIN_UNVERIFIED",
+  "feeds": [
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat_tol",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_tol",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 2000,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat_ms",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_ms",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_ms"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat_iso",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_iso",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "iso_utc"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat_gz",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "gzip",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_gz",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat_zip",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "zip",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_zip",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat_jsonl",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        },
+        {
+          "index": 2,
+          "name": "recv_ts",
+          "required": false,
+          "role": "receive_timestamp",
+          "type": "timestamp"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "jsonl",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": "recv_ts",
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_jsonl",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "heartbeat_jsona",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "json_array",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_jsona",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "headerless",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "headerless_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "headerless",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": null,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "sparse_trades",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "jsonl",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "sparse",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "sparse_trades",
+      "source": "fixture",
+      "sparse_rule": "NO_EVENT_NOT_OUTAGE",
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": null,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "seq_nocontract",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "seq",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        },
+        {
+          "index": 2,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "seq_nocontract",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "seq_contract",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "seq",
+          "required": true,
+          "role": "sequence",
+          "type": "sequence"
+        },
+        {
+          "index": 2,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": {
+        "contiguous": true,
+        "id_field": "seq",
+        "scope": "per_instrument"
+      },
+      "series": "seq_contract",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "seq_interleaved",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "seq",
+          "required": true,
+          "role": "sequence",
+          "type": "sequence"
+        },
+        {
+          "index": 2,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": {
+        "contiguous": false,
+        "id_field": "seq",
+        "scope": "global_interleaved"
+      },
+      "series": "seq_interleaved",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": null,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "candle_trades",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "headerless_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "sparse",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "candle_trades",
+      "source": "fixture",
+      "sparse_rule": "NO_EVENT_NOT_OUTAGE",
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": null,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": null,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": "synthetic/fixture/candle_trades/instr/era1",
+      "depth": null,
+      "era": "era1",
+      "feed": "candles",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "headerless_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "sparse",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "candles",
+      "source": "fixture",
+      "sparse_rule": "CANDLE_CROSSCHECK_TRADES",
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": null,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": {
+        "band_fields": [
+          "band_near",
+          "band_far"
+        ],
+        "band_threshold": 25,
+        "band_thresholds_declared": true,
+        "bands_are_not_executable_levels": true,
+        "level_fields": [
+          "lvl_0",
+          "lvl_1"
+        ],
+        "notes_code": "BANDS_DISTINCT_FROM_WALKABLE_LEVELS"
+      },
+      "era": "era1",
+      "feed": "depth",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "band_near",
+          "required": true,
+          "role": "depth_band",
+          "type": "array"
+        },
+        {
+          "index": 2,
+          "name": "band_far",
+          "required": true,
+          "role": "depth_band",
+          "type": "array"
+        },
+        {
+          "index": 3,
+          "name": "lvl_0",
+          "required": true,
+          "role": "executable_level",
+          "type": "array"
+        },
+        {
+          "index": 4,
+          "name": "lvl_1",
+          "required": true,
+          "role": "executable_level",
+          "type": "array"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "jsonl",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "depth",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "timed_meta",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "recv_ts",
+          "required": false,
+          "role": "receive_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 2,
+          "name": "pub_ts",
+          "required": false,
+          "role": "publication_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 3,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": "pub_ts",
+        "receive": "recv_ts",
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "timed_meta",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": true,
+      "cadence_ms": null,
+      "calendar": "UNVERIFIED",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "unspecified",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": false,
+        "kind": "headerless_csv",
+        "quote": "\""
+      },
+      "instrument": "unspecified",
+      "observation": "unknown",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "unspecified",
+      "source": "placeholder",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": null,
+      "venue": "unverified",
+      "verification_status": "UNVERIFIED"
+    },
+    {
+      "audit_publication_delay": false,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era2",
+      "feed": "heartbeat_era2",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "tag",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": null,
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": null,
+      "sequence_contract": null,
+      "series": "heartbeat_era2",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    },
+    {
+      "audit_publication_delay": true,
+      "cadence_ms": 60000,
+      "calendar": "UTC_CONTINUOUS",
+      "crosscheck_feed_ref": null,
+      "depth": null,
+      "era": "era1",
+      "feed": "pub_delay",
+      "fields": [
+        {
+          "index": 0,
+          "name": "event_ts",
+          "required": true,
+          "role": "event_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 1,
+          "name": "pub_ts",
+          "required": true,
+          "role": "publication_timestamp",
+          "type": "timestamp"
+        },
+        {
+          "index": 2,
+          "name": "note",
+          "required": true,
+          "role": "ignored",
+          "type": "ignored"
+        }
+      ],
+      "format": {
+        "container": "plain",
+        "delimiter": ",",
+        "encoding": "utf-8",
+        "header": true,
+        "kind": "header_csv",
+        "quote": "\""
+      },
+      "instrument": "instr",
+      "observation": "periodic",
+      "optional_timestamps": {
+        "publication": "pub_ts",
+        "receive": null,
+        "vintage": null
+      },
+      "permissible_publication_delay_ms": 5000,
+      "sequence_contract": null,
+      "series": "pub_delay",
+      "source": "fixture",
+      "sparse_rule": null,
+      "timestamp": {
+        "field": "event_ts",
+        "timezone": "UTC",
+        "unit": "unix_s"
+      },
+      "tolerance_ms": 0,
+      "venue": "synthetic",
+      "verification_status": "SYNTHETIC_DECLARED"
+    }
+  ],
+  "registry_schema": "source_registry_v1"
+}
