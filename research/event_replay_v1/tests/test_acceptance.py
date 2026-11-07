@@ -1204,6 +1204,103 @@ class AcceptanceTest(unittest.TestCase):
         self.assertEqual(emoji.receipt_used, 14, "oracle:receipt-reserve-before-build")
         self.assertIn(b"\\ud83d\\ude00", bytes(emoji_watch.buf), "oracle:receipt-reserve-before-build")
 
+    def test_float_plain_same_value(self):
+        from research.event_replay_v1.guards import OutputLedger, emit_receipt
+
+        prefix = b'{"elapsed":'
+        suffix = b"}"
+        values = [
+            0.0,
+            2.0,
+            0.5,
+            -0.5,
+            0.25,
+            1.5,
+            2.0 ** -4,
+            2.0 ** -1074,
+            sys.float_info.max,
+            -sys.float_info.max,
+        ]
+        self.assertEqual(len(values), 10, "oracle:float-plain-same-value")
+        for value in values:
+            ledger = OutputLedger()
+            held = {}
+            ledger.observe_writer = lambda writer: held.__setitem__("writer", writer)
+            watch = self._FloatWatch(ledger)
+            emit_receipt(ledger, watch, {"elapsed": value})
+            raw = bytes(watch.buf)
+            self.assertTrue(raw.startswith(prefix), "oracle:float-plain-same-value")
+            self.assertTrue(raw.endswith(suffix), "oracle:float-plain-same-value")
+            token = raw[len(prefix):-len(suffix)]
+            self.assertEqual(float(token), value, "oracle:float-plain-same-value")
+            self.assertNotIn(b"e", token.lower(), "oracle:float-plain-same-value")
+            writer = held["writer"]
+            self.assertEqual(writer.float_exit_receipt - writer.float_entry_receipt, len(token), "oracle:float-plain-same-value")
+            self.assertEqual(sum(writer.float_scratch), len(token), "oracle:float-plain-same-value")
+            self.assertTrue(all(size <= 1024 for size in writer.float_scratch), "oracle:float-plain-same-value")
+            self.assertEqual(ledger.receipt_used, len(prefix) + len(token) + len(suffix), "oracle:float-plain-same-value")
+            self.assertEqual(raw, prefix + token + suffix, "oracle:float-plain-same-value")
+        sub = 2.0 ** -1074
+        ledger = OutputLedger()
+        held = {}
+        ledger.observe_writer = lambda writer: held.__setitem__("writer", writer)
+        watch = self._FloatWatch(ledger)
+        emit_receipt(ledger, watch, {"elapsed": sub})
+        token = bytes(watch.buf)[len(prefix):-len(suffix)]
+        self.assertEqual(len(token), 1076, "oracle:float-plain-same-value")
+        self.assertTrue(token.startswith(b"0."), "oracle:float-plain-same-value")
+        self.assertEqual(len(bytes(watch.buf)), 1088, "oracle:float-plain-same-value")
+        self.assertEqual(sum(held["writer"].float_scratch), 1076, "oracle:float-plain-same-value")
+        self.assertLessEqual(max(held["writer"].float_scratch), 1024, "oracle:float-plain-same-value")
+        self.assertEqual(len(str(int(sys.float_info.max))), 309, "oracle:float-plain-same-value")
+
+    def test_float_window_before_digits(self):
+        from research.event_replay_v1.guards import CapStop, OutputLedger, emit_receipt
+
+        prefix = b'{"elapsed":'
+
+        def fail_at(value: float, cap: int, unit: bytes, numeric_prefix: bytes) -> None:
+            ledger = OutputLedger(aggregate_cap=cap, receipt_cap=cap)
+            held = {}
+            ledger.observe_writer = lambda writer: held.__setitem__("writer", writer)
+            watch = self._FloatWatch(ledger)
+            scratch_at_raise = {}
+            raised = {}
+
+            def reserve(nbytes: int) -> None:
+                try:
+                    OutputLedger.reserve_receipt(ledger, nbytes)
+                except CapStop:
+                    scratch_at_raise["n"] = len(held["writer"].scratch_allocations)
+                    raised["row"] = (nbytes, ledger.receipt_used, bytes(watch.buf))
+                    raise
+
+            ledger.reserve_receipt = reserve
+            with self.assertRaises(CapStop) as caught:
+                emit_receipt(ledger, watch, {"elapsed": value})
+            self.assertEqual(str(caught.exception), "CAP_STOP:receipt", "oracle:float-window-before-digits")
+            nbytes, used, raw = raised["row"]
+            self.assertEqual(nbytes, len(unit), "oracle:float-window-before-digits")
+            self.assertEqual(raw, prefix + numeric_prefix, "oracle:float-window-before-digits")
+            self.assertNotIn(unit, raw, "oracle:float-window-before-digits")
+            self.assertFalse(raw.endswith(b"}"), "oracle:float-window-before-digits")
+            self.assertEqual(len(held["writer"].scratch_allocations), scratch_at_raise["n"], "oracle:float-window-before-digits")
+            self.assertEqual(used, len(prefix) + len(numeric_prefix), "oracle:float-window-before-digits")
+
+        fail_at(-0.5, 12, b"-0", b"")
+        fail_at(0.5, 13, b".5", b"0")
+
+    class _FloatWatch:
+        def __init__(self, ledger) -> None:
+            self.ledger = ledger
+            self.buf = bytearray()
+
+        def write(self, data: bytes) -> None:
+            before = self.ledger.receipt_used
+            self.buf.extend(data)
+            if before != self.ledger.receipt_used:
+                raise AssertionError("oracle:receipt-prewrite-not-a-second-charge")
+
     def test_outer_refuses_when_inner_guard_off(self):
         from research.event_replay_v1.guards import ACTIVE_OUTER, INNER_GUARD
 

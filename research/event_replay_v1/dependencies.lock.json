@@ -41,8 +41,8 @@
       "sha256": "daf52f8aca34e9780e87e20986820de6e303784da8e7e55781d4281659181faa"
     },
     "research/event_replay_v1/guards.py": {
-      "bytes": 32558,
-      "sha256": "c9c4a1e2710bd0f8f7b505ce6d1b693934d2d293f4afd9574d67153506faf542"
+      "bytes": 34695,
+      "sha256": "b42469f3d515e03a801346a43e5d03c71f3dead73aa2485c5b55b51f9bd10e2f"
     },
     "research/event_replay_v1/order_state.py": {
       "bytes": 2820,
@@ -57,8 +57,8 @@
       "sha256": "a91b87ff57bdbf3ab383ace670e97c65f03b42c64e18924823dc0761295ffa7a"
     },
     "research/event_replay_v1/tests/test_acceptance.py": {
-      "bytes": 58929,
-      "sha256": "db79ad7734163aa578aa9d2a8a386c8f7ae6815aee3a96a12f376c0b40f74e71"
+      "bytes": 63854,
+      "sha256": "3f1f2336d8c245cecb46d51cab5f5151c55629a45bde75b3b21e4340d530ec49"
     }
   },
   "fixture_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",

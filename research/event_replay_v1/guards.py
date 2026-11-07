@@ -10,7 +10,6 @@ Aggregate command output is a separate 16MiB ledger.
 
 from __future__ import annotations
 
-import decimal
 import os
 import resource
 import socket
@@ -576,35 +575,55 @@ def _digit_window(number: int, total: int, start: int, length: int) -> bytes:
     return f"{window:0{length}d}".encode("ascii")
 
 
-def _float_length(negative: bool, digits: tuple, sci: int) -> int:
-    count = len(digits)
-    return (1 if negative else 0) + count + (1 if count > 1 else 0) + 2 + _int_digits(sci if sci >= 0 else -sci)
+def _binary_pair(value: float) -> tuple[int, int]:
+    """abs(value) = n * 2**e with n < 2**53. No decimal digits are stored."""
+
+    number = -value if value < 0 else value
+    if number == 0.0:
+        return 0, 0
+    low = 4503599627370496.0  # 2**52
+    high = 9007199254740992.0  # 2**53
+    power = 0
+    while number < low:
+        number *= 2.0
+        power -= 1
+    while number >= high:
+        number /= 2.0
+        power += 1
+    return int(number), power
 
 
-def _float_at(negative: bool, digits: tuple, sci: int, index: int) -> int:
-    count = len(digits)
-    pos = index
-    if negative:
-        if pos == 0:
-            return ord("-")
-        pos -= 1
-    mantissa = count + (1 if count > 1 else 0)
-    if pos < mantissa:
-        if count == 1:
-            return ord("0") + digits[0]
-        if pos == 0:
-            return ord("0") + digits[0]
-        if pos == 1:
-            return ord(".")
-        return ord("0") + digits[pos - 1]
-    pos -= mantissa
-    if pos == 0:
-        return ord("e")
-    if pos == 1:
-        return ord("+") if sci >= 0 else ord("-")
-    exp = sci if sci >= 0 else -sci
-    exp_len = _int_digits(exp)
-    return _digit_window(exp, exp_len, pos - 2, 1)[0]
+def _split_binary(significand: int, power: int) -> tuple[int, int, int]:
+    if significand == 0:
+        return 0, 0, 0
+    if power >= 0:
+        return significand << power, 0, 0
+    width = -power
+    if width >= significand.bit_length():
+        return 0, significand, width
+    integer_value = significand >> width
+    return integer_value, significand - (integer_value << width), width
+
+
+def _reduce_fraction(numer: int, width: int) -> tuple[int, int]:
+    if numer == 0 or width == 0:
+        return 0, 0
+    shift = 0
+    while shift < width and numer % 2 == 0:
+        numer //= 2
+        shift += 1
+    return numer, width - shift
+
+
+def _fraction_digits(numer: int, places: int, start: int, take: int) -> bytes:
+    """Digits [start, start+take) of the zero-padded places-digit field."""
+
+    drop = places - (start + take)
+    scaled = numer * pow(5, places)
+    if drop:
+        scaled //= pow(10, drop)
+    block = scaled % pow(10, take)
+    return f"{block:0{take}d}".encode("ascii")
 
 
 class ReceiptWriter:
@@ -712,29 +731,61 @@ class ReceiptWriter:
     def emit_float(self, value: float) -> None:
         if value != value or value == float("inf") or value == float("-inf"):
             raise CapStop("receipt")
+        self.float_entry_receipt = self.ledger.receipt_used
+        self.float_entry_scratch = len(self.scratch_allocations)
         negative = value < 0
-        magnitude = decimal.Decimal.from_float(-value if negative else value)
-        sign, digits, exponent = magnitude.as_tuple()
-        if not digits:
-            digits = (0,)
-            exponent = 0
-        sci = exponent + len(digits) - 1
-        total = _float_length(negative or bool(sign), digits, sci)
-        start = 0
-        while start < total:
+        significand, power = _binary_pair(value)
+        integer_value, frac_numer, width = _split_binary(significand, power)
+        numer, places = _reduce_fraction(frac_numer, width)
+        int_digits = 1 if integer_value == 0 else _int_digits(integer_value)
+        frac_len = places if numer else 0
+        pos_int = 0
+        pos_frac = 0
+        signed = negative
+        while pos_int < int_digits or pos_frac < frac_len:
             room = self.room() if self.room() < SCRATCH_LIMIT else SCRATCH_LIMIT
-            if room < 1:
-                self.ledger.reserve_receipt(1)
-            take = total - start if total - start < room else room
-            self.ledger.reserve_receipt(take)
-            buf = bytes(
-                _float_at(negative or bool(sign), digits, sci, index)
-                for index in range(start, start + take)
-            )
-            if len(buf) != take:
+            if pos_int < int_digits:
+                sign_len = 1 if signed else 0
+                minimum = sign_len + 1 if pos_int == 0 else 1
+                if room < minimum:
+                    self.ledger.reserve_receipt(minimum)
+                take = int_digits - pos_int
+                if take > room - sign_len:
+                    take = room - sign_len
+                piece_len = sign_len + take
+                self.ledger.reserve_receipt(piece_len)
+                buf = bytearray()
+                if sign_len:
+                    buf.append(ord("-"))
+                if integer_value == 0:
+                    buf.append(ord("0"))
+                else:
+                    buf.extend(_digit_window(integer_value, int_digits, pos_int, take))
+                if len(buf) != piece_len:
+                    raise CapStop("receipt")
+                self._commit_new(bytes(buf))
+                pos_int += take
+                signed = False
+                continue
+            dot = 1 if pos_frac == 0 else 0
+            minimum = dot + 1 if pos_frac == 0 else 1
+            if room < minimum:
+                self.ledger.reserve_receipt(minimum)
+            take = frac_len - pos_frac
+            if take > room - dot:
+                take = room - dot
+            piece_len = dot + take
+            self.ledger.reserve_receipt(piece_len)
+            buf = bytearray()
+            if dot:
+                buf.append(ord("."))
+            buf.extend(_fraction_digits(numer, places, pos_frac, take))
+            if len(buf) != piece_len:
                 raise CapStop("receipt")
-            self._commit_new(buf)
-            start += take
+            self._commit_new(bytes(buf))
+            pos_frac += take
+        self.float_exit_receipt = self.ledger.receipt_used
+        self.float_scratch = self.scratch_allocations[self.float_entry_scratch:]
 
     def emit_unicode_string(self, text: str) -> None:
         self.write_exact(b'"')
@@ -858,6 +909,9 @@ def _byte_window(pending: bytes, room: int):
 
 def emit_receipt(ledger: OutputLedger, handle, value, sort_keys: bool = False) -> ReceiptWriter:
     writer = ReceiptWriter(ledger, handle)
+    observe = getattr(ledger, "observe_writer", None)
+    if observe is not None:
+        observe(writer)
     writer.emit(value, sort_keys=sort_keys)
     return writer
 
