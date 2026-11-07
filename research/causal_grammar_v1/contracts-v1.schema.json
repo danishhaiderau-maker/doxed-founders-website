@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "causal_grammar.contracts.v1",
+  "title": "Stage A fixture-only causal contracts",
+  "description": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED. Not an auditor CoverageReport, ReplayTrace, ResearchResults, or collector raw-event schema.",
+  "type": "object",
+  "$defs": {
+    "normalized_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "source",
+        "series_id",
+        "provenance",
+        "linkage",
+        "segment_id",
+        "member_id",
+        "record_index",
+        "timestamps",
+        "receive_monotonic_ns",
+        "connection_epoch",
+        "release_status",
+        "revision_of",
+        "availability",
+        "availability_ms",
+        "ordering",
+        "validity",
+        "value",
+        "unit",
+        "usable"
+      ],
+      "properties": {
+        "schema": {"const": "causal_grammar.normalized_record.v1"},
+        "schema_version": {"const": "v1"},
+        "source": {"const": "synthetic"},
+        "series_id": {"enum": ["A", "B", "C"]},
+        "availability": {"enum": ["AVAILABLE", "UNKNOWN"]},
+        "usable": {"type": "boolean"}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compatibility", "compatibility_status"],
+      "properties": {
+        "compatibility": {"const": "NOT_ESTABLISHED"},
+        "compatibility_status": {"const": "BLOCKED"}
+      }
+    }
+  }
+}
