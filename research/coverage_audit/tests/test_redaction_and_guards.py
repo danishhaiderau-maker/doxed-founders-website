@@ -128,54 +128,123 @@ class RedactionTests(unittest.TestCase):
 
         from research.coverage_audit.guards import activate_runtime_denies, restore_runtime_denies
 
-        outer = {"env": 0, "net": 0, "write": 0}
+        class OuterRefusal(Exception):
+            def __init__(self, path):
+                super().__init__(path)
+                self.path = path
+
+        outer = {"environ": 0, "getenv": 0, "dns": 0, "socket": 0, "connect": 0, "write": 0}
         saved = (os.getenv, os.environ, socket.socket, socket.getaddrinfo, socket.create_connection, builtins.open)
 
+        def bump(path):
+            outer[path] += 1
+            raise OuterRefusal(path)
+
         def outer_getenv(*_args, **_kwargs):
-            outer["env"] += 1
-            raise RuntimeError("outer-env")
+            bump("getenv")
 
         def outer_socket(*_args, **_kwargs):
-            outer["net"] += 1
-            raise RuntimeError("outer-net")
+            bump("socket")
+
+        def outer_getaddrinfo(*_args, **_kwargs):
+            bump("dns")
+
+        def outer_connect(*_args, **_kwargs):
+            bump("connect")
 
         def outer_open(file, mode="r", *args, **kwargs):
             if any(flag in str(mode) for flag in ("w", "a", "x", "+")):
-                outer["write"] += 1
-                raise RuntimeError("outer-write")
+                bump("write")
             return saved[5](file, mode, *args, **kwargs)
 
+        class OuterEnviron:
+            def __getitem__(self, key):
+                bump("environ")
+
+            def get(self, key, default=None):
+                bump("environ")
+
+            def __iter__(self):
+                bump("environ")
+
+            def keys(self):
+                bump("environ")
+
+            def items(self):
+                bump("environ")
+
+            def values(self):
+                bump("environ")
+
+            def copy(self):
+                bump("environ")
+
+            def __contains__(self, key):
+                bump("environ")
+
+            def __len__(self):
+                bump("environ")
+
+        def is_kill(exc, path, before, after):
+            if type(exc) is not OuterRefusal or exc.path != path:
+                return False
+            if after[path] != before[path] + 1:
+                return False
+            return all(after[key] == before[key] for key in after if key != path)
+
+        calls = (
+            ("environ", "ENV_READ_FORBIDDEN", lambda: os.environ["LANG"]),
+            ("getenv", "ENV_READ_FORBIDDEN", lambda: os.getenv("LANG")),
+            ("dns", "NETWORK_FORBIDDEN", lambda: socket.getaddrinfo("example.invalid", 1)),
+            ("socket", "NETWORK_FORBIDDEN", lambda: socket.socket()),
+            ("connect", "NETWORK_FORBIDDEN", lambda: socket.create_connection(("example.invalid", 1))),
+            ("write", "SOURCE_MUTATION_FORBIDDEN", lambda: builtins.open("unused", "w")),
+        )
         os.getenv = outer_getenv
+        os.environ = OuterEnviron()
         socket.socket = outer_socket
+        socket.getaddrinfo = outer_getaddrinfo
+        socket.create_connection = outer_connect
         builtins.open = outer_open
         state = activate_runtime_denies()
         try:
-            with self.assertRaises(AuditStop) as caught:
-                os.getenv("LANG")
-            self.assertEqual(caught.exception.code, "ENV_READ_FORBIDDEN")
-            self.assertEqual(outer["env"], 0)
-            with self.assertRaises(AuditStop) as caught:
-                os.environ["LANG"]
-            self.assertEqual(caught.exception.code, "ENV_READ_FORBIDDEN")
-            with self.assertRaises(AuditStop) as caught:
-                socket.socket()
-            self.assertEqual(caught.exception.code, "NETWORK_FORBIDDEN")
-            self.assertEqual(outer["net"], 0)
-            with self.assertRaises(AuditStop) as caught:
-                socket.getaddrinfo("example.invalid", 1)
-            self.assertEqual(caught.exception.code, "NETWORK_FORBIDDEN")
-            with self.assertRaises(AuditStop) as caught:
-                builtins.open("unused", "w")
-            self.assertEqual(caught.exception.code, "SOURCE_MUTATION_FORBIDDEN")
-            self.assertEqual(outer["write"], 0)
-            state["guards"][0].weaken = True
-            with self.assertRaises(RuntimeError):
-                os.getenv("LANG")
+            for path, code, invoke in calls:
+                with self.assertRaises(AuditStop) as caught:
+                    invoke()
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(outer[path], 0)
+                self.assertEqual(sum(outer.values()), 0)
+
+            zeros = {key: 0 for key in outer}
             try:
-                self.assertEqual(outer["env"], 0)
-                self.fail("env mutant was not killed")
-            except AssertionError:
-                print("MUTANT env_guard KILLED by test_runtime_denies_fire_before_outer_trap")
+                raise RuntimeError("unrelated")
+            except RuntimeError as exc:
+                self.assertFalse(is_kill(exc, "getenv", zeros, zeros))
+            try:
+                self.assertEqual(1, 0)
+            except AssertionError as exc:
+                self.assertFalse(is_kill(exc, "getenv", zeros, zeros))
+            bumped = dict(zeros)
+            bumped["dns"] = 1
+            wrong = OuterRefusal("getenv")
+            self.assertFalse(is_kill(wrong, "dns", zeros, bumped))
+            self.assertFalse(is_kill(wrong, "getenv", zeros, bumped))
+
+            for path, _code, invoke in calls:
+                for guard in state["guards"].values():
+                    guard.weaken = False
+                state["guards"][path].weaken = True
+                for key in outer:
+                    outer[key] = 0
+                before = dict(outer)
+                try:
+                    invoke()
+                except OuterRefusal as exc:
+                    self.assertTrue(is_kill(exc, path, before, outer))
+                    print(f"MUTANT inner_{path} KILLED by test_runtime_denies_fire_before_outer_trap")
+                else:
+                    self.fail(path)
+                state["guards"][path].weaken = False
         finally:
             restore_runtime_denies(state)
             os.getenv, os.environ, socket.socket, socket.getaddrinfo, socket.create_connection, builtins.open = saved

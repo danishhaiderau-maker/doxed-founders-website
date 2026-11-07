@@ -956,32 +956,41 @@ def redaction_ok(report: object, trusted: set[str]) -> bool:
 class _DenyMap:
     """Mapping stand-in that refuses every read before any value is returned."""
 
-    def __getitem__(self, key):
+    def __init__(self, saved):
+        self.weaken = False
+        self._saved = saved
+
+    def _read(self, name, *args, **kwargs):
+        if self.weaken:
+            return getattr(self._saved, name)(*args, **kwargs)
         raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def __getitem__(self, key):
+        return self._read("__getitem__", key)
 
     def get(self, key, default=None):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("get", key, default)
 
     def __iter__(self):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("__iter__")
 
     def keys(self):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("keys")
 
     def items(self):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("items")
 
     def values(self):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("values")
 
     def copy(self):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("copy")
 
     def __contains__(self, key):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("__contains__", key)
 
     def __len__(self):
-        raise AuditStop("ENV_READ_FORBIDDEN")
+        return self._read("__len__")
 
 
 def _deny_env(*_args, **_kwargs):
@@ -1013,7 +1022,7 @@ def activate_runtime_denies():
         "create_connection": socket.create_connection,
         "open": builtins.open,
     }
-    _deny_write.real_open = builtins.open
+    _deny_write.real_open = state["open"]
 
     def guarded_getenv(*args, **kwargs):
         if getattr(guarded_getenv, "weaken", False):
@@ -1025,6 +1034,16 @@ def activate_runtime_denies():
             return state["socket"](*args, **kwargs)
         return _deny_network(*args, **kwargs)
 
+    def guarded_getaddrinfo(*args, **kwargs):
+        if getattr(guarded_getaddrinfo, "weaken", False):
+            return state["getaddrinfo"](*args, **kwargs)
+        return _deny_network(*args, **kwargs)
+
+    def guarded_create_connection(*args, **kwargs):
+        if getattr(guarded_create_connection, "weaken", False):
+            return state["create_connection"](*args, **kwargs)
+        return _deny_network(*args, **kwargs)
+
     def guarded_open(file, mode="r", *args, **kwargs):
         if getattr(guarded_open, "weaken", False):
             return state["open"](file, mode, *args, **kwargs)
@@ -1032,14 +1051,24 @@ def activate_runtime_denies():
 
     guarded_getenv.weaken = False
     guarded_socket.weaken = False
+    guarded_getaddrinfo.weaken = False
+    guarded_create_connection.weaken = False
     guarded_open.weaken = False
+    denied_environ = _DenyMap(state["environ"])
     os.getenv = guarded_getenv
-    os.environ = _DenyMap()
+    os.environ = denied_environ
     socket.socket = guarded_socket
-    socket.getaddrinfo = _deny_network
-    socket.create_connection = _deny_network
+    socket.getaddrinfo = guarded_getaddrinfo
+    socket.create_connection = guarded_create_connection
     builtins.open = guarded_open
-    state["guards"] = (guarded_getenv, guarded_socket, guarded_open)
+    state["guards"] = {
+        "environ": denied_environ,
+        "getenv": guarded_getenv,
+        "dns": guarded_getaddrinfo,
+        "socket": guarded_socket,
+        "connect": guarded_create_connection,
+        "write": guarded_open,
+    }
     return state
 
 

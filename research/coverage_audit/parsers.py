@@ -258,40 +258,61 @@ def _one_gzip(data: bytes, pos: int, ledger, followed: bool) -> tuple[bytes, int
     if decomp_room <= 0:
         raise AuditStop("DECOMPRESSION_CAP")
     allowance = decomp_room if decomp_room < mem_room else mem_room
+    owned = 0
+
+    def release_exact(amount: int) -> None:
+        nonlocal owned
+        if amount == 0:
+            return
+        if amount > owned:
+            raise AuditStop("MEMORY_CAP")
+        ledger.release_memory(amount)
+        owned -= amount
+
     ledger.mark_loop(True)
     try:
+        try:
+            ledger.charge_before_alloc(allowance)
+        except AuditStop:
+            raise
+        owned = allowance
         ledger.check_meter()
         try:
             decompressor = zlib.decompressobj(-15)
             out = decompressor.decompress(data[index:], allowance)
         except AuditStop:
+            release_exact(owned)
             raise
         except Exception:
+            release_exact(owned)
             raise AuditStop("GZIP_CORRUPT") from None
     finally:
         ledger.mark_loop(False)
     if not decompressor.eof:
         hit_cap = len(out) >= allowance
         out = b""
+        release_exact(owned)
         if hit_cap and allowance == mem_room and mem_room < decomp_room:
             raise AuditStop("MEMORY_CAP")
         raise AuditStop("DECOMPRESSION_CAP" if hit_cap else "GZIP_TRUNCATED")
     unused = decompressor.unused_data
     if len(unused) < 8:
         out = b""
+        release_exact(owned)
         raise AuditStop("GZIP_TRUNCATED")
+    release_exact(allowance - len(out))
     crc, isize = struct.unpack("<II", unused[:8])
     if gzip_crc_is_bad(zlib.crc32(out) & 0xFFFFFFFF, crc) or gzip_crc_is_bad(len(out) & 0xFFFFFFFF, isize):
+        release_exact(owned)
         out = b""
         raise AuditStop("GZIP_CRC")
-    ledger.charge_before_alloc(len(out))
     ledger.add_decomp(len(out))
     following = unused[8:]
     pad = 0
     while pad < len(following) and following[pad] == 0:
         pad += 1
     if gzip_tail_is_bad(following, pad):
-        ledger.release_memory(len(out))
+        release_exact(owned)
         out = b""
         raise AuditStop("GZIP_TRUNCATED_TAIL")
     next_pos = len(data) - len(unused) + 8 + pad
