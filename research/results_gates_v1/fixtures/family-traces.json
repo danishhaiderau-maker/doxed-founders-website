@@ -1,0 +1,814 @@
+{
+  "accounting": {
+    "signals": [
+      {
+        "day": "D1",
+        "hold_seconds": "300",
+        "id": "sig-1",
+        "net": "2",
+        "order_t": 1,
+        "slippage": "0.4",
+        "state": "filled",
+        "week": "W1"
+      },
+      {
+        "day": "D2",
+        "hold_seconds": "900",
+        "id": "sig-2",
+        "net": "3",
+        "order_t": 2,
+        "slippage": "0.6",
+        "state": "filled",
+        "week": "W1"
+      },
+      {
+        "day": "D3",
+        "hold_seconds": "300",
+        "id": "sig-3",
+        "net": "2",
+        "order_t": 3,
+        "slippage": "0.4",
+        "state": "filled",
+        "week": "W2"
+      },
+      {
+        "day": "D4",
+        "hold_seconds": "600",
+        "id": "sig-4",
+        "net": "3",
+        "order_t": 4,
+        "slippage": "0.6",
+        "state": "filled",
+        "week": "W2"
+      },
+      {
+        "day": "D1",
+        "hold_seconds": null,
+        "id": "sig-5",
+        "net": "0",
+        "order_t": 5,
+        "slippage": null,
+        "state": "missed",
+        "week": "W1"
+      },
+      {
+        "day": "D2",
+        "hold_seconds": null,
+        "id": "sig-6",
+        "net": "0",
+        "order_t": 6,
+        "slippage": null,
+        "state": "rejected",
+        "week": "W2"
+      },
+      {
+        "day": "D4",
+        "hold_seconds": null,
+        "id": "sig-7",
+        "net": "0",
+        "order_t": 7,
+        "slippage": null,
+        "state": "unfilled",
+        "week": "W2"
+      }
+    ],
+    "valuation": "SYNTHETIC_DECLARED"
+  },
+  "as_of": "SYNTHETIC-T0",
+  "causal": {
+    "decisions": [
+      {
+        "decision_t": 16,
+        "id": "d-early",
+        "used_observation_ids": [
+          "o-early",
+          "o-mid"
+        ]
+      },
+      {
+        "decision_t": 100,
+        "id": "d-late",
+        "used_observation_ids": [
+          "o-future"
+        ]
+      }
+    ],
+    "observations": [
+      {
+        "available_t": 5,
+        "id": "o-early",
+        "value": "1"
+      },
+      {
+        "available_t": 16,
+        "id": "o-mid",
+        "value": "2"
+      },
+      {
+        "available_t": 100,
+        "id": "o-future",
+        "value": "9"
+      }
+    ]
+  },
+  "comparable_family": {
+    "preregistered_ids": [
+      "S1",
+      "S2",
+      "S3"
+    ],
+    "presented_ids": [
+      "S1",
+      "S2",
+      "S3"
+    ],
+    "series": [
+      {
+        "differential": [
+          "1",
+          "1",
+          "1",
+          "1"
+        ],
+        "id": "S1"
+      },
+      {
+        "differential": [
+          "0",
+          "0",
+          "0",
+          "0"
+        ],
+        "id": "S2"
+      },
+      {
+        "differential": [
+          "-1",
+          "0",
+          "0",
+          "1"
+        ],
+        "id": "S3"
+      }
+    ]
+  },
+  "compatibility": "NOT_ESTABLISHED",
+  "connection_state": "NOT_CONNECTED",
+  "cost": {
+    "gross": "12",
+    "queue_delay_status": "SYNTHETIC",
+    "synthetic_roundtrip": "5"
+  },
+  "coverage": {
+    "evaluated": [
+      "S1",
+      "S2",
+      "S3"
+    ],
+    "excluded": [
+      "T4",
+      "T5"
+    ],
+    "failed_attempts": [
+      "F7"
+    ],
+    "gate_failures": [
+      "S3"
+    ],
+    "planned": [
+      "S1",
+      "S2",
+      "S3",
+      "T4",
+      "T5",
+      "R6"
+    ],
+    "remaining": [
+      "R6"
+    ]
+  },
+  "dashboard": {
+    "freshness_evidence": null,
+    "mapped_downloads": [
+      "results"
+    ],
+    "mapped_panels": [
+      "coverage",
+      "gates",
+      "methods"
+    ],
+    "required_downloads": [
+      "results"
+    ],
+    "required_panels": [
+      "coverage",
+      "gates",
+      "methods"
+    ]
+  },
+  "draft_extras": {
+    "note-s1": "synthetic-note-s1",
+    "note-s2": "synthetic-note-s2"
+  },
+  "exposure_claim": {
+    "end": 70,
+    "start": 60,
+    "token": "UNDISTURBED"
+  },
+  "exposure_ledger": {
+    "completeness": "COMPLETE",
+    "coordinate_system": "SYNTHETIC_INDEX",
+    "intervals": [
+      {
+        "disposition": "EXPOSED",
+        "end": 10,
+        "id": "study1_train",
+        "start": 0
+      },
+      {
+        "disposition": "EXPOSED",
+        "end": 20,
+        "id": "study1_test",
+        "start": 10
+      },
+      {
+        "disposition": "EXPOSED",
+        "end": 30,
+        "id": "run_a",
+        "start": 20
+      },
+      {
+        "disposition": "EXPOSED",
+        "end": 40,
+        "id": "run_a2",
+        "start": 30
+      },
+      {
+        "disposition": "AUDIT_ONLY",
+        "end": 47,
+        "id": "07d",
+        "start": 40
+      },
+      {
+        "disposition": "EXPOSED",
+        "end": 60,
+        "id": "spent_holdouts",
+        "start": 47
+      }
+    ],
+    "real_dates": null,
+    "schema": "exposure_ledger_v1",
+    "version": "1"
+  },
+  "family": [
+    {
+      "id": "S1",
+      "role": "CANDIDATE"
+    },
+    {
+      "id": "S2",
+      "role": "CANDIDATE"
+    },
+    {
+      "id": "S3",
+      "role": "CANDIDATE"
+    }
+  ],
+  "fixture_only": true,
+  "fixture_status": "FIXTURE_ONLY",
+  "folds": {
+    "folds": [
+      {
+        "embargo_end_t": 2,
+        "embargo_start_t": 0,
+        "id": "F1",
+        "net": "1",
+        "oof": [
+          {
+            "id": "oof-001",
+            "t": 2
+          },
+          {
+            "id": "oof-002",
+            "t": 3
+          },
+          {
+            "id": "oof-003",
+            "t": 4
+          },
+          {
+            "id": "oof-004",
+            "t": 5
+          },
+          {
+            "id": "oof-005",
+            "t": 6
+          },
+          {
+            "id": "oof-006",
+            "t": 7
+          },
+          {
+            "id": "oof-007",
+            "t": 8
+          },
+          {
+            "id": "oof-008",
+            "t": 9
+          },
+          {
+            "id": "oof-009",
+            "t": 10
+          },
+          {
+            "id": "oof-010",
+            "t": 11
+          },
+          {
+            "id": "oof-011",
+            "t": 12
+          },
+          {
+            "id": "oof-012",
+            "t": 13
+          },
+          {
+            "id": "oof-013",
+            "t": 14
+          },
+          {
+            "id": "oof-014",
+            "t": 15
+          },
+          {
+            "id": "oof-015",
+            "t": 16
+          }
+        ],
+        "test_end_t": 17,
+        "test_start_t": 2,
+        "train_end_t": -1
+      },
+      {
+        "embargo_end_t": 19,
+        "embargo_start_t": 17,
+        "id": "F2",
+        "net": "1",
+        "oof": [
+          {
+            "id": "oof-016",
+            "t": 19
+          },
+          {
+            "id": "oof-017",
+            "t": 20
+          },
+          {
+            "id": "oof-018",
+            "t": 21
+          },
+          {
+            "id": "oof-019",
+            "t": 22
+          },
+          {
+            "id": "oof-020",
+            "t": 23
+          },
+          {
+            "id": "oof-021",
+            "t": 24
+          },
+          {
+            "id": "oof-022",
+            "t": 25
+          },
+          {
+            "id": "oof-023",
+            "t": 26
+          },
+          {
+            "id": "oof-024",
+            "t": 27
+          },
+          {
+            "id": "oof-025",
+            "t": 28
+          },
+          {
+            "id": "oof-026",
+            "t": 29
+          },
+          {
+            "id": "oof-027",
+            "t": 30
+          },
+          {
+            "id": "oof-028",
+            "t": 31
+          },
+          {
+            "id": "oof-029",
+            "t": 32
+          },
+          {
+            "id": "oof-030",
+            "t": 33
+          }
+        ],
+        "test_end_t": 34,
+        "test_start_t": 19,
+        "train_end_t": 16
+      },
+      {
+        "embargo_end_t": 36,
+        "embargo_start_t": 34,
+        "id": "F3",
+        "net": "1",
+        "oof": [
+          {
+            "id": "oof-031",
+            "t": 36
+          },
+          {
+            "id": "oof-032",
+            "t": 37
+          },
+          {
+            "id": "oof-033",
+            "t": 38
+          },
+          {
+            "id": "oof-034",
+            "t": 39
+          },
+          {
+            "id": "oof-035",
+            "t": 40
+          },
+          {
+            "id": "oof-036",
+            "t": 41
+          },
+          {
+            "id": "oof-037",
+            "t": 42
+          },
+          {
+            "id": "oof-038",
+            "t": 43
+          },
+          {
+            "id": "oof-039",
+            "t": 44
+          },
+          {
+            "id": "oof-040",
+            "t": 45
+          },
+          {
+            "id": "oof-041",
+            "t": 46
+          },
+          {
+            "id": "oof-042",
+            "t": 47
+          },
+          {
+            "id": "oof-043",
+            "t": 48
+          },
+          {
+            "id": "oof-044",
+            "t": 49
+          },
+          {
+            "id": "oof-045",
+            "t": 50
+          }
+        ],
+        "test_end_t": 51,
+        "test_start_t": 36,
+        "train_end_t": 33
+      },
+      {
+        "embargo_end_t": 53,
+        "embargo_start_t": 51,
+        "id": "F4",
+        "net": "-1",
+        "oof": [
+          {
+            "id": "oof-046",
+            "t": 53
+          },
+          {
+            "id": "oof-047",
+            "t": 54
+          },
+          {
+            "id": "oof-048",
+            "t": 55
+          },
+          {
+            "id": "oof-049",
+            "t": 56
+          },
+          {
+            "id": "oof-050",
+            "t": 57
+          },
+          {
+            "id": "oof-051",
+            "t": 58
+          },
+          {
+            "id": "oof-052",
+            "t": 59
+          },
+          {
+            "id": "oof-053",
+            "t": 60
+          },
+          {
+            "id": "oof-054",
+            "t": 61
+          },
+          {
+            "id": "oof-055",
+            "t": 62
+          },
+          {
+            "id": "oof-056",
+            "t": 63
+          },
+          {
+            "id": "oof-057",
+            "t": 64
+          },
+          {
+            "id": "oof-058",
+            "t": 65
+          },
+          {
+            "id": "oof-059",
+            "t": 66
+          },
+          {
+            "id": "oof-060",
+            "t": 67
+          }
+        ],
+        "test_end_t": 68,
+        "test_start_t": 53,
+        "train_end_t": 50
+      }
+    ],
+    "reserved_holdout_ids": [
+      "HOLD-R"
+    ]
+  },
+  "label": "FIXTURE-ONLY",
+  "p_values": [
+    {
+      "evaluated": true,
+      "id": "S1",
+      "p": "0.001"
+    },
+    {
+      "evaluated": true,
+      "id": "S2",
+      "p": "0.04"
+    },
+    {
+      "evaluated": true,
+      "id": "S3",
+      "p": "0.03"
+    },
+    {
+      "evaluated": false,
+      "id": "T4",
+      "p": null
+    },
+    {
+      "evaluated": false,
+      "id": "T5",
+      "p": null
+    },
+    {
+      "evaluated": false,
+      "id": "R6",
+      "p": null
+    },
+    {
+      "evaluated": false,
+      "id": "F7",
+      "p": null
+    }
+  ],
+  "producer_pins": {
+    "coverage_report": "NOT_PINNED",
+    "stage_a": "NOT_PINNED",
+    "stage_b": "NOT_PINNED"
+  },
+  "profile_id": "synthetic-branch-profile-v1",
+  "quarantine_findings": [],
+  "rc_draws": [
+    [
+      3,
+      3,
+      3,
+      3
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "record_labels": {
+    "exploratory_two_month_only": [
+      "T4"
+    ],
+    "invalid_for_fills": [
+      "S3"
+    ]
+  },
+  "schema": "results_consumer_fixture_stub_v1",
+  "scope": {
+    "exact_scope": "synthetic-family-traces-v1",
+    "real_cost_thresholds": null,
+    "real_dates": null,
+    "real_n": null
+  },
+  "source": "synthetic-family-traces",
+  "strategy_drafts": [
+    {
+      "definition": {
+        "members": [
+          "A"
+        ],
+        "ordered": false,
+        "paper_only": true,
+        "relay_eligible": false
+      },
+      "extra_name": "note-s1",
+      "family_member_id": "S1",
+      "strategy_id": "SYN-S1"
+    },
+    {
+      "definition": {
+        "members": [
+          "B"
+        ],
+        "ordered": false,
+        "paper_only": true,
+        "relay_eligible": false
+      },
+      "extra_name": "note-s2",
+      "family_member_id": "S2",
+      "strategy_id": "SYN-S2"
+    }
+  ],
+  "trials": {
+    "diversity_filter_ids": [
+      "S1",
+      "S2"
+    ],
+    "rows": [
+      {
+        "id": "S1",
+        "kind": "strategy"
+      },
+      {
+        "id": "S2",
+        "kind": "strategy"
+      },
+      {
+        "id": "S3",
+        "kind": "strategy"
+      },
+      {
+        "id": "T4",
+        "kind": "retry"
+      },
+      {
+        "id": "T5",
+        "kind": "direction"
+      },
+      {
+        "id": "F7",
+        "kind": "window"
+      }
+    ]
+  },
+  "version": "1"
+}
