@@ -20,6 +20,7 @@ import sys
 import time
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -36,12 +37,18 @@ def _install_vas() -> None:
 
 
 def _parent_main() -> int:
+    sys.dont_write_bytecode = True
     _install_vas()
     from research.event_replay_v1.guards import (
         MAX_AGGREGATE_BYTES,
         MAX_RECEIPT_BYTES,
+        ByteSource,
+        CapStop,
         OutputLedger,
         ProcessGate,
+        ChunkPump,
+        emit_receipt,
+        install_entry_containment,
     )
 
     receipt = Path("/opt/cursor/artifacts/b992-v5-suite-receipt.json")
@@ -72,6 +79,10 @@ def _parent_main() -> int:
     if not str(receipt.resolve()).startswith(str(allowed_root) + "/"):
         print("PROHIBITED_REAL_ROOT", file=sys.stderr)
         return 3
+    if not receipt.parent.is_dir():
+        print("PROHIBITED_REAL_ROOT", file=sys.stderr)
+        return 3
+    install_entry_containment((str(receipt.resolve()),))
     gate = ProcessGate()
     ledger = OutputLedger()
     lock_bytes = (ROOT / "research/event_replay_v1/dependencies.lock.json").read_bytes()
@@ -88,24 +99,36 @@ def _parent_main() -> int:
             env={},
             preexec_fn=_install_vas,
             start_new_session=True,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        if proc.stdin is not None:
+            proc.stdin.close()
         stopped = False
         overshoot = 0.0
+        out_pump = ChunkPump(proc.stdout.fileno(), ledger) if proc.stdout is not None else None
+        err_pump = ChunkPump(proc.stderr.fileno(), ledger) if proc.stderr is not None else None
         try:
-            while proc.poll() is None:
-                if time.monotonic() - started > deadline or time.monotonic() - suite_started > SUITE_SECONDS:
+            while True:
+                if proc.poll() is not None and (out_pump is None or out_pump.eof) and (err_pump is None or err_pump.eof):
+                    break
+                if (time.monotonic() - started > deadline or time.monotonic() - suite_started > SUITE_SECONDS) and not stopped:
                     kill_at = time.monotonic()
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
                     stopped = True
                     overshoot = time.monotonic() - kill_at
+                if out_pump is not None and not out_pump.eof:
+                    out_pump.pull()
+                if err_pump is not None and not err_pump.eof:
+                    err_pump.pull()
+                if stopped and (out_pump is None or out_pump.eof) and (err_pump is None or err_pump.eof):
                     break
-                time.sleep(0.01)
-            out = proc.stdout.read() if proc.stdout is not None else b""
-            err = proc.stderr.read() if proc.stderr is not None else b""
+                if (out_pump is None or not out_pump.progress) and (err_pump is None or not err_pump.progress):
+                    time.sleep(0.01)
+            out = out_pump.value() if out_pump is not None else b""
+            err = err_pump.value() if err_pump is not None else b""
         finally:
             gate.release()
         return proc.returncode if proc.returncode is not None else -9, out, err, {
@@ -134,6 +157,7 @@ def _parent_main() -> int:
     proofs.append({"fault": "wall_deadline", "returncode": code, "saw_slept": b"SLEPT" in out, "wall": wall})
     bootstrap = (
         "import sys\n"
+        "sys.dont_write_bytecode = True\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "sys.argv = [sys.argv[2], '--suite-child']\n"
         "import runpy\n"
@@ -143,8 +167,6 @@ def _parent_main() -> int:
         [sys.executable, "-I", "-S", "-c", bootstrap, str(ROOT), str(Path(__file__).resolve())],
         COMMAND_SECONDS,
     )
-    ledger.reserve_pipe(len(out), "child_stdout")
-    ledger.reserve_pipe(len(err), "child_stderr")
     body = {
         "kind": "event_replay_v1.suite_receipt",
         "compatibility": "BLOCKED",
@@ -162,19 +184,16 @@ def _parent_main() -> int:
         "aggregate_bytes": ledger.aggregate_used,
         "aggregate_cap_bytes": MAX_AGGREGATE_BYTES,
         "receipt_cap_bytes": MAX_RECEIPT_BYTES,
-        "child_stderr": err.decode("utf-8", "replace"),
-        "child_stdout": out.decode("utf-8", "replace"),
+        "child_stderr": ByteSource(err),
+        "child_stdout": ByteSource(out),
     }
-    blob = json.dumps(body).encode("utf-8")
-    offset = 0
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    with receipt.open("wb") as handle:
-        while offset < len(blob):
-            chunk = blob[offset:offset + 65536]
-            ledger.reserve_receipt(len(chunk))
-            handle.write(chunk)
-            offset += len(chunk)
-    sys.stderr.write(err.decode("utf-8", "replace"))
+    try:
+        with receipt.open("wb") as handle:
+            emit_receipt(ledger, handle, body, sort_keys=False)
+    except CapStop as exc:
+        print(f"CAP_STOP:{exc.code}", file=sys.stderr)
+        return 2
+    sys.stderr.buffer.write(err)
     return code if code is not None else 1
 
 
@@ -182,7 +201,11 @@ if __name__ == "__main__" and "--suite-child" not in sys.argv:
     raise SystemExit(_parent_main())
 
 if "--suite-child" in sys.argv:
+    sys.dont_write_bytecode = True
     _install_vas()
+    from research.event_replay_v1.guards import install_entry_containment
+
+    install_entry_containment(())
 
 from research.event_replay_v1.accounting import FeeDispositionError
 from research.event_replay_v1.engine import FixtureError, replay
@@ -645,15 +668,43 @@ class AcceptanceTest(unittest.TestCase):
         self.assertEqual(self.scenario("S-TIME")["exits"][0]["winner"], "TIME")
         self.assertEqual(self.scenario("S-THESIS")["exits"][0]["winner"], "THESIS_CUT")
         self.assertIsNone(self.scenario("S-THESIS")["exits"][0]["observed_price"])
+        hands = (
+            ("HARD_STOP", "S11", "80", "10", "s11", "-200"),
+            ("LIQUIDATION", "S12", "99", "10", "s12", "-10"),
+            ("LIQUIDATION", "S13", "101", "10", "s13", "-10"),
+            ("THESIS_CUT", "S-THESIS", "100", "1", "s-thesis", "0"),
+            ("LADDER", "S9", "139", "1", "s9", "39"),
+            ("BREAKEVEN", "S10", "79", "1", "s10", "-21"),
+            ("TRAIL", "S-TRAIL", "100", "1", "s-trail", "0"),
+            ("GIVEBACK", "S-GIVEBACK", "100", "1", "s-giveback", "0"),
+            ("TARGET", "S-TARGET", "100", "1", "s-target", "0"),
+            ("TIME", "S-TIME", "100", "1", "s-time", "0"),
+        )
+        for name, scenario_id, price, qty, signal_id, pnl in hands:
+            oracle = f"oracle:protection:{name}"
+            fill = self.fills(scenario_id, "EXIT")[0]
+            self.assertEqual(fill["price"], price, oracle)
+            self.assertEqual(fill["qty"], qty, oracle)
+            self.assertEqual(self.signals[signal_id]["realized_pnl"], pnl, oracle)
         pending = self.scenario("S-PENDING")["exits"][0]
-        self.assertEqual(pending["winner"], "HARD_STOP")
-        self.assertEqual(pending["superseded_from"], "TARGET")
-        self.assertEqual(self.fills("S-PENDING", "EXIT")[0]["price"], "70")
-        self.assertEqual(self.signals["s-pending"]["realized_pnl"], "-30")
+        self.assertEqual(pending["winner"], "HARD_STOP", "oracle:pending-cross")
+        self.assertEqual(pending["superseded_from"], "TARGET", "oracle:pending-cross")
+        pending_fill = self.fills("S-PENDING", "EXIT")[0]
+        self.assertEqual(pending_fill["price"], "70", "oracle:pending-cross")
+        self.assertEqual(pending_fill["qty"], "1", "oracle:pending-cross")
+        self.assertEqual(self.signals["s-pending"]["realized_pnl"], "-30", "oracle:pending-cross")
+        cancel = next(order for order in self.scenario("S7")["orders"] if order["order_id"] == "s7:entry")
+        self.assertEqual(cancel["filled_qty"], "4", "oracle:cancel-conserve")
+        self.assertEqual(cancel["cancelled_qty"], "6", "oracle:cancel-conserve")
+        self.assertEqual(cancel["original_qty"], "10", "oracle:cancel-conserve")
+        cancel_fill = self.fills("S7", "ENTRY")[0]
+        self.assertEqual(cancel_fill["price"], "50", "oracle:cancel-conserve")
+        self.assertEqual(cancel_fill["qty"], "4", "oracle:cancel-conserve")
         a = next(order for order in self.scenario("S-C3")["orders"] if order["order_id"] == "c3-a:entry")
         b = next(order for order in self.scenario("S-C3")["orders"] if order["order_id"] == "c3-b:entry")
-        self.assertEqual(a["filled_qty"], "2")
-        self.assertEqual(b["filled_qty"], "1")
+        self.assertEqual(a["filled_qty"], "2", "oracle:cancel-conserve")
+        self.assertEqual(b["filled_qty"], "1", "oracle:cancel-conserve")
+        self.assertEqual(Decimal(a["filled_qty"]) + Decimal(b["filled_qty"]), Decimal(3), "oracle:cancel-conserve")
 
     def test_liquidation_unknown_terms_dust_and_no_roundup(self):
         self.assertEqual(self.signals["s12"]["liq_price"], "99.5")
@@ -820,9 +871,15 @@ class AcceptanceTest(unittest.TestCase):
                 "missed signals remain in the denominator of 29",
                 lambda result: self.assertEqual(result["accounting"]["denominator"], "29"),
             ),
+            (
+                "fill_at_trigger_price_trail",
+                "TRAIL fill stays at the book price 100, not the trigger",
+                lambda result: self.assertEqual(
+                    [row["price"] for row in result["scenarios"]["S-TRAIL"]["fills"] if row["role"] == "EXIT"],
+                    ["100"],
+                ),
+            ),
         ]
-        from unittest.mock import patch
-
         import research.event_replay_v1.pricer as pricer_mod
         import research.event_replay_v1.risk as risk_mod
 
@@ -902,6 +959,13 @@ class AcceptanceTest(unittest.TestCase):
         def oracle_den(result):
             self.assertEqual(result["accounting"]["denominator"], str(len(self.signals)), "oracle:miss-denominator")
 
+        def oracle_trail(result):
+            self.assertEqual(
+                [row["price"] for row in result["scenarios"]["S-TRAIL"]["fills"] if row["role"] == "EXIT"],
+                ["100"],
+                "oracle:protection:TRAIL",
+            )
+
         receipts = [
             run_fault("admit_future_books", leak, "research.event_replay_v1.engine.select_book", "oracle:future-book", oracle_future),
             run_fault("instant_cancels", zero_delay, "research.event_replay_v1.engine.cancel_ack_delay_us", "oracle:partial-before-ack", oracle_partial),
@@ -909,6 +973,7 @@ class AcceptanceTest(unittest.TestCase):
             run_fault("fill_at_trigger_price", at_trigger, "research.event_replay_v1.engine.exit_walk", "oracle:stop-book-price", oracle_stop),
             run_fault("increase_size", round_up, "research.event_replay_v1.engine.size_decision", "oracle:no-round-up", oracle_size),
             run_fault("drop_misses", drop, "research.event_replay_v1.pricer.signal_denominator", "oracle:miss-denominator", oracle_den),
+            run_fault("fill_at_trigger_price_trail", at_trigger, "research.event_replay_v1.engine.exit_walk", "oracle:protection:TRAIL", oracle_trail),
         ]
         self.assertEqual([item["fault"] for item in receipts], [item[0] for item in checks])
         blob = json.dumps(receipts)
@@ -1057,6 +1122,116 @@ class AcceptanceTest(unittest.TestCase):
         self.assertNotIn("research/event_replay_v1/dependencies.lock.json", lock["files"])
         digest = hashlib.sha256(LOCK_PATH.read_bytes()).hexdigest()
         self.assertEqual(len(digest), 64)
+
+    def test_suite_admit_before_read(self):
+        from research.event_replay_v1.guards import CapStop, OutputLedger, read_chunked, read_framed
+
+        class Stream:
+            def __init__(self, payload: bytes) -> None:
+                self.payload = payload
+                self.pos = 0
+                self.reads: list[int] = []
+
+            def read(self, nbytes: int) -> bytes:
+                self.reads.append(nbytes)
+                chunk = self.payload[self.pos:self.pos + nbytes]
+                self.pos += len(chunk)
+                return chunk
+
+        control = Stream(b"hello")
+        ledger = OutputLedger(aggregate_cap=64, receipt_cap=32)
+        before = ledger.aggregate_used
+        got = read_chunked(control, ledger, chunk=8)
+        self.assertEqual(got, b"hello", "oracle:suite-admit-before-read")
+        self.assertEqual(ledger.aggregate_used - before, control.pos, "oracle:suite-admit-before-read")
+        self.assertEqual(control.reads[0], 8, "oracle:suite-admit-before-read")
+        framed_body = b"ok"
+        framed = Stream(len(framed_body).to_bytes(4, "big") + framed_body)
+        framed_ledger = OutputLedger(aggregate_cap=64, receipt_cap=32)
+        before = framed_ledger.aggregate_used
+        frames = read_framed(framed, framed_ledger)
+        self.assertEqual(frames, [framed_body], "oracle:suite-admit-before-read")
+        self.assertEqual(framed_ledger.aggregate_used - before, framed.pos, "oracle:suite-admit-before-read")
+        fault = Stream((1000).to_bytes(4, "big") + b"X" * 1000)
+        fault_ledger = OutputLedger(aggregate_cap=32, receipt_cap=16)
+        with self.assertRaises(CapStop) as caught:
+            read_framed(fault, fault_ledger)
+        self.assertEqual(str(caught.exception), "CAP_STOP:aggregate", "oracle:suite-admit-before-read")
+        self.assertEqual(fault.reads, [4], "oracle:suite-admit-before-read")
+        self.assertEqual(fault.pos, 4, "oracle:suite-admit-before-read")
+
+    def test_receipt_reserve_before_build(self):
+        from research.event_replay_v1.guards import ByteSource, CapStop, OutputLedger, ReceiptWriter
+
+        class Watch:
+            def __init__(self, ledger: OutputLedger) -> None:
+                self.ledger = ledger
+                self.buf = bytearray()
+
+            def write(self, data: bytes) -> None:
+                before = self.ledger.receipt_used
+                self.buf.extend(data)
+                self.assert_unchanged = before == self.ledger.receipt_used
+
+        # 6 * 2 source bytes is 12, which does not fit in the room left after the
+        # opening quote. The exact ASCII length does, so the charge is the exact length.
+        ledger = OutputLedger(aggregate_cap=64, receipt_cap=4)
+        watch = Watch(ledger)
+        writer = ReceiptWriter(ledger, watch)
+        writer.emit(ByteSource(b"AB"))
+        self.assertTrue(watch.assert_unchanged, "oracle:receipt-prewrite-not-a-second-charge")
+        self.assertEqual(bytes(watch.buf), b'"AB"', "oracle:receipt-reserve-before-build")
+        self.assertEqual(ledger.receipt_used, 4, "oracle:receipt-reserve-before-build")
+        one = OutputLedger(aggregate_cap=8, receipt_cap=1)
+        one_watch = Watch(one)
+        one_writer = ReceiptWriter(one, one_watch)
+        one_writer.write_byte_content(b"A")
+        self.assertEqual(bytes(one_watch.buf), b"A", "oracle:receipt-reserve-before-build")
+        self.assertEqual(one.receipt_used, 1, "oracle:receipt-reserve-before-build")
+        fault = OutputLedger(aggregate_cap=8, receipt_cap=5)
+        fault_watch = Watch(fault)
+        fault_writer = ReceiptWriter(fault, fault_watch)
+        fault_writer.write_exact(b'"')
+        before_scratch = len(fault_writer.scratch_allocations)
+        with self.assertRaises(CapStop) as caught:
+            fault_writer.write_byte_content(b"\x01")
+        self.assertEqual(str(caught.exception), "CAP_STOP:receipt", "oracle:receipt-reserve-before-build")
+        self.assertEqual(len(fault_writer.scratch_allocations), before_scratch, "oracle:receipt-reserve-before-build")
+        self.assertNotIn(b"\\u0001", bytes(fault_watch.buf), "oracle:receipt-reserve-before-build")
+        emoji = OutputLedger(aggregate_cap=64, receipt_cap=14)
+        emoji_watch = Watch(emoji)
+        ReceiptWriter(emoji, emoji_watch).emit("\U0001F600")
+        self.assertEqual(emoji.receipt_used, 14, "oracle:receipt-reserve-before-build")
+        self.assertIn(b"\\ud83d\\ude00", bytes(emoji_watch.buf), "oracle:receipt-reserve-before-build")
+
+    def test_outer_refuses_when_inner_guard_off(self):
+        from research.event_replay_v1.guards import ACTIVE_OUTER, INNER_GUARD
+
+        self.assertIsNotNone(ACTIVE_OUTER, "oracle:outer-socket-after-inner-off")
+        self.assertTrue(ACTIVE_OUTER.installed, "oracle:outer-socket-after-inner-off")
+        saved = INNER_GUARD.active
+        try:
+            INNER_GUARD.active = False
+            with self.assertRaises(GuardError) as caught:
+                socket.socket()
+            self.assertEqual(str(caught.exception), "PROHIBITED_NETWORK", "oracle:outer-socket-after-inner-off")
+            with self.assertRaises(GuardError):
+                socket.getaddrinfo("127.0.0.1", 9)
+            self.assertIn("PROHIBITED_NETWORK", ACTIVE_OUTER.refusals, "oracle:outer-socket-after-inner-off")
+            with self.assertRaises(GuardError) as caught:
+                open("/tmp/b992-synthetic-outer-write", "w", encoding="utf-8")
+            self.assertEqual(str(caught.exception), "PROHIBITED_WRITE", "oracle:outer-write-after-inner-off")
+            self.assertIn("PROHIBITED_WRITE", ACTIVE_OUTER.refusals, "oracle:outer-write-after-inner-off")
+            self.assertFalse(Path("/tmp/b992-synthetic-outer-write").exists(), "oracle:outer-write-after-inner-off")
+        finally:
+            INNER_GUARD.active = saved
+        INNER_GUARD.active = True
+        with self.assertRaises(GuardError) as caught:
+            socket.socket()
+        self.assertEqual(str(caught.exception), "PROHIBITED_NETWORK", "oracle:outer-socket-after-inner-off")
+        with self.assertRaises(GuardError) as caught:
+            open("/tmp/b992-synthetic-outer-write-control", "w", encoding="utf-8")
+        self.assertEqual(str(caught.exception), "PROHIBITED_WRITE", "oracle:outer-write-after-inner-off")
 
 
 if __name__ == "__main__":

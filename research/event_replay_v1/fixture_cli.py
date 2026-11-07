@@ -37,12 +37,7 @@ def _install_vas() -> None:
     resource.setrlimit(resource.RLIMIT_AS, (VAS_BYTES, VAS_BYTES))
 
 
-def run_inprocess(argv: list[str]) -> dict:
-    """Child logic with no filesystem write and no further process spawn."""
-
-    from .engine import replay
-    from .guards import DEFAULT_LIMITS, CapStop, require_vas_ceiling
-
+def _parse_child(argv: list[str]):
     if "--real-input" in argv or "--live" in argv or "--network" in argv:
         raise RuntimeError("REAL_INPUT_MODE_REJECTED")
     if "--fixture-only" not in argv:
@@ -52,7 +47,15 @@ def run_inprocess(argv: list[str]) -> dict:
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--cli-child", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def _execute_parsed(args) -> dict:
+    """Replay after arguments exist. The child installs containment before this import."""
+
+    from .engine import replay
+    from .guards import DEFAULT_LIMITS, CapStop, require_vas_ceiling
+
     require_vas_ceiling()
     raw = Path(args.fixture).read_bytes()
     lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
@@ -73,46 +76,26 @@ def run_inprocess(argv: list[str]) -> dict:
     }
 
 
-def _read_bounded(stream, ledger) -> bytes:
-    chunks = []
-    while True:
-        ledger.reserve_pipe(4096, "stderr_or_plain")
-        chunk = stream.read(4096)
-        if not chunk:
-            ledger.refund(4096)
-            break
-        if len(chunk) < 4096:
-            ledger.refund(4096 - len(chunk))
-        chunks.append(chunk)
-    return b"".join(chunks)
+def run_inprocess(argv: list[str]) -> dict:
+    """Child logic with no filesystem write and no further process spawn."""
 
-
-def _read_frames(stream, ledger) -> list[bytes]:
-    frames = []
-    while True:
-        ledger.reserve_pipe(4, "frame_header")
-        header = stream.read(4)
-        if not header:
-            ledger.refund(4)
-            break
-        if len(header) < 4:
-            ledger.refund(4 - len(header))
-            raise RuntimeError("CAP_STOP:aggregate")
-        size = int.from_bytes(header, "big")
-        if size > ledger.remaining_aggregate():
-            raise RuntimeError("CAP_STOP:aggregate")
-        ledger.reserve_pipe(size, "frame_body")
-        body = stream.read(size)
-        if len(body) < size:
-            ledger.refund(size - len(body))
-            raise RuntimeError("CAP_STOP:aggregate")
-        frames.append(body)
-    return frames
+    return _execute_parsed(_parse_child(argv))
 
 
 def parent_main(argv: list[str]) -> int:
+    sys.dont_write_bytecode = True
     _install_vas()
-    from .guards import MAX_AGGREGATE_BYTES, MAX_RECEIPT_BYTES, OutputLedger, ProcessGate
+    from .guards import (
+        MAX_AGGREGATE_BYTES,
+        MAX_RECEIPT_BYTES,
+        CapStop,
+        OutputLedger,
+        ProcessGate,
+        ChunkPump,
+        FramePump,
+        emit_receipt,
+        install_entry_containment,
+    )
 
     if "--real-input" in argv or "--live" in argv:
         return _fail("REAL_INPUT_MODE_REJECTED")
@@ -128,6 +111,9 @@ def parent_main(argv: list[str]) -> int:
     allowed_root = Path("/opt/cursor/artifacts").resolve()
     if not str(receipt.resolve()).startswith(str(allowed_root) + "/"):
         return _fail("PROHIBITED_REAL_ROOT")
+    if not receipt.parent.is_dir():
+        return _fail("PROHIBITED_REAL_ROOT")
+    install_entry_containment((str(receipt.resolve()),))
     gate = ProcessGate()
     gate.acquire()
     ledger = OutputLedger(aggregate_cap=MAX_AGGREGATE_BYTES, receipt_cap=MAX_RECEIPT_BYTES)
@@ -135,6 +121,7 @@ def parent_main(argv: list[str]) -> int:
     repo = str(PACKAGE.parents[1])
     bootstrap = (
         "import sys\n"
+        "sys.dont_write_bytecode = True\n"
         "sys.path.insert(0, sys.argv[1])\n"
         "from research.event_replay_v1.fixture_cli import main\n"
         "raise SystemExit(main(sys.argv[2:]))\n"
@@ -145,25 +132,41 @@ def parent_main(argv: list[str]) -> int:
         env={},
         preexec_fn=_install_vas,
         start_new_session=True,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    if proc.stdin is not None:
+        proc.stdin.close()
     deadline = COMMAND_SECONDS
     overshoot = 0.0
     stopped = False
+    out_pump = FramePump(proc.stdout.fileno(), ledger) if proc.stdout is not None else None
+    err_pump = ChunkPump(proc.stderr.fileno(), ledger) if proc.stderr is not None else None
     try:
-        while proc.poll() is None:
-            if time.monotonic() - started > deadline:
+        while True:
+            if proc.poll() is not None and (out_pump is None or out_pump.eof) and (err_pump is None or err_pump.eof):
+                break
+            if time.monotonic() - started > deadline and not stopped:
                 kill_at = time.monotonic()
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
                 stopped = True
                 overshoot = time.monotonic() - kill_at
+            if out_pump is not None and not out_pump.eof:
+                out_pump.pull()
+            if err_pump is not None and not err_pump.eof:
+                err_pump.pull()
+            if stopped and (out_pump is None or out_pump.eof) and (err_pump is None or err_pump.eof):
                 break
-            time.sleep(0.01)
-        stdout = _read_frames(proc.stdout, ledger) if proc.stdout is not None else []
-        stderr = _read_bounded(proc.stderr, ledger) if proc.stderr is not None else b""
+            if (out_pump is None or not out_pump.progress) and (err_pump is None or not err_pump.progress):
+                time.sleep(0.01)
+        stdout = out_pump.frames if out_pump is not None else []
+        stderr = err_pump.value() if err_pump is not None else b""
+    except CapStop as exc:
+        gate.release()
+        print(f"CAP_STOP:{exc.code}", file=sys.stderr)
+        return 2
     finally:
         gate.release()
     if stopped:
@@ -189,29 +192,31 @@ def parent_main(argv: list[str]) -> int:
         "stderr_bytes": len(stderr),
         "child": payload,
     }
-    blob = json.dumps(body, sort_keys=True).encode("utf-8")
-    receipt.parent.mkdir(parents=True, exist_ok=True)
-    offset = 0
-    with receipt.open("wb") as handle:
-        while offset < len(blob):
-            chunk = blob[offset:offset + 65536]
-            ledger.reserve_receipt(len(chunk))
-            handle.write(chunk)
-            offset += len(chunk)
-    print(json.dumps({"status": payload.get("status", "OK"), "compatibility": "BLOCKED", "receipt_bytes": len(blob)}))
+    try:
+        with receipt.open("wb") as handle:
+            writer = emit_receipt(ledger, handle, body, sort_keys=True)
+        receipt_bytes = writer.ledger.receipt_used
+    except CapStop as exc:
+        print(f"CAP_STOP:{exc.code}", file=sys.stderr)
+        return 2
+    print(json.dumps({"status": payload.get("status", "OK"), "compatibility": "BLOCKED", "receipt_bytes": receipt_bytes}))
     return 0 if payload.get("status") == "OK" else 2
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--cli-child" in argv:
-        from .guards import install_env_trap
+        sys.dont_write_bytecode = True
+        from .guards import GuardError, install_entry_containment, install_env_trap
 
-        install_env_trap()
         _install_vas()
         try:
-            payload = run_inprocess(argv)
-        except RuntimeError as exc:
+            # Parse before the env trap. argparse reads locale data during startup.
+            parsed = _parse_child(argv)
+            install_entry_containment(())
+            install_env_trap()
+            payload = _execute_parsed(parsed)
+        except (RuntimeError, GuardError) as exc:
             payload = {"status": "ERROR", "code": str(exc)}
         data = json.dumps(payload).encode("utf-8")
         sys.stdout.buffer.write(len(data).to_bytes(4, "big") + data)
