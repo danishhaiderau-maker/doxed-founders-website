@@ -1,0 +1,52 @@
+name: results-gates-v1-acceptance
+
+on:
+  pull_request:
+    paths:
+      - research/results_gates_v1/**
+      - .github/workflows/results-gates-v1-acceptance.yml
+  push:
+    branches:
+      - master
+    paths:
+      - research/results_gates_v1/**
+      - .github/workflows/results-gates-v1-acceptance.yml
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Record the ref this job tested
+        run: |
+          echo "checked_out_sha=$(git rev-parse HEAD)"
+          echo "event_name=${{ github.event_name }}"
+          echo "github_sha=${{ github.sha }}"
+          echo "github_ref=${{ github.ref }}"
+          echo "pull_request_head_sha=${{ github.event.pull_request.head.sha }}"
+
+      - name: Record image Python
+        run: python3 --version
+
+      - name: Run the existing acceptance suite
+        run: |
+          set +e
+          python3 research/results_gates_v1/tests/test_acceptance.py > "$RUNNER_TEMP/results-gates-v1-stdout.txt" 2> "$RUNNER_TEMP/results-gates-v1-stderr.txt"
+          code=$?
+          set -e
+          echo "----- results_gates_v1 stdout -----"
+          cat "$RUNNER_TEMP/results-gates-v1-stdout.txt"
+          echo "----- results_gates_v1 stderr -----"
+          cat "$RUNNER_TEMP/results-gates-v1-stderr.txt"
+          echo "suite_exit_code=$code"
+          exit "$code"
