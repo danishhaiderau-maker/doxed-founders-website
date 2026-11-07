@@ -1,8 +1,8 @@
 """Synthetic acceptance tests for the Stage C results consumer.
 
-Oracles in this file are handwritten. They do not call production BH or RC helpers.
-Each kill() record is a mutation proof: the weakened behavior disagrees with the
-required outcome. A green run is software behavior on synthetic fixtures only.
+Oracles in this file are handwritten. Production-fault rows come from an outer
+recorder that swaps the production binding, reruns the named assertion, and
+restores it. Value pairs and import errors are not kills.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import copy
 import json
+import os
 import sys
 import tempfile
 import time
@@ -23,6 +24,11 @@ if str(ROOT) not in sys.path:
 
 from research.results_gates_v1.dashboard_projection import project
 from research.results_gates_v1.folds import assess, project_causal
+import research.results_gates_v1.gates as gates_mod
+import research.results_gates_v1.guards as guards_mod
+import research.results_gates_v1.metrics as metrics_mod
+import research.results_gates_v1.statistics as statistics_mod
+import research.results_gates_v1.validate as validate_mod
 from research.results_gates_v1.gates import (
     compare_ge,
     compare_gt,
@@ -34,16 +40,23 @@ from research.results_gates_v1.gates import (
 )
 from research.results_gates_v1.guards import (
     BOUNDS,
+    COMMAND_SECONDS,
     LIBRARY_IMPORTS,
     PACKAGE_FILES,
+    PER_WORKER_VAS_BYTES,
+    RECEIPT_BYTES,
     TEST_IMPORTS,
     commit_receipt,
     enforce_elapsed,
     enforce_rss,
     load_lock,
     package_root,
+    read_canonical_verified,
+    read_pipe_bounded,
     reject_canaries,
     rss_kib,
+    run_contained,
+    vas_ceiling_probe,
 )
 from research.results_gates_v1.metrics import compute
 from research.results_gates_v1.packages import build, dump_yaml, parse_yaml
@@ -65,94 +78,62 @@ from research.results_gates_v1 import fixture_cli
 
 FIXTURE = package_root() / "fixtures" / "family-traces.json"
 SUITE_STARTED = time.monotonic()
-MUTATIONS = []
+FAULTS = []
 SECRET = "CANARY_SECRET_SUPERSECRETVALUE"
 
-REQUIRED_MUTATIONS = (
-    "M01_bh_drop_p1",
-    "M02_bh_strict_less",
-    "M03_bh_impute_missing_p",
-    "M04_rc_selected_pool",
-    "M05_rc_no_centering",
-    "M06_rc_missing_draws_p0",
-    "M07_p1_counted_as_coverage",
-    "M08_coverage_overlap_accepted",
-    "M09_drop_miss_denominator",
-    "M10_unresolved_as_zero",
-    "M11_overlap_ignored",
-    "M12_closed_interval_boundary",
-    "M13_missing_ledger_accepts_untouched",
-    "M14_unknown_ledger_undisturbed",
-    "M15_q07d_accepted",
-    "M16_missing_profile_pass",
-    "M17_unknown_field",
-    "M18_funding_numeric_zero",
-    "M19_whole_cost_stress",
-    "M20_dashboard_drops_connection",
-    "M21_missing_mapping_compatible",
-    "M22_not_connected_rewritten",
-    "M23_package_cap_truncates",
-    "M24_future_perturbs_past",
-    "M25_canary_leaks_payload",
-    "M26_strategy_cap_truncates",
-    "M27_receipt_oversize_written",
-    "M28_workers_over_cap",
-    "M29_dedup_erases_trials",
-    "M30_dsr_favorable",
-    "M31_fold_future_leak",
-    "M32_reserved_borrow",
-    "M33_iid_fold_pvalue",
-    "M34_fee_evidence_invented",
-    "M35_real_n_inherited",
-    "M36_evaluation_status_pass",
-    "M37_nonpositive_concentration_pass",
-    "M38_missing_hold_pass",
-    "M39_nan_net",
-    "M40_gate_failure_not_subset",
-    "M41_incomplete_family_rc",
-    "M42_mtime_freshness",
-    "M43_yaml_drops_relay",
-    "M44_mission_done",
-    "M45_label_stripped",
-    "M46_invalid_fills_promoted",
-    "M47_old_fee_threshold_field",
-    "M48_command_timeout_continues",
-    "M49_eta_emitted",
-    "M50_producer_schema_redefined",
-    "M51_rw_favorable_default",
-    "M52_pbo_favorable_default",
-    "M53_bootstrap_seed_default",
-    "M54_effective_n_favorable",
-    "M55_cluster_ci_favorable",
-    "M56_gross_boundary",
-    "M57_net_boundary",
-    "M58_stress_boundary",
-    "M59_fold_positive_boundary",
-    "M60_oof_boundary",
-    "M61_share_boundary",
-    "M62_hold_boundary",
-    "M63_rc_p_boundary",
-    "M64_lead_cap_boundary",
-    "M65_package_roundtrip",
-    "M66_input_mutated",
-    "M67_prohibited_access_before_io",
-    "M68_real_input_mode",
-    "M69_cap_enforcement_ast",
-    "M70_a2_unseen_claim",
-)
 
-
-def kill(mid, fault, assertion, correct, weakened):
-    MUTATIONS.append(
-        {
-            "id": mid,
-            "fault": fault,
-            "assertion": assertion,
-            "killed": correct != weakened,
-        }
+def record_fault(fault_id, assertion, module, name, mutant, exercise, oracle):
+    """Outer recorder. CONTROL and restoration must pass. WEAK must fail for real."""
+    original = getattr(module, name)
+    sentinel = object()
+    setattr(original, "_c993_sentinel", sentinel)
+    try:
+        exercise()
+        intact = "PASS"
+        intact_failure = None
+    except Exception as exc:
+        intact = "FAIL"
+        intact_failure = type(exc).__name__
+    setattr(module, name, mutant)
+    try:
+        try:
+            exercise()
+            weak = "NO_FAILURE"
+            weak_failure = None
+        except Exception as exc:
+            weak = "FAIL"
+            weak_failure = type(exc).__name__
+    finally:
+        setattr(module, name, original)
+    restored = getattr(module, name) is original and getattr(original, "_c993_sentinel", None) is sentinel
+    try:
+        exercise()
+        restored_run = "PASS"
+    except Exception as exc:
+        restored_run = type(exc).__name__
+    counted = (
+        intact == "PASS"
+        and weak == "FAIL"
+        and weak_failure not in {None, "ImportError", "ModuleNotFoundError"}
+        and restored
+        and restored_run == "PASS"
     )
-    if correct == weakened:
-        raise AssertionError(f"{mid} did not kill {fault}")
+    row = {
+        "id": fault_id,
+        "assertion": assertion,
+        "base_oracle": oracle,
+        "control": intact,
+        "intact": intact,
+        "weak": weak,
+        "failure_type": weak_failure,
+        "intact_failure": intact_failure,
+        "restored": restored,
+        "restored_run": restored_run,
+        "counted_as_kill": counted,
+    }
+    FAULTS.append(row)
+    if not counted:
+        raise AssertionError(row)
 
 
 def load():
@@ -234,20 +215,6 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(bh["executed_coverage"], 3)
         self.assertIs(bh["p1_is_coverage"], False)
         self.assertEqual(result["coverage"]["executed_coverage"], 3)
-        kill(
-            "M01_bh_drop_p1",
-            "drop p=1 cells from the BH denominator",
-            "test_bh_matches_hand_oracle_and_p1_is_not_coverage",
-            expected,
-            weakened_bh_drop_p1(pairs, Fraction("0.05")),
-        )
-        kill(
-            "M07_p1_counted_as_coverage",
-            "add bookkeeping p=1 cells to executed coverage",
-            "test_bh_matches_hand_oracle_and_p1_is_not_coverage",
-            3,
-            3 + 4,
-        )
 
     def test_bh_boundary_is_inclusive(self):
         entries = [
@@ -261,25 +228,11 @@ class OracleTests(unittest.TestCase):
         expected = oracle_bh(pairs, Fraction("0.05"))
         self.assertEqual(list(produced["rejected_ids"]), expected)
         self.assertEqual(expected, ["A", "B", "C", "D"])
-        kill(
-            "M02_bh_strict_less",
-            "replace BH <= with <",
-            "test_bh_boundary_is_inclusive",
-            expected,
-            weakened_bh_strict(pairs, Fraction("0.05")),
-        )
 
     def test_missing_evaluated_p_is_not_imputed(self):
         blocked = benjamini_hochberg([{"id": "A", "evaluated": True, "p": None}], Fraction("0.05"))
         self.assertEqual(blocked["status"], "BLOCKED")
         self.assertEqual(blocked["rejected_ids"], [])
-        kill(
-            "M03_bh_impute_missing_p",
-            "impute a missing evaluated p as 0",
-            "test_missing_evaluated_p_is_not_imputed",
-            "BLOCKED",
-            "SYNTHETIC_BRANCH_COMPUTED",
-        )
 
     def test_white_rc_matches_fixed_draw_oracle(self):
         doc = load()
@@ -297,13 +250,6 @@ class OracleTests(unittest.TestCase):
             peak = max(sum((series[k][index] for index in draw), Fraction(0)) / len(series[0]) for k in range(len(series)))
             if peak >= uncentered:
                 raw_extreme += 1
-        kill(
-            "M05_rc_no_centering",
-            "skip null recentering",
-            "test_white_rc_matches_fixed_draw_oracle",
-            expected,
-            Fraction(raw_extreme, len(draws)),
-        )
 
     def test_selected_pool_and_incomplete_family_do_not_compute_rc(self):
         selected = load()
@@ -317,20 +263,6 @@ class OracleTests(unittest.TestCase):
         incomplete_result = run(incomplete)
         self.assertEqual(incomplete_result["statistics"]["white_rc"]["reason"], "INCOMPLETE_COMPARABLE_FAMILY")
         self.assertIsNone(incomplete_result["statistics"]["white_rc"]["p"])
-        kill(
-            "M04_rc_selected_pool",
-            "compute White RC on a presented subset",
-            "test_selected_pool_and_incomplete_family_do_not_compute_rc",
-            None,
-            "0.00",
-        )
-        kill(
-            "M41_incomplete_family_rc",
-            "compute White RC with a missing family member",
-            "test_selected_pool_and_incomplete_family_do_not_compute_rc",
-            None,
-            "0.05",
-        )
 
     def test_absent_draws_are_not_a_zero_p(self):
         doc = load()
@@ -338,13 +270,6 @@ class OracleTests(unittest.TestCase):
         result = run(doc)
         self.assertEqual(result["statistics"]["white_rc"]["status"], "BLOCKED")
         self.assertIsNone(result["statistics"]["white_rc"]["p"])
-        kill(
-            "M06_rc_missing_draws_p0",
-            "treat missing draws as p=0",
-            "test_absent_draws_are_not_a_zero_p",
-            None,
-            "0",
-        )
 
 
 class BoundaryTests(unittest.TestCase):
@@ -364,14 +289,12 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(on_boundary, "SYNTHETIC_BRANCH_PASS")
             self.assertEqual(other_side, "SYNTHETIC_BRANCH_FAIL")
             self.assertEqual(missing, "BLOCKED")
-            kill(mid, f"flip or drop the boundary for {fault}", "test_numeric_boundaries_missing_and_nan", on_boundary, other_side)
         with self.assertRaises(SchemaError):
             compare_gt("NaN", "0")
         doc = load()
         doc["accounting"]["signals"][0]["net"] = "NaN"
         with self.assertRaises(SchemaError):
             run(doc)
-        kill("M39_nan_net", "accept NaN as a passing net", "test_numeric_boundaries_missing_and_nan", "SchemaError", "SYNTHETIC_BRANCH_PASS")
 
     def test_week_share_boundary(self):
         self.assertEqual(compare_le("0.50", "0.50"), "SYNTHETIC_BRANCH_PASS")
@@ -419,16 +342,6 @@ class AccountingTests(unittest.TestCase):
         self.assertNotIn("SYN-S3", [row["strategy_id"] for row in result["packages"]["emitted"]])
         mutated = copy.deepcopy(snapshot)
         mutated["source"] = "mutated"
-        kill("M66_input_mutated", "mutate the caller document during evaluation", "test_primary_accounting_and_cost_split", before == snapshot, mutated == snapshot)
-        kill("M18_funding_numeric_zero", "record excluded funding as numeric zero", "test_primary_accounting_and_cost_split", None, 0)
-        kill("M19_whole_cost_stress", "scale spread as well as slippage", "test_primary_accounting_and_cost_split", Fraction(9), Fraction(12) - Fraction("1.5") * (Fraction(2) + Fraction(1)))
-        kill("M09_drop_miss_denominator", "drop missed rejected and unfilled signals from the denominator", "test_primary_accounting_and_cost_split", "7", "4")
-        kill("M29_dedup_erases_trials", "count only the diversity filter", "test_primary_accounting_and_cost_split", 6, 2)
-        kill("M34_fee_evidence_invented", "invent venue fee verification", "test_primary_accounting_and_cost_split", None, "verified")
-        kill("M35_real_n_inherited", "inherit an old research N", "test_primary_accounting_and_cost_split", None, 480)
-        kill("M36_evaluation_status_pass", "emit evaluation PASS", "test_primary_accounting_and_cost_split", "BLOCKED_NO_APPROVED_REAL_PROFILE", "PASS")
-        kill("M45_label_stripped", "strip exploratory and invalid-for-fills labels", "test_primary_accounting_and_cost_split", ["T4", "S3"], [])
-        kill("M70_a2_unseen_claim", "inherit a prior A2 unseen claim", "test_primary_accounting_and_cost_split", False, True)
 
     def test_unresolved_positions_stay_incomplete(self):
         doc = load()
@@ -440,7 +353,6 @@ class AccountingTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["status"], "INCOMPLETE")
         self.assertIsNone(result["metrics"]["net_per_signal"])
         self.assertEqual(gate(result, "net_sum"), "BLOCKED")
-        kill("M10_unresolved_as_zero", "close an unresolved position as zero", "test_unresolved_positions_stay_incomplete", "INCOMPLETE", "COMPLETE")
 
     def test_nonpositive_concentration_and_missing_hold_block(self):
         doc = load()
@@ -459,8 +371,6 @@ class AccountingTests(unittest.TestCase):
         missing = copy.deepcopy(doc["accounting"])
         missing["signals"][0]["hold_seconds"] = None
         self.assertEqual(compute(missing)["status"], "BLOCKED")
-        kill("M37_nonpositive_concentration_pass", "treat a nonpositive denominator as share 0 PASS", "test_nonpositive_concentration_and_missing_hold_block", "AMBIGUOUS", "SYNTHETIC_BRANCH_PASS")
-        kill("M38_missing_hold_pass", "pass median hold when a fill hold is missing", "test_nonpositive_concentration_and_missing_hold_block", "BLOCKED", "SYNTHETIC_BRANCH_PASS")
 
     def test_coverage_partition_and_gate_failure_subset(self):
         overlapped = load()
@@ -469,8 +379,6 @@ class AccountingTests(unittest.TestCase):
         outsider = load()
         outsider["coverage"]["gate_failures"].append("T4")
         self.assertIs(run(outsider)["coverage"]["gate_failures_subset"], False)
-        kill("M08_coverage_overlap_accepted", "accept an overlapping planned partition", "test_coverage_partition_and_gate_failure_subset", "RECONCILIATION_FAILED", "RECONCILED")
-        kill("M40_gate_failure_not_subset", "allow a gate failure outside evaluated ids", "test_coverage_partition_and_gate_failure_subset", False, True)
 
     def test_fold_leakage_and_reserved_borrow(self):
         leaked = load()
@@ -482,9 +390,6 @@ class AccountingTests(unittest.TestCase):
         self.assertEqual(assess(borrowed["folds"])["reason"], "RESERVED_BORROWED")
         self.assertIsNone(run()["folds"]["iid_fold_pvalue"])
         self.assertEqual(run()["folds"]["definition_approval"], "NOT_APPROVED")
-        kill("M31_fold_future_leak", "accept an OOF trade inside the train window", "test_fold_leakage_and_reserved_borrow", "BLOCKED", "INTEGRITY_OK")
-        kill("M32_reserved_borrow", "borrow a reserved holdout into a fold", "test_fold_leakage_and_reserved_borrow", "RESERVED_BORROWED", "INTEGRITY_OK")
-        kill("M33_iid_fold_pvalue", "emit an iid fold p-value", "test_fold_leakage_and_reserved_borrow", None, "0.01")
 
     def test_future_perturbation_keeps_earlier_projection(self):
         first = run()
@@ -498,13 +403,6 @@ class AccountingTests(unittest.TestCase):
         leaked = load()
         leaked["causal"]["decisions"][0]["used_observation_ids"].append("o-future")
         self.assertEqual(run(leaked)["causal"]["status"], "LEAKAGE")
-        kill(
-            "M24_future_perturbs_past",
-            "include a later decision in the projection through t",
-            "test_future_perturbation_keeps_earlier_projection",
-            before,
-            canonical_bytes(project_causal(first["causal"], 10**9)),
-        )
 
 
 class ExposureTests(unittest.TestCase):
@@ -528,10 +426,6 @@ class ExposureTests(unittest.TestCase):
         missing_gate = exposure_gate(missing, {"start": 80, "end": 90, "token": "UNTOUCHED"})
         self.assertEqual(missing_gate["untouched_block_reason"], "UNKNOWN_OR_INCOMPLETE_LEDGER")
         self.assertNotEqual(missing_gate["untouched_validation_acceptance"], "ACCEPT")
-        kill("M11_overlap_ignored", "accept an overlapping undisturbed claim", "test_overlap_boundary_and_unknown_ledger", "REJECTED", "NOT_REJECTED_FOR_OVERLAP")
-        kill("M12_closed_interval_boundary", "treat a touching half-open boundary as overlap", "test_overlap_boundary_and_unknown_ledger", overlaps_half_open(10, 12, 0, 10), closed_touch)
-        kill("M13_missing_ledger_accepts_untouched", "accept untouched validation when an epoch is missing", "test_overlap_boundary_and_unknown_ledger", "BLOCKED", "ACCEPT")
-        kill("M14_unknown_ledger_undisturbed", "treat an unknown ledger as undisturbed", "test_overlap_boundary_and_unknown_ledger", "BLOCKED", "NOT_REJECTED_FOR_OVERLAP")
 
     def test_07d_accepted_finding_is_rejected(self):
         doc = load()
@@ -540,7 +434,6 @@ class ExposureTests(unittest.TestCase):
         self.assertEqual(result["quarantine"]["status"], "REJECTED_AUDIT_ONLY")
         self.assertEqual(result["quarantine"]["accepted_findings"], "REJECTED")
         self.assertEqual(result["quarantine"]["disposition"], "AUDIT_ONLY")
-        kill("M15_q07d_accepted", "accept a 07d finding", "test_07d_accepted_finding_is_rejected", "REJECTED", "ACCEPTED")
 
 
 class PackageDashboardTests(unittest.TestCase):
@@ -584,10 +477,6 @@ class PackageDashboardTests(unittest.TestCase):
         withheld = run(promoted)
         self.assertEqual([row["reason"] for row in withheld["packages"]["withheld"]], ["INVALID_FOR_FILLS"])
         self.assertNotIn("SYN-S3", [row["strategy_id"] for row in withheld["packages"]["emitted"]])
-        kill("M23_package_cap_truncates", "emit the first 10 leads and drop the rest", "test_package_roundtrip_cap_and_invalid_fill", 0, 10)
-        kill("M43_yaml_drops_relay", "flip relay_eligible during YAML roundtrip", "test_package_roundtrip_cap_and_invalid_fill", False, True)
-        kill("M46_invalid_fills_promoted", "package an INVALID-for-fills member as a lead", "test_package_roundtrip_cap_and_invalid_fill", ["INVALID_FOR_FILLS"], [])
-        kill("M65_package_roundtrip", "drop application NOT_APPLIED on roundtrip", "test_package_roundtrip_cap_and_invalid_fill", "NOT_APPLIED", "APPLIED")
 
     def test_dashboard_provenance_and_missing_mapping(self):
         result = run()
@@ -623,10 +512,6 @@ class PackageDashboardTests(unittest.TestCase):
         source = (package_root() / "dashboard_projection.py").read_text(encoding="utf-8")
         self.assertNotIn("getmtime", source)
         self.assertNotIn(".stat(", source)
-        kill("M20_dashboard_drops_connection", "drop connection_state from a panel", "test_dashboard_provenance_and_missing_mapping", "NOT_CONNECTED", "MISSING")
-        kill("M21_missing_mapping_compatible", "call a partial mapping compatible", "test_dashboard_provenance_and_missing_mapping", "BLOCKED_MISSING_MAPPING", "PROJECTION_ONLY_NOT_CONNECTED")
-        kill("M22_not_connected_rewritten", "rewrite NOT_CONNECTED as CONNECTED", "test_dashboard_provenance_and_missing_mapping", "NOT_CONNECTED", "CONNECTED")
-        kill("M42_mtime_freshness", "treat file mtime as freshness evidence", "test_dashboard_provenance_and_missing_mapping", "UNKNOWN", "FRESH")
 
 
 class FailClosedTests(unittest.TestCase):
@@ -653,11 +538,6 @@ class FailClosedTests(unittest.TestCase):
             run(old)
         with self.assertRaises(SchemaError):
             validate_zero_statement({"text_scope": "synthetic-family-traces-v1", "mission_done": True, "research_done": False})
-        kill("M16_missing_profile_pass", "PASS when the profile is unapproved", "test_schema_profile_and_producer_rejection", "ProfileRejected", "PASS")
-        kill("M17_unknown_field", "accept an unknown field", "test_schema_profile_and_producer_rejection", "SchemaError", "ACCEPTED")
-        kill("M44_mission_done", "allow a zero-result statement to say mission DONE", "test_schema_profile_and_producer_rejection", "SchemaError", "ACCEPTED")
-        kill("M47_old_fee_threshold_field", "revive an old RT15 fee field", "test_schema_profile_and_producer_rejection", "SchemaError", "ACCEPTED")
-        kill("M50_producer_schema_redefined", "accept a producer CoverageReport schema", "test_schema_profile_and_producer_rejection", "SchemaError", "ACCEPTED")
 
     def test_methods_have_no_favorable_defaults(self):
         methods = run()["methods"]
@@ -671,12 +551,6 @@ class FailClosedTests(unittest.TestCase):
         self.assertIsNone(methods["bootstrap_b2000_seed20261104_block1day"]["value"])
         self.assertEqual(methods["trial_count"]["status"], "IMPLEMENTED_BOOKKEEPING")
         self.assertIs(methods["trial_count"]["independent_observations"], False)
-        kill("M30_dsr_favorable", "fill a favorable deflated Sharpe", "test_methods_have_no_favorable_defaults", None, "1")
-        kill("M51_rw_favorable_default", "fill a favorable Romano-Wolf p-value", "test_methods_have_no_favorable_defaults", None, "0.01")
-        kill("M52_pbo_favorable_default", "fill a favorable PBO", "test_methods_have_no_favorable_defaults", None, "0")
-        kill("M53_bootstrap_seed_default", "adopt B2000 seed 20261104 block 1 day", "test_methods_have_no_favorable_defaults", None, "20261104")
-        kill("M54_effective_n_favorable", "fill a favorable effective n", "test_methods_have_no_favorable_defaults", None, 1000)
-        kill("M55_cluster_ci_favorable", "fill a favorable cluster interval", "test_methods_have_no_favorable_defaults", None, "[0,1]")
 
     def test_result_is_immutable_and_has_no_eta(self):
         result = run()
@@ -685,7 +559,6 @@ class FailClosedTests(unittest.TestCase):
         plain = to_plain(result)
         self.assertNotIn("eta", _keys(plain))
         self.assertNotIn("strategy_profitable", _keys(plain))
-        kill("M49_eta_emitted", "emit an ETA field", "test_result_is_immutable_and_has_no_eta", False, True)
 
     def test_caps_stop_without_truncation(self):
         oversized = {"family": [{"id": f"S{index}", "role": "CANDIDATE"} for index in range(257)]}
@@ -710,10 +583,6 @@ class FailClosedTests(unittest.TestCase):
             with self.assertRaises(CapStop):
                 commit_receipt(receipt, b"x" * (BOUNDS["receipt_bytes"] + 1))
             self.assertIs(receipt.exists(), False)
-        kill("M26_strategy_cap_truncates", "truncate 257 strategies to 256 and continue", "test_caps_stop_without_truncation", "INCOMPLETE_STOP", "EVALUATED_256")
-        kill("M27_receipt_oversize_written", "write a receipt above 8 MiB", "test_caps_stop_without_truncation", False, True)
-        kill("M28_workers_over_cap", "allow more than 2 workers", "test_caps_stop_without_truncation", "cpu_workers", "ALLOWED")
-        kill("M48_command_timeout_continues", "continue after the 120 second command cap", "test_caps_stop_without_truncation", "command_seconds", "COMPLETED")
 
     def test_canary_does_not_leak_and_pins_match(self):
         with self.assertRaises(CanaryRejected) as caught:
@@ -727,7 +596,6 @@ class FailClosedTests(unittest.TestCase):
         self.assertIs(lock["real_evaluation_permitted"], False)
         self.assertEqual(lock["bounds"], BOUNDS)
         self.assertEqual(lock["third_party"], [])
-        kill("M25_canary_leaks_payload", "include the canary value in the error", "test_canary_does_not_leak_and_pins_match", "canary_detected", SECRET)
 
 
 class CliTests(unittest.TestCase):
@@ -755,14 +623,10 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(code, 3)
                 self.assertIs(receipt.exists(), False)
                 self.assertNotIn(SECRET, output)
-                self.assertIn("canary_detected", output)
+                self.assertIn("prohibited_access", output)
+                self.assertNotIn("canary_detected", output)
             finally:
                 canary.unlink(missing_ok=True)
-        source = (package_root() / "fixture_cli.py").read_text(encoding="utf-8")
-        self.assertLess(source.find("reject_access("), source.find("read_bytes("))
-        self.assertLess(source.find("reject_canaries("), source.find("commit_receipt("))
-        kill("M67_prohibited_access_before_io", "open a receipt before rejecting network access", "test_cli_rejects_real_input_network_and_canaries_before_receipts", False, True)
-        kill("M68_real_input_mode", "accept --real-input", "test_cli_rejects_real_input_network_and_canaries_before_receipts", 2, 0)
 
     def test_cli_fixture_receipt_pins_and_import_caps(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -793,7 +657,7 @@ class CliTests(unittest.TestCase):
                 continue
             library_roots |= _import_roots(package_root() / rel)
         self.assertTrue(library_roots <= LIBRARY_IMPORTS)
-        forbidden = {"socket", "urllib", "requests", "subprocess", "os", "ctypes", "pickle", "ssl", "http", "threading", "multiprocessing", "concurrent"}
+        forbidden = {"socket", "urllib", "requests", "subprocess", "ctypes", "pickle", "ssl", "http", "threading", "multiprocessing", "concurrent"}
         self.assertTrue(library_roots.isdisjoint(forbidden))
         self.assertTrue(_import_roots(Path(__file__)) <= TEST_IMPORTS)
         self.assertIn("enforce_workers", _called_in(package_root() / "gates.py", "evaluate_fixture"))
@@ -801,7 +665,392 @@ class CliTests(unittest.TestCase):
         self.assertIn("enforce_elapsed", _called_in(package_root() / "gates.py", "evaluate_fixture"))
         self.assertIn("enforce_rss", _called_in(package_root() / "gates.py", "evaluate_fixture"))
         self.assertIn("enforce_receipt_bytes", _called_in(package_root() / "guards.py", "commit_receipt"))
-        kill("M69_cap_enforcement_ast", "remove a resource-cap call from the consumer", "test_cli_fixture_receipt_pins_and_import_caps", True, False)
+
+
+class CorrectiveTests(unittest.TestCase):
+    def test_h1_production_faults(self):
+        original_bh = statistics_mod.benjamini_hochberg
+        original_interval = gates_mod._interval_admitted
+        original_compute = metrics_mod.compute
+
+        def bh_less(entries, q=statistics_mod.BH_Q):
+            prepared = []
+            for row in entries:
+                p_value = Fraction(row["p"]) if row["evaluated"] else Fraction(1)
+                prepared.append((row["id"], p_value))
+            prepared.sort(key=lambda item: (item[1], item[0]))
+            count = len(prepared)
+            largest = None
+            for rank, (_ident, p_value) in enumerate(prepared, start=1):
+                if p_value < (Fraction(rank, count) * q):
+                    largest = rank
+            rejected = [] if largest is None else [prepared[index][0] for index in range(largest)]
+            return {"status": "SYNTHETIC_BRANCH_COMPUTED", "rejected_ids": rejected, "m": count, "real_inference": "BLOCKED"}
+
+        def bh_drop_p1(entries, q=statistics_mod.BH_Q):
+            return original_bh([row for row in entries if row.get("evaluated")], q)
+
+        def rc_uncentered(series, draws, *, family_exact=True):
+            width = len(series[0]["differential"])
+            parsed = [[Fraction(item) for item in row["differential"]] for row in series]
+            statistic = max(sum(values, Fraction(0)) / width for values in parsed)
+            extreme = 0
+            for draw in draws:
+                peak = max(sum((parsed[k][index] for index in draw), Fraction(0)) / width for k in range(len(parsed)))
+                if peak >= statistic:
+                    extreme += 1
+            return {"status": "SYNTHETIC_BRANCH_FAIL", "p": "1", "real_inference": "BLOCKED", "extreme": extreme}
+
+        def rc_on_presented(doc):
+            block = doc["comparable_family"]
+            presented = set(block["presented_ids"])
+            series = [row for row in block["series"] if row["id"] in presented]
+            return statistics_mod.white_reality_check(series, doc["rc_draws"], family_exact=True)
+
+        def never_overlap(*_args):
+            return False
+
+        def closed_overlap(start_a, end_a, start_b, end_b):
+            if end_a < start_a or end_b < start_b:
+                return False
+            return start_a <= end_b and start_b <= end_a
+
+        def always_complete(_ledger, _intervals):
+            return True
+
+        def admit_inverted(row):
+            start = row.get("start")
+            end = row.get("end")
+            if isinstance(start, int) and isinstance(end, int) and end < start:
+                return True
+            return original_interval(row)
+
+        def admit_unmarked_zero(row):
+            start = row.get("start")
+            end = row.get("end")
+            if isinstance(start, int) and isinstance(end, int) and end == start:
+                return True
+            return original_interval(row)
+
+        def reject_declared_empty(row):
+            if row.get("width_mark") == "EMPTY":
+                return False
+            return original_interval(row)
+
+        def reversed_compare(value, threshold, op):
+            left = gates_mod._as_fraction(value)
+            right = gates_mod._as_fraction(threshold)
+            if left is None or right is None:
+                return "BLOCKED"
+            if op == "ge":
+                ok = left > right
+            elif op == "gt":
+                ok = left >= right
+            elif op == "le":
+                ok = left < right
+            else:
+                ok = False
+            return "SYNTHETIC_BRANCH_PASS" if ok else "SYNTHETIC_BRANCH_FAIL"
+
+        def disabled(*_args, **_kwargs):
+            return None
+
+        def allow_nonzero(_state, _net):
+            return None
+
+        def drop_nonfills(accounting):
+            kept = [row for row in accounting["signals"] if row["state"] in {"filled", "unresolved"}]
+            return original_compute({"valuation": accounting["valuation"], "signals": kept})
+
+        def exercise_bh_boundary():
+            entries = [
+                {"id": "A", "evaluated": True, "p": "0.0125"},
+                {"id": "B", "evaluated": True, "p": "0.03"},
+                {"id": "C", "evaluated": True, "p": "0.04"},
+                {"id": "D", "evaluated": True, "p": "0.05"},
+            ]
+            produced = statistics_mod.benjamini_hochberg(entries, Fraction("0.05"))
+            if list(produced["rejected_ids"]) != ["A", "B", "C", "D"]:
+                raise AssertionError(list(produced["rejected_ids"]))
+
+        def exercise_p1():
+            from research.results_gates_v1.coverage import reconcile
+            result = gates_mod._bh(load(), reconcile(load()["coverage"]))
+            if result["m"] != 7 or list(result["rejected_ids"]) != ["S1"] or result["bookkeeping_p1"] != 4:
+                raise AssertionError((result.get("m"), list(result.get("rejected_ids") or []), result.get("bookkeeping_p1")))
+
+        def exercise_rc():
+            result = gates_mod._rc(load())
+            if result["p"] != "0.05":
+                raise AssertionError(result["p"])
+
+        def exercise_pool():
+            doc = load()
+            doc["comparable_family"]["presented_ids"] = ["S1"]
+            result = gates_mod._rc(doc)
+            if result["status"] != "REJECTED_NOT_FULL_FAMILY" or result["p"] is not None:
+                raise AssertionError((result["status"], result["p"]))
+
+        def exercise_overlap():
+            result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 39, "end": 41, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "OVERLAP" or result["false_undisturbed_claim"] != "REJECTED":
+                raise AssertionError((result["synthetic_overlap"], result["false_undisturbed_claim"]))
+            if result["untouched_validation_acceptance"] != "BLOCKED" or result["real_exposure"] != "UNKNOWN":
+                raise AssertionError("untouched moved")
+
+        def exercise_boundary():
+            result = gates_mod.exposure_gate(load()["exposure_ledger"], {"start": 60, "end": 70, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "NO_OVERLAP" or result["false_undisturbed_claim"] != "NOT_REJECTED_FOR_OVERLAP":
+                raise AssertionError((result["synthetic_overlap"], result["false_undisturbed_claim"]))
+
+        def exercise_unknown():
+            ledger = copy.deepcopy(load()["exposure_ledger"])
+            ledger["completeness"] = "UNKNOWN"
+            result = gates_mod.exposure_gate(ledger, {"start": 80, "end": 90, "token": "UNSEEN"})
+            if result["synthetic_overlap"] != "UNKNOWN" or result["false_undisturbed_claim"] != "BLOCKED":
+                raise AssertionError((result["synthetic_overlap"], result["false_undisturbed_claim"]))
+            if result["untouched_validation_acceptance"] != "BLOCKED" or result["real_exposure"] != "UNKNOWN":
+                raise AssertionError("untouched moved")
+
+        def exercise_ge():
+            if gates_mod.compare_ge("10", "10") != "SYNTHETIC_BRANCH_PASS":
+                raise AssertionError(gates_mod.compare_ge("10", "10"))
+
+        def exercise_gt():
+            if gates_mod.compare_gt("0", "0") != "SYNTHETIC_BRANCH_FAIL":
+                raise AssertionError(gates_mod.compare_gt("0", "0"))
+
+        def exercise_le():
+            if gates_mod.compare_le("0.40", "0.40") != "SYNTHETIC_BRANCH_PASS":
+                raise AssertionError(gates_mod.compare_le("0.40", "0.40"))
+
+        def exercise_workers():
+            try:
+                gates_mod.evaluate_fixture(load(), workers=3)
+            except CapStop as exc:
+                if exc.status != "INCOMPLETE_STOP" or exc.reason != "cpu_workers":
+                    raise AssertionError(exc.reason)
+                return
+            raise AssertionError("workers cap did not stop")
+
+        def exercise_strategies():
+            doc = {"family": [{"id": f"S{index}", "role": "CANDIDATE"} for index in range(257)]}
+            try:
+                gates_mod.evaluate_fixture(doc)
+            except CapStop as exc:
+                if exc.reason != "fixture_strategies":
+                    raise AssertionError(exc.reason)
+                return
+            raise AssertionError("strategy cap did not stop")
+
+        def exercise_elapsed():
+            class _Expired:
+                def elapsed(self):
+                    return COMMAND_SECONDS + 1
+            try:
+                gates_mod.evaluate_fixture(load(), clock=_Expired())
+            except CapStop as exc:
+                if exc.reason != "command_seconds":
+                    raise AssertionError(exc.reason)
+                return
+            raise AssertionError("command cap did not stop")
+
+        def exercise_receipt():
+            directory = Path(tempfile.mkdtemp())
+            path = directory / "oversized.json"
+            try:
+                try:
+                    guards_mod.commit_receipt(path, b"x" * (RECEIPT_BYTES + 1))
+                except CapStop as exc:
+                    if path.exists() or exc.reason != "receipt_bytes":
+                        raise AssertionError("receipt cap wrote or mismatched")
+                    return
+                raise AssertionError("receipt cap did not stop")
+            finally:
+                if path.exists():
+                    path.unlink()
+
+        def exercise_nonfill():
+            doc = load()
+            doc["accounting"]["signals"][4]["net"] = "1"
+            try:
+                gates_mod.evaluate_fixture(doc)
+            except SchemaError as exc:
+                if "nonzero non-fill" not in str(exc) or doc["accounting"]["signals"][4]["net"] != "1":
+                    raise AssertionError(str(exc))
+                return
+            raise AssertionError("nonzero non-fill was accepted")
+
+        def exercise_inverted():
+            ledger = copy.deepcopy(load()["exposure_ledger"])
+            ledger["intervals"][0]["end"] = -1
+            result = gates_mod.exposure_gate(ledger, {"start": 60, "end": 70, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "UNKNOWN" or result["real_exposure"] != "UNKNOWN":
+                raise AssertionError(result["synthetic_overlap"])
+            if result["untouched_validation_acceptance"] != "BLOCKED":
+                raise AssertionError("untouched moved")
+
+        def exercise_zero():
+            ledger = copy.deepcopy(load()["exposure_ledger"])
+            ledger["intervals"][0]["end"] = ledger["intervals"][0]["start"]
+            result = gates_mod.exposure_gate(ledger, {"start": 60, "end": 70, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "UNKNOWN":
+                raise AssertionError(result["synthetic_overlap"])
+
+        def exercise_empty():
+            ledger = copy.deepcopy(load()["exposure_ledger"])
+            ledger["intervals"][0]["end"] = ledger["intervals"][0]["start"]
+            ledger["intervals"][0]["width_mark"] = "EMPTY"
+            ledger["intervals"][0]["provenance"] = "SYNTHETIC_DECLARED_EMPTY"
+            result = gates_mod.exposure_gate(ledger, {"start": 60, "end": 70, "token": "UNDISTURBED"})
+            if result["synthetic_overlap"] != "NO_OVERLAP":
+                raise AssertionError(result["synthetic_overlap"])
+            if result["untouched_validation_acceptance"] != "BLOCKED" or result["real_exposure"] != "UNKNOWN":
+                raise AssertionError("untouched moved")
+
+        def exercise_denominator():
+            result = gates_mod.evaluate_fixture(load())
+            if result["metrics"]["net_per_signal"]["denominator"] != "7":
+                raise AssertionError(result["metrics"]["net_per_signal"])
+
+        cases = [
+            ("F-BH-INCLUSIVE", "test_bh_boundary_is_inclusive", statistics_mod, "benjamini_hochberg", bh_less, exercise_bh_boundary, ["A", "B", "C", "D"]),
+            ("F-BH-P1-MASS", "test_bh_matches_hand_oracle_and_p1_is_not_coverage", statistics_mod, "benjamini_hochberg", bh_drop_p1, exercise_p1, {"m": 7, "rejected": ["S1"]}),
+            ("F-RC-NO-CENTER", "test_white_rc_matches_fixed_draw_oracle", statistics_mod, "white_reality_check", rc_uncentered, exercise_rc, "0.05"),
+            ("F-RC-SELECTED-POOL", "test_selected_pool_and_incomplete_family_do_not_compute_rc", gates_mod, "_rc", rc_on_presented, exercise_pool, None),
+            ("F-EXPOSURE-OVERLAP", "test_overlap_boundary_and_unknown_ledger", gates_mod, "overlaps_half_open", never_overlap, exercise_overlap, "REJECTED"),
+            ("F-EXPOSURE-BOUNDARY", "test_overlap_boundary_and_unknown_ledger", gates_mod, "overlaps_half_open", closed_overlap, exercise_boundary, "NO_OVERLAP"),
+            ("F-EXPOSURE-UNKNOWN", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_ledger_internally_complete", always_complete, exercise_unknown, "UNKNOWN"),
+            ("F-COMPARE-GE", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_ge, "SYNTHETIC_BRANCH_PASS"),
+            ("F-COMPARE-GT", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_gt, "SYNTHETIC_BRANCH_FAIL"),
+            ("F-COMPARE-LE", "test_numeric_boundaries_missing_and_nan", gates_mod, "_compare", reversed_compare, exercise_le, "SYNTHETIC_BRANCH_PASS"),
+            ("F-CAP-WORKERS", "test_caps_stop_without_truncation", gates_mod, "enforce_workers", disabled, exercise_workers, "INCOMPLETE_STOP"),
+            ("F-CAP-STRATEGIES", "test_caps_stop_without_truncation", gates_mod, "enforce_strategy_count", disabled, exercise_strategies, "INCOMPLETE_STOP"),
+            ("F-CAP-ELAPSED", "test_caps_stop_without_truncation", gates_mod, "enforce_elapsed", disabled, exercise_elapsed, "INCOMPLETE_STOP"),
+            ("F-CAP-RECEIPT", "test_caps_stop_without_truncation", guards_mod, "enforce_receipt_bytes", disabled, exercise_receipt, "INCOMPLETE_STOP"),
+            ("F-NONFILL-ZERO", "test_primary_accounting_and_cost_split", validate_mod, "assert_nonfill_zero", allow_nonzero, exercise_nonfill, "REJECT"),
+            ("F-H6-INVERTED", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", admit_inverted, exercise_inverted, "UNKNOWN"),
+            ("F-H6-UNMARKED-ZERO", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", admit_unmarked_zero, exercise_zero, "UNKNOWN"),
+            ("F-H6-DECLARED-EMPTY", "test_overlap_boundary_and_unknown_ledger", gates_mod, "_interval_admitted", reject_declared_empty, exercise_empty, "NO_OVERLAP"),
+            ("F-DENOMINATOR", "test_primary_accounting_and_cost_split", metrics_mod, "compute", drop_nonfills, exercise_denominator, "7"),
+        ]
+        for fault_id, assertion, module, name, mutant, exercise, oracle in cases:
+            record_fault(fault_id, assertion, module, name, mutant, exercise, oracle)
+
+    def test_h5_nonzero_nonfill_is_rejected_not_normalized(self):
+        doc = load()
+        doc["accounting"]["signals"][4]["net"] = "2"
+        with self.assertRaises(SchemaError) as caught:
+            run(doc)
+        self.assertIn("nonzero non-fill", str(caught.exception))
+        self.assertEqual(doc["accounting"]["signals"][4]["net"], "2")
+
+    def test_h6_width_cases_keep_real_exposure_unknown(self):
+        inverted = load()
+        inverted["exposure_ledger"]["intervals"][0]["end"] = -1
+        inverted_result = run(inverted)
+        self.assertEqual(inverted_result["exposure"]["synthetic_overlap"], "UNKNOWN")
+        self.assertEqual(inverted_result["exposure"]["untouched_validation_acceptance"], "BLOCKED")
+        self.assertEqual(inverted_result["exposure"]["real_exposure"], "UNKNOWN")
+        unmarked = load()
+        unmarked["exposure_ledger"]["intervals"][0]["end"] = unmarked["exposure_ledger"]["intervals"][0]["start"]
+        unmarked_result = run(unmarked)
+        self.assertEqual(unmarked_result["exposure"]["synthetic_overlap"], "UNKNOWN")
+        declared = load()
+        declared["exposure_ledger"]["intervals"][0]["end"] = declared["exposure_ledger"]["intervals"][0]["start"]
+        declared["exposure_ledger"]["intervals"][0]["width_mark"] = "EMPTY"
+        declared["exposure_ledger"]["intervals"][0]["provenance"] = "SYNTHETIC_DECLARED_EMPTY"
+        declared_result = run(declared)
+        self.assertEqual(declared_result["exposure"]["synthetic_overlap"], "NO_OVERLAP")
+        self.assertEqual(declared_result["exposure"]["untouched_validation_acceptance"], "BLOCKED")
+        self.assertEqual(declared_result["exposure"]["real_exposure"], "UNKNOWN")
+
+    def test_h4_canonical_read_and_alternate_path(self):
+        opens = []
+        real_open = Path.open
+
+        def wrapped(self, *args, **kwargs):
+            opens.append(self)
+            return real_open(self, *args, **kwargs)
+
+        Path.open = wrapped
+        try:
+            data = read_canonical_verified()
+        finally:
+            Path.open = real_open
+        fixture_opens = [item for item in opens if item.name == "family-traces.json"]
+        self.assertEqual(len(fixture_opens), 1)
+        self.assertEqual(sha256_bytes(data), load_lock()["fixture_sha256"])
+        self.assertEqual(json.loads(data.decode("utf-8"))["schema"], "results_consumer_fixture_stub_v1")
+        forks = []
+        real_fork = os.fork
+
+        def spy_fork():
+            forks.append("FORK")
+            return real_fork()
+
+        os.fork = spy_fork
+        try:
+            code, output = _capture_stdout(lambda: fixture_cli.main(["--fixture-only", "--fixture", "/etc/passwd"]))
+        finally:
+            os.fork = real_fork
+        self.assertEqual(code, 3)
+        self.assertEqual(forks, [])
+        self.assertIn("prohibited_access", output)
+        self.assertNotIn("passwd", output)
+
+    def test_h2_h3_cap_controls(self):
+        def oversized(write_fd):
+            os.write(write_fd, b"x" * (RECEIPT_BYTES + 1))
+            return 0
+
+        with self.assertRaises(CapStop) as pipe_cap:
+            run_contained(oversized)
+        self.assertEqual(pipe_cap.exception.status, "INCOMPLETE_STOP")
+        self.assertEqual(pipe_cap.exception.reason, "receipt_bytes")
+        self.assertEqual(vas_ceiling_probe(), "MEMORY_ERROR")
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            time.sleep(30)
+            os._exit(0)
+        os.close(write_fd)
+
+        class _Jump:
+            def elapsed(self):
+                return COMMAND_SECONDS + 1
+
+        try:
+            with self.assertRaises(CapStop) as timed:
+                read_pipe_bounded(read_fd, pid, timeout_s=COMMAND_SECONDS, clock=_Jump())
+            self.assertEqual(timed.exception.reason, "command_seconds")
+            self.assertEqual(timed.exception.status, "INCOMPLETE_STOP")
+        finally:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            os.close(read_fd)
+        real = fixture_cli.run_contained
+
+        def raise_cap(_child):
+            raise CapStop("receipt_bytes")
+
+        fixture_cli.run_contained = raise_cap
+        try:
+            code, output = _capture_stdout(lambda: fixture_cli.main(["--fixture-only"]))
+        finally:
+            fixture_cli.run_contained = real
+        self.assertEqual(code, 5)
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "INCOMPLETE_STOP")
+        self.assertEqual(payload["error"], "receipt_bytes")
+        self.assertNotEqual(payload["status"], "REJECTED")
 
 
 class ZzzResourceTests(unittest.TestCase):
@@ -811,12 +1060,14 @@ class ZzzResourceTests(unittest.TestCase):
         observed = enforce_rss()
         self.assertLess(elapsed, 600)
         self.assertLess(observed, 512 * 1024)
-        found = [row["id"] for row in MUTATIONS]
-        self.assertEqual(sorted(found), sorted(REQUIRED_MUTATIONS))
-        self.assertTrue(all(row["killed"] for row in MUTATIONS))
+        self.assertTrue(FAULTS)
+        self.assertTrue(all(row["counted_as_kill"] for row in FAULTS))
+        self.assertEqual(len(FAULTS), len({row["id"] for row in FAULTS}))
         print(json.dumps({
-            "mutation_count": len(MUTATIONS),
-            "mutations_killed": sum(1 for row in MUTATIONS if row["killed"]),
+            "fault_ids": [row["id"] for row in FAULTS],
+            "fault_count": len(FAULTS),
+            "counted_kills": sum(1 for row in FAULTS if row["counted_as_kill"]),
+            "failure_types": {row["id"]: row["failure_type"] for row in FAULTS},
             "suite_elapsed_ms": int(elapsed * 1000),
             "rss_kib": observed,
             "rss_cap_kib": 512 * 1024,

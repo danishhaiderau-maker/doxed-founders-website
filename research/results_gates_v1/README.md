@@ -20,7 +20,9 @@ There is no real-input mode. Paths outside `fixtures/` are rejected before they 
 python -m unittest research.results_gates_v1.tests.test_acceptance
 ```
 
-Bounds enforced by the process: 2 CPU workers, 512 MiB RSS, 120 seconds per command, 600 seconds per suite, 8 MiB receipts, 256 fixture strategies. Hitting a cap stops with `INCOMPLETE_STOP`. Results are not truncated and no ETA is emitted.
+Bounds are the original six: 2 CPU workers inclusive, 512 MiB for the whole parent+child tree, 120 seconds per command, 600 seconds per suite, 8 MiB receipts, 256 fixture strategies. The parent is the only receipt writer. It forks one child and reads that child's stdout through a bounded pipe. Each process installs a VAS ceiling of half of 512 MiB before the child starts, so the sum of the ceilings is 512 MiB. VAS is a conservative upper bound, not RSS. The limit is set after the interpreter has already started, and a kill is not instantaneous; this does not claim zero overshoot. There is no CPU-time cap, no 2048-event cap, and no extra aggregate byte quota. A cap hit emits `INCOMPLETE_STOP` and the reason. A nonzero exit alone is not that status. Results are not truncated and no ETA is emitted.
+
+Only the canonical fixture path is admitted, and that check happens before the file is opened. The child reads it once, hashes those bytes against the lock, and only then decodes that same buffer. Unpinned paths are refused before open. Nonzero missed, rejected, or unfilled nets are rejected and are not rewritten as zero. Zero non-fills stay in the denominator. Inverted ledger epochs and unmarked zero-width epochs are incomplete and unknown. A zero-width epoch is admitted only when it is explicitly marked EMPTY and carries provenance. That width rule is an RK interpretation, not an original positive-width requirement. Real exposure stays unknown and untouched validation stays blocked.
 
 ## What the fixture proves
 
@@ -39,7 +41,7 @@ Synthetic profile `synthetic-branch-profile-v1` is the only profile. Its example
 - Romano-Wolf, PBO, diversity dedup, and bootstrap B=2000 / seed 20261104 / block 1 day: proposed, not tested. No favorable default is filled in.
 - Nested walk-forward dated definitions: not approved. No iid fold p-value is emitted.
 - White reality-check real inference: blocked until benchmark, centering, dependence-preserving bootstrap, RNG, repetitions, block length, and missingness are preregistered.
-- Exposure of Study1 train/test, RUN-A/A2, 07d, and spent holdouts: real dates are unknown. Unknown or incomplete ledgers block untouched-validation acceptance. Overlap of a half-open `[start, end)` claim with an exposed interval rejects undisturbed, untouched, and unseen claims. 07d is audit only.
+- Exposure of Study1 train/test, RUN-A/A2, 07d, and spent holdouts: real dates are unknown. Unknown or incomplete ledgers block untouched-validation acceptance. Overlap of a half-open `[start, end)` claim with an exposed interval rejects undisturbed, untouched, and unseen claims. 07d is audit only. Inverted and unmarked zero-width required epochs stay unknown. A declared EMPTY epoch needs provenance. Real untouched acceptance stays blocked.
 - Dashboard UI and API mapping remains separately owned. This projection keeps `source`, `as_of`, fixture status, and `NOT_CONNECTED`. A missing mapping blocks dashboard compatibility.
 - REALISTIC_V1 / R7 reconciliation remains open. R53 future-live criteria and Danish's arm are outside this package.
 

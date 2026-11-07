@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 
+from . import validate as validate_mod
 from .validate import number_str, parse_number
 
 
@@ -42,6 +43,8 @@ def compute(accounting: dict) -> dict:
             "giveback_abs": None,
             "includes_miss_zeros": True,
         }
+    for row in resolved:
+        validate_mod.assert_nonfill_zero(row["state"], row["net"])
     for row in fills:
         if row["hold_seconds"] is None or row["day"] is None or row["week"] is None:
             return _blocked("MISSING_FILL_FIELDS")

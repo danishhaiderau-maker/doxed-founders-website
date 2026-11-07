@@ -226,6 +226,17 @@ def sha256_obj(obj) -> str:
     return sha256_bytes(canonical_bytes(obj))
 
 
+NONFILL_STATES = frozenset({"missed", "rejected", "unfilled"})
+
+
+def assert_nonfill_zero(state: str, net) -> None:
+    """Reject a nonzero missed, rejected, or unfilled net. Do not replace it with zero."""
+    if state not in NONFILL_STATES:
+        return
+    if net is None or parse_number(net) != 0:
+        raise SchemaError("nonzero non-fill")
+
+
 def parse_number(raw) -> Fraction:
     if isinstance(raw, bool) or raw is None:
         raise SchemaError("number missing")
@@ -266,10 +277,16 @@ def number_str(value: Fraction) -> str:
     return rendered
 
 
-def exact_keys(doc: Mapping, required: tuple[str, ...], *, label: str) -> None:
+def exact_keys(
+    doc: Mapping,
+    required: tuple[str, ...],
+    *,
+    label: str,
+    optional: tuple[str, ...] = (),
+) -> None:
     if not isinstance(doc, Mapping):
         raise SchemaError(f"{label} must be an object")
-    unknown = sorted(set(doc) - set(required))
+    unknown = sorted(set(doc) - set(required) - set(optional))
     missing = [key for key in required if key not in doc]
     if unknown:
         raise SchemaError(f"unknown fields in {label}: {','.join(unknown)}")
@@ -513,6 +530,7 @@ def _validate_accounting(block: dict) -> None:
                 raise SchemaError("unresolved net")
         else:
             parse_number(row["net"])
+            assert_nonfill_zero(row["state"], row["net"])
         if row["state"] == "filled":
             parse_number(row["slippage"])
             parse_number(row["hold_seconds"])
@@ -602,11 +620,25 @@ def _validate_ledger(block: dict) -> None:
         raise SchemaError("ledger completeness")
     seen = set()
     for row in need_list(block, "intervals"):
-        exact_keys(row, ("id", "start", "end", "disposition"), label="interval")
+        exact_keys(
+            row,
+            ("id", "start", "end", "disposition"),
+            label="interval",
+            optional=("width_mark", "provenance"),
+        )
         ident = need_str(row, "id")
         if ident in seen:
             raise SchemaError("duplicate interval")
         seen.add(ident)
+        mark = row.get("width_mark", "NONE")
+        if mark not in {"NONE", "EMPTY"}:
+            raise SchemaError("width_mark")
+        provenance = row.get("provenance", None)
+        if mark == "EMPTY":
+            if not isinstance(provenance, str) or provenance == "":
+                raise SchemaError("empty provenance")
+        elif provenance is not None:
+            raise SchemaError("provenance")
         if row["start"] is not None:
             need_int(row, "start")
         if row["end"] is not None:

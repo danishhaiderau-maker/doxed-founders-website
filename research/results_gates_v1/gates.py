@@ -121,6 +121,10 @@ _PROFILE = {
         "required_epochs": list(REQUIRED_EPOCHS),
         "epoch_07d": "AUDIT_ONLY",
         "unknown_or_incomplete": "BLOCK_UNTOUCHED_VALIDATION",
+        "width_rule": "RK_INTERPRETATION_NOT_ORIGINAL_POSITIVE_WIDTH",
+        "inverted": "INCOMPLETE_UNKNOWN",
+        "unmarked_zero_width": "UNKNOWN",
+        "declared_empty": "ACCEPTED_WITH_PROVENANCE",
     },
 }
 
@@ -519,12 +523,35 @@ def _peek_family_count(doc) -> int | None:
     return None
 
 
+def _interval_admitted(row: dict) -> bool:
+    """RK interpretation: inverted and unmarked zero-width epochs are not complete.
+
+    A zero-width epoch is admitted only when width_mark is EMPTY and provenance
+    is present. That is not an original positive-width rule.
+    """
+    start = row.get("start")
+    end = row.get("end")
+    if isinstance(start, bool) or isinstance(end, bool):
+        return False
+    if not isinstance(start, int) or not isinstance(end, int):
+        return False
+    mark = row.get("width_mark", "NONE")
+    provenance = row.get("provenance", None)
+    if end < start:
+        return False
+    if end == start:
+        return mark == "EMPTY" and isinstance(provenance, str) and provenance != ""
+    if mark == "EMPTY":
+        return False
+    return True
+
+
 def _ledger_internally_complete(ledger: dict, intervals: dict) -> bool:
     if ledger.get("completeness") != "COMPLETE" or ledger.get("real_dates") is not None:
         return False
     for ident in REQUIRED_EPOCHS:
         row = intervals.get(ident)
-        if row is None or row.get("start") is None or row.get("end") is None:
+        if row is None or not _interval_admitted(row):
             return False
         if row.get("disposition") == "UNKNOWN":
             return False

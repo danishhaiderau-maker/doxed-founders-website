@@ -6,9 +6,14 @@ INCOMPLETE/STOP with no truncation and no ETA.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import select
+import signal
 import sys
 import time
+import resource
 from pathlib import Path
 
 from .validate import (
@@ -27,6 +32,10 @@ COMMAND_SECONDS = 120
 SUITE_SECONDS = 600
 RECEIPT_BYTES = 8 * 1024 * 1024
 MAX_STRATEGIES = 256
+VAS_SUM_BYTES = RSS_MIB * 1024 * 1024
+PER_WORKER_VAS_BYTES = VAS_SUM_BYTES // CPU_WORKERS
+STREAM_CHUNK = 65536
+_IN_CHILD = False
 
 BOUNDS = {
     "cpu_workers": CPU_WORKERS,
@@ -71,9 +80,12 @@ LIBRARY_IMPORTS = frozenset(
         "fractions",
         "hashlib",
         "json",
+        "os",
         "pathlib",
         "re",
         "resource",
+        "select",
+        "signal",
         "sys",
         "time",
         "types",
@@ -125,8 +137,6 @@ def enforce_elapsed(seconds: float, *, kind: str) -> None:
 def rss_kib() -> int:
     if sys.platform != "linux":
         raise CapStop("rss_platform_unsupported")
-    import resource
-
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
 
@@ -174,12 +184,183 @@ def reject_canaries(payload) -> None:
                 raise CanaryRejected("canary_detected")
 
 
+def admit_canonical_path(path: Path) -> Path:
+    """Refuse any unpinned path before a fixture open or read."""
+    allowed = fixture_path().resolve(strict=False)
+    candidate = path.resolve(strict=False)
+    if candidate != allowed:
+        raise ProhibitedAccess("unpinned_alternate_path")
+    return allowed
+
+
 def jail_fixture(path: Path) -> Path:
-    root = (package_root() / "fixtures").resolve()
-    candidate = path.resolve()
-    if not candidate.is_relative_to(root) or candidate.suffix != ".json":
-        raise ProhibitedAccess("real_root")
-    return candidate
+    return admit_canonical_path(path)
+
+
+def install_worker_vas_ceiling() -> None:
+    """Cap this process at half of the 512 MiB sum so parent+child ceilings add to 512 MiB.
+
+    VAS is a conservative upper bound, not RSS. The limit is installed after
+    interpreter startup; delivery of a later kill can overshoot. There is no
+    CPU-time cap and no claim of zero overshoot.
+    """
+    if sys.platform != "linux":
+        raise CapStop("rss_platform_unsupported")
+    ceiling = PER_WORKER_VAS_BYTES
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (ceiling, ceiling))
+    except (ValueError, OSError) as exc:
+        raise CapStop("rss_mib") from exc
+
+
+def read_canonical_verified() -> bytes:
+    """One bounded read of the canonical fixture. Hash those bytes before return.
+
+    The caller parses the returned buffer. This function does not decode JSON
+    and does not read the fixture a second time.
+    """
+    path = fixture_path()
+    hasher_calls = 0
+    chunks = []
+    total = 0
+    digest_builder = hashlib.sha256()
+    with path.open("rb") as handle:
+        hasher_calls += 1
+        while True:
+            block = handle.read(STREAM_CHUNK)
+            if not block:
+                break
+            total += len(block)
+            if total > PER_WORKER_VAS_BYTES:
+                raise CapStop("rss_mib")
+            digest_builder.update(block)
+            chunks.append(block)
+    read_canonical_verified.opens = hasher_calls
+    body = b"".join(chunks)
+    if digest_builder.hexdigest() != load_lock()["fixture_sha256"]:
+        raise DriftStop("fixture hash")
+    return body
+
+
+def _raise_command_cap(_signum, _frame):
+    raise CapStop("command_seconds")
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
+def cap_line(exc: CapStop) -> str:
+    return json.dumps(
+        {"error": exc.reason, "ok": False, "status": exc.status},
+        sort_keys=True,
+    ) + "\n"
+
+
+def read_pipe_bounded(fd: int, pid: int, *, timeout_s: int, clock=None) -> bytes:
+    if timeout_s != COMMAND_SECONDS:
+        raise CapStop("clock")
+    ticker = clock or MonotonicClock()
+    chunks = []
+    total = 0
+    while True:
+        if ticker.elapsed() > COMMAND_SECONDS:
+            _signal_child(pid)
+            raise CapStop("command_seconds")
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if not ready:
+            continue
+        block = os.read(fd, STREAM_CHUNK)
+        if not block:
+            break
+        total += len(block)
+        if total > RECEIPT_BYTES:
+            _signal_child(pid)
+            raise CapStop("receipt_bytes")
+        chunks.append(block)
+    return b"".join(chunks)
+
+
+def _signal_child(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def run_contained(child_main) -> tuple[int, bytes]:
+    """Parent plus one child. No third process. Parent reads the only receipt pipe."""
+    global _IN_CHILD
+    if _IN_CHILD:
+        raise CapStop("cpu_workers")
+    install_worker_vas_ceiling()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        _IN_CHILD = True
+        os.close(read_fd)
+        code = 1
+        try:
+            signal.signal(signal.SIGALRM, _raise_command_cap)
+            signal.alarm(COMMAND_SECONDS)
+            code = int(child_main(write_fd))
+        except CapStop as exc:
+            _write_all(write_fd, cap_line(exc).encode("utf-8"))
+            code = 5
+        except MemoryError:
+            _write_all(write_fd, cap_line(CapStop("rss_mib")).encode("utf-8"))
+            code = 5
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+        os._exit(code)
+    os.close(write_fd)
+    status = 0
+    try:
+        body = read_pipe_bounded(read_fd, pid, timeout_s=COMMAND_SECONDS)
+    finally:
+        os.close(read_fd)
+        try:
+            _pid, status = os.waitpid(pid, 0)
+        except ChildProcessError:
+            status = 0
+    if os.WIFSIGNALED(status):
+        raise CapStop("rss_mib")
+    exit_code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+    return exit_code, body
+
+
+def vas_ceiling_probe() -> str:
+    """Child allocation at the per-worker ceiling. Parent does not allocate it."""
+    install_worker_vas_ceiling()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            blob = bytearray(PER_WORKER_VAS_BYTES)
+            del blob
+            _write_all(write_fd, b"ALLOCATED")
+        except MemoryError:
+            _write_all(write_fd, b"MEMORY_ERROR")
+        except CapStop:
+            _write_all(write_fd, b"CAP")
+        os.close(write_fd)
+        os._exit(0)
+    os.close(write_fd)
+    try:
+        message = read_pipe_bounded(read_fd, pid, timeout_s=COMMAND_SECONDS)
+    finally:
+        os.close(read_fd)
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    return message.decode("utf-8")
 
 
 def load_lock() -> dict:
