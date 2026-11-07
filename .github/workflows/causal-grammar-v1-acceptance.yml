@@ -1,0 +1,734 @@
+name: causal-grammar-v1-acceptance
+
+on:
+  pull_request:
+    paths:
+      - research/causal_grammar_v1/**
+      - .github/workflows/causal-grammar-v1-acceptance.yml
+  push:
+    branches:
+      - master
+    paths:
+      - research/causal_grammar_v1/**
+      - .github/workflows/causal-grammar-v1-acceptance.yml
+
+permissions:
+  contents: read
+
+jobs:
+  causal-grammar-v1-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Record head, clean tree, and package pins
+        env:
+          GITHUB_SHA_ENV: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          set -u
+          set -o noclobber
+          upload="${RUNNER_TEMP}/a990-ci-upload"
+          manifest="${upload}/a990-ci-pin-manifest.txt"
+          ok=1
+          if [ -e "$upload" ]; then
+            echo "STOP_UPLOAD_DIR_PRESENT"
+            exit 1
+          fi
+          mkdir "$upload"
+          mkdir_rc=$?
+          if [ "$mkdir_rc" -ne 0 ]; then
+            echo "STOP_UPLOAD_MKDIR ${mkdir_rc}"
+            exit 1
+          fi
+          : > "$manifest"
+          manifest_create_rc=$?
+          if [ "$manifest_create_rc" -ne 0 ]; then
+            echo "STOP_MANIFEST_CREATE ${manifest_create_rc}"
+            exit 1
+          fi
+          echo "manifest_create_rc=${manifest_create_rc}" >> "$manifest"
+          echo "mkdir_upload_rc=${mkdir_rc}" >> "$manifest"
+          echo "PYTHONDONTWRITEBYTECODE=${PYTHONDONTWRITEBYTECODE}" >> "$manifest"
+          head_sha="$(git rev-parse HEAD 2>&1)"
+          head_rc=$?
+          status="$(git status --porcelain 2>&1)"
+          status_rc=$?
+          {
+            echo "checked_out_sha=${head_sha}"
+            echo "checked_out_rc=${head_rc}"
+            echo "github_sha=${GITHUB_SHA_ENV}"
+            echo "event_name=${EVENT_NAME}"
+            echo "pull_request_head_sha=${PR_HEAD}"
+            echo "porcelain_rc=${status_rc}"
+            echo "PORCELAIN_BEGIN"
+            printf '%s\n' "$status"
+            echo "PORCELAIN_END"
+            echo "base 40087a65f2157f8c6701ea3670adc5c29a28c87d"
+          } >> "$manifest"
+          identity_append_rc=$?
+          if [ "$identity_append_rc" -ne 0 ]; then
+            echo "STOP_IDENTITY_APPEND ${identity_append_rc}"
+            ok=0
+          fi
+          if [ "$head_rc" -ne 0 ] || [ "$status_rc" -ne 0 ] || [ -n "$status" ]; then ok=0; fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ "$head_sha" != "$PR_HEAD" ]; then ok=0; fi
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ "$head_sha" != "$GITHUB_SHA_ENV" ]; then ok=0; fi
+          else
+            ok=0
+          fi
+          python3 --version >> "$manifest" 2>&1
+          python_version_rc=$?
+          echo "python_version_rc=${python_version_rc}" >> "$manifest"
+          command -v python3 >> "$manifest" 2>&1
+          python_path_rc=$?
+          echo "python_path_rc=${python_path_rc}" >> "$manifest"
+          if [ "$python_version_rc" -ne 0 ] || [ "$python_path_rc" -ne 0 ]; then ok=0; fi
+          echo "PINS_BEFORE_BEGIN" >> "$manifest"
+          sha256sum -c - >> "$manifest" 2>&1 << 'EOF'
+          55ee098c758fec73932466ade9e2d14f563628403c1aabdf0aa40e8ba0eec7ff  research/causal_grammar_v1/README.md
+          f28e1af57b7d29c6af7ad0e208ba4fcf1f6863427203021f00b31bf43b5f0efe  research/causal_grammar_v1/__init__.py
+          7584a3c6378405e2023bfb33100849287247c0c0607c4d06049fb1895ba8bb5d  research/causal_grammar_v1/asof.py
+          e4b4596b2bcc96852852a82d461d89082a47269366a19eaa93440a08313ac59b  research/causal_grammar_v1/canonical.py
+          9cf464a7044d1cdb482468dcfbaa311c3d6a2d2b074014b11a446fe48b00159e  research/causal_grammar_v1/contracts-v1.schema.json
+          7689cb9e798de736d661a75de47e7fec139694f963a52a012cb3eb99f554b1ac  research/causal_grammar_v1/contracts_v1.py
+          e83339fca16de0f6c8dde8bada295b072618e68d97e939917a8716898c5ff960  research/causal_grammar_v1/dependencies.lock.json
+          c09ab03a4439331ddbdc0afc7334d1b8083ca7873fd0f81b67ab1c6d7ddca93f  research/causal_grammar_v1/enumerate.py
+          8a30dc113ceee01bee360cd819fb10f882fa323a4b7b719d37d2485f464f4cae  research/causal_grammar_v1/features.py
+          557c63b40a630918912c173698da0d96b713a19f1b78d05d36a9d371fe447e8b  research/causal_grammar_v1/fixture_cli.py
+          f547399c3715741e92abbdfe25d22083e4f5ead9b7392dd3a95dc4388ce696c8  research/causal_grammar_v1/fixtures/committed-events.json
+          6644cb0a66cc23aedfb92cc346d30a276b5926206fc0cc656c71df2b2e8ace24  research/causal_grammar_v1/fixtures/tiny-spec.json
+          342e4737c250ad1caa5e4b16f49decaab0bd341bd6090272f4a5a0db5bab0b64  research/causal_grammar_v1/grammar.py
+          15a1551432feeb5f3bf44f6ffda1273a96afda969f0d8b98cc4f5b45ce7b45f4  research/causal_grammar_v1/guards.py
+          562ac68456a162c1d54be5d3d1a3d9afe7a4310ea1323361774c2bc591cedcc1  research/causal_grammar_v1/normalized_adapter.py
+          d609543acfb8b7123980f5df0394f6d0179acf566889548be83cf57f0d139c97  research/causal_grammar_v1/tests/test_acceptance.py
+          EOF
+          pin_rc=$?
+          echo "PINS_BEFORE_END" >> "$manifest"
+          echo "pin_rc=${pin_rc}" >> "$manifest"
+          if [ "$pin_rc" -ne 0 ]; then ok=0; fi
+          for target in "${RUNNER_TEMP}" /tmp; do
+            label="$target"
+            stat_out="$(stat -f "$target" 2>&1)"
+            stat_rc=$?
+            find_out="$(findmnt -T "$target" 2>&1)"
+            find_rc=$?
+            fstype="$(findmnt -T "$target" -n -o FSTYPE 2>&1)"
+            fstype_rc=$?
+            df_out="$(df -B1 "$target" 2>&1)"
+            df_rc=$?
+            avail_blocks="$(printf '%s\n' "$stat_out" | awk '/^Blocks:/ {print $7}')"
+            blocks_rc=$?
+            avail_bytes="$(printf '%s\n' "$df_out" | awk 'NR==2 {print $4}')"
+            bytes_rc=$?
+            usep="$(printf '%s\n' "$df_out" | awk 'NR==2 {print $5}')"
+            usep_rc=$?
+            printf '%s\n' "$usep" | grep -Eq '^[0-9]+%$'
+            usep_grep_rc=$?
+            {
+              echo "TARGET ${label}"
+              echo "stat_rc=${stat_rc}"
+              echo "STAT_BEGIN"
+              printf '%s\n' "$stat_out"
+              echo "STAT_END"
+              echo "findmnt_rc=${find_rc}"
+              echo "FINDMNT_BEGIN"
+              printf '%s\n' "$find_out"
+              echo "FINDMNT_END"
+              echo "fstype_rc=${fstype_rc}"
+              echo "fstype=${fstype}"
+              echo "df_rc=${df_rc}"
+              echo "DF_BEGIN"
+              printf '%s\n' "$df_out"
+              echo "DF_END"
+              echo "blocks_rc=${blocks_rc}"
+              echo "avail_blocks=${avail_blocks}"
+              echo "bytes_rc=${bytes_rc}"
+              echo "avail_bytes=${avail_bytes}"
+              echo "usep_rc=${usep_rc}"
+              echo "usep=${usep}"
+              echo "usep_grep_rc=${usep_grep_rc}"
+            } >> "$manifest"
+            probe_append_rc=$?
+            if [ "$probe_append_rc" -ne 0 ]; then
+              echo "STOP_PROBE_APPEND ${probe_append_rc}"
+              ok=0
+            fi
+            if [ "$stat_rc" -ne 0 ] || [ "$find_rc" -ne 0 ] || [ "$fstype_rc" -ne 0 ] || [ "$df_rc" -ne 0 ] || [ "$blocks_rc" -ne 0 ] || [ "$bytes_rc" -ne 0 ] || [ "$usep_rc" -ne 0 ] || [ "$usep_grep_rc" -ne 0 ]; then ok=0; fi
+            if [ "$fstype" != "ext4" ]; then ok=0; fi
+            case "$avail_blocks" in
+              ''|*[!0-9]*) ok=0 ;;
+              *) if [ "$avail_blocks" -le 0 ]; then ok=0; fi ;;
+            esac
+            case "$avail_bytes" in
+              ''|*[!0-9]*) ok=0 ;;
+              *) if [ "$avail_bytes" -le 0 ]; then ok=0; fi ;;
+            esac
+          done
+          echo "preflight_ok=${ok}" >> "$manifest"
+          [ "$ok" -eq 1 ]
+
+      - name: Prepare a fresh ordinary matrix directory
+        run: |
+          set +e
+          set -u
+          set -o noclobber
+          upload="${RUNNER_TEMP}/a990-ci-upload"
+          dest=/opt/cursor/artifacts
+          matrix=/opt/cursor/artifacts/a990-v8-partial-matrix.json
+          log="${upload}/a990-ci-matrix-preflight.txt"
+          ok=1
+          : > "$log"
+          log_rc=$?
+          if [ "$log_rc" -ne 0 ]; then
+            echo "STOP_LOG_CREATE ${log_rc}"
+            exit 1
+          fi
+          echo "log_create_rc=${log_rc}" >> "$log"
+          stat_out="$(stat -f /opt 2>&1)"
+          stat_rc=$?
+          find_out="$(findmnt -T /opt 2>&1)"
+          find_rc=$?
+          fstype="$(findmnt -T /opt -n -o FSTYPE 2>&1)"
+          fstype_rc=$?
+          df_out="$(df -B1 /opt 2>&1)"
+          df_rc=$?
+          avail_blocks="$(printf '%s\n' "$stat_out" | awk '/^Blocks:/ {print $7}')"
+          blocks_rc=$?
+          avail_bytes="$(printf '%s\n' "$df_out" | awk 'NR==2 {print $4}')"
+          bytes_rc=$?
+          usep="$(printf '%s\n' "$df_out" | awk 'NR==2 {print $5}')"
+          usep_rc=$?
+          printf '%s\n' "$usep" | grep -Eq '^[0-9]+%$'
+          usep_grep_rc=$?
+          {
+            echo "stat_rc=${stat_rc}"
+            echo "STAT_OPT_BEGIN"
+            printf '%s\n' "$stat_out"
+            echo "STAT_OPT_END"
+            echo "findmnt_rc=${find_rc}"
+            echo "FINDMNT_OPT_BEGIN"
+            printf '%s\n' "$find_out"
+            echo "FINDMNT_OPT_END"
+            echo "fstype_rc=${fstype_rc}"
+            echo "fstype=${fstype}"
+            echo "df_rc=${df_rc}"
+            echo "DF_OPT_BEGIN"
+            printf '%s\n' "$df_out"
+            echo "DF_OPT_END"
+            echo "blocks_rc=${blocks_rc}"
+            echo "avail_blocks=${avail_blocks}"
+            echo "bytes_rc=${bytes_rc}"
+            echo "avail_bytes=${avail_bytes}"
+            echo "usep_rc=${usep_rc}"
+            echo "usep=${usep}"
+            echo "usep_grep_rc=${usep_grep_rc}"
+          } >> "$log"
+          probe_append_rc=$?
+          if [ "$probe_append_rc" -ne 0 ]; then
+            echo "STOP_PROBE_APPEND ${probe_append_rc}"
+            ok=0
+          fi
+          if [ "$stat_rc" -ne 0 ] || [ "$find_rc" -ne 0 ] || [ "$fstype_rc" -ne 0 ] || [ "$df_rc" -ne 0 ] || [ "$blocks_rc" -ne 0 ] || [ "$bytes_rc" -ne 0 ] || [ "$usep_rc" -ne 0 ] || [ "$usep_grep_rc" -ne 0 ]; then ok=0; fi
+          if [ "$fstype" != "ext4" ]; then
+            ok=0
+            echo "STOP_NOT_EXT4" >> "$log"
+          fi
+          case "$avail_blocks" in
+            ''|*[!0-9]*) ok=0; echo "STOP_BLOCKS" >> "$log" ;;
+            *) if [ "$avail_blocks" -le 0 ]; then ok=0; echo "STOP_CAPACITY_BLOCKS" >> "$log"; fi ;;
+          esac
+          case "$avail_bytes" in
+            ''|*[!0-9]*) ok=0; echo "STOP_BYTES" >> "$log" ;;
+            *) if [ "$avail_bytes" -le 0 ]; then ok=0; echo "STOP_CAPACITY_BYTES" >> "$log"; fi ;;
+          esac
+          if [ -e "$matrix" ] || [ -L "$matrix" ]; then
+            ok=0
+            echo "STOP_MATRIX_PRESENT" >> "$log"
+          fi
+          if [ -L /opt/cursor ] || [ -L "$dest" ]; then
+            ok=0
+            echo "STOP_SYMLINK" >> "$log"
+          fi
+          if [ -e /opt/cursor ] && [ ! -d /opt/cursor ]; then
+            ok=0
+            echo "STOP_OPT_CURSOR_NOT_DIR" >> "$log"
+          fi
+          if [ -e "$dest" ] && [ ! -d "$dest" ]; then
+            ok=0
+            echo "STOP_ARTIFACTS_NOT_DIR" >> "$log"
+          fi
+          if [ "$ok" -eq 1 ] && [ ! -d /opt/cursor ]; then
+            sudo mkdir /opt/cursor
+            sudo_mkdir_cursor_rc=$?
+            echo "sudo_mkdir_opt_cursor_rc=${sudo_mkdir_cursor_rc}" >> "$log"
+            if [ "$sudo_mkdir_cursor_rc" -ne 0 ]; then ok=0; fi
+          elif [ "$ok" -eq 1 ]; then
+            echo "sudo_mkdir_opt_cursor_rc=skipped_present" >> "$log"
+          else
+            echo "sudo_mkdir_opt_cursor_rc=skipped_precheck" >> "$log"
+          fi
+          if [ "$ok" -eq 1 ] && [ ! -d "$dest" ]; then
+            sudo mkdir "$dest"
+            sudo_mkdir_artifacts_rc=$?
+            echo "sudo_mkdir_artifacts_rc=${sudo_mkdir_artifacts_rc}" >> "$log"
+            if [ "$sudo_mkdir_artifacts_rc" -ne 0 ]; then ok=0; fi
+          elif [ "$ok" -eq 1 ]; then
+            echo "sudo_mkdir_artifacts_rc=skipped_present" >> "$log"
+          else
+            echo "sudo_mkdir_artifacts_rc=skipped_precheck" >> "$log"
+          fi
+          readlink_out="$(readlink -f "$dest" 2>&1)"
+          readlink_rc=$?
+          dest_fstype="$(findmnt -T "$dest" -n -o FSTYPE 2>&1)"
+          dest_fstype_rc=$?
+          {
+            echo "readlink_rc=${readlink_rc}"
+            echo "readlink=${readlink_out}"
+            echo "dest_fstype_rc=${dest_fstype_rc}"
+            echo "dest_fstype=${dest_fstype}"
+          } >> "$log"
+          if [ "$readlink_rc" -ne 0 ] || [ "$readlink_out" != "$dest" ]; then
+            ok=0
+            echo "STOP_READLINK" >> "$log"
+          fi
+          if [ "$dest_fstype_rc" -ne 0 ] || [ "$dest_fstype" != "ext4" ]; then
+            ok=0
+            echo "STOP_DEST_FSTYPE" >> "$log"
+          fi
+          if [ -L "$dest" ] || [ ! -d "$dest" ]; then
+            ok=0
+            echo "STOP_DEST" >> "$log"
+          fi
+          if [ "$ok" -eq 1 ] && [ ! -w "$dest" ]; then
+            sudo chown "$(id -u):$(id -g)" "$dest"
+            sudo_chown_rc=$?
+            echo "sudo_chown_artifacts_rc=${sudo_chown_rc}" >> "$log"
+            if [ "$sudo_chown_rc" -ne 0 ]; then ok=0; fi
+          elif [ "$ok" -eq 1 ]; then
+            echo "sudo_chown_artifacts_rc=skipped_writable" >> "$log"
+          else
+            echo "sudo_chown_artifacts_rc=skipped_precheck" >> "$log"
+          fi
+          if [ ! -w "$dest" ]; then
+            ok=0
+            echo "STOP_NOT_WRITABLE" >> "$log"
+          fi
+          if [ -e "$matrix" ] || [ -L "$matrix" ]; then
+            ok=0
+            echo "STOP_MATRIX_PRESENT_AFTER" >> "$log"
+          fi
+          echo "preflight_ok=${ok}" >> "$log"
+          [ "$ok" -eq 1 ]
+
+      - name: Run the ordinary suite
+        id: ordinary
+        timeout-minutes: 11
+        run: |
+          set +e
+          set -u
+          set -o noclobber
+          upload="${RUNNER_TEMP}/a990-ci-upload"
+          out="${upload}/a990-ci-ordinary-stdout.txt"
+          err="${upload}/a990-ci-ordinary-stderr.txt"
+          ex="${upload}/a990-ci-ordinary-exit.txt"
+          copy="${upload}/a990-ci-ordinary-matrix.json"
+          pins="${upload}/a990-ci-pins-after-ordinary.txt"
+          matrix=/opt/cursor/artifacts/a990-v8-partial-matrix.json
+          for path in "$out" "$err" "$ex" "$copy" "$pins"; do
+            if [ -e "$path" ]; then
+              printf '%s\n' "STOP_PRESENT ${path}" > "${upload}/a990-ci-ordinary-stop.txt"
+              exit 1
+            fi
+          done
+          if [ -e "$matrix" ] || [ -L "$matrix" ]; then
+            printf '%s\n' "STOP_MATRIX_PRESENT" > "${upload}/a990-ci-ordinary-stop.txt"
+            exit 1
+          fi
+          python3 research/causal_grammar_v1/tests/test_acceptance.py > "$out" 2> "$err"
+          ec=$?
+          printf '%s\n' "$ec" > "$ex"
+          exit_write_rc=$?
+          sha256sum -c - > "$pins" 2>&1 << 'EOF'
+          55ee098c758fec73932466ade9e2d14f563628403c1aabdf0aa40e8ba0eec7ff  research/causal_grammar_v1/README.md
+          f28e1af57b7d29c6af7ad0e208ba4fcf1f6863427203021f00b31bf43b5f0efe  research/causal_grammar_v1/__init__.py
+          7584a3c6378405e2023bfb33100849287247c0c0607c4d06049fb1895ba8bb5d  research/causal_grammar_v1/asof.py
+          e4b4596b2bcc96852852a82d461d89082a47269366a19eaa93440a08313ac59b  research/causal_grammar_v1/canonical.py
+          9cf464a7044d1cdb482468dcfbaa311c3d6a2d2b074014b11a446fe48b00159e  research/causal_grammar_v1/contracts-v1.schema.json
+          7689cb9e798de736d661a75de47e7fec139694f963a52a012cb3eb99f554b1ac  research/causal_grammar_v1/contracts_v1.py
+          e83339fca16de0f6c8dde8bada295b072618e68d97e939917a8716898c5ff960  research/causal_grammar_v1/dependencies.lock.json
+          c09ab03a4439331ddbdc0afc7334d1b8083ca7873fd0f81b67ab1c6d7ddca93f  research/causal_grammar_v1/enumerate.py
+          8a30dc113ceee01bee360cd819fb10f882fa323a4b7b719d37d2485f464f4cae  research/causal_grammar_v1/features.py
+          557c63b40a630918912c173698da0d96b713a19f1b78d05d36a9d371fe447e8b  research/causal_grammar_v1/fixture_cli.py
+          f547399c3715741e92abbdfe25d22083e4f5ead9b7392dd3a95dc4388ce696c8  research/causal_grammar_v1/fixtures/committed-events.json
+          6644cb0a66cc23aedfb92cc346d30a276b5926206fc0cc656c71df2b2e8ace24  research/causal_grammar_v1/fixtures/tiny-spec.json
+          342e4737c250ad1caa5e4b16f49decaab0bd341bd6090272f4a5a0db5bab0b64  research/causal_grammar_v1/grammar.py
+          15a1551432feeb5f3bf44f6ffda1273a96afda969f0d8b98cc4f5b45ce7b45f4  research/causal_grammar_v1/guards.py
+          562ac68456a162c1d54be5d3d1a3d9afe7a4310ea1323361774c2bc591cedcc1  research/causal_grammar_v1/normalized_adapter.py
+          d609543acfb8b7123980f5df0394f6d0179acf566889548be83cf57f0d139c97  research/causal_grammar_v1/tests/test_acceptance.py
+          EOF
+          pin_rc=$?
+          porcelain="$(git status --porcelain 2>&1)"
+          porcelain_rc=$?
+          matrix_copy_rc=1
+          if [ -f "$matrix" ] && [ ! -L "$matrix" ]; then
+            cat "$matrix" > "$copy"
+            matrix_copy_rc=$?
+          fi
+          {
+            echo "pin_rc=${pin_rc}"
+            echo "process_ec=${ec}"
+            echo "exit_write_rc=${exit_write_rc}"
+            echo "matrix_copy_rc=${matrix_copy_rc}"
+            echo "PYTHONDONTWRITEBYTECODE=${PYTHONDONTWRITEBYTECODE}"
+            echo "PORCELAIN_rc=${porcelain_rc}"
+            echo "PORCELAIN_BEGIN"
+            printf '%s\n' "$porcelain"
+            echo "PORCELAIN_END"
+          } >> "$pins"
+          tail_rc=$?
+          fail=0
+          [ "$ec" -eq 0 ] || fail=1
+          [ "$exit_write_rc" -eq 0 ] || fail=1
+          [ "$pin_rc" -eq 0 ] || fail=1
+          [ "$porcelain_rc" -eq 0 ] || fail=1
+          [ -z "$porcelain" ] || fail=1
+          [ "$matrix_copy_rc" -eq 0 ] || fail=1
+          [ "$tail_rc" -eq 0 ] || fail=1
+          if [ ! -f "$out" ] || ! grep -xF "REAL_SUITE_EXPIRY NOT EXECUTED" "$out" >/dev/null; then fail=1; fi
+          if [ ! -f "$out" ] || ! grep -xF "A5 OPEN_MERGE_BLOCK" "$out" >/dev/null; then fail=1; fi
+          if [ -f "$out" ] && grep -F "A5 CLOSED" "$out" >/dev/null; then fail=1; fi
+          echo "ordinary_fail=${fail}" >> "$pins"
+          [ "$fail" -eq 0 ]
+
+      - name: Run the suite-expiry diagnostic
+        id: diagnostic
+        if: steps.ordinary.outcome == 'success'
+        timeout-minutes: 2
+        run: |
+          set +e
+          set -u
+          set -o noclobber
+          upload="${RUNNER_TEMP}/a990-ci-upload"
+          out="${upload}/a990-ci-suite-expiry-stdout.txt"
+          err="${upload}/a990-ci-suite-expiry-stderr.txt"
+          ex="${upload}/a990-ci-suite-expiry-exit.txt"
+          pins="${upload}/a990-ci-pins-after-diagnostic.txt"
+          outside=/tmp/a990-v10-suite-expiry-outside-receipt.json
+          for path in "$out" "$err" "$ex" "$pins"; do
+            if [ -e "$path" ]; then
+              printf '%s\n' "STOP_PRESENT ${path}" > "${upload}/a990-ci-suite-expiry-stop.txt"
+              exit 1
+            fi
+          done
+          if [ -e "$outside" ] || [ -L "$outside" ]; then
+            printf '%s\n' "STOP_OUTSIDE_PRESENT" > "${upload}/a990-ci-suite-expiry-stop.txt"
+            exit 1
+          fi
+          python3 research/causal_grammar_v1/tests/test_acceptance.py --real-suite-expiry-only > "$out" 2> "$err"
+          ec=$?
+          printf '%s\n' "$ec" > "$ex"
+          exit_write_rc=$?
+          sha256sum -c - > "$pins" 2>&1 << 'EOF'
+          55ee098c758fec73932466ade9e2d14f563628403c1aabdf0aa40e8ba0eec7ff  research/causal_grammar_v1/README.md
+          f28e1af57b7d29c6af7ad0e208ba4fcf1f6863427203021f00b31bf43b5f0efe  research/causal_grammar_v1/__init__.py
+          7584a3c6378405e2023bfb33100849287247c0c0607c4d06049fb1895ba8bb5d  research/causal_grammar_v1/asof.py
+          e4b4596b2bcc96852852a82d461d89082a47269366a19eaa93440a08313ac59b  research/causal_grammar_v1/canonical.py
+          9cf464a7044d1cdb482468dcfbaa311c3d6a2d2b074014b11a446fe48b00159e  research/causal_grammar_v1/contracts-v1.schema.json
+          7689cb9e798de736d661a75de47e7fec139694f963a52a012cb3eb99f554b1ac  research/causal_grammar_v1/contracts_v1.py
+          e83339fca16de0f6c8dde8bada295b072618e68d97e939917a8716898c5ff960  research/causal_grammar_v1/dependencies.lock.json
+          c09ab03a4439331ddbdc0afc7334d1b8083ca7873fd0f81b67ab1c6d7ddca93f  research/causal_grammar_v1/enumerate.py
+          8a30dc113ceee01bee360cd819fb10f882fa323a4b7b719d37d2485f464f4cae  research/causal_grammar_v1/features.py
+          557c63b40a630918912c173698da0d96b713a19f1b78d05d36a9d371fe447e8b  research/causal_grammar_v1/fixture_cli.py
+          f547399c3715741e92abbdfe25d22083e4f5ead9b7392dd3a95dc4388ce696c8  research/causal_grammar_v1/fixtures/committed-events.json
+          6644cb0a66cc23aedfb92cc346d30a276b5926206fc0cc656c71df2b2e8ace24  research/causal_grammar_v1/fixtures/tiny-spec.json
+          342e4737c250ad1caa5e4b16f49decaab0bd341bd6090272f4a5a0db5bab0b64  research/causal_grammar_v1/grammar.py
+          15a1551432feeb5f3bf44f6ffda1273a96afda969f0d8b98cc4f5b45ce7b45f4  research/causal_grammar_v1/guards.py
+          562ac68456a162c1d54be5d3d1a3d9afe7a4310ea1323361774c2bc591cedcc1  research/causal_grammar_v1/normalized_adapter.py
+          d609543acfb8b7123980f5df0394f6d0179acf566889548be83cf57f0d139c97  research/causal_grammar_v1/tests/test_acceptance.py
+          EOF
+          pin_rc=$?
+          porcelain="$(git status --porcelain 2>&1)"
+          porcelain_rc=$?
+          python3 - "$err" "$out" "$ex" << 'PY'
+          import math
+          import pathlib
+          import sys
+          stderr_path = pathlib.Path(sys.argv[1])
+          stdout_path = pathlib.Path(sys.argv[2])
+          exit_path = pathlib.Path(sys.argv[3])
+          if not stderr_path.is_file() or not stdout_path.is_file() or not exit_path.is_file():
+              sys.exit(1)
+          stderr = stderr_path.read_bytes()
+          stdout = stdout_path.read_bytes()
+          exit_bytes = exit_path.read_bytes()
+          if stdout != b"" or exit_bytes != b"4\n" or not stderr.endswith(b"\n"):
+              sys.exit(1)
+          lines = stderr.decode().splitlines()
+          if len(lines) != 8:
+              sys.exit(1)
+          def value(line, prefix):
+              if not line.startswith(prefix):
+                  sys.exit(1)
+              return line[len(prefix):]
+          if value(lines[0], "code ") != "INCOMPLETE:CAP_SUITE_SECONDS":
+              sys.exit(1)
+          if value(lines[1], "later_enforce_code ") != "INCOMPLETE:CAP_SUITE_SECONDS":
+              sys.exit(1)
+          if value(lines[2], "expiry_set ") != "true":
+              sys.exit(1)
+          if value(lines[3], "rss_latched ") not in ("true", "false"):
+              sys.exit(1)
+          if lines[4] != "suppress_success true":
+              sys.exit(1)
+          if value(lines[5], "receipt_path_exists ") != "false":
+              sys.exit(1)
+          remaining = value(lines[6], "suite_remaining ")
+          parts = remaining.split()
+          if len(parts) != 1 or parts[0] != remaining:
+              sys.exit(1)
+          try:
+              number = float(parts[0])
+          except ValueError:
+              sys.exit(1)
+          if not math.isfinite(number) or not number < 0:
+              sys.exit(1)
+          if lines[7] != "a5 OPEN_MERGE_BLOCK":
+              sys.exit(1)
+          PY
+          check_rc=$?
+          outside_after=0
+          if [ -e "$outside" ] || [ -L "$outside" ]; then
+            outside_after=1
+          fi
+          {
+            echo "pin_rc=${pin_rc}"
+            echo "process_ec=${ec}"
+            echo "exit_write_rc=${exit_write_rc}"
+            echo "check_rc=${check_rc}"
+            echo "outside_after=${outside_after}"
+            echo "PYTHONDONTWRITEBYTECODE=${PYTHONDONTWRITEBYTECODE}"
+            echo "PORCELAIN_rc=${porcelain_rc}"
+            echo "PORCELAIN_BEGIN"
+            printf '%s\n' "$porcelain"
+            echo "PORCELAIN_END"
+          } >> "$pins"
+          tail_rc=$?
+          [ "$ec" -eq 4 ] && [ "$exit_write_rc" -eq 0 ] && [ "$pin_rc" -eq 0 ] && [ "$check_rc" -eq 0 ] && [ "$porcelain_rc" -eq 0 ] && [ -z "$porcelain" ] && [ "$outside_after" -eq 0 ] && [ "$tail_rc" -eq 0 ]
+
+      - name: Install pinned gitleaks for the evidence scan
+        id: gitleaks_tool
+        if: always()
+        run: |
+          set +e
+          set -u
+          archive="${RUNNER_TEMP}/gitleaks_8.24.3_linux_x64.tar.gz"
+          tool="${RUNNER_TEMP}/gitleaks"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz"
+          expected="9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
+          curl -fsSL -o "$archive" "$url"
+          download_rc=$?
+          echo "gitleaks_download_rc=${download_rc}"
+          if [ "$download_rc" -ne 0 ]; then
+            exit 1
+          fi
+          printf '%s  %s\n' "$expected" "$archive" | sha256sum -c
+          sum_rc=$?
+          echo "gitleaks_sha256_rc=${sum_rc}"
+          if [ "$sum_rc" -ne 0 ]; then
+            exit 1
+          fi
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          tar_rc=$?
+          echo "gitleaks_tar_rc=${tar_rc}"
+          if [ "$tar_rc" -ne 0 ]; then
+            exit 1
+          fi
+          version="$("$tool" version 2>&1)"
+          version_rc=$?
+          echo "gitleaks_version_rc=${version_rc}"
+          printf '%s\n' "$version"
+          printf '%s\n' "$version" | grep -x "8.24.3" >/dev/null
+          match_rc=$?
+          echo "gitleaks_version_match_rc=${match_rc}"
+          [ "$version_rc" -eq 0 ] && [ "$match_rc" -eq 0 ]
+
+      - name: Record evidence in the job log
+        if: always()
+        env:
+          ORDINARY_OUTCOME: ${{ steps.ordinary.outcome }}
+          DIAGNOSTIC_OUTCOME: ${{ steps.diagnostic.outcome }}
+          GITLEAKS_OUTCOME: ${{ steps.gitleaks_tool.outcome }}
+        run: |
+          set +e
+          python3 - << 'PY'
+          import base64
+          import hashlib
+          import os
+          import pathlib
+          import subprocess
+          upload = pathlib.Path(os.environ["RUNNER_TEMP"]) / "a990-ci-upload"
+          budget = 786432
+          raw_limits = {
+              "a990-ci-pin-manifest.txt": 65536,
+              "a990-ci-matrix-preflight.txt": 32768,
+              "a990-ci-ordinary-stdout.txt": 65536,
+              "a990-ci-ordinary-stderr.txt": 262144,
+              "a990-ci-ordinary-exit.txt": 64,
+              "a990-ci-ordinary-matrix.json": 131072,
+              "a990-ci-pins-after-ordinary.txt": 65536,
+              "a990-ci-suite-expiry-stdout.txt": 64,
+              "a990-ci-suite-expiry-stderr.txt": 4096,
+              "a990-ci-suite-expiry-exit.txt": 64,
+              "a990-ci-pins-after-diagnostic.txt": 65536,
+          }
+          preflight_names = [
+              "a990-ci-pin-manifest.txt",
+              "a990-ci-matrix-preflight.txt",
+          ]
+          ordinary_names = [
+              "a990-ci-ordinary-stdout.txt",
+              "a990-ci-ordinary-stderr.txt",
+              "a990-ci-ordinary-exit.txt",
+              "a990-ci-ordinary-matrix.json",
+              "a990-ci-pins-after-ordinary.txt",
+          ]
+          diagnostic_names = [
+              "a990-ci-suite-expiry-stdout.txt",
+              "a990-ci-suite-expiry-stderr.txt",
+              "a990-ci-suite-expiry-exit.txt",
+              "a990-ci-pins-after-diagnostic.txt",
+          ]
+          ordinary_outcome = os.environ.get("ORDINARY_OUTCOME", "")
+          diagnostic_outcome = os.environ.get("DIAGNOSTIC_OUTCOME", "")
+          gitleaks_outcome = os.environ.get("GITLEAKS_OUTCOME", "")
+          rows = []
+          reasons = []
+          if ordinary_outcome == "cancelled" or diagnostic_outcome == "cancelled":
+              reasons.append("CANCELLED")
+          def classify(name, ran):
+              path = upload / name
+              limit = raw_limits[name]
+              if not ran:
+                  return {"path": name, "state": "NOT_RUN", "bytes": 0, "sha256": "NONE", "body": b"", "oversize": False}
+              if path.is_symlink() or not path.is_file():
+                  return {"path": name, "state": "MISSING", "bytes": 0, "sha256": "NONE", "body": b"", "oversize": False}
+              data = path.read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              if len(data) == 0:
+                  return {"path": name, "state": "ZERO_LENGTH", "bytes": 0, "sha256": digest, "body": b"", "oversize": False}
+              if len(data) > limit:
+                  return {"path": name, "state": "OVERSIZE", "bytes": len(data), "sha256": digest, "body": b"", "oversize": True}
+              return {"path": name, "state": "PRESENT", "bytes": len(data), "sha256": digest, "body": data, "oversize": False}
+          ordinary_ran = ordinary_outcome in ("success", "failure", "cancelled")
+          diagnostic_ran = diagnostic_outcome in ("success", "failure", "cancelled")
+          for name in preflight_names:
+              rows.append(classify(name, True))
+          for name in ordinary_names:
+              rows.append(classify(name, ordinary_ran))
+          for name in diagnostic_names:
+              rows.append(classify(name, diagnostic_ran))
+          if any(row["oversize"] for row in rows):
+              reasons.append("OVERSIZE")
+          if ordinary_ran:
+              for name in ("a990-ci-ordinary-exit.txt", "a990-ci-ordinary-matrix.json"):
+                  row = next(item for item in rows if item["path"] == name)
+                  if row["state"] != "PRESENT":
+                      reasons.append("MISSING_" + name)
+          if diagnostic_ran:
+              exit_row = next(item for item in rows if item["path"] == "a990-ci-suite-expiry-exit.txt")
+              if exit_row["state"] != "PRESENT":
+                  reasons.append("MISSING_DIAGNOSTIC_EXIT")
+          else:
+              reasons.append("DIAGNOSTIC_NOT_RUN")
+          def block(row, include_body):
+              lines = [
+                  "BEGIN_EVIDENCE path={path} state={state} bytes={bytes} sha256={sha256}".format(**row)
+              ]
+              if include_body and row["state"] == "PRESENT":
+                  encoded = base64.b64encode(row["body"]).decode("ascii")
+                  for offset in range(0, len(encoded), 76):
+                      lines.append(encoded[offset:offset + 76])
+              lines.append("END_EVIDENCE path={path}".format(**row))
+              return "\n".join(lines) + "\n"
+          def emit(text):
+              encoded = text.encode("utf-8")
+              if len(encoded) > budget:
+                  print("A990_LOG_RESULT INCOMPLETE_PRINT_BUDGET", flush=True)
+                  raise SystemExit(1)
+              print(text, end="", flush=True)
+          index = "".join(block(row, False) for row in rows)
+          withhold = "OVERSIZE" in reasons
+          scanner = pathlib.Path(os.environ["RUNNER_TEMP"]) / "gitleaks"
+          if gitleaks_outcome != "success" or not scanner.is_file():
+              reasons.append("SCANNER")
+              withhold = True
+          elif not withhold:
+              report = pathlib.Path(os.environ["RUNNER_TEMP"]) / "gitleaks-evidence-report.json"
+              scan_cwd = pathlib.Path(os.environ["RUNNER_TEMP"]) / "a990-scan-cwd"
+              scan_cwd.mkdir()
+              config_path = scan_cwd / "evidence.gitleaks.toml"
+              config_path.write_text("title = \"a990-evidence-scan\"\n[extend]\nuseDefault = true\n", encoding="utf-8")
+              completed = subprocess.run(
+                  [
+                      str(scanner),
+                      "detect",
+                      "--no-git",
+                      "--source",
+                      str(upload),
+                      "--config",
+                      str(config_path),
+                      "--gitleaks-ignore-path",
+                      str(scan_cwd),
+                      "--max-target-megabytes",
+                      "0",
+                      "--ignore-gitleaks-allow",
+                      "--redact",
+                      "--report-format",
+                      "json",
+                      "--report-path",
+                      str(report),
+                  ],
+                  cwd=str(scan_cwd),
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+              )
+              if completed.returncode != 0:
+                  reasons.append("GITLEAKS")
+                  withhold = True
+          ordinary_stdout = next(item for item in rows if item["path"] == "a990-ci-ordinary-stdout.txt")
+          diagnostic_stdout = next(item for item in rows if item["path"] == "a990-ci-suite-expiry-stdout.txt")
+          if ordinary_outcome == "success" and ordinary_stdout["state"] != "PRESENT":
+              reasons.append("MISSING_ORDINARY_STDOUT")
+          if diagnostic_outcome == "success" and diagnostic_stdout["state"] != "ZERO_LENGTH":
+              reasons.append("DIAGNOSTIC_STDOUT")
+          body_text = "" if withhold else "".join(block(row, True) for row in rows)
+          if not withhold and len(body_text.encode("utf-8")) > budget:
+              reasons.append("PRINT_BUDGET")
+              withhold = True
+              body_text = ""
+          result = "INCOMPLETE"
+          if not reasons and ordinary_outcome == "success" and diagnostic_outcome == "success":
+              result = "PASS"
+          elif reasons:
+              result = "INCOMPLETE " + ",".join(reasons)
+          else:
+              result = "INCOMPLETE STEP_OUTCOME"
+          text = (index if withhold else body_text) + "A990_LOG_RESULT " + result + "\n"
+          emit(text)
+          if result != "PASS":
+              raise SystemExit(1)
+          PY
