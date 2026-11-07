@@ -106,9 +106,9 @@ class PipelineTests(unittest.TestCase):
             code, cli_report = cli_main(
             [
                 "--registry",
-                "SECRET_CANARY.json",
+                "fxmarka.json",
                 "--allowlist",
-                "SECRET_CANARY.json",
+                "fxmarka.json",
                 "--allowlist-sha256",
                 sha256_hex(canonical_bytes(allowlist)),
                 "--base-commit",
@@ -125,11 +125,11 @@ class PipelineTests(unittest.TestCase):
             sources={item["logical_id"]: source},
             meter=BUILDERS["cpu_at"]()["meter"].__class__(0, 0),
             )
-        self.assertNotIn("SECRET_CANARY", stdout.getvalue())
-        self.assertNotIn("SECRET_CANARY", stderr.getvalue())
+        self.assertNotIn("fxmarka", stdout.getvalue())
+        self.assertNotIn("fxmarka", stderr.getvalue())
         self.assertEqual(code, 0, cli_report["reasons"])
         self.assertEqual(cli_report["status"], "COMPLETE")
-        self.assertNotIn("SECRET_CANARY", json.dumps(cli_report))
+        self.assertNotIn("fxmarka", json.dumps(cli_report))
         self.assertEqual(cli_report["run"]["base_commit"], BASE)
         self.assertFalse(cli_report["scope"]["real_interval_claim"])
 

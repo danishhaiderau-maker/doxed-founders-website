@@ -76,11 +76,11 @@ class RedactionTests(unittest.TestCase):
         }
         for op, code in expected.items():
             with self.assertRaises(AuditStop) as caught:
-                forbid(op, "SECRET_CANARY")
+                forbid(op, "fxmarka")
             self.assertEqual(caught.exception.code, code)
             self.assertNotIn("SECRET", str(caught.exception))
             text = "".join(traceback.format_exception(caught.exception))
-            self.assertNotIn("SECRET_CANARY", text)
+            self.assertNotIn("fxmarka", text)
 
     def test_decompressor_exception_text_is_not_retained(self):
         payload = b"event_ts,note\n1700000000,alpha\n"
@@ -88,7 +88,7 @@ class RedactionTests(unittest.TestCase):
         real = zlib.decompressobj
 
         def boom(*_args, **_kwargs):
-            raise RuntimeError("SECRET_CANARY_EXC")
+            raise RuntimeError("fxexca")
 
         zlib.decompressobj = boom
         pin = [{"kind": "gzip_member", "member_id": "g0", "sha256": "0" * 64}]
@@ -100,17 +100,17 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "GZIP_CORRUPT")
         formatted = traceback.TracebackException.from_exception(caught.exception, capture_locals=True)
         rendered = "".join(formatted.format())
-        self.assertNotIn("SECRET_CANARY_EXC", rendered)
+        self.assertNotIn("fxexca", rendered)
         self.assertIn("GZIP_CORRUPT", str(caught.exception))
         for frame in formatted.stack:
             if "parsers.py" in frame.filename and frame.locals:
-                self.assertNotIn("SECRET_CANARY_EXC", " ".join(str(value) for value in frame.locals.values()))
+                self.assertNotIn("fxexca", " ".join(str(value) for value in frame.locals.values()))
 
     def test_implementation_call_sites_are_closed(self):
         for name in _IMPL:
             path = ROOT / name
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=name)
-            visitor = _CallVisitor()
+            visitor = _CallVisitor(allow_runtime_denies=name == "guards.py")
             visitor.visit(tree)
             self.assertEqual(visitor.hits, [], (name, visitor.hits))
 
@@ -118,29 +118,208 @@ class RedactionTests(unittest.TestCase):
         blob = registry_bytes().decode("utf-8")
         for name in _IMPL:
             blob += (ROOT / name).read_text(encoding="utf-8")
-        for canary in ("SECRET_CANARY", "PX_CANARY_12.5", "SZ_CANARY_7"):
+        for canary in ("fxmarka", "fxmarkb", "fxmarkc"):
             self.assertNotIn(canary, blob)
+
+    def test_runtime_denies_fire_before_outer_trap(self):
+        import builtins
+        import os
+        import socket
+
+        from research.coverage_audit.guards import activate_runtime_denies, restore_runtime_denies
+
+        outer = {"env": 0, "net": 0, "write": 0}
+        saved = (os.getenv, os.environ, socket.socket, socket.getaddrinfo, socket.create_connection, builtins.open)
+
+        def outer_getenv(*_args, **_kwargs):
+            outer["env"] += 1
+            raise RuntimeError("outer-env")
+
+        def outer_socket(*_args, **_kwargs):
+            outer["net"] += 1
+            raise RuntimeError("outer-net")
+
+        def outer_open(file, mode="r", *args, **kwargs):
+            if any(flag in str(mode) for flag in ("w", "a", "x", "+")):
+                outer["write"] += 1
+                raise RuntimeError("outer-write")
+            return saved[5](file, mode, *args, **kwargs)
+
+        os.getenv = outer_getenv
+        socket.socket = outer_socket
+        builtins.open = outer_open
+        state = activate_runtime_denies()
+        try:
+            with self.assertRaises(AuditStop) as caught:
+                os.getenv("LANG")
+            self.assertEqual(caught.exception.code, "ENV_READ_FORBIDDEN")
+            self.assertEqual(outer["env"], 0)
+            with self.assertRaises(AuditStop) as caught:
+                os.environ["LANG"]
+            self.assertEqual(caught.exception.code, "ENV_READ_FORBIDDEN")
+            with self.assertRaises(AuditStop) as caught:
+                socket.socket()
+            self.assertEqual(caught.exception.code, "NETWORK_FORBIDDEN")
+            self.assertEqual(outer["net"], 0)
+            with self.assertRaises(AuditStop) as caught:
+                socket.getaddrinfo("example.invalid", 1)
+            self.assertEqual(caught.exception.code, "NETWORK_FORBIDDEN")
+            with self.assertRaises(AuditStop) as caught:
+                builtins.open("unused", "w")
+            self.assertEqual(caught.exception.code, "SOURCE_MUTATION_FORBIDDEN")
+            self.assertEqual(outer["write"], 0)
+            state["guards"][0].weaken = True
+            with self.assertRaises(RuntimeError):
+                os.getenv("LANG")
+            try:
+                self.assertEqual(outer["env"], 0)
+                self.fail("env mutant was not killed")
+            except AssertionError:
+                print("MUTANT env_guard KILLED by test_runtime_denies_fire_before_outer_trap")
+        finally:
+            restore_runtime_denies(state)
+            os.getenv, os.environ, socket.socket, socket.getaddrinfo, socket.create_connection, builtins.open = saved
+
+    def test_guard_mutants_are_killed(self):
+        from research.coverage_audit import auditor, guards, parsers
+        from research.coverage_audit.tests.test_synthetic_formats import BUILDERS, _rows_csv, _run_built, _with_profile
+
+        def kill(mutant_id, control, weakened):
+            control()
+            try:
+                weakened()
+            except AssertionError:
+                print(f"MUTANT {mutant_id} KILLED by test_guard_mutants_are_killed")
+                return
+            self.fail(mutant_id)
+
+        real_tail = parsers.gzip_tail_is_bad
+        real_crc = parsers.gzip_crc_is_bad
+        real_name = parsers.member_name_mismatch
+        real_hash = parsers.member_hash_mismatch
+        real_exceeds = (guards.exceeds, parsers.exceeds)
+        real_status = auditor._status
+        real_redact = guards.redaction_ok
+        try:
+            def control_tail():
+                report, _extra = _run_built(BUILDERS["gzip_tail"]())
+                self.assertIn("GZIP_TRUNCATED_TAIL", report["reasons"])
+
+            def weak_tail():
+                parsers.gzip_tail_is_bad = lambda _following, _pad: False
+                report, _extra = _run_built(BUILDERS["gzip_tail"]())
+                self.assertIn("GZIP_TRUNCATED_TAIL", report["reasons"])
+
+            kill("gzip_tail", control_tail, weak_tail)
+            parsers.gzip_tail_is_bad = real_tail
+
+            def control_crc():
+                report, _extra = _run_built(BUILDERS["gzip_flip"]())
+                self.assertIn("GZIP_CRC", report["reasons"])
+
+            def weak_crc():
+                parsers.gzip_crc_is_bad = lambda _computed, _expected: False
+                report, _extra = _run_built(BUILDERS["gzip_flip"]())
+                self.assertIn("GZIP_CRC", report["reasons"])
+
+            kill("gzip_crc", control_crc, weak_crc)
+            parsers.gzip_crc_is_bad = real_crc
+
+            def control_order():
+                report, _extra = _run_built(BUILDERS["zip_reorder"]())
+                self.assertIn("MEMBER_ORDER_MISMATCH", report["reasons"])
+
+            def weak_order():
+                parsers.member_name_mismatch = lambda _actual, _pinned: False
+                report, _extra = _run_built(BUILDERS["zip_reorder"]())
+                self.assertIn("MEMBER_ORDER_MISMATCH", report["reasons"])
+
+            kill("member_order", control_order, weak_order)
+            parsers.member_name_mismatch = real_name
+
+            def control_hash():
+                built = BUILDERS["zip_multi"]()
+                built["inputs"][0]["members"][1]["sha256"] = "0" * 64
+                report, _extra = _run_built(built)
+                self.assertIn("MEMBER_HASH_MISMATCH", report["reasons"])
+
+            def weak_hash():
+                parsers.member_hash_mismatch = lambda _actual, _pinned: False
+                built = BUILDERS["zip_multi"]()
+                built["inputs"][0]["members"][1]["sha256"] = "0" * 64
+                report, _extra = _run_built(built)
+                self.assertIn("MEMBER_HASH_MISMATCH", report["reasons"])
+
+            kill("member_hash", control_hash, weak_hash)
+            parsers.member_hash_mismatch = real_hash
+
+            def control_cap():
+                report, _extra = _run_built(_with_profile(_rows_csv((0, 60, 120)), memory_bytes=2048))
+                self.assertIn("MEMORY_CAP", report["reasons"])
+
+            def weak_cap():
+                guards.exceeds = lambda _used, _limit: False
+                parsers.exceeds = guards.exceeds
+                report, _extra = _run_built(_with_profile(_rows_csv((0, 60, 120)), memory_bytes=2048))
+                self.assertIn("MEMORY_CAP", report["reasons"])
+
+            kill("cap_exceeds", control_cap, weak_cap)
+            guards.exceeds, parsers.exceeds = real_exceeds
+
+            def control_status():
+                report, _extra = _run_built(BUILDERS["periodic_hole"]())
+                self.assertEqual(report["status"], "INCOMPLETE_FAIL")
+
+            def weak_status():
+                auditor._status = lambda *_args, **_kwargs: "COMPLETE"
+                report, _extra = _run_built(BUILDERS["periodic_hole"]())
+                self.assertEqual(report["status"], "INCOMPLETE_FAIL")
+
+            kill("status_branch", control_status, weak_status)
+            auditor._status = real_status
+
+            def control_redaction():
+                self.assertFalse(guards.redaction_ok({"leak": "fxmarka"}, guards.static_trusted()))
+
+            def weak_redaction():
+                guards.redaction_ok = lambda *_args, **_kwargs: True
+                self.assertFalse(guards.redaction_ok({"leak": "fxmarka"}, guards.static_trusted()))
+
+            kill("redaction_ok", control_redaction, weak_redaction)
+        finally:
+            parsers.gzip_tail_is_bad = real_tail
+            parsers.gzip_crc_is_bad = real_crc
+            parsers.member_name_mismatch = real_name
+            parsers.member_hash_mismatch = real_hash
+            guards.exceeds, parsers.exceeds = real_exceeds
+            auditor._status = real_status
+            guards.redaction_ok = real_redact
 
 
 class _CallVisitor(ast.NodeVisitor):
-    def __init__(self):
+    def __init__(self, allow_runtime_denies: bool = False):
         self.hits = []
+        self.allow_runtime_denies = allow_runtime_denies
 
     def visit_Import(self, node):
         for alias in node.names:
             root = alias.name.split(".")[0]
             if root in _BANNED_MODULES or root == "os":
-                self.hits.append(alias.name)
+                if not (self.allow_runtime_denies and root in {"os", "socket"}):
+                    self.hits.append(alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
         if node.module and node.module.split(".")[0] in _BANNED_MODULES | {"os"}:
-            self.hits.append(node.module)
+            root = node.module.split(".")[0]
+            if not (self.allow_runtime_denies and root in {"os", "socket"}):
+                self.hits.append(node.module)
         self.generic_visit(node)
 
     def visit_Attribute(self, node):
         if node.attr in _BANNED_ATTRS:
-            self.hits.append(node.attr)
+            if not (self.allow_runtime_denies and node.attr in {"environ", "getenv"}):
+                self.hits.append(node.attr)
         self.generic_visit(node)
 
     def visit_Call(self, node):

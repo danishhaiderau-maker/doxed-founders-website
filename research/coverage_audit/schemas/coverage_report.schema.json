@@ -350,7 +350,8 @@
             "executable_levels",
             "bands_equal_walkable_book",
             "undeclared_fields_max",
-            "depth_note"
+            "depth_note",
+            "band_threshold"
           ],
           "properties": {
             "fields": {
@@ -372,7 +373,8 @@
                 {"type": "null"},
                 {"const": "BANDS_DISTINCT_FROM_WALKABLE_LEVELS"}
               ]
-            }
+            },
+            "band_threshold": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 1000000}]}
           }
         },
         "semantics": {
@@ -434,13 +436,14 @@
         "feed_ref": {"type": "string", "pattern": "^[a-z][a-z0-9_]+(/[a-z][a-z0-9_]+){4}$"},
         "utc_start": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"},
         "utc_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"},
-        "rule": {"enum": ["PERIODIC_CADENCE_V1", "SEQUENCE_CONTRACT", "CANDLE_MISSING_WHILE_TRADE_PRESENT"]},
+        "rule": {"enum": ["PERIODIC_CADENCE_V1", "SEQUENCE_CONTRACT", "CANDLE_MISSING_WHILE_TRADE_PRESENT", "PUBLICATION_DELAY_V1"]},
         "justification": {
           "enum": [
             "DELTA_EXCEEDS_CADENCE_PLUS_TOLERANCE",
             "SEQUENCE_HOLE",
             "SEQUENCE_NONMONOTONIC",
-            "TRADE_MINUTE_WITHOUT_CANDLE"
+            "TRADE_MINUTE_WITHOUT_CANDLE",
+            "DELAY_EXCEEDS_DECLARED"
           ]
         },
         "evidence": {
@@ -450,6 +453,7 @@
             "cadence_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
             "tolerance_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
             "observed_delta_ms": {"type": "integer", "minimum": 0, "maximum": 4000000000000},
+            "declared_delay_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
             "expected_sequence": {"type": "integer", "minimum": 0, "maximum": 1000000000},
             "observed_sequence": {"type": "integer", "minimum": 0, "maximum": 1000000000}
           }

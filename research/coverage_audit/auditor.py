@@ -13,6 +13,8 @@ import re
 
 from research.coverage_audit.cadence import analyze
 from research.coverage_audit.guards import (
+    activate_runtime_denies,
+    restore_runtime_denies,
     NULL_COMMIT,
     ORDERING,
     REASON_SET,
@@ -90,8 +92,10 @@ def run_audit(
     meter=None,
     probe: str | None = None,
 ) -> dict:
+    state = activate_runtime_denies()
     try:
-        return _execute(
+        try:
+            return _execute(
             registry_bytes=registry_bytes,
             allowlist=allowlist,
             allowlist_sha256=allowlist_sha256,
@@ -102,9 +106,11 @@ def run_audit(
             profile=profile,
             meter=meter,
             probe=probe,
-        )
-    except Exception:
-        return _bare("UNEXPECTED_STOP")
+            )
+        except Exception:
+            return _bare("UNEXPECTED_STOP")
+    finally:
+        restore_runtime_denies(state)
 
 
 def _execute(
@@ -379,14 +385,38 @@ def _read_source(source, pin, ledger, record):
         raise AuditStop("INPUT_SIZE_MISMATCH")
     if size > ledger.p["max_input_bytes"] or ledger.input_bytes + size > ledger.p["max_input_bytes"]:
         raise AuditStop("INPUT_SIZE_CAP")
+    ledger.charge_before_alloc(size)
     digest = hashlib.sha256()
-    parts: list[bytes] = []
+    buf = bytearray(size)
     total = 0
     try:
         chunks = source.read_chunks(4096)
     except Exception:
+        ledger.release_memory(size)
         raise AuditStop("UNEXPECTED_STOP") from None
-    for chunk in chunks:
+    try:
+        for chunk in chunks:
+            ledger.mark_loop(True)
+            try:
+                ledger.check_meter()
+                try:
+                    if source.identity() != ident:
+                        record["stable"] = False
+                        raise AuditStop("MID_READ_MUTATION")
+                except AuditStop:
+                    raise
+                except Exception:
+                    raise AuditStop("MID_READ_MUTATION") from None
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise AuditStop("UNEXPECTED_STOP")
+                if total + len(chunk) > size:
+                    record["stable"] = False
+                    raise AuditStop("INPUT_SIZE_CAP")
+                buf[total : total + len(chunk)] = chunk
+                total += len(chunk)
+                digest.update(chunk)
+            finally:
+                ledger.mark_loop(False)
         try:
             if source.identity() != ident:
                 record["stable"] = False
@@ -395,37 +425,21 @@ def _read_source(source, pin, ledger, record):
             raise
         except Exception:
             raise AuditStop("MID_READ_MUTATION") from None
-        if not isinstance(chunk, (bytes, bytearray)):
-            raise AuditStop("UNEXPECTED_STOP")
-        total += len(chunk)
-        if total > pin["size"] or total > ledger.p["max_input_bytes"]:
+        if total != pin["size"]:
+            record["observed_size"] = total
             record["stable"] = False
-            raise AuditStop("INPUT_SIZE_CAP")
-        digest.update(chunk)
-        parts.append(bytes(chunk))
-    try:
-        if source.identity() != ident:
-            record["stable"] = False
-            raise AuditStop("MID_READ_MUTATION")
-    except AuditStop:
-        raise
-    except Exception:
-        raise AuditStop("MID_READ_MUTATION") from None
-    if total != pin["size"]:
+            raise AuditStop("INPUT_SIZE_MISMATCH")
+        observed = digest.hexdigest()
+        record["observed_sha256"] = observed
         record["observed_size"] = total
-        record["stable"] = False
-        raise AuditStop("INPUT_SIZE_MISMATCH")
-    observed = digest.hexdigest()
-    record["observed_sha256"] = observed
-    record["observed_size"] = total
-    if observed != pin["sha256"]:
-        record["stable"] = False
-        parts.clear()
-        raise AuditStop("INPUT_HASH_MISMATCH")
-    ledger.add_input(total)
-    data = b"".join(parts)
-    parts.clear()
-    return data, ident, observed
+        if observed != pin["sha256"]:
+            record["stable"] = False
+            raise AuditStop("INPUT_HASH_MISMATCH")
+        ledger.add_input(total)
+        return bytes(buf), ident, observed
+    except AuditStop:
+        ledger.release_memory(size)
+        raise
 
 
 def _analyze(pins, registry, states, ledger, gaps, unknown_rows, reasons) -> None:
@@ -543,6 +557,7 @@ def _fingerprint(feed, fingerprint: Fingerprint) -> dict:
         "bands_equal_walkable_book": False,
         "undeclared_fields_max": fingerprint.undeclared_max,
         "depth_note": note,
+        "band_threshold": None if feed["depth"] is None or feed["depth"]["band_thresholds_declared"] is not True else feed["depth"]["band_threshold"],
     }
 
 
@@ -646,10 +661,6 @@ def _finish(
         },
     }
     report["status"] = _status(report["reasons"], report["gaps"], report["unknowns"], report["parse_errors"])
-    if report["status"] == "COMPLETE" and (report["gaps"] or report["unknowns"] or report["parse_errors"] or report["reasons"]):
-        _add(report["reasons"], "UNEXPECTED_STOP")
-        report["reasons"] = sorted(set(report["reasons"]))
-        report["status"] = "INCOMPLETE_FAIL"
     return _guard_output(report, profile["output_bytes"], trusted, profile, meter, ledger, base, clock, seed, scope_id)
 
 

@@ -7,7 +7,7 @@ contract. Unproven intervals stay UNKNOWN and do not invent timestamps.
 
 from __future__ import annotations
 
-from research.coverage_audit.guards import AuditStop, to_iso
+from research.coverage_audit.guards import AuditStop, exceeds, to_iso
 
 
 def analyze(feed, events, violations: int, cross_events, ledger, gaps: list, unknowns: list) -> dict:
@@ -40,7 +40,32 @@ def analyze(feed, events, violations: int, cross_events, ledger, gaps: list, unk
             _unknown(unknowns, "CADENCE_UNKNOWN")
     else:
         _unknown(unknowns, "CADENCE_UNKNOWN")
+    _publication_delay(feed, events, ledger, gaps)
     return _sequence(feed, events, ledger, gaps)
+
+
+def _publication_delay(feed, events, ledger, gaps: list) -> None:
+    delay = feed["permissible_publication_delay_ms"]
+    if not isinstance(delay, int) or isinstance(delay, bool):
+        return
+    ref = _ref(feed)
+    for event in events:
+        if event.publication_ms is None:
+            continue
+        delta = event.publication_ms - event.ts_ms
+        if delta < 0 or exceeds(delta, delay):
+            _append(
+                ledger,
+                gaps,
+                {
+                    "feed_ref": ref,
+                    "utc_start": to_iso(event.ts_ms),
+                    "utc_end": to_iso(event.publication_ms if event.publication_ms >= event.ts_ms else event.ts_ms),
+                    "rule": "PUBLICATION_DELAY_V1",
+                    "justification": "DELAY_EXCEEDS_DECLARED",
+                    "evidence": {"declared_delay_ms": delay, "observed_delta_ms": max(delta, 0)},
+                },
+            )
 
 
 def _unknown(unknowns: list, reason: str) -> None:

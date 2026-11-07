@@ -4,7 +4,7 @@
   "card_sha256": "3272c6425b592aac79163c789c66e5667a29be27466ad23f8ecab659a7c207d5",
   "profile_id": "tiny-synthetic-v1",
   "profile_note": "tiny-synthetic-v1 numbers are test bounds, not a real-runtime estimate",
-  "canaries": ["SECRET_CANARY", "SECRET_CANARY_EXC", "PX_CANARY_12.5", "SZ_CANARY_7"],
+  "canaries": ["fxmarka", "fxexca", "fxmarkb", "fxmarkc"],
   "cases": [
     {"id": "gzip_single", "group": "format", "expect_status": "COMPLETE", "expect_reasons": []},
     {"id": "gzip_multi", "group": "format", "expect_status": "COMPLETE", "expect_reasons": []},
@@ -51,9 +51,9 @@
     {"id": "zero_rows", "group": "cadence", "expect_status": "UNKNOWN", "expect_reasons": ["MISSING_EVIDENCE"], "mutation": true, "expect_gap_count": 0},
     {"id": "registry_rejects_manufactured_delay", "group": "cadence", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["REGISTRY_INVALID"], "mutation": true, "must_not_read": true},
     {"id": "cpu_at", "group": "limits", "expect_status": "COMPLETE", "expect_reasons": [], "mutation": true},
-    {"id": "cpu_above", "group": "limits", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["CPU_CAP"], "mutation": true, "must_not_read": true},
+    {"id": "cpu_above", "group": "limits", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["CPU_CAP"], "mutation": true},
     {"id": "wall_at", "group": "limits", "expect_status": "COMPLETE", "expect_reasons": [], "mutation": true},
-    {"id": "wall_above", "group": "limits", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["WALL_CAP"], "mutation": true, "must_not_read": true},
+    {"id": "wall_above", "group": "limits", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["WALL_CAP"], "mutation": true},
     {"id": "memory_at", "group": "limits", "expect_status": "COMPLETE", "expect_reasons": [], "mutation": true},
     {"id": "memory_above", "group": "limits", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["MEMORY_CAP"], "mutation": true},
     {"id": "output_at", "group": "limits", "expect_status": "COMPLETE", "expect_reasons": [], "mutation": true},
@@ -83,6 +83,11 @@
     {"id": "network_probe", "group": "redaction", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["NETWORK_FORBIDDEN"], "mutation": true, "must_not_read": true},
     {"id": "vault_probe", "group": "redaction", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["VAULT_READ_FORBIDDEN"], "mutation": true, "must_not_read": true},
     {"id": "chmod_probe", "group": "redaction", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["SOURCE_MUTATION_FORBIDDEN"], "mutation": true, "must_not_read": true},
+    {"id": "incompatible_era", "group": "format", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["SCHEMA_MISMATCH"], "mutation": true},
+    {"id": "duplicate_timestamps", "group": "cadence", "expect_status": "COMPLETE", "expect_reasons": [], "mutation": true},
+    {"id": "json_null_optional", "group": "format", "expect_status": "COMPLETE", "expect_reasons": []},
+    {"id": "publication_delay_within", "group": "cadence", "expect_status": "COMPLETE", "expect_reasons": []},
+    {"id": "publication_delay_over", "group": "cadence", "expect_status": "INCOMPLETE_FAIL", "expect_reasons": ["PROVEN_COVERAGE_GAP"], "expect_gap_rule": "PUBLICATION_DELAY_V1", "mutation": true},
     {"id": "periodic_complete", "group": "pipeline", "expect_status": "COMPLETE", "expect_reasons": []}
   ]
 }

@@ -154,6 +154,11 @@ class AuditStop(Exception):
         self.code = code
 
 
+def exceeds(used: int, limit: int) -> bool:
+    """True when used is strictly above limit. At-cap equality is inside budget."""
+    return used > limit
+
+
 def forbid(op: str, detail: object = None) -> None:
     """Fail closed. The detail argument is discarded and never stored."""
     del detail
@@ -349,6 +354,37 @@ class FixedMeter:
         return self._wall
 
 
+class LoopBoundaryMeter:
+    """Injected meter that trips only while a parser loop is marked hot."""
+
+    mode = "injected"
+
+    def __init__(self, cpu_ms: int, wall_ms: int, trip: str | None = None):
+        self._cpu = cpu_ms
+        self._wall = wall_ms
+        self.trip = trip
+        self.hot = False
+        self.loop_checks = 0
+
+    def cpu_ms(self) -> int:
+        if self.hot:
+            self.loop_checks += 1
+            if self.trip == "cpu":
+                return self._cpu + 1
+            if self.trip is None:
+                return self._cpu
+        return 0
+
+    def wall_ms(self) -> int:
+        if self.hot:
+            self.loop_checks += 1
+            if self.trip == "wall":
+                return self._wall + 1
+            if self.trip is None:
+                return self._wall
+        return 0
+
+
 class ProcessMeter:
     mode = "process"
 
@@ -377,6 +413,7 @@ class Ledger:
         self.duplicate_keys = 0
         self.gaps = 0
         self.max_record = 0
+        self.peak = 0
 
     def fail(self, code: str) -> None:
         raise AuditStop(code)
@@ -388,42 +425,58 @@ class Ledger:
             self.fail("CPU_CAP")
         if not isinstance(wall, int) or isinstance(wall, bool) or wall < 0:
             self.fail("WALL_CAP")
-        if cpu > self.p["cpu_ms"]:
+        if exceeds(cpu, self.p["cpu_ms"]):
             self.fail("CPU_CAP")
-        if wall > self.p["wall_ms"]:
+        if exceeds(wall, self.p["wall_ms"]):
             self.fail("WALL_CAP")
+
+    def mark_loop(self, active: bool) -> None:
+        meter = self.meter
+        if hasattr(meter, "hot"):
+            meter.hot = active
 
     def reserve_memory(self, amount: int) -> None:
         if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
             self.fail("MEMORY_CAP")
-        if self.memory + amount > self.p["memory_bytes"]:
+        if exceeds(self.memory + amount, self.p["memory_bytes"]):
             self.fail("MEMORY_CAP")
         self.memory += amount
+        if self.memory > self.peak:
+            self.peak = self.memory
+
+    def charge_before_alloc(self, nbytes: int) -> None:
+        """Account for a real buffer before the caller allocates it."""
+        self.check_meter()
+        self.reserve_memory(nbytes)
+
+    def release_memory(self, amount: int) -> None:
+        if amount > 0:
+            self.memory = max(0, self.memory - amount)
 
     def add_input(self, amount: int) -> None:
-        if amount < 0 or self.input_bytes + amount > self.p["max_input_bytes"]:
+        if amount < 0 or exceeds(self.input_bytes + amount, self.p["max_input_bytes"]):
             self.fail("INPUT_SIZE_CAP")
         self.input_bytes += amount
 
     def add_decomp(self, amount: int) -> None:
-        if amount < 0 or self.decompressed + amount > self.p["max_decompressed_bytes"]:
+        if amount < 0 or exceeds(self.decompressed + amount, self.p["max_decompressed_bytes"]):
             self.fail("DECOMPRESSION_CAP")
         self.decompressed += amount
 
     def add_member(self) -> None:
-        if self.members + 1 > self.p["max_archive_members"]:
+        if exceeds(self.members + 1, self.p["max_archive_members"]):
             self.fail("MEMBER_CAP")
         self.reserve_memory(self.p["member_memory_bytes"])
         self.members += 1
 
     def note_record(self, amount: int) -> None:
-        if amount < 0 or amount > self.p["max_record_bytes"]:
+        if amount < 0 or exceeds(amount, self.p["max_record_bytes"]):
             self.fail("RECORD_SIZE_CAP")
         if amount > self.max_record:
             self.max_record = amount
 
     def add_gap(self) -> None:
-        if self.gaps + 1 > self.p["max_gaps"]:
+        if exceeds(self.gaps + 1, self.p["max_gaps"]):
             self.fail("GAP_ENUMERATION_CAP")
         self.reserve_memory(self.p["gap_memory_bytes"])
         self.gaps += 1
@@ -436,7 +489,7 @@ class Ledger:
         if not isinstance(wall, int) or isinstance(wall, bool) or wall < 0:
             wall = self.p["wall_ms"] + 1
         return {
-            "memory_bytes": self.memory,
+            "memory_bytes": self.peak if self.peak else self.memory,
             "cpu_ms": cpu,
             "wall_ms": wall,
             "output_bytes": 0,
@@ -532,11 +585,25 @@ def _check_feed(feed: dict, refs: set[str]) -> None:
             raise AuditStop("REGISTRY_INVALID")
         if depth["bands_are_not_executable_levels"] is not True:
             raise AuditStop("REGISTRY_INVALID")
+        declared = depth["band_thresholds_declared"]
+        threshold = depth.get("band_threshold")
+        if declared is True:
+            if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold < 0:
+                raise AuditStop("REGISTRY_INVALID")
+        elif declared is not False or threshold is not None:
+            raise AuditStop("REGISTRY_INVALID")
     xref = feed["crosscheck_feed_ref"]
     if xref is not None and (xref not in refs or xref == feed_ref(feed)):
         raise AuditStop("REGISTRY_INVALID")
-    if feed["permissible_publication_delay_ms"] is not None:
+    delay = feed["permissible_publication_delay_ms"]
+    if feed["verification_status"] == "UNVERIFIED" and delay is not None:
         raise AuditStop("REGISTRY_INVALID")
+    if feed["verification_status"] == "SYNTHETIC_DECLARED":
+        if feed["audit_publication_delay"] is True:
+            if not isinstance(delay, int) or isinstance(delay, bool) or delay < 0:
+                raise AuditStop("REGISTRY_INVALID")
+        elif delay is not None:
+            raise AuditStop("REGISTRY_INVALID")
     status = feed["verification_status"]
     if status == "UNVERIFIED":
         if (
@@ -553,8 +620,6 @@ def _check_feed(feed: dict, refs: set[str]) -> None:
             raise AuditStop("REGISTRY_INVALID")
         return
     if status != "SYNTHETIC_DECLARED" or feed["calendar"] != "UTC_CONTINUOUS":
-        raise AuditStop("REGISTRY_INVALID")
-    if feed["audit_publication_delay"] is not False:
         raise AuditStop("REGISTRY_INVALID")
     if feed["observation"] == "periodic":
         if (
@@ -660,7 +725,9 @@ STRUCTURAL_KEYS = frozenset(
         "accepted_real_dates",
         "allowlist_observed_sha256",
         "allowlist_sha256",
+        "band_threshold",
         "bands_equal_walkable_book",
+        "declared_delay_ms",
         "base_commit",
         "cadence_ms",
         "calendar",
@@ -820,7 +887,9 @@ def static_trusted() -> set[str]:
         "PERIODIC_CADENCE_V1",
         "SEQUENCE_CONTRACT",
         "CANDLE_MISSING_WHILE_TRADE_PRESENT",
+        "PUBLICATION_DELAY_V1",
         "DELTA_EXCEEDS_CADENCE_PLUS_TOLERANCE",
+        "DELAY_EXCEEDS_DECLARED",
         "SEQUENCE_HOLE",
         "TRADE_MINUTE_WITHOUT_CANDLE",
         "BANDS_DISTINCT_FROM_WALKABLE_LEVELS",
@@ -882,3 +951,108 @@ def redaction_ok(report: object, trusted: set[str]) -> bool:
         if value == "<NON_PRIMITIVE>" or not string_allowed(value, trusted):
             return False
     return True
+
+
+class _DenyMap:
+    """Mapping stand-in that refuses every read before any value is returned."""
+
+    def __getitem__(self, key):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def get(self, key, default=None):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def __iter__(self):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def keys(self):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def items(self):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def values(self):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def copy(self):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def __contains__(self, key):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+    def __len__(self):
+        raise AuditStop("ENV_READ_FORBIDDEN")
+
+
+def _deny_env(*_args, **_kwargs):
+    raise AuditStop("ENV_READ_FORBIDDEN")
+
+
+def _deny_network(*_args, **_kwargs):
+    raise AuditStop("NETWORK_FORBIDDEN")
+
+
+def _deny_write(file, mode="r", *args, **kwargs):
+    text = mode if isinstance(mode, str) else ""
+    if any(flag in text for flag in ("w", "a", "x", "+")):
+        raise AuditStop("SOURCE_MUTATION_FORBIDDEN")
+    return _deny_write.real_open(file, mode, *args, **kwargs)
+
+
+def activate_runtime_denies():
+    """Install production denials ahead of env, DNS/connect, and write calls."""
+    import builtins
+    import os
+    import socket
+
+    state = {
+        "getenv": os.getenv,
+        "environ": os.environ,
+        "socket": socket.socket,
+        "getaddrinfo": socket.getaddrinfo,
+        "create_connection": socket.create_connection,
+        "open": builtins.open,
+    }
+    _deny_write.real_open = builtins.open
+
+    def guarded_getenv(*args, **kwargs):
+        if getattr(guarded_getenv, "weaken", False):
+            return state["getenv"](*args, **kwargs)
+        return _deny_env(*args, **kwargs)
+
+    def guarded_socket(*args, **kwargs):
+        if getattr(guarded_socket, "weaken", False):
+            return state["socket"](*args, **kwargs)
+        return _deny_network(*args, **kwargs)
+
+    def guarded_open(file, mode="r", *args, **kwargs):
+        if getattr(guarded_open, "weaken", False):
+            return state["open"](file, mode, *args, **kwargs)
+        return _deny_write(file, mode, *args, **kwargs)
+
+    guarded_getenv.weaken = False
+    guarded_socket.weaken = False
+    guarded_open.weaken = False
+    os.getenv = guarded_getenv
+    os.environ = _DenyMap()
+    socket.socket = guarded_socket
+    socket.getaddrinfo = _deny_network
+    socket.create_connection = _deny_network
+    builtins.open = guarded_open
+    state["guards"] = (guarded_getenv, guarded_socket, guarded_open)
+    return state
+
+
+def restore_runtime_denies(state) -> None:
+    import builtins
+    import os
+    import socket
+
+    if not state:
+        return
+    os.getenv = state["getenv"]
+    os.environ = state["environ"]
+    socket.socket = state["socket"]
+    socket.getaddrinfo = state["getaddrinfo"]
+    socket.create_connection = state["create_connection"]
+    builtins.open = state["open"]

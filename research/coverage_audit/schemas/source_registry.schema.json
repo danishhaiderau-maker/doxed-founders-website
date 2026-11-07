@@ -146,7 +146,8 @@
                 "level_fields",
                 "band_thresholds_declared",
                 "bands_are_not_executable_levels",
-                "notes_code"
+                "notes_code",
+                "band_threshold"
               ],
               "properties": {
                 "band_fields": {
@@ -157,7 +158,8 @@
                   "type": "array",
                   "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
                 },
-                "band_thresholds_declared": {"const": false},
+                "band_thresholds_declared": {"type": "boolean"},
+                "band_threshold": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 1000000}]},
                 "bands_are_not_executable_levels": {"const": true},
                 "notes_code": {"const": "BANDS_DISTINCT_FROM_WALKABLE_LEVELS"}
               }

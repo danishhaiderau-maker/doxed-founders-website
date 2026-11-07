@@ -8,6 +8,7 @@ import struct
 import unittest
 import zipfile
 import zlib
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from research.coverage_audit.auditor import run_audit
@@ -16,6 +17,7 @@ from research.coverage_audit.guards import (
     TINY_SYNTHETIC_PROFILE,
     AuditStop,
     FixedMeter,
+    LoopBoundaryMeter,
     canonical_bytes,
     forbid,
     schema_errors,
@@ -27,7 +29,7 @@ FIXTURE = ROOT / "tests" / "fixtures" / "synthetic_cases.json"
 BASE = "40087a65f2157f8c6701ea3670adc5c29a28c87d"
 CLOCK = 1700000000000
 T0 = 1700000000
-CANARIES = ("SECRET_CANARY", "SECRET_CANARY_EXC", "PX_CANARY_12.5", "SZ_CANARY_7")
+CANARIES = ("fxmarka", "fxexca", "fxmarkb", "fxmarkc")
 
 
 def load_cases():
@@ -41,6 +43,8 @@ def registry_bytes():
 def ref_for(name: str) -> str:
     if name == "unspecified":
         return "unverified/placeholder/unspecified/unspecified/era1"
+    if name == "heartbeat_era2":
+        return "synthetic/fixture/heartbeat_era2/instr/era2"
     return f"synthetic/fixture/{name}/instr/era1"
 
 
@@ -66,11 +70,11 @@ class MemorySource:
         if self.mode == "mid":
             self._chunks += 1
             yield self.data[:1]
-            self._token = "SECRET_CANARY"
+            self._token = "fxmarka"
             yield self.data[1:]
             return
         if self.mode == "mutate_allowlist" and self.allowlist is not None:
-            self.allowlist["SECRET_CANARY"] = "PX_CANARY_12.5"
+            self.allowlist["fxmarka"] = "fxmarkb"
         view = self.replacement if self.mode == "replace" else self.data
         for index in range(0, len(view), size):
             yield view[index : index + size]
@@ -202,17 +206,21 @@ def _run_built(built, meter=None, probe=None):
         sources[item["logical_id"]] = MemorySource(
             data if mode != "replace" else pinned,
             mode=mode,
-            replacement=item.get("replacement", b"SECRET_CANARY"),
+            replacement=item.get("replacement", b"fxmarka"),
             allowlist=allowlist,
         )
         if mode == "replace":
             sources[item["logical_id"]].data = pinned
     if built.get("extra_source"):
-        sources["extra_ignored"] = MemorySource(b"SECRET_CANARY")
+        sources["extra_ignored"] = MemorySource(b"fxmarka")
     digest = sha256_hex(canonical_bytes(allowlist))
     if built.get("tamper"):
         digest = "0" * 64
-    report = run_audit(
+    meter_used = meter if meter is not None else built.get("meter", FixedMeter(0, 0))
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        report = run_audit(
         registry_bytes=registry,
         allowlist=allowlist,
         allowlist_sha256=digest,
@@ -221,12 +229,19 @@ def _run_built(built, meter=None, probe=None):
         clock_unix_ms=CLOCK,
         seed=built.get("seed", 0),
         profile=profile,
-        meter=meter if meter is not None else built.get("meter", FixedMeter(0, 0)),
-        probe=probe if probe is not None else built.get("probe"),
-    )
+            meter=meter_used,
+            probe=probe if probe is not None else built.get("probe"),
+        )
     reads = sum(source.reads for source in sources.values())
     mutations = sum(source.mutation_calls for source in sources.values())
-    return report, {"reads": reads, "mutation_calls": mutations, "sources": sources}
+    return report, {
+        "reads": reads,
+        "mutation_calls": mutations,
+        "sources": sources,
+        "meter": meter_used,
+        "stdout": stdout.getvalue(),
+        "stderr": stderr.getvalue(),
+    }
 
 
 def assert_case(test, case):
@@ -246,6 +261,8 @@ def assert_case(test, case):
     test.assertTrue(report["scope"]["synthetic_only"])
     for canary in CANARIES:
         test.assertNotIn(canary, blob, case["id"])
+        test.assertNotIn(canary, extra.get("stdout", ""))
+        test.assertNotIn(canary, extra.get("stderr", ""))
     if case.get("must_not_read"):
         test.assertEqual(extra["reads"], 0, case["id"])
     if case["id"] == "extra_source_ignored":
@@ -260,19 +277,28 @@ def assert_case(test, case):
         test.assertIn("T", gap["utc_start"])
         test.assertIn("T", gap["utc_end"])
         test.assertTrue(gap["rule"])
-    _special(test, case["id"], report)
+    _special(test, case["id"], report, extra)
     return report, extra
 
 
-def _special(test, case_id, report):
+def _special(test, case_id, report, extra):
+    meter = extra.get("meter")
+    if case_id in ("cpu_at", "cpu_above", "wall_at", "wall_above") and hasattr(meter, "loop_checks"):
+        test.assertGreater(meter.loop_checks, 0, case_id)
     if not report["feeds"]:
         return
     feed = report["feeds"][0]
     if case_id == "depth_bands":
         fingerprint = feed["schema_fingerprint"]
         test.assertFalse(fingerprint["bands_equal_walkable_book"])
+        test.assertEqual(fingerprint["band_threshold"], 25)
         test.assertNotEqual(fingerprint["depth_bands"][0]["count_max"], fingerprint["executable_levels"][0]["count_max"])
         test.assertGreater(fingerprint["undeclared_fields_max"], 0)
+    if case_id == "duplicate_timestamps":
+        test.assertEqual(feed["duplicate_count"], 1)
+    if case_id == "json_null_optional":
+        test.assertIsNone(feed["receive"]["min"])
+        test.assertNotIn("JSON_MALFORMED", report["reasons"])
     if case_id == "timed_meta":
         test.assertIsNotNone(feed["receive"]["min"])
         test.assertIsNotNone(feed["publication"]["min"])
@@ -331,7 +357,7 @@ def _periodic_complete():
 @_register("gzip_multi")
 def _gzip_multi():
     first = _csv("event_ts,note", _periodic_rows((0, 60)))
-    second = _csv("event_ts,note", _periodic_rows((120,), labels=("SZ_CANARY_7",)))
+    second = _csv("event_ts,note", _periodic_rows((120,), labels=("fxmarkc",)))
     blob = _gzip(first) + _gzip(second)
     return {"inputs": [_input("case_main", "heartbeat_gz", blob, [
         _member("g0", 0, first, "gzip_member"),
@@ -366,12 +392,12 @@ def _gzip_flip():
 @_register("gzip_fname")
 def _gzip_fname():
     payload = _csv("event_ts,note", _periodic_rows())
-    return {"inputs": [_input("case_main", "heartbeat_gz", _gzip(payload, b"SECRET_CANARY"), [_member("g0", 0, payload, "gzip_member")])]}
+    return {"inputs": [_input("case_main", "heartbeat_gz", _gzip(payload, b"fxmarka"), [_member("g0", 0, payload, "gzip_member")])]}
 
 
 @_register("gzip_bomb")
 def _gzip_bomb():
-    payload = b"A" * 5000 + b"SECRET_CANARY"
+    payload = b"A" * 5000 + b"fxmarka"
     return _with_profile(
         {"inputs": [_input("case_main", "heartbeat_gz", _gzip(payload), [_member("g0", 0, payload, "gzip_member")])]},
         max_decompressed_bytes=1024,
@@ -381,9 +407,9 @@ def _gzip_bomb():
 @_register("csv_quoted")
 def _csv_quoted():
     rows = [
-        ("1700000000", 'say "SECRET_CANARY", hi\nstill'),
-        ("1700000060", "PX_CANARY_12.5"),
-        ("1700000120", "SZ_CANARY_7"),
+        ("1700000000", 'say "fxmarka", hi\nstill'),
+        ("1700000060", "fxmarkb"),
+        ("1700000120", "fxmarkc"),
     ]
     return {"inputs": [_plain("heartbeat", rows)]}
 
@@ -395,13 +421,13 @@ def _headerless():
 
 @_register("field_count")
 def _field_count():
-    payload = b"event_ts,note\n1700000000,alpha,SECRET_CANARY\n"
+    payload = b"event_ts,note\n1700000000,alpha,fxmarka\n"
     return {"inputs": [_input("case_main", "heartbeat", payload)]}
 
 
 @_register("encoding_error")
 def _encoding_error():
-    payload = b"event_ts,note\n1700000000,SECRET_CANARY\xff\n"
+    payload = b"event_ts,note\n1700000000,fxmarka\xff\n"
     return {"inputs": [_input("case_main", "heartbeat", payload)]}
 
 
@@ -414,7 +440,7 @@ def _timestamp_unit():
 def _jsonl_ok():
     rows = []
     for index, offset in enumerate((0, 60, 120)):
-        rows.append({"event_ts": T0 + offset, "note": CANARIES[index], "px": "PX_CANARY_12.5"})
+        rows.append({"event_ts": T0 + offset, "note": CANARIES[index], "px": "fxmarkb"})
     payload = "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows).encode("utf-8")
     return {"inputs": [_input("case_main", "heartbeat_jsonl", payload)]}
 
@@ -422,7 +448,7 @@ def _jsonl_ok():
 @_register("jsonl_malformed")
 def _jsonl_malformed():
     good = json.dumps({"event_ts": T0, "note": "alpha"}, separators=(",", ":")).encode("utf-8")
-    return {"inputs": [_input("case_main", "heartbeat_jsonl", good + b"\n{SECRET_CANARY\n")]}
+    return {"inputs": [_input("case_main", "heartbeat_jsonl", good + b"\n{fxmarka\n")]}
 
 
 @_register("json_array")
@@ -433,29 +459,29 @@ def _json_array():
 
 @_register("header_mismatch")
 def _header_mismatch():
-    payload = b"event_ts,SECRET_CANARY\n1700000000,alpha\n"
+    payload = b"event_ts,fxmarka\n1700000000,alpha\n"
     return {"inputs": [_input("case_main", "heartbeat", payload)]}
 
 
 @_register("iso_ok")
 def _iso_ok():
     rows = [
-        ("2023-11-14T22:13:20Z", "SECRET_CANARY"),
-        ("2023-11-14T22:14:20Z", "PX_CANARY_12.5"),
-        ("2023-11-14T22:15:20Z", "SZ_CANARY_7"),
+        ("2023-11-14T22:13:20Z", "fxmarka"),
+        ("2023-11-14T22:14:20Z", "fxmarkb"),
+        ("2023-11-14T22:15:20Z", "fxmarkc"),
     ]
     return {"inputs": [_plain("heartbeat_iso", rows)]}
 
 
 @_register("iso_offset")
 def _iso_offset():
-    payload = b"event_ts,note\n2023-11-14T22:13:20+00:00,SECRET_CANARY\n"
+    payload = b"event_ts,note\n2023-11-14T22:13:20+00:00,fxmarka\n"
     return {"inputs": [_input("case_main", "heartbeat_iso", payload)]}
 
 
 def _zip_pair():
     first = _csv("event_ts,note", _periodic_rows((0, 60)))
-    second = _csv("event_ts,note", [("1700000120", "SZ_CANARY_7")])
+    second = _csv("event_ts,note", [("1700000120", "fxmarkc")])
     return first, second
 
 
@@ -485,7 +511,7 @@ def _zip_reorder():
 @_register("zip_extra")
 def _zip_extra():
     first, second = _zip_pair()
-    extra = b"SECRET_CANARY\n"
+    extra = b"fxmarka\n"
     blob = _zip([("a.csv", first), ("b.csv", second), ("c.csv", extra)])
     members = [
         _member("part_a", 0, first, "file", "a.csv"),
@@ -496,7 +522,7 @@ def _zip_extra():
 
 @_register("zip_traversal")
 def _zip_traversal():
-    blob = _zip([("../SECRET_CANARY.csv", b"PX_CANARY_12.5")])
+    blob = _zip([("../fxmarka.csv", b"fxmarkb")])
     members = [_member("part_a", 0, b"alpha", "file", "a.csv")]
     return {"inputs": [_input("case_main", "heartbeat_zip", blob, members)]}
 
@@ -504,7 +530,7 @@ def _zip_traversal():
 @_register("zip_crc")
 def _zip_crc():
     first = _csv("event_ts,note", [("1700000000", "alpha"), ("1700000060", "beta")])
-    second = b"SECRET_CANARY_BODY"
+    second = b"fxbodya"
     blob = bytearray(_zip([("a.csv", first), ("b.csv", second)], compress=zipfile.ZIP_STORED))
     with zipfile.ZipFile(io.BytesIO(blob)) as archive:
         info = archive.getinfo("b.csv")
@@ -543,7 +569,7 @@ def _zip_encrypted():
 
 @_register("sparse_not_outage")
 def _sparse():
-    rows = [{"event_ts": stamp, "note": "SECRET_CANARY"} for stamp in (T0, T0 + 1000, T0 + 5000)]
+    rows = [{"event_ts": stamp, "note": "fxmarka"} for stamp in (T0, T0 + 1000, T0 + 5000)]
     payload = "".join(json.dumps(row) + "\n" for row in rows).encode("utf-8")
     return {"inputs": [_input("case_main", "sparse_trades", payload)]}
 
@@ -575,7 +601,7 @@ def _seq_hole():
 
 @_register("seq_nocontract")
 def _seq_none():
-    rows = [(str(T0), "SECRET_CANARY", "PX_CANARY_12.5"), (str(T0 + 60), "2", "SZ_CANARY_7"), (str(T0 + 120), "4", "alpha")]
+    rows = [(str(T0), "fxmarka", "fxmarkb"), (str(T0 + 60), "2", "fxmarkc"), (str(T0 + 120), "4", "alpha")]
     return {"inputs": [_plain("seq_nocontract", rows, header="event_ts,seq,note")]}
 
 
@@ -585,8 +611,8 @@ def _seq_interleaved():
 
 
 def _candle_inputs(trade_offsets, candle_offsets):
-    trades = _csv(None, [(str(T0 + offset), "SECRET_CANARY") for offset in trade_offsets])
-    candles = _csv(None, [(str(T0 + offset), "PX_CANARY_12.5") for offset in candle_offsets])
+    trades = _csv(None, [(str(T0 + offset), "fxmarka") for offset in trade_offsets])
+    candles = _csv(None, [(str(T0 + offset), "fxmarkb") for offset in candle_offsets])
     return {"inputs": [_input("trades", "candle_trades", trades), _input("candles", "candles", candles)]}
 
 
@@ -602,7 +628,7 @@ def _candle_ok():
 
 @_register("candle_no_crosscheck")
 def _candle_no():
-    candles = _csv(None, [("1700000000", "SECRET_CANARY")])
+    candles = _csv(None, [("1700000000", "fxmarka")])
     return {"inputs": [_input("candles", "candles", candles)]}
 
 
@@ -613,7 +639,7 @@ def _candle_quiet():
 
 @_register("unverified_placeholder")
 def _unverified():
-    payload = b"1700000000,SECRET_CANARY\n"
+    payload = b"1700000000,fxmarka\n"
     return {"inputs": [_input("case_main", "unspecified", payload)]}
 
 
@@ -635,12 +661,12 @@ def _depth():
         rows.append(
             {
                 "event_ts": T0 + offset,
-                "band_near": ["PX_CANARY_12.5", 1],
+                "band_near": ["fxmarkb", 1],
                 "band_far": [1],
                 "lvl_0": [1, 2, 3],
-                "lvl_1": ["SZ_CANARY_7"],
-                "px": "PX_CANARY_12.5",
-                "sz": "SZ_CANARY_7",
+                "lvl_1": ["fxmarkc"],
+                "px": "fxmarkb",
+                "sz": "fxmarkc",
             }
         )
     payload = "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows).encode("utf-8")
@@ -672,22 +698,22 @@ def _registry_bad():
 
 @_register("cpu_at")
 def _cpu_at():
-    return {**_rows_csv((0, 60, 120)), "meter": FixedMeter(10000, 0)}
+    return {**_rows_csv((0, 60, 120)), "meter": LoopBoundaryMeter(10000, 10000)}
 
 
 @_register("cpu_above")
 def _cpu_above():
-    return {**_rows_csv((0, 60, 120)), "meter": FixedMeter(10001, 0)}
+    return {**_rows_csv((0, 60, 120)), "meter": LoopBoundaryMeter(10000, 10000, trip="cpu")}
 
 
 @_register("wall_at")
 def _wall_at():
-    return {**_rows_csv((0, 60, 120)), "meter": FixedMeter(0, 10000)}
+    return {**_rows_csv((0, 60, 120)), "meter": LoopBoundaryMeter(10000, 10000)}
 
 
 @_register("wall_above")
 def _wall_above():
-    return {**_rows_csv((0, 60, 120)), "meter": FixedMeter(0, 10001)}
+    return {**_rows_csv((0, 60, 120)), "meter": LoopBoundaryMeter(10000, 10000, trip="wall")}
 
 
 def _memory_cap(at_cap: bool):
@@ -846,7 +872,7 @@ def _replace():
     item["mode"] = "replace"
     item["pinned"] = pinned
     item["payload"] = pinned
-    secret = b"SECRET_CANARY"
+    secret = b"fxmarka"
     item["replacement"] = (secret * (len(pinned) // len(secret) + 1))[: len(pinned)]
     return {"inputs": [item]}
 
@@ -855,7 +881,7 @@ def _replace():
 def _readback():
     item = _plain("heartbeat", _periodic_rows())
     item["mode"] = "readback"
-    item["replacement"] = b"SECRET_CANARY"
+    item["replacement"] = b"fxmarka"
     return {"inputs": [item]}
 
 
@@ -903,6 +929,44 @@ def _vault():
 @_register("chmod_probe")
 def _chmod():
     return {**_rows_csv((0, 60, 120)), "probe": "chmod"}
+
+
+@_register("incompatible_era")
+def _incompatible_era():
+    payload = _csv("event_ts,note", _periodic_rows())
+    return {"inputs": [_input("case_main", "heartbeat_era2", payload)]}
+
+
+@_register("duplicate_timestamps")
+def _duplicate_timestamps():
+    return _rows_csv((0, 60, 60))
+
+
+@_register("json_null_optional")
+def _json_null():
+    rows = []
+    for index, offset in enumerate((0, 60, 120)):
+        rows.append({"event_ts": T0 + offset, "note": CANARIES[index], "recv_ts": None})
+    payload = "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows).encode("utf-8")
+    return {"inputs": [_input("case_main", "heartbeat_jsonl", payload)]}
+
+
+def _pub_rows(delta):
+    rows = []
+    for index, offset in enumerate((0, 60, 120)):
+        stamp = T0 + offset
+        rows.append((str(stamp), str(stamp + delta), CANARIES[index]))
+    return {"inputs": [_plain("pub_delay", rows, header="event_ts,pub_ts,note")]}
+
+
+@_register("publication_delay_within")
+def _pub_within():
+    return _pub_rows(1)
+
+
+@_register("publication_delay_over")
+def _pub_over():
+    return _pub_rows(9)
 
 
 def run_group(test, group):

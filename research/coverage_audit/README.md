@@ -82,7 +82,11 @@ only.
 | member_memory_bytes | 40 |
 
 Crossing a bound returns `INCOMPLETE_FAIL` and a reason code. It does not
-truncate a result into `COMPLETE`. Test-only profiles may set lower bounds, or
+truncate a result into `COMPLETE`. Input buffers, CSV records, decompressed
+members, and ZIP central-directory bytes are charged against `memory_bytes`
+before those buffers are allocated. CPU and wall meters are checked inside
+decompression, CSV, JSON, and ZIP scan loops. A synthetic feed may declare a
+publication-delay number; real venue delays stay unverified. Test-only profiles may set lower bounds, or
 the same bounds at the exact edge, and cannot exceed the ceilings in
 `guards.py`. The CLI cannot select those profiles.
 
