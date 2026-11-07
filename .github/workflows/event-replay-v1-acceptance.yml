@@ -1,0 +1,77 @@
+name: event-replay-v1-acceptance
+
+on:
+  pull_request:
+    paths:
+      - research/event_replay_v1/**
+      - .github/workflows/event-replay-v1-acceptance.yml
+  push:
+    branches:
+      - master
+    paths:
+      - research/event_replay_v1/**
+      - .github/workflows/event-replay-v1-acceptance.yml
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Record the ref this job tested
+        run: |
+          echo "checked_out_sha=$(git rev-parse HEAD)"
+          echo "event_name=${{ github.event_name }}"
+          echo "github_sha=${{ github.sha }}"
+          echo "github_ref=${{ github.ref }}"
+          echo "pull_request_head_sha=${{ github.event.pull_request.head.sha }}"
+
+      - name: Record image Python
+        run: python3 --version
+
+      - name: Run the existing acceptance suite
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "WORKTREE_NOT_CLEAN"
+            git status --porcelain
+            exit 1
+          fi
+          sudo mkdir -p /opt/cursor/artifacts
+          sudo chown "$(id -u):$(id -g)" /opt/cursor/artifacts
+          if [ ! -d /opt/cursor/artifacts ]; then
+            echo "RECEIPT_DIR_ABSENT"
+            exit 1
+          fi
+          head_sha="$(git rev-parse HEAD)"
+          set +e
+          python3 research/event_replay_v1/tests/test_acceptance.py \
+            --receipt /opt/cursor/artifacts/event-replay-v1-ci-suite-receipt.json \
+            --head "$head_sha" \
+            --base 40087a65f2157f8c6701ea3670adc5c29a28c87d \
+            --clean-tree CLEAN \
+            > "$RUNNER_TEMP/event-replay-v1-parent-stdout.txt" \
+            2> "$RUNNER_TEMP/event-replay-v1-parent-stderr.txt"
+          code=$?
+          set -e
+          echo "----- event_replay_v1 parent stdout -----"
+          cat "$RUNNER_TEMP/event-replay-v1-parent-stdout.txt"
+          echo "----- event_replay_v1 parent stderr -----"
+          cat "$RUNNER_TEMP/event-replay-v1-parent-stderr.txt"
+          echo "----- event_replay_v1 receipt -----"
+          if [ -f /opt/cursor/artifacts/event-replay-v1-ci-suite-receipt.json ]; then
+            cat /opt/cursor/artifacts/event-replay-v1-ci-suite-receipt.json
+            echo
+          else
+            echo "RECEIPT_ABSENT"
+          fi
+          echo "suite_exit_code=$code"
+          exit "$code"
