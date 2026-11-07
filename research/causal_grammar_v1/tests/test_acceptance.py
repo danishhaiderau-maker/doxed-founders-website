@@ -2700,6 +2700,37 @@ class StageAAcceptance(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--real-suite-expiry-only"]:
+        outside = Path("/tmp/a990-v10-suite-expiry-outside-receipt.json")
+        guards._PROCESS_STARTED = time.perf_counter() - (guards.MAX_SUITE_SECONDS + 1)
+        guards.discover_suite_on_cleanup()
+        write_code = ""
+        try:
+            guards.guarded_write_text(outside, "{}", ROOT)
+        except guards.CapExhausted as exc:
+            write_code = exc.code
+        later_code = ""
+        try:
+            guards.enforce_before_work()
+        except guards.CapExhausted as exc:
+            later_code = exc.code
+        sys.stderr.write(
+            "\n".join(
+                [
+                    "code " + write_code,
+                    "later_enforce_code " + later_code,
+                    "expiry_set " + ("true" if guards.expiry_set() else "false"),
+                    "rss_latched " + ("true" if guards.rss_latched() else "false"),
+                    "suppress_success " + ("true" if guards.suppress_success() else "false"),
+                    "receipt_path_exists " + ("true" if outside.exists() else "false"),
+                    "suite_remaining " + str(guards.suite_remaining()),
+                    "a5 OPEN_MERGE_BLOCK",
+                ]
+            )
+            + "\n"
+        )
+        sys.stderr.flush()
+        sys.exit(4)
     outcome = unittest.main(argv=[sys.argv[0]], exit=False, verbosity=2).result
     destination = Path("/opt/cursor/artifacts/a990-v8-partial-matrix.json")
     destination.write_text(json.dumps({"rows": MATRIX}, indent=2) + "\n", encoding="utf-8")

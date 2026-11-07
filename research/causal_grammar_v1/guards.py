@@ -44,14 +44,15 @@ ENFORCEMENT_DISCLOSURE = (
     "rss_linux_kibibytes_times_1024;"
     "conservative_upper_bound_self_plus_children_maxrss;"
     "no_cpu_seconds_cap;"
-    "no_setrlimit_no_cgroup;"
+    "downward_setrlimit_RLIMIT_AS_to_268435456_when_hard_is_RLIM_INFINITY_or_above_target;"
+    "equal_or_lower_hard_not_changed;"
+    "hard_limit_not_raised;"
+    "no_cgroup;"
+    "no_child_spawned;"
     "under_limit_run_is_not_ceiling_proof;"
     "stdlib_structural_schema_check_is_not_draft_2020_12;"
     "vas_recorded_pair_not_rss;"
-    "hard_limit_not_raised;"
-    "reserved_268435456_uninstalled_no_child;"
-    "one_itimer_real;"
-    "no_child_spawned"
+    "one_itimer_real"
 )
 
 _VAS_TARGET = 268435456
