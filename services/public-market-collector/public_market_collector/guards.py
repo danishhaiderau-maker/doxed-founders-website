@@ -23,6 +23,9 @@ FORBIDDEN_IMPORT_ROOTS = {
     "microstructure_tape",
     "tape_archive",
     "tempfile",
+    "asyncio",
+    "_socket",
+    "importlib",
 }
 
 FORBIDDEN_CALLS = {
@@ -35,6 +38,7 @@ FORBIDDEN_CALLS = {
     "truncate",
     "system",
     "popen",
+    "__import__",
 }
 
 FORBIDDEN_ATTRS = {"environ"}

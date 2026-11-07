@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import os
 import socket
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,9 +48,17 @@ from public_market_collector.framing import (
     sha256_bytes,
     verify_segment,
 )
+from public_market_collector import guards as guards_mod
 from public_market_collector.guards import scan_package
 from public_market_collector.market import Book, canonical_norms, example_checksum_matches_docs, signed_crc32
 from public_market_collector.session import Session, append_startup_gap, inspect_torn_tail
+
+# Integrity checks compare recorded bytes. They detect corruption. They are not a
+# tamper-proof seal against someone who rewrites a commit together with its checksum.
+# Sustained backpressure is not proven by the queue fixture. SEQ_ALL, TIMESTAMP,
+# reconnect limits, checksum float spelling, and NTP stay unverified.
+KILLED_LINES = []
+_AUDIT_HOOKED = False
 
 
 def _cfg(root: Path, **overrides):
@@ -556,26 +567,245 @@ class SyntheticTests(unittest.TestCase):
         self.assertTrue(opens[1]["book_valid"])
 
     def test_t18_replay_is_identical_and_keeps_null_timestamps(self):
+        """B: fresh on-disk raw, through journal verify, renormalized, compared to on-disk norm."""
         session = self._session()
         session.handle(_sub("book", 7), recv_utc_ns=1, recv_mono_ns=1)
         session.handle(_book(7, [[6000, 1, 1], [6100, 1, -1]]), recv_utc_ns=2, recv_mono_ns=2)
         session.handle(_hb(7), recv_utc_ns=3, recv_mono_ns=3)
         session.handle(_sub("trades", 8), recv_utc_ns=4, recv_mono_ns=4)
         session.handle(_js([8, "te", [7, None, 1, 10]]), recv_utc_ns=5, recv_mono_ns=5)
+        session.handle(_js([8, "te", [9, 1574694478808, -2, 11]]), recv_utc_ns=6, recv_mono_ns=6)
         session.commit()
-        stored = self._norms(session)
-        first = canonical_norms(session.durable_raw, prec="P0", seq_scope=None, seq_layout=None)
-        second = canonical_norms(session.durable_raw, prec="P0", seq_scope=None, seq_layout=None)
-        self.assertEqual(first, second)
-        self.assertEqual(first, "\n".join(dumps(row) for row in stored).encode("utf-8"))
-        heartbeat = next(row for row in stored if row["channel"] == "heartbeat")
-        book = next(row for row in stored if row["channel"] == "book_snapshot")
-        trade = next(row for row in stored if row["channel"] == "trade")
+        root = Path(session.root)
+        _journal, loaded = _disk_committed(root)
+        raw_rows = list(loaded["raw-book"]) + list(loaded["raw-trades"])
+        raw_rows.sort(key=lambda row: int(row["ingest_order"]))
+        self.assertTrue(all(row["schema_v"] == "pmc_raw_v1" for row in raw_rows))
+        raw_ids = {row["raw_id"] for row in raw_rows}
+        self.assertTrue(raw_ids)
+        self.assertTrue(all(str(raw_id).count(":") == 2 for raw_id in raw_ids))
+        renormalized = canonical_norms(raw_rows, prec="P0", seq_scope=None, seq_layout=None)
+        again = canonical_norms(raw_rows, prec="P0", seq_scope=None, seq_layout=None)
+        self.assertEqual(renormalized, again)
+        stored_rows = list(loaded["norm-book"]) + list(loaded["norm-trades"])
+        order = {row["raw_id"]: int(row["ingest_order"]) for row in raw_rows}
+        stored_rows.sort(key=lambda row: (order[row["raw_id"]], int(row["norm_ordinal"])))
+        stored = "\n".join(dumps(row) for row in stored_rows).encode("utf-8")
+        self.assertEqual(stored, renormalized)
+        self.assertTrue(all(row["norm_schema_v"] == "pmc_norm_v1" for row in stored_rows))
+        self.assertTrue(all(row["raw_id"] in raw_ids for row in stored_rows))
+        for commit in _journal:
+            if commit.get("kind") != "commit" or not str(commit.get("stream", "")).startswith("norm"):
+                continue
+            blob = (root / commit["segment_rel"]).read_bytes()
+            chunk = blob[int(commit["member_start_offset"]) : int(commit["member_end_offset"])]
+            self.assertEqual(sha256_bytes(chunk), commit["member_sha256"])
+            payload = gzip.decompress(chunk)
+            self.assertTrue(payload.endswith(b"\n"))
+            self.assertIn(payload.splitlines()[0], stored)
+        heartbeat = next(row for row in stored_rows if row["channel"] == "heartbeat")
+        book = next(row for row in stored_rows if row["channel"] == "book_snapshot")
+        null_trade = next(row for row in stored_rows if row["trade_id"] == 7)
+        timed_trade = next(row for row in stored_rows if row["trade_id"] == 9)
         self.assertIsNone(heartbeat["ts_exchange_ms"])
         self.assertIsNone(book["ts_exchange_ms"])
-        self.assertIsNone(trade["ts_exchange_ms"])
+        self.assertEqual(book["applied"], True)
+        self.assertIsNone(null_trade["ts_exchange_ms"])
+        self.assertEqual(null_trade["side"], "buy")
+        self.assertEqual(null_trade["price"], 10)
+        self.assertEqual(null_trade["amount"], 1)
+        self.assertEqual(timed_trade["ts_exchange_ms"], 1574694478808)
+        self.assertEqual(timed_trade["side"], "sell")
         self.assertNotEqual(heartbeat["ts_exchange_ms"], heartbeat["ts_recv_utc_ns"])
+        mutated = [dict(row) for row in raw_rows]
+        mutated[0] = dict(mutated[0], ts_exchange_ms=123456)
+        bad = canonical_norms(mutated, prec="P0", seq_scope=None, seq_layout=None)
+        self.assertNotEqual(bad, stored)
+        killed("B-accept-mutated-raw", lambda: self.assertEqual(bad, stored))
+        session.durable_raw[0]["symbol"] = "MEMORY-MUTATION"
+        _journal2, loaded2 = _disk_committed(root)
+        raw2 = list(loaded2["raw-book"]) + list(loaded2["raw-trades"])
+        raw2.sort(key=lambda row: int(row["ingest_order"]))
+        self.assertEqual(canonical_norms(raw2, prec="P0", seq_scope=None, seq_layout=None), stored)
+        self.assertNotIn("MEMORY-MUTATION", stored.decode("utf-8"))
         self.assertTrue(UNKNOWNS)
+        self.assertTrue(_journal2)
+
+    def test_c_midstream_nonzero_disk_cap(self):
+        """C: nonzero cap, committed data already present, then a loud stop."""
+        root = Path(self.tmp.name) / "midstream-cap"
+        session = Session(_cfg(root, disk_cap_bytes=50_000_000))
+        session.handle(_sub("book", 7), recv_utc_ns=1, recv_mono_ns=1)
+        session.handle(_book(7, [[6000, 1, 1], [6100, 1, -1]]), recv_utc_ns=2, recv_mono_ns=2)
+        session.commit()
+        prior = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+        segment = root / "raw/book/bookseg.gz"
+        segment_hash = sha256_bytes(segment.read_bytes())
+        journal_before = (root / "index.journal").read_bytes()
+        committed_ids = [row["raw_id"] for row in durable_view(segment, read_journal(root / "index.journal")[0], "bookseg")["records"]]
+        self.assertGreaterEqual(len(committed_ids), 1)
+        wide = [[6000 + i, 1, 1 if i % 2 == 0 else -1] for i in range(40)]
+        session.handle(_book(7, wide), recv_utc_ns=3, recv_mono_ns=3)
+        predicted = {
+            "kind": "capture_stop",
+            "cause": "write_fail",
+            "detail": "disk_full",
+            "received": session.received,
+            "durable": session.durable,
+            "attempted": session.attempted,
+            "rejected_counted": False,
+            "rejected_sha256": None,
+        }
+        slack = len(dumps(predicted)) + 80
+        estimate = 80 + sum(len(dumps(row)) for row in session.buffer["raw-book"])
+        self.assertGreater(estimate, slack)
+        session.cfg.disk_cap_bytes = _directory_size(root) + slack
+        self.assertGreater(session.cfg.disk_cap_bytes, 0)
+        with self.assertRaises(CaptureStopped) as caught:
+            session.commit()
+        stderr = caught.exception.stderr
+        self.assertIn("CAPTURE_STOP", stderr)
+        self.assertIn("disk_full", stderr)
+        self.assertNotIn("alert", stderr.lower())
+        self.assertEqual(segment.read_bytes(), prior["raw/book/bookseg.gz"])
+        self.assertEqual(sha256_bytes(segment.read_bytes()), segment_hash)
+        self.assertGreaterEqual(segment.stat().st_size, len(prior["raw/book/bookseg.gz"]))
+        journal_after = (root / "index.journal").read_bytes()
+        self.assertTrue(journal_after.startswith(journal_before))
+        self.assertGreater(len(journal_after), len(journal_before))
+        records, stopped = read_journal(root / "index.journal")
+        self.assertFalse(stopped)
+        self.assertTrue(any(row.get("kind") == "capture_stop" and row.get("detail") == "disk_full" for row in records))
+        self.assertNotIn(b"alert", journal_after.lower())
+        view = durable_view(segment, records, "bookseg")
+        self.assertEqual(view.get("verify_errors"), [])
+        self.assertEqual([row["raw_id"] for row in view["records"]], committed_ids)
+        self.assertEqual(view["lost_uncommitted_tail_bytes"], 0)
+        self.assertEqual(view["decodable_uncommitted_members"], 0)
+        for rel, blob in prior.items():
+            path = root / rel
+            self.assertTrue(path.is_file())
+            if rel != "index.journal":
+                self.assertEqual(path.read_bytes(), blob)
+            self.assertGreaterEqual(path.stat().st_size, len(blob))
+        def _require_segment(blob: bytes) -> None:
+            if sha256_bytes(blob) != segment_hash or len(blob) < len(prior["raw/book/bookseg.gz"]):
+                raise AssertionError("segment changed")
+
+        _require_segment(segment.read_bytes())
+        killed("C-truncated-segment", lambda: _require_segment(segment.read_bytes()[:-1]))
+        killed(
+            "C-stop-removed",
+            lambda: self.assertTrue(any(row.get("kind") == "capture_stop" for row in records if row.get("kind") != "capture_stop")),
+        )
+
+    def test_d_static_denylist_and_runtime_failclosed(self):
+        """D: denylist plants, plus the real Session and entrypoint under a tripwire."""
+        plant = Path(self.tmp.name) / "plants"
+        plant.mkdir()
+        (plant / "use_asyncio.py").write_text("import asyncio\n")
+        (plant / "use_socket.py").write_text("import _socket\n")
+        (plant / "use_importlib.py").write_text("import importlib\n")
+        (plant / "use_dunder.py").write_text("x = __import__('json')\n")
+        findings = scan_package(plant)
+        self.assertTrue(any("import asyncio" in item for item in findings))
+        self.assertTrue(any("import _socket" in item for item in findings))
+        self.assertTrue(any("import importlib" in item for item in findings))
+        self.assertTrue(any("call __import__" in item for item in findings))
+        self.assertEqual(scan_package(), [])
+        guards_mod.FORBIDDEN_IMPORT_ROOTS.remove("asyncio")
+        try:
+            weakened = scan_package(plant)
+            killed("D-asyncio-denylist-removed", lambda: self.assertTrue(any("import asyncio" in item for item in weakened)))
+        finally:
+            guards_mod.FORBIDDEN_IMPORT_ROOTS.add("asyncio")
+        self.assertTrue(any("import asyncio" in item for item in scan_package(plant)))
+        guards_mod.FORBIDDEN_CALLS.remove("__import__")
+        try:
+            weakened_call = scan_package(plant)
+            killed("D-dunder-import-removed", lambda: self.assertTrue(any("call __import__" in item for item in weakened_call)))
+        finally:
+            guards_mod.FORBIDDEN_CALLS.add("__import__")
+        canary = "canary-secret-value"
+        os.environ["BITFINEX_API_KEY"] = canary
+        runtime = Path(self.tmp.name) / "runtime-guard"
+        session = Session(_cfg(runtime))
+        events = []
+
+        def _audit(event, args):
+            del args
+            if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.posix_spawn"}:
+                events.append(event)
+                raise RuntimeError(f"fail-closed {event}")
+
+        global _AUDIT_HOOKED
+        if not _AUDIT_HOOKED:
+            sys.addaudithook(_audit)
+            _AUDIT_HOOKED = True
+        stderr = io.StringIO()
+        real_env = os.environ
+
+        class _EnvTrap:
+            def __getitem__(self, key):
+                raise RuntimeError(f"env read {key}")
+
+            def get(self, key, default=None):
+                raise RuntimeError(f"env read {key}")
+
+            def __contains__(self, key):
+                raise RuntimeError(f"env read {key}")
+
+        os.environ = _EnvTrap()
+        try:
+            with redirect_stderr(stderr):
+                code = entrypoint.main([])
+                session.handle(_hb(7), recv_utc_ns=1, recv_mono_ns=1)
+                session.commit()
+        finally:
+            os.environ = real_env
+        self.assertEqual(code, 78)
+        self.assertIn("BOARD_FREEZE_UNSET", stderr.getvalue())
+        self.assertEqual(events, [])
+        self.assertNotIn(canary, stderr.getvalue())
+        written = b"".join(path.read_bytes() for path in runtime.rglob("*") if path.is_file())
+        self.assertNotIn(canary.encode("utf-8"), written)
+        self.assertIn(canary, real_env.get("BITFINEX_API_KEY", ""))
+
+        def _require_socket_block():
+            try:
+                socket.socket()
+            except RuntimeError:
+                return
+            raise AssertionError("socket was not blocked")
+
+        _require_socket_block()
+
+        class _Silent:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+        saved_socket = socket.socket
+        socket.socket = _Silent
+        try:
+            killed("D-socket-tripwire-removed", _require_socket_block)
+        finally:
+            socket.socket = saved_socket
+        _require_socket_block()
+
+    def test_nongate_e_malformed_checksum_and_noninteger_price(self):
+        """Not an acceptance gate. Existing fail-closed checksum behaviour only."""
+        session = self._session()
+        session.handle(_sub("book", 7), recv_utc_ns=1, recv_mono_ns=1)
+        session.handle(_book(7, [[6000, 1, 1], [6100, 1, -1]]), recv_utc_ns=2, recv_mono_ns=2)
+        session.handle(_js([7, "cs"]), recv_utc_ns=3, recv_mono_ns=3)
+        session.commit()
+        self.assertTrue(any(row["channel"] == "gap" and row["payload"].get("cause") == "checksum_fail" for row in session.durable_raw))
+        other = Session(_cfg(Path(self.tmp.name) / "noninteger"))
+        other.handle(_sub("book", 7), recv_utc_ns=1, recv_mono_ns=1)
+        other.handle(_book(7, [[6000.5, 1, 1.5], [6100, 1, -1]]), recv_utc_ns=2, recv_mono_ns=2)
+        other.handle(_cs(7, 1), recv_utc_ns=3, recv_mono_ns=3)
+        other.commit()
+        self.assertTrue(any(row["channel"] == "gap" and row["payload"].get("cause") == "checksum_fail" for row in other.durable_raw))
 
     def _assert_commit_order(self, trace: list[str], stream: str) -> None:
         tokens = [
@@ -591,6 +821,44 @@ class SyntheticTests(unittest.TestCase):
             indexes.append(idx)
             start = idx + 1
         self.assertEqual(indexes, sorted(indexes))
+
+
+def _directory_size(root: Path) -> int:
+    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+
+
+def killed(label, check) -> None:
+    """Run a check that must fail. The mutation exists only for this call."""
+    try:
+        check()
+    except AssertionError as exc:
+        line = f"KILLED_MUTATION {label} result=FAIL detail={exc.__class__.__name__}"
+        KILLED_LINES.append(line)
+        print(line, flush=True)
+        return
+    raise AssertionError(f"KILLED_MUTATION {label} was not killed")
+
+
+def _disk_committed(root: Path) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Fresh reader: journal file and segment bytes only. No session memory."""
+    journal, stopped = read_journal(root / "index.journal")
+    if stopped:
+        raise AssertionError("journal tail is not a complete prefix")
+    loaded: dict[str, list[dict]] = {}
+    seen = set()
+    for row in journal:
+        if row.get("kind") != "commit" or row.get("segment_id") in seen:
+            continue
+        seen.add(row["segment_id"])
+        path = root / row["segment_rel"]
+        verified = verify_segment(path, journal, row["segment_id"])
+        if verified["errors"]:
+            raise AssertionError(verified["errors"])
+        view = durable_view(path, journal, row["segment_id"])
+        if view.get("verify_errors"):
+            raise AssertionError(view["verify_errors"])
+        loaded[row["stream"]] = view["records"]
+    return journal, loaded
 
 
 def gzip_payload_text(blob: bytes) -> bytes:
