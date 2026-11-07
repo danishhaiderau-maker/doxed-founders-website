@@ -142,9 +142,15 @@ class _ComboPatch:
 
 
 class OracleMiss(Exception):
-    def __init__(self, assertion_id: str, downstream_code: str | None = None) -> None:
+    def __init__(
+        self,
+        assertion_id: str,
+        downstream_code: str | None = None,
+        component_observed: bool = False,
+    ) -> None:
         self.assertion_id = assertion_id
         self.downstream_code = downstream_code
+        self.component_observed = component_observed
         super().__init__(assertion_id)
 
 
@@ -186,6 +192,7 @@ def run_matrix(
     weak_patch,
     weak,
     expect_weak: str = "ORACLE_VIOLATED",
+    require_component: bool = False,
 ) -> None:
     row = {
         "fault_id": fault_id,
@@ -201,6 +208,8 @@ def run_matrix(
         "actual_type": "",
         "actual_code": "",
         "downstream_code": "",
+        "downstream_status": "",
+        "component_observed": False,
         "restored": False,
     }
     try:
@@ -218,14 +227,20 @@ def run_matrix(
         try:
             try:
                 weak()
+                row["weak"] = "HELD"
             except OracleMiss as exc:
                 row["actual_type"] = "OracleMiss"
                 row["actual_code"] = exc.assertion_id
                 row["downstream_code"] = exc.downstream_code or ""
-                if exc.assertion_id == assertion_id:
-                    row["weak"] = "ORACLE_VIOLATED"
-                else:
+                row["component_observed"] = exc.component_observed
+                if exc.downstream_code:
+                    row["downstream_status"] = "NON_KILL"
+                if exc.assertion_id != assertion_id:
                     row["weak"] = "ERROR"
+                elif require_component and not exc.component_observed:
+                    row["weak"] = "UNPROVEN"
+                else:
+                    row["weak"] = "ORACLE_VIOLATED"
             except DownstreamRefusal as exc:
                 row["weak"] = "NON_KILL"
                 row["actual_type"] = exc.actual_type
@@ -565,6 +580,8 @@ class _SlowClock:
 class StageAAcceptance(unittest.TestCase):
     def setUp(self) -> None:
         self.maxDiff = None
+        if guards.rss_latched() or guards.expiry_set():
+            self.fail("NOT EXECUTED: sticky stop already set")
 
     def test_handwritten_oracle_lists_exactly_13(self) -> None:
         self.assertEqual(len(HANDWRITTEN_IDS), 13)
@@ -1739,41 +1756,66 @@ class StageAAcceptance(unittest.TestCase):
         )
 
     def test_m19_uncommitted_tail_usable(self) -> None:
-        def always_committed(member: dict) -> bool:
-            del member
-            return False
+        calls: list[bool] = []
 
-        def observe() -> None:
-            try:
-                produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
-            except ContractError as exc:
-                raise DownstreamRefusal(type(exc).__name__, exc.code) from None
+        def real_tail() -> None:
+            produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
             usable = any(str(item.get("linkage", "")).endswith(":tail") for item in produced["records"])
             rejected = any(item.get("code") == "UNCOMMITTED_TAIL" for item in produced["rejections"])
             require("tail_absent_from_usable_records", (not usable) and rejected)
 
+        def weaken(member: dict) -> bool:
+            calls.append(member["committed"] is False)
+            return False
+
+        def observe() -> None:
+            calls.clear()
+            downstream = ""
+            produced = None
+            try:
+                produced = adapter.normalize_manifest(build_manifest(pinned_rows()))
+            except ContractError as exc:
+                downstream = exc.code
+            if not calls:
+                raise OracleMiss("uncommitted_predicate_returned_false", component_observed=False)
+            if produced is not None and any(
+                str(item.get("linkage", "")).endswith(":tail") for item in produced["records"]
+            ):
+                raise RuntimeError("usable tail returned")
+            if any(calls):
+                raise OracleMiss(
+                    "uncommitted_predicate_returned_false",
+                    downstream_code=downstream or None,
+                    component_observed=True,
+                )
+            require("tail_absent_from_usable_records", produced is not None)
+
         def committed_only() -> None:
+            calls.clear()
             manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
             manifest["segment"]["members"] = [
                 member for member in manifest["segment"]["members"] if member["committed"] is True
             ]
             produced = adapter.normalize_manifest(manifest)
-            require("committed_row_usable", bool(produced["records"]) and produced["rejections"] == [])
+            require(
+                "committed_row_usable",
+                bool(produced["records"]) and produced["rejections"] == [] and calls and not any(calls),
+            )
 
         run_matrix(
             fault_id="M19_UNCOMMITTED_TAIL_USABLE",
             symbol="normalized_adapter._member_is_uncommitted",
             call_path="normalize_manifest",
-            assertion_id="tail_absent_from_usable_records",
-            sentinel="UNCOMMITTED_TAIL",
-            note="true predicate weakened at the member loop; no post-return append; downstream committed check is not weakened",
-            base=observe,
-            control_patch=_SymbolPatch(adapter, "_member_is_uncommitted", always_committed),
+            assertion_id="uncommitted_predicate_returned_false",
+            sentinel="component-layer, usable-tail NOT proven",
+            note="component-layer, usable-tail NOT proven; downstream MISSING_FIELD is NON_KILL",
+            base=real_tail,
+            control_patch=_SymbolPatch(adapter, "_member_is_uncommitted", weaken),
             control=committed_only,
-            intact=observe,
-            weak_patch=_SymbolPatch(adapter, "_member_is_uncommitted", always_committed),
+            intact=real_tail,
+            weak_patch=_SymbolPatch(adapter, "_member_is_uncommitted", weaken),
             weak=observe,
-            expect_weak="NON_KILL",
+            require_component=True,
         )
 
     def test_m20_record_index_accepted(self) -> None:
@@ -1966,20 +2008,35 @@ class StageAAcceptance(unittest.TestCase):
                 return False
             return value != value or value in (float("inf"), float("-inf"))
 
-        def observe(value: object) -> None:
+        seen: list[object] = []
+
+        def weaken(value: object) -> None:
+            seen.append(value)
+
+        def observe(value: object, weakened: bool) -> None:
+            if weakened:
+                seen.clear()
             built = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
             built["segment"]["members"][0]["value"] = value
+            downstream = ""
+            produced = None
             try:
                 produced = adapter.normalize_manifest(built)
             except ContractError as exc:
+                downstream = exc.code
                 if exc.code == "NONFINITE:value":
                     return
-                if independent_nonfinite(value):
-                    raise OracleMiss("finite_guard_refusal_absent", downstream_code=exc.code)
-                raise DownstreamRefusal(type(exc).__name__, exc.code) from None
             if independent_nonfinite(value):
-                raise RuntimeError("usable nonfinite record returned")
-            require("finite_value_normalizes", produced["records"][0]["value"] == value)
+                if produced is not None:
+                    raise RuntimeError("usable nonfinite record returned")
+                if not seen:
+                    raise OracleMiss("finite_guard_refusal_absent", component_observed=False)
+                raise OracleMiss(
+                    "finite_guard_refusal_absent",
+                    downstream_code=downstream or None,
+                    component_observed=True,
+                )
+            require("finite_value_normalizes", produced is not None and produced["records"][0]["value"] == value and (not weakened or seen == [value]))
 
         run_matrix(
             fault_id="M25_NONFINITE_COERCED",
@@ -1987,13 +2044,14 @@ class StageAAcceptance(unittest.TestCase):
             call_path="_validate_member_values",
             assertion_id="finite_guard_refusal_absent",
             sentinel="NONFINITE:value",
-            note="component guard only; canonical.py frozen; a later CANONICAL_REJECT is downstream evidence, not the kill code",
-            base=lambda: observe(float("nan")),
-            control_patch=_SymbolPatch(adapter, "assert_finite_value", lambda value: None),
-            control=lambda: observe(1),
-            intact=lambda: observe(float("nan")),
-            weak_patch=_SymbolPatch(adapter, "assert_finite_value", lambda value: None),
-            weak=lambda: observe(float("nan")),
+            note="recorded normal-path call; CANONICAL_REJECT stays downstream NON_KILL",
+            base=lambda: observe(float("nan"), False),
+            control_patch=_SymbolPatch(adapter, "assert_finite_value", weaken),
+            control=lambda: observe(1, True),
+            intact=lambda: observe(float("nan"), False),
+            weak_patch=_SymbolPatch(adapter, "assert_finite_value", weaken),
+            weak=lambda: observe(float("nan"), True),
+            require_component=True,
         )
 
     def test_m26_cross_series_allowed(self) -> None:
@@ -2148,18 +2206,22 @@ class StageAAcceptance(unittest.TestCase):
         manifest = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
         real = adapter.blocked_compatibility
 
-        def claim_pass(refs: dict) -> dict:
+        def claim_pass_if_pins(refs: dict) -> dict:
             claimed = real(refs)
-            claimed["compatibility"] = "PASS"
-            claimed["compatibility_status"] = "PASS"
+            if refs.get("implementation_pins") is not None:
+                claimed["compatibility"] = "PASS"
+                claimed["compatibility_status"] = "PASS"
             return claimed
 
-        def oracle() -> None:
-            record = adapter.normalize_manifest(manifest)["records"][0]
+        def blocked(manifest_obj: dict) -> None:
+            record = adapter.normalize_manifest(manifest_obj)["records"][0]
             require(
                 "compatibility_remains_blocked",
                 record["provenance"]["compatibility_status"] == "BLOCKED" and record["provenance"]["compatibility"] != "PASS",
             )
+
+        pinned = build_manifest([row("m-a1", 0, "A", 1, 1000, 1)])
+        pinned["producer_spec_references"]["implementation_pins"] = "present-unapproved"
 
         run_matrix(
             fault_id="M30_COMPATIBILITY_PASS",
@@ -2167,13 +2229,13 @@ class StageAAcceptance(unittest.TestCase):
             call_path="to_record",
             assertion_id="compatibility_remains_blocked",
             sentinel="BLOCKED",
-            note="claim_pass has no clean BLOCKED input; control reinstalls the real function and is disclosed as that exception",
-            base=oracle,
-            control_patch=_SymbolPatch(adapter, "blocked_compatibility", real),
-            control=oracle,
-            intact=oracle,
-            weak_patch=_SymbolPatch(adapter, "blocked_compatibility", claim_pass),
-            weak=oracle,
+            note="same conditional weakening; null pins stay BLOCKED; present pins are the weak input",
+            base=lambda: blocked(manifest),
+            control_patch=_SymbolPatch(adapter, "blocked_compatibility", claim_pass_if_pins),
+            control=lambda: blocked(manifest),
+            intact=lambda: blocked(manifest),
+            weak_patch=_SymbolPatch(adapter, "blocked_compatibility", claim_pass_if_pins),
+            weak=lambda: blocked(pinned),
         )
 
     def test_m31_prefix_digest_ignored(self) -> None:
@@ -2314,7 +2376,7 @@ class StageAAcceptance(unittest.TestCase):
             call_path="fixture_cli.run_fixture->preemptive_checkpoint",
             assertion_id="over_command_writes_no_receipt",
             sentinel="INCOMPLETE:CAP_COMMAND_SECONDS",
-            note="synthetic 121s clock; wall clock was not 121s; not ceiling proof",
+            note="synthetic 121s clock; wall clock was not 121s; arm_earliest still stops; not ceiling proof",
             base=success,
             control_patch=_SymbolPatch(guards, "assert_elapsed", lambda *args, **kwargs: None),
             control=success,
@@ -2326,6 +2388,7 @@ class StageAAcceptance(unittest.TestCase):
                 ]
             ),
             weak=over,
+            expect_weak="HELD",
         )
 
     def test_cap_suite_checkpoint(self) -> None:
@@ -2476,6 +2539,78 @@ class StageAAcceptance(unittest.TestCase):
             weak=write_over,
         )
 
+    def test_w_local_due_and_limit_wiring(self) -> None:
+        self.assertEqual(guards.decide_due(-1.0, None), "INCOMPLETE:CAP_SUITE_SECONDS")
+        self.assertEqual(guards.decide_due(10.0, -1.0), "INCOMPLETE:CAP_COMMAND_SECONDS")
+        self.assertEqual(guards.decide_due(10.0, 10.0), "ARM")
+        self.assertEqual(guards.classify_limit_pair(1, 268435456), "ACCEPT")
+        self.assertEqual(guards.classify_limit_pair(268435456, 268435456), "ACCEPT")
+        self.assertEqual(guards.classify_limit_pair(1, 100), "ACCEPT")
+        self.assertEqual(guards.classify_limit_pair(10, 1), "LATCH")
+        self.assertEqual(guards.classify_limit_pair(1, 268435457), "LOWER_TO_TARGET")
+        self.assertFalse(guards.expiry_set())
+        self.assertFalse(guards.rss_latched())
+
+    def test_w_import_pair_readback(self) -> None:
+        pair = guards.recorded_limit_pair()
+        self.assertIsNotNone(pair)
+        self.assertEqual(pair, resource.getrlimit(resource.RLIMIT_AS))
+        self.assertFalse(guards.rss_latched())
+
+    def test_y_observation_delivery(self) -> None:
+        clock = guards.CommandClock()
+        guards.begin_command(clock)
+        before = guards.delivery_count()
+        guards.arm_observation()
+        caught = 0
+        for _ in range(2):
+            try:
+                time.sleep(0.2)
+            except SystemExit as exc:
+                self.assertEqual(exc.code, 4)
+                caught += 1
+        self.assertGreaterEqual(guards.delivery_count() - before, 2)
+        self.assertGreaterEqual(caught, 2)
+        self.assertFalse(guards.expiry_set())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "receipt.json"
+            with self.assertRaises(SystemExit):
+                guards.guarded_write_text(path, "{}", ROOT)
+            self.assertFalse(path.exists())
+        guards.end_observation()
+        self.assertGreater(guards.timer_delay(), 0.0)
+        self.assertLess(guards.timer_delay(), 120.0)
+        guards.discover_suite_on_cleanup()
+        self.assertFalse(guards.expiry_set())
+
+    def test_zz_terminal_rss_memory(self) -> None:
+        class _Boom(str):
+            def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+                del encoding, errors
+                raise MemoryError()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "receipt.json"
+            with self.assertRaises(guards.CapExhausted) as caught:
+                guards.guarded_write_text(path, _Boom("x"), ROOT)
+            self.assertEqual(caught.exception.code, "INCOMPLETE:CAP_RSS")
+            self.assertFalse(path.exists())
+        self.assertTrue(guards.rss_latched())
+        with self.assertRaises(guards.CapExhausted):
+            guards.enforce_before_work()
+        MATRIX.append(
+            {
+                "fault_id": "CAP_RSS_TERMINAL",
+                "weak": "INCOMPLETE",
+                "status": "INCOMPLETE",
+                "note": "real RSS latch set; no success receipt; later work refused",
+                "base": "HELD",
+                "control": "HELD",
+                "intact": "HELD",
+                "restored": True,
+            }
+        )
+
     def test_z_fault_matrix_complete(self) -> None:
         required = {
             "M01_DROP_ORDERED_PAIR",
@@ -2521,7 +2656,6 @@ class StageAAcceptance(unittest.TestCase):
         seen = {item["fault_id"] for item in MATRIX}
         self.assertTrue(required <= seen)
         non_kill = {
-            "M19_UNCOMMITTED_TAIL_USABLE",
             "M23_MISSING_FIELD_DEFAULTED",
             "CAP_EVENTS",
             "CAP_DEFINITIONS",
@@ -2533,14 +2667,33 @@ class StageAAcceptance(unittest.TestCase):
             self.assertIs(item["restored"], True, item["fault_id"])
             if item["fault_id"] in non_kill:
                 self.assertEqual(item["weak"], "NON_KILL", item)
+            elif item["fault_id"] == "CAP_COMMAND":
+                self.assertEqual(item["weak"], "HELD", item["fault_id"])
             else:
                 self.assertEqual(item["weak"], "ORACLE_VIOLATED", item["fault_id"])
                 self.assertEqual(item["actual_code"], item["assertion_id"], item["fault_id"])
         by_id = {item["fault_id"]: item for item in MATRIX}
-        self.assertEqual(by_id["M19_UNCOMMITTED_TAIL_USABLE"]["actual_code"], "MISSING_FIELD:committed")
+        self.assertEqual(by_id["M19_UNCOMMITTED_TAIL_USABLE"]["actual_code"], "uncommitted_predicate_returned_false")
+        self.assertEqual(by_id["M19_UNCOMMITTED_TAIL_USABLE"]["downstream_code"], "MISSING_FIELD:committed")
+        self.assertEqual(by_id["M19_UNCOMMITTED_TAIL_USABLE"]["downstream_status"], "NON_KILL")
+        self.assertTrue(by_id["M19_UNCOMMITTED_TAIL_USABLE"]["component_observed"])
         self.assertEqual(by_id["M23_MISSING_FIELD_DEFAULTED"]["actual_code"], "TRUNCATED_MEMBER")
         self.assertEqual(by_id["M25_NONFINITE_COERCED"]["downstream_code"], "CANONICAL_REJECT")
+        self.assertEqual(by_id["M25_NONFINITE_COERCED"]["downstream_status"], "NON_KILL")
+        self.assertTrue(by_id["M25_NONFINITE_COERCED"]["component_observed"])
         self.assertNotEqual(by_id["M25_NONFINITE_COERCED"]["actual_code"], "CANONICAL_REJECT")
+        MATRIX.append(
+            {
+                "fault_id": "CAP_SUITE_REAL",
+                "weak": "NOT EXECUTED",
+                "status": "INCOMPLETE",
+                "note": "real suite expiry: NOT EXECUTED",
+                "base": "NOT EXECUTED",
+                "control": "NOT EXECUTED",
+                "intact": "NOT EXECUTED",
+                "restored": True,
+            }
+        )
         guards.preemptive_checkpoint(None)
         self.assertLess(time.perf_counter() - SUITE_STARTED, 600)
         self.assertLess(guards.peak_rss_bytes(), 512 * 1024 * 1024)
@@ -2548,10 +2701,13 @@ class StageAAcceptance(unittest.TestCase):
 
 if __name__ == "__main__":
     outcome = unittest.main(argv=[sys.argv[0]], exit=False, verbosity=2).result
-    destination = Path("/opt/cursor/artifacts/a990-v3-narrow-proof-matrix.json")
+    destination = Path("/opt/cursor/artifacts/a990-v8-partial-matrix.json")
     destination.write_text(json.dumps({"rows": MATRIX}, indent=2) + "\n", encoding="utf-8")
     print("MATRIX_ROWS", len(MATRIX))
     print("MATRIX_PATH", destination)
+    print("REAL_SUITE_EXPIRY", "NOT EXECUTED")
+    print("A5", "OPEN_MERGE_BLOCK")
     print("SUITE_ELAPSED_SECONDS", f"{time.perf_counter() - SUITE_STARTED:.6f}")
     print("PEAK_RSS_BYTES", guards.peak_rss_bytes())
+    print("RSS_LATCH", guards.rss_latched())
     sys.exit(0 if outcome.wasSuccessful() else 1)

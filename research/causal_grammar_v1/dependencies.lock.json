@@ -16,6 +16,7 @@
     "json",
     "pathlib",
     "resource",
+    "signal",
     "sys",
     "time",
     "typing"

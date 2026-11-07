@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import resource
+import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -45,8 +46,26 @@ ENFORCEMENT_DISCLOSURE = (
     "no_cpu_seconds_cap;"
     "no_setrlimit_no_cgroup;"
     "under_limit_run_is_not_ceiling_proof;"
-    "stdlib_structural_schema_check_is_not_draft_2020_12"
+    "stdlib_structural_schema_check_is_not_draft_2020_12;"
+    "vas_recorded_pair_not_rss;"
+    "hard_limit_not_raised;"
+    "reserved_268435456_uninstalled_no_child;"
+    "one_itimer_real;"
+    "no_child_spawned"
 )
+
+_VAS_TARGET = 268435456
+_BACKSTOP_SECONDS = 0.05
+_active_clock = None
+_expiry: dict | None = None
+_observation = False
+_refused: set[int] = set()
+_rss_latch = ""
+_suppress_success = False
+_recorded_pair: tuple[int, int] | None = None
+_deliveries = 0
+_handler_installed = False
+_limit_installed = False
 
 
 def reject_prohibited(kind: str) -> None:
@@ -54,6 +73,7 @@ def reject_prohibited(kind: str) -> None:
 
 
 def assert_workers(workers: int) -> None:
+    enforce_before_work()
     if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
         raise CapExhausted("INCOMPLETE:CAP_WORKERS")
     if workers > MAX_CPU_WORKERS:
@@ -61,16 +81,19 @@ def assert_workers(workers: int) -> None:
 
 
 def assert_event_count(count: int) -> None:
+    enforce_before_work()
     if count > MAX_EVENTS:
         raise CapExhausted("INCOMPLETE:CAP_EVENTS")
 
 
 def assert_definition_count(count: int) -> None:
+    enforce_before_work()
     if count > MAX_DEFINITIONS:
         raise CapExhausted("INCOMPLETE:CAP_DEFINITIONS")
 
 
 def assert_elapsed(elapsed_seconds: float, *, suite: bool = False) -> None:
+    enforce_before_work()
     limit = MAX_SUITE_SECONDS if suite else MAX_COMMAND_SECONDS
     code = "INCOMPLETE:CAP_SUITE_SECONDS" if suite else "INCOMPLETE:CAP_COMMAND_SECONDS"
     if elapsed_seconds > limit:
@@ -78,11 +101,13 @@ def assert_elapsed(elapsed_seconds: float, *, suite: bool = False) -> None:
 
 
 def assert_receipt_size(size: int) -> None:
+    enforce_before_work()
     if size > MAX_RECEIPT_BYTES:
         raise CapExhausted("INCOMPLETE:CAP_RECEIPT_BYTES")
 
 
 def assert_rss(peak_rss_bytes: int) -> None:
+    enforce_before_work()
     if peak_rss_bytes > MAX_PEAK_RSS_BYTES:
         raise CapExhausted("INCOMPLETE:CAP_RSS")
 
@@ -103,8 +128,210 @@ def process_elapsed() -> float:
     return time.perf_counter() - _PROCESS_STARTED
 
 
+def suite_remaining() -> float:
+    return MAX_SUITE_SECONDS - (time.perf_counter() - _PROCESS_STARTED)
+
+
+def command_remaining(clock: CommandClock | None) -> float | None:
+    if clock is None:
+        return None
+    return MAX_COMMAND_SECONDS - clock.elapsed()
+
+
+def expiry_set() -> bool:
+    return _expiry is not None
+
+
+def rss_latched() -> bool:
+    return _rss_latch != ""
+
+
+def delivery_count() -> int:
+    return _deliveries
+
+
+def timer_delay() -> float:
+    return float(signal.getitimer(signal.ITIMER_REAL)[0])
+
+
+def recorded_limit_pair() -> tuple[int, int] | None:
+    return _recorded_pair
+
+
+def suppress_success() -> bool:
+    return _suppress_success
+
+
+def note_due(code: str, clock: CommandClock | None = None) -> None:
+    """Sticky due transition. Does not raise."""
+    global _expiry
+    if code == "INCOMPLETE:CAP_SUITE_SECONDS":
+        _expiry = {"code": code, "clock": None}
+    elif clock is not None:
+        _refused.add(id(clock))
+    signal.setitimer(signal.ITIMER_REAL, _BACKSTOP_SECONDS, _BACKSTOP_SECONDS)
+
+
+def _arm_snapshot(delay: float) -> None:
+    signal.setitimer(signal.ITIMER_REAL, delay, delay)
+
+
+def arm_earliest() -> None:
+    """Before-work arm. May raise. Cleanup does not call this."""
+    if _rss_latch:
+        raise CapExhausted(_rss_latch)
+    if _expiry is not None:
+        raise CapExhausted(_expiry["code"])
+    remaining = suite_remaining()
+    active = command_remaining(_active_clock)
+    if remaining <= 0:
+        note_due("INCOMPLETE:CAP_SUITE_SECONDS")
+        raise CapExhausted("INCOMPLETE:CAP_SUITE_SECONDS")
+    if active is not None and active <= 0:
+        note_due("INCOMPLETE:CAP_COMMAND_SECONDS", _active_clock)
+        raise CapExhausted("INCOMPLETE:CAP_COMMAND_SECONDS")
+    earliest = remaining if active is None else min(remaining, active)
+    _arm_snapshot(earliest)
+
+
+def enforce_before_work() -> None:
+    if _observation:
+        return
+    arm_earliest()
+
+
+def discover_suite_on_cleanup() -> None:
+    """Nonraising cleanup. One remaining read. Does not call arm_earliest."""
+    global _active_clock, _suppress_success
+    if _expiry is not None:
+        return
+    _active_clock = None
+    remaining = suite_remaining()
+    if remaining <= 0:
+        note_due("INCOMPLETE:CAP_SUITE_SECONDS")
+        _suppress_success = True
+        return
+    _arm_snapshot(remaining)
+
+
+def begin_command(clock: CommandClock) -> None:
+    global _active_clock
+    enforce_before_work()
+    _active_clock = clock
+
+
+def end_observation() -> None:
+    global _observation
+    if _expiry is not None:
+        return
+    _observation = False
+    arm_earliest()
+
+
+def arm_observation() -> None:
+    global _observation
+    _observation = True
+    _arm_snapshot(_BACKSTOP_SECONDS)
+
+
+def mark_memory_error() -> None:
+    global _rss_latch
+    _rss_latch = "INCOMPLETE:CAP_RSS"
+    if _active_clock is not None:
+        _refused.add(id(_active_clock))
+    raise CapExhausted("INCOMPLETE:CAP_RSS")
+
+
+def decide_due(suite_seconds: float, command_seconds: float | None) -> str:
+    """Local wiring. Does not assign process latches."""
+    if suite_seconds <= 0:
+        return "INCOMPLETE:CAP_SUITE_SECONDS"
+    if command_seconds is not None and command_seconds <= 0:
+        return "INCOMPLETE:CAP_COMMAND_SECONDS"
+    return "ARM"
+
+
+def classify_limit_pair(soft: int, hard: int) -> str:
+    """Local wiring. Does not call setrlimit or assign the process latch."""
+    if soft > hard:
+        return "LATCH"
+    if hard == resource.RLIM_INFINITY or hard > _VAS_TARGET:
+        return "LOWER_TO_TARGET"
+    return "ACCEPT"
+
+
+def _on_alarm(signum: int, frame: object) -> None:
+    global _deliveries
+    del signum, frame
+    _deliveries += 1
+    if _expiry is not None:
+        signal.setitimer(signal.ITIMER_REAL, _BACKSTOP_SECONDS, _BACKSTOP_SECONDS)
+        raise SystemExit(4)
+    remaining = suite_remaining()
+    active = command_remaining(_active_clock)
+    if remaining <= 0 or (active is not None and active <= 0):
+        code = "INCOMPLETE:CAP_SUITE_SECONDS" if remaining <= 0 else "INCOMPLETE:CAP_COMMAND_SECONDS"
+        note_due(code, None if remaining <= 0 else _active_clock)
+        raise SystemExit(4)
+    if _observation:
+        signal.setitimer(signal.ITIMER_REAL, _BACKSTOP_SECONDS, _BACKSTOP_SECONDS)
+        raise SystemExit(4)
+    arm_earliest()
+
+
+def install_address_limit() -> None:
+    """Once, at import. Does not raise. Does not raise a hard limit."""
+    global _recorded_pair, _rss_latch, _limit_installed
+    if _limit_installed:
+        return
+    _limit_installed = True
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    except (OSError, ValueError):
+        _rss_latch = "INCOMPLETE:CAP_RSS"
+        return
+    if not isinstance(soft, int) or not isinstance(hard, int):
+        _rss_latch = "INCOMPLETE:CAP_RSS"
+        return
+    if hard == resource.RLIM_INFINITY or hard > _VAS_TARGET:
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (_VAS_TARGET, _VAS_TARGET))
+            read_soft, read_hard = resource.getrlimit(resource.RLIMIT_AS)
+        except (OSError, ValueError, OverflowError):
+            _rss_latch = "INCOMPLETE:CAP_RSS"
+            return
+        if read_soft != _VAS_TARGET or read_hard != _VAS_TARGET:
+            _rss_latch = "INCOMPLETE:CAP_RSS"
+            return
+        _recorded_pair = (_VAS_TARGET, _VAS_TARGET)
+        return
+    if soft > hard:
+        _rss_latch = "INCOMPLETE:CAP_RSS"
+        return
+    try:
+        read_soft, read_hard = resource.getrlimit(resource.RLIMIT_AS)
+    except (OSError, ValueError):
+        _rss_latch = "INCOMPLETE:CAP_RSS"
+        return
+    if read_soft != soft or read_hard != hard:
+        _rss_latch = "INCOMPLETE:CAP_RSS"
+        return
+    _recorded_pair = (soft, hard)
+
+
+def install_suite_protection() -> None:
+    global _handler_installed
+    if _handler_installed:
+        return
+    signal.signal(signal.SIGALRM, _on_alarm)
+    _handler_installed = True
+    install_address_limit()
+    discover_suite_on_cleanup()
+
+
 def preemptive_checkpoint(clock: CommandClock | None = None) -> None:
     """Halt before the next stage and before a success receipt."""
+    enforce_before_work()
     assert_elapsed(process_elapsed(), suite=True)
     if clock is not None:
         clock.assert_open()
@@ -126,6 +353,7 @@ def reject_path(path: Path, allowed_roots: list[Path]) -> Path:
 
 
 def guarded_read_text(path: Path, allowed_roots: list[Path]) -> str:
+    enforce_before_work()
     resolved = reject_path(path, allowed_roots)
     return resolved.read_text(encoding="utf-8")
 
@@ -136,6 +364,9 @@ def guarded_read_bytes(path: Path, allowed_roots: list[Path]) -> bytes:
 
 
 def guarded_write_text(path: Path, text: str, repo_root: Path) -> None:
+    if _observation or (_active_clock is not None and id(_active_clock) in _refused):
+        raise SystemExit(4)
+    enforce_before_work()
     for part in path.parts:
         lowered = part.lower()
         if lowered in _BANNED_PARTS or lowered.startswith(_BANNED_PREFIXES):
@@ -144,9 +375,12 @@ def guarded_write_text(path: Path, text: str, repo_root: Path) -> None:
     root = repo_root.resolve()
     if resolved == root or _is_relative_to(resolved, root):
         raise ProhibitedAccess("PROHIBITED:receipt-inside-repo")
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    payload = text.encode("utf-8")
+    try:
+        payload = text.encode("utf-8")
+    except MemoryError:
+        mark_memory_error()
     assert_receipt_size(len(payload))
+    resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_bytes(payload)
 
 
@@ -267,6 +501,7 @@ def audit_sources(sources: dict[str, str], *, test_names: set[str]) -> dict[str,
         "math",
         "pathlib",
         "resource",
+        "signal",
         "sys",
         "time",
         "typing",
@@ -313,6 +548,9 @@ class CommandClock:
 
     def assert_open(self) -> None:
         assert_elapsed(self.elapsed())
+
+
+install_suite_protection()
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

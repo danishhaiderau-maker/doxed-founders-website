@@ -193,11 +193,15 @@ def main(argv: list[str] | None = None) -> int:
         "--workers",
         str(args.workers),
     ]
+    status = 0
+    code = ""
     try:
+        guards_mod.begin_command(clock)
         spec_path = Path(args.spec)
         events_path = Path(args.events)
         if spec_path.name != "tiny-spec.json" or events_path.name != "committed-events.json":
             raise ContractError("UNPINNED_FIXTURE")
+        guards_mod.enforce_before_work()
         spec = load_json_file(spec_path)
         manifest = load_json_file(events_path)
         receipt = run_fixture(
@@ -209,6 +213,36 @@ def main(argv: list[str] | None = None) -> int:
             command=command,
             clock=clock,
         )
+    except CapExhausted as exc:
+        status = 4
+        code = exc.code
+    except MemoryError:
+        try:
+            guards_mod.mark_memory_error()
+        except CapExhausted as exc:
+            status = 4
+            code = exc.code
+    except (ProhibitedAccess, ContractError) as exc:
+        status = 3
+        code = exc.code
+    finally:
+        guards_mod.discover_suite_on_cleanup()
+    if status == 3:
+        print(code, file=sys.stderr)
+        return 3
+    if (
+        status == 4
+        or guards_mod.expiry_set()
+        or guards_mod.rss_latched()
+        or guards_mod.suppress_success()
+    ):
+        if not code and guards_mod.expiry_set():
+            code = "INCOMPLETE:CAP_SUITE_SECONDS"
+        if not code and guards_mod.rss_latched():
+            code = "INCOMPLETE:CAP_RSS"
+        print(code or "INCOMPLETE:CAP_SUITE_SECONDS", file=sys.stderr)
+        return 4
+    try:
         guarded_write_text(Path(args.receipt), canonical_bytes(receipt).decode("utf-8"), REPO_ROOT)
     except CapExhausted as exc:
         print(exc.code, file=sys.stderr)
