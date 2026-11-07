@@ -1,0 +1,3023 @@
+{
+  "approved_stage_a_pin": null,
+  "compatibility": "BLOCKED",
+  "fee_scope": "EXPLICIT_PER_ACCOUNT_STATEMENT_NOT_INDEPENDENTLY_EVIDENCED_NOT_VENUE_WIDE",
+  "fee_verification_evidence": null,
+  "fixture_label": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+  "funding_charges": {
+    "amount": null,
+    "status": "EXCLUDED_NOT_MODELLED"
+  },
+  "live": "OFF",
+  "measured_depth_cost": null,
+  "measured_latency_cost": null,
+  "measured_spread_cost": null,
+  "producer_schema_redefined": false,
+  "queue_and_delay_value_class": "SYNTHETIC",
+  "r57_actual_sweep": false,
+  "raw_payload_canary": "CANARY-RAW-PAYLOAD-FIXTURE-ONLY",
+  "real_policy": {
+    "cost_threshold": null,
+    "dates": null,
+    "maxhold": null,
+    "n": null,
+    "status": "NULL/BLOCKED"
+  },
+  "realistic_v1": null,
+  "scenarios": [
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s0-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s0-obs",
+            "prefix_digest": "fixture-prefix-s0-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s0-obs",
+            "whole_segment_digest": "fixture-digest-s0-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "s0-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s0",
+          "observation_ids": [
+            "s0-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s0",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "s0-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 2500,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "90",
+              "5"
+            ]
+          ],
+          "availability_us": 3000,
+          "bids": [
+            [
+              "89",
+              "5"
+            ]
+          ],
+          "event_id": "s0-book-future",
+          "exchange_timestamp_utc": null,
+          "seq": 9,
+          "stale": false,
+          "time_us": 3000,
+          "type": "book",
+          "valid_from_us": 1000,
+          "valid_to_us": 5000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S0"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s1-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s1-obs",
+            "prefix_digest": "fixture-prefix-s1-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s1-obs",
+            "whole_segment_digest": "fixture-digest-s1-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "2"
+            ],
+            [
+              "101",
+              "3"
+            ],
+            [
+              "103",
+              "10"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "98",
+              "4"
+            ]
+          ],
+          "event_id": "s1-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 1900,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s1",
+          "observation_ids": [
+            "s1-obs"
+          ],
+          "protections": {},
+          "qty": "4",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s1",
+          "strategy_id": "fixture-strategy-B",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "asks": [
+            [
+              "111",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "110",
+              "5"
+            ]
+          ],
+          "event_id": "s1-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S1"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s2-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s2-obs",
+            "prefix_digest": "fixture-prefix-s2-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s2-obs",
+            "whole_segment_digest": "fixture-digest-s2-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "s2-book",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": true,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s2",
+          "observation_ids": [
+            "s2-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s2",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S2"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s3-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s3-obs",
+            "prefix_digest": "fixture-prefix-s3-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s3-obs",
+            "whole_segment_digest": "fixture-digest-s3-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s3",
+          "observation_ids": [
+            "s3-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s3",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S3"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s4-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s4-obs",
+            "prefix_digest": "fixture-prefix-s4-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s4-obs",
+            "whole_segment_digest": "fixture-digest-s4-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s4",
+          "limit_price": "100",
+          "observation_ids": [
+            "s4-obs"
+          ],
+          "protections": {},
+          "qty": "2",
+          "queue_ahead_qty": "3",
+          "queue_value_class": "SYNTHETIC",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s4",
+          "strategy_id": "fixture-strategy-A",
+          "style": "PASSIVE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s4-trade",
+          "price": "100",
+          "qty": "5",
+          "seq": 4,
+          "time_us": 1200,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "100",
+              "2"
+            ]
+          ],
+          "event_id": "s4-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S4"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s5-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s5-obs",
+            "prefix_digest": "fixture-prefix-s5-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s5-obs",
+            "whole_segment_digest": "fixture-digest-s5-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "cancel_ack_delay_us": 10,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s5",
+          "limit_price": "100",
+          "observation_ids": [
+            "s5-obs"
+          ],
+          "protections": {},
+          "qty": "2",
+          "queue_ahead_qty": "5",
+          "queue_value_class": "SYNTHETIC",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s5",
+          "strategy_id": "fixture-strategy-A",
+          "style": "PASSIVE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "ttl_us": 400,
+          "type": "signal"
+        },
+        {
+          "event_id": "s5-trade",
+          "price": "100",
+          "qty": "5",
+          "seq": 4,
+          "time_us": 1200,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S5"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s6-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s6-obs",
+            "prefix_digest": "fixture-prefix-s6-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s6-obs",
+            "whole_segment_digest": "fixture-digest-s6-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s6",
+          "limit_price": "100",
+          "observation_ids": [
+            "s6-obs"
+          ],
+          "protections": {},
+          "qty": "2",
+          "queue_ahead_qty": "100",
+          "queue_value_class": "SYNTHETIC",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s6",
+          "strategy_id": "fixture-strategy-A",
+          "style": "PASSIVE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s6-trade",
+          "price": "99",
+          "qty": "2",
+          "seq": 4,
+          "time_us": 1300,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "event_id": "s6-trade",
+          "price": "99",
+          "qty": "2",
+          "seq": 5,
+          "time_us": 1301,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "100",
+              "2"
+            ]
+          ],
+          "event_id": "s6-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S6"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s7-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s7-obs",
+            "prefix_digest": "fixture-prefix-s7-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s7-obs",
+            "whole_segment_digest": "fixture-digest-s7-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "cancel_ack_delay_us": 50,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s7",
+          "limit_price": "50",
+          "observation_ids": [
+            "s7-obs"
+          ],
+          "protections": {},
+          "qty": "10",
+          "queue_ahead_qty": "100000",
+          "queue_value_class": "SYNTHETIC",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s7",
+          "strategy_id": "fixture-strategy-A",
+          "style": "PASSIVE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1000,
+          "ttl_us": 90,
+          "type": "signal"
+        },
+        {
+          "event_id": "s7-trade",
+          "price": "49",
+          "qty": "4",
+          "seq": 4,
+          "time_us": 1120,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "event_id": "s7-trade",
+          "price": "49",
+          "qty": "4",
+          "seq": 5,
+          "time_us": 1121,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "ack_id": "s7:entry:arrival",
+          "event_id": "s7-dup-ack",
+          "order_id": "s7:entry",
+          "seq": 6,
+          "signal_id": "s7",
+          "time_us": 1125,
+          "type": "duplicate_ack"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "50",
+              "10"
+            ]
+          ],
+          "event_id": "s7-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S7"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s8-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s8-obs",
+            "prefix_digest": "fixture-prefix-s8-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s8-obs",
+            "whole_segment_digest": "fixture-digest-s8-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "cancel_ack_delay_us": 20,
+          "chase_after_us": 20,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s8",
+          "limit_price": "100",
+          "observation_ids": [
+            "s8-obs"
+          ],
+          "protections": {},
+          "qty": "5",
+          "queue_ahead_qty": "999999",
+          "queue_value_class": "SYNTHETIC",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s8",
+          "strategy_id": "fixture-strategy-A",
+          "style": "PASSIVE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s8-trade",
+          "price": "99",
+          "qty": "2",
+          "seq": 4,
+          "time_us": 1040,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "110",
+              "3"
+            ]
+          ],
+          "availability_us": 1055,
+          "bids": [
+            [
+              "109",
+              "5"
+            ]
+          ],
+          "event_id": "s8-book-chase",
+          "exchange_timestamp_utc": null,
+          "seq": 5,
+          "stale": false,
+          "time_us": 1055,
+          "type": "book",
+          "valid_from_us": 1055,
+          "valid_to_us": 1800,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "110",
+              "5"
+            ]
+          ],
+          "event_id": "s8-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S8"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s9-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s9-obs",
+            "prefix_digest": "fixture-prefix-s9-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s9-obs",
+            "whole_segment_digest": "fixture-digest-s9-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "2"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "2"
+            ]
+          ],
+          "event_id": "s9-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 1500,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s9",
+          "observation_ids": [
+            "s9-obs"
+          ],
+          "protections": {
+            "breakeven_arm": "110",
+            "breakeven_lock": "100",
+            "giveback": "50",
+            "hard_stop": "50",
+            "ladder": [
+              {
+                "price": "115",
+                "qty": "1"
+              }
+            ],
+            "target": "130",
+            "trail_arm": "120",
+            "trail_distance": "5"
+          },
+          "qty": "2",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s9",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s9-mark",
+          "price": "140",
+          "seq": 4,
+          "signal_id": "s9",
+          "time_us": 2000,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "140",
+              "1"
+            ]
+          ],
+          "availability_us": 2004,
+          "bids": [
+            [
+              "139",
+              "1"
+            ],
+            [
+              "138",
+              "1"
+            ]
+          ],
+          "event_id": "s9-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 5,
+          "stale": false,
+          "time_us": 2004,
+          "type": "book",
+          "valid_from_us": 2004,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S9"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s10-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s10-obs",
+            "prefix_digest": "fixture-prefix-s10-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s10-obs",
+            "whole_segment_digest": "fixture-digest-s10-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "s10-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 1500,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s10",
+          "observation_ids": [
+            "s10-obs"
+          ],
+          "protections": {
+            "breakeven_arm": "110",
+            "breakeven_lock": "100",
+            "hard_stop": "10"
+          },
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s10",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s10-arm",
+          "price": "110",
+          "seq": 4,
+          "signal_id": "s10",
+          "time_us": 2000,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "event_id": "s10-gap",
+          "price": "80",
+          "seq": 5,
+          "signal_id": "s10",
+          "time_us": 2100,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "80",
+              "1"
+            ]
+          ],
+          "availability_us": 2104,
+          "bids": [
+            [
+              "79",
+              "1"
+            ]
+          ],
+          "event_id": "s10-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 6,
+          "stale": false,
+          "time_us": 2104,
+          "type": "book",
+          "valid_from_us": 2104,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S10"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s11-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s11-obs",
+            "prefix_digest": "fixture-prefix-s11-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s11-obs",
+            "whole_segment_digest": "fixture-digest-s11-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "10"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "10"
+            ]
+          ],
+          "event_id": "s11-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 2000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s11",
+          "leverage": "100",
+          "observation_ids": [
+            "s11-obs"
+          ],
+          "posted_margin": "10",
+          "protections": {
+            "hard_stop": "90"
+          },
+          "qty": "10",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s11",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s11-mark",
+          "price": "89",
+          "seq": 4,
+          "signal_id": "s11",
+          "time_us": 3000,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "81",
+              "20"
+            ]
+          ],
+          "availability_us": 3009,
+          "bids": [
+            [
+              "80",
+              "20"
+            ]
+          ],
+          "event_id": "s11-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 5,
+          "stale": false,
+          "time_us": 3009,
+          "type": "book",
+          "valid_from_us": 3009,
+          "valid_to_us": 5000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 10,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S11"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s12-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s12-obs",
+            "prefix_digest": "fixture-prefix-s12-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s12-obs",
+            "whole_segment_digest": "fixture-digest-s12-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "10"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "10"
+            ]
+          ],
+          "event_id": "s12-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 2000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s12",
+          "leverage": "100",
+          "maintenance": {
+            "mmr": "0.005",
+            "status": "SUPPLIED"
+          },
+          "observation_ids": [
+            "s12-obs"
+          ],
+          "posted_margin": "10",
+          "protections": {},
+          "qty": "10",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s12",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s12-mark",
+          "price": "99.5",
+          "seq": 4,
+          "signal_id": "s12",
+          "time_us": 2500,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "10"
+            ]
+          ],
+          "availability_us": 2504,
+          "bids": [
+            [
+              "99",
+              "10"
+            ]
+          ],
+          "event_id": "s12-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 5,
+          "stale": false,
+          "time_us": 2504,
+          "type": "book",
+          "valid_from_us": 2504,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S12"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s13-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s13-obs",
+            "prefix_digest": "fixture-prefix-s13-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s13-obs",
+            "whole_segment_digest": "fixture-digest-s13-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "101",
+              "10"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "100",
+              "10"
+            ]
+          ],
+          "event_id": "s13-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 2000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s13",
+          "leverage": "100",
+          "maintenance": {
+            "mmr": "0.005",
+            "status": "SUPPLIED"
+          },
+          "observation_ids": [
+            "s13-obs"
+          ],
+          "posted_margin": "10",
+          "protections": {},
+          "qty": "10",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "SHORT",
+          "signal_id": "s13",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s13-mark",
+          "price": "100.5",
+          "seq": 4,
+          "signal_id": "s13",
+          "time_us": 2500,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "101",
+              "10"
+            ]
+          ],
+          "availability_us": 2504,
+          "bids": [
+            [
+              "100",
+              "10"
+            ]
+          ],
+          "event_id": "s13-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 5,
+          "stale": false,
+          "time_us": 2504,
+          "type": "book",
+          "valid_from_us": 2504,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S13"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s14-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s14-obs",
+            "prefix_digest": "fixture-prefix-s14-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s14-obs",
+            "whole_segment_digest": "fixture-digest-s14-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "s14-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 2000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s14",
+          "maintenance": {
+            "status": "UNKNOWN"
+          },
+          "observation_ids": [
+            "s14-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s14",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "s14-mark",
+          "price": "50",
+          "seq": 4,
+          "signal_id": "s14",
+          "time_us": 2500,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S14"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s15-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s15-obs",
+            "prefix_digest": "fixture-prefix-s15-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s15-obs",
+            "whole_segment_digest": "fixture-digest-s15-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "s15-book",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s15",
+          "observation_ids": [
+            "s15-obs"
+          ],
+          "protections": {},
+          "qty": "0.5",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s15",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S15"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s16-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s16-obs",
+            "prefix_digest": "fixture-prefix-s16-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s16-obs",
+            "whole_segment_digest": "fixture-digest-s16-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "0.4"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "s16-book",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s16",
+          "observation_ids": [
+            "s16-obs"
+          ],
+          "protections": {},
+          "qty": "5",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s16",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S16"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "s17-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-s17-obs",
+            "prefix_digest": "fixture-prefix-s17-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:s17-obs",
+            "whole_segment_digest": "fixture-digest-s17-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 100,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "2"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "2"
+            ]
+          ],
+          "event_id": "s17-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s17-a",
+          "observation_ids": [
+            "s17-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s17-a",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_exit_us": 5000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 2000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s17-b",
+          "observation_ids": [
+            "s17-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 4,
+          "side": "LONG",
+          "signal_id": "s17-b",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 2000,
+          "type": "signal"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 5000,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "s17-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 5000,
+          "type": "book",
+          "valid_from_us": 5000,
+          "valid_to_us": 6000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 1,
+      "min_qty": "1",
+      "scenario_id": "S17"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "strail-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-strail-obs",
+            "prefix_digest": "fixture-prefix-strail-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:strail-obs",
+            "whole_segment_digest": "fixture-digest-strail-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "strail-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 1500,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s-trail",
+          "observation_ids": [
+            "strail-obs"
+          ],
+          "protections": {
+            "trail_arm": "110",
+            "trail_distance": "5"
+          },
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-trail",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "strail-arm",
+          "price": "110",
+          "seq": 4,
+          "signal_id": "s-trail",
+          "time_us": 2000,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "event_id": "strail-hit",
+          "price": "104",
+          "seq": 5,
+          "signal_id": "s-trail",
+          "time_us": 2100,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "101",
+              "1"
+            ]
+          ],
+          "availability_us": 2104,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "strail-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 6,
+          "stale": false,
+          "time_us": 2104,
+          "type": "book",
+          "valid_from_us": 2104,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-TRAIL"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "sgive-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-sgive-obs",
+            "prefix_digest": "fixture-prefix-sgive-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:sgive-obs",
+            "whole_segment_digest": "fixture-digest-sgive-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "sgive-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 1500,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s-giveback",
+          "observation_ids": [
+            "sgive-obs"
+          ],
+          "protections": {
+            "giveback": "10"
+          },
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-giveback",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "sgive-peak",
+          "price": "120",
+          "seq": 4,
+          "signal_id": "s-giveback",
+          "time_us": 2000,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "event_id": "sgive-hit",
+          "price": "110",
+          "seq": 5,
+          "signal_id": "s-giveback",
+          "time_us": 2100,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "101",
+              "1"
+            ]
+          ],
+          "availability_us": 2104,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "sgive-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 6,
+          "stale": false,
+          "time_us": 2104,
+          "type": "book",
+          "valid_from_us": 2104,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-GIVEBACK"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "starget-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-starget-obs",
+            "prefix_digest": "fixture-prefix-starget-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:starget-obs",
+            "whole_segment_digest": "fixture-digest-starget-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "starget-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 1500,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s-target",
+          "observation_ids": [
+            "starget-obs"
+          ],
+          "protections": {
+            "target": "110"
+          },
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-target",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "starget-hit",
+          "price": "110",
+          "seq": 4,
+          "signal_id": "s-target",
+          "time_us": 2000,
+          "type": "mark",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "101",
+              "1"
+            ]
+          ],
+          "availability_us": 2004,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "starget-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 5,
+          "stale": false,
+          "time_us": 2004,
+          "type": "book",
+          "valid_from_us": 2004,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-TARGET"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "stime-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-stime-obs",
+            "prefix_digest": "fixture-prefix-stime-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:stime-obs",
+            "whole_segment_digest": "fixture-digest-stime-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "stime-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 2000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s-time",
+          "observation_ids": [
+            "stime-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-time",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_exit_us": 3000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 3000,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "stime-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 3000,
+          "type": "book",
+          "valid_from_us": 3000,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-TIME"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "sthesis-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-sthesis-obs",
+            "prefix_digest": "fixture-prefix-sthesis-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:sthesis-obs",
+            "whole_segment_digest": "fixture-digest-sthesis-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "sthesis-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 2000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s-thesis",
+          "observation_ids": [
+            "sthesis-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-thesis",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": true,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "sthesis-event",
+          "seq": 4,
+          "signal_id": "s-thesis",
+          "time_us": 2500,
+          "type": "thesis"
+        },
+        {
+          "asks": [
+            [
+              "101",
+              "1"
+            ]
+          ],
+          "availability_us": 2504,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "sthesis-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 5,
+          "stale": false,
+          "time_us": 2504,
+          "type": "book",
+          "valid_from_us": 2504,
+          "valid_to_us": 4000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-THESIS"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "sbound-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-sbound-obs",
+            "prefix_digest": "fixture-prefix-sbound-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:sbound-obs",
+            "whole_segment_digest": "fixture-digest-sbound-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1000,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "sbound-book",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1000,
+          "type": "book",
+          "valid_from_us": 1000,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 0,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s-boundary",
+          "observation_ids": [
+            "sbound-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-boundary",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1000,
+          "type": "signal"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-BOUNDARY"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "spub-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-spub-obs",
+            "prefix_digest": "fixture-prefix-spub-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:spub-obs",
+            "whole_segment_digest": "fixture-digest-spub-obs"
+          },
+          "publication_us": 5000,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 100,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 100,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "asks": [
+            [
+              "50",
+              "1"
+            ]
+          ],
+          "availability_us": 1005,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "spub-book",
+          "exchange_timestamp_utc": null,
+          "seq": 2,
+          "stale": false,
+          "time_us": 1005,
+          "type": "book",
+          "valid_from_us": 1005,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "s-pub",
+          "observation_ids": [
+            "spub-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-pub",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 1010,
+          "type": "signal"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-PUB"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 100,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "srecv-b",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-srecv-b",
+            "prefix_digest": "fixture-prefix-srecv-b",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:srecv-b",
+            "whole_segment_digest": "fixture-digest-srecv-b"
+          },
+          "publication_us": 100,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 100,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 400,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "srecv-a",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-srecv-a",
+            "prefix_digest": "fixture-prefix-srecv-a",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:srecv-a",
+            "whole_segment_digest": "fixture-digest-srecv-a"
+          },
+          "publication_us": 100,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 2,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 100,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 1000,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 400,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "srecv-early",
+          "observation_ids": [
+            "srecv-a"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "srecv-early",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_us": 500,
+          "type": "signal"
+        },
+        {
+          "asks": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "availability_us": 1105,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "srecv-book-entry",
+          "exchange_timestamp_utc": null,
+          "seq": 4,
+          "stale": false,
+          "time_us": 1105,
+          "type": "book",
+          "valid_from_us": 1105,
+          "valid_to_us": 1900,
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1100,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "0",
+          "event_id": "srecv-ok",
+          "observation_ids": [
+            "srecv-a"
+          ],
+          "protections": {},
+          "qty": "1",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 5,
+          "side": "LONG",
+          "signal_id": "srecv-ok",
+          "strategy_id": "fixture-strategy-A",
+          "style": "MARKETABLE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1100,
+          "type": "signal"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "100",
+              "1"
+            ]
+          ],
+          "event_id": "srecv-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-RECV"
+    },
+    {
+      "events": [
+        {
+          "approved_stage_a_pin": null,
+          "bar_close_us": 1000,
+          "compatibility": "BLOCKED",
+          "connection_epoch": "fixture-epoch",
+          "event_id": "soff-obs",
+          "exchange_timestamp_utc": null,
+          "fixture_only": true,
+          "linkage": {
+            "member_byte_range": [
+              0,
+              1
+            ],
+            "member_digest": "fixture-member-soff-obs",
+            "prefix_digest": "fixture-prefix-soff-obs",
+            "prefix_extent": 1,
+            "segment_member_record": "fixture-segment:fixture-member:soff-obs",
+            "whole_segment_digest": "fixture-digest-soff-obs"
+          },
+          "publication_us": 900,
+          "receive_time_utc": "2099-01-01T00:00:01Z",
+          "release_status": "first-release",
+          "schema_id": "fixture-only.normalized_observation.unpinned",
+          "seq": 1,
+          "series_id": "fixture-series",
+          "source_id": "fixture-source",
+          "source_time_us": 900,
+          "stage_a_stub": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+          "time_us": 900,
+          "type": "observation",
+          "validity": "VALID"
+        },
+        {
+          "arrival_delay_us": 10,
+          "bar_close_us": 1000,
+          "delay_value_class": "SYNTHETIC",
+          "entry_offset_bps": "100",
+          "event_id": "s-offset",
+          "observation_ids": [
+            "soff-obs"
+          ],
+          "protections": {},
+          "qty": "1",
+          "queue_ahead_qty": "0",
+          "queue_value_class": "SYNTHETIC",
+          "reference_price": "100",
+          "regime": "FIXTURE_REGIME_NOT_LIVE_POLICY",
+          "seq": 3,
+          "side": "LONG",
+          "signal_id": "s-offset",
+          "strategy_id": "fixture-strategy-A",
+          "style": "PASSIVE",
+          "thesis_cut": false,
+          "time_exit_us": 2000,
+          "time_us": 1000,
+          "type": "signal"
+        },
+        {
+          "event_id": "soff-trade",
+          "price": "98",
+          "qty": "1",
+          "seq": 4,
+          "time_us": 1300,
+          "type": "trade",
+          "value_class": "SYNTHETIC"
+        },
+        {
+          "asks": [
+            [
+              "999",
+              "1"
+            ]
+          ],
+          "availability_us": 2000,
+          "bids": [
+            [
+              "99",
+              "1"
+            ]
+          ],
+          "event_id": "soff-book-exit",
+          "exchange_timestamp_utc": null,
+          "seq": 8,
+          "stale": false,
+          "time_us": 2000,
+          "type": "book",
+          "valid_from_us": 2000,
+          "valid_to_us": 3000,
+          "value_class": "SYNTHETIC"
+        }
+      ],
+      "exit_delay_us": 5,
+      "max_concurrent": 4,
+      "min_qty": "1",
+      "scenario_id": "S-OFFSET"
+    }
+  ],
+  "schema_id": "event_replay_v1.lifecycle_fixture.unpinned",
+  "synthetic_secret_canary": "CANARY-SECRET-FIXTURE-ONLY",
+  "trading_fee": "0"
+}
