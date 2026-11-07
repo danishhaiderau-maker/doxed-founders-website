@@ -1,0 +1,67 @@
+{
+  "spec_schema": "causal_grammar.fixture_spec.v1",
+  "fixture_only": true,
+  "compatibility": "NOT_ESTABLISHED",
+  "label": "FIXTURE-ONLY / COMPATIBILITY NOT ESTABLISHED",
+  "spec_id": "tiny-spec-v1",
+  "domain": ["A", "B", "C"],
+  "bounds": {
+    "max_cpu_workers": 2,
+    "peak_rss_bytes": 536870912,
+    "per_command_seconds": 120,
+    "total_suite_seconds": 600,
+    "receipt_bytes": 8388608,
+    "max_events": 2048,
+    "max_definitions": 256,
+    "real_temporal_enumeration": "NOT_IMPLEMENTED"
+  },
+  "families": {
+    "singles": ["A", "B", "C"],
+    "unordered_pairs": [["A", "B"], ["A", "C"], ["B", "C"]],
+    "unordered_triples": [["A", "B", "C"]],
+    "ordered_pairs": [["A", "B"], ["B", "A"], ["A", "C"], ["C", "A"], ["B", "C"], ["C", "B"]]
+  },
+  "ordered_policy": {
+    "lag_ms": 100,
+    "lag_inclusive": true,
+    "expiry_ms": 1000,
+    "expiry_inclusive": false,
+    "reset": "on_consequent_or_expiry",
+    "ties": "simultaneous_does_not_fire",
+    "event_consumption": "consume_antecedent_once",
+    "retrigger": "after_reset_only",
+    "duplicate_events": "ignore_exact_duplicate_linkage",
+    "order_clock": "availability_ms"
+  },
+  "unordered_policy": {
+    "window_ms": 5000,
+    "require_all_members": true,
+    "retain_pure_interactions": true,
+    "marginal_success_irrelevant": true
+  },
+  "single_policy": {
+    "positive_signal_gt": 0,
+    "negative_signal_lt": 0,
+    "zero_is_unsuccessful_marginal": true
+  },
+  "feature": {
+    "name": "prior_mean",
+    "unit": "fixture_unit",
+    "lookback_observations": 2,
+    "lookback_unit": "count_of_strictly_prior_eligible",
+    "min_periods": 2,
+    "series_boundary": "same_series_id_only",
+    "interpolation": "prohibited",
+    "forward_fill": "prohibited",
+    "warmup": "unknown_if_insufficient",
+    "cutoffs_ms": [1000, 1500, 2000]
+  },
+  "unsupported_must_fail": true,
+  "prune_by_marginal_performance": false,
+  "producer_spec_references": {
+    "auditor_coverage_report": "3272c6425b59",
+    "collector": ["1439354678ef", "7bee784c7e13"],
+    "implementation_pins": null,
+    "compatibility_status": "BLOCKED"
+  }
+}
