@@ -276,8 +276,8 @@ def _one_gzip(data: bytes, pos: int, ledger, followed: bool) -> tuple[bytes, int
         except AuditStop:
             raise
         owned = allowance
-        ledger.check_meter()
         try:
+            ledger.check_meter()
             decompressor = zlib.decompressobj(-15)
             out = decompressor.decompress(data[index:], allowance)
         except AuditStop:

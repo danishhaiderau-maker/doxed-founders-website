@@ -136,6 +136,100 @@ class LimitTests(unittest.TestCase):
             Ledger.charge_before_alloc = real_charge
             Ledger.release_memory = real_release
 
+    def test_second_meter_stop_releases_owned_allowance_once(self):
+        from research.coverage_audit.guards import AuditStop, Ledger, TINY_SYNTHETIC_PROFILE
+        from research.coverage_audit import parsers
+        from research.coverage_audit.tests.test_synthetic_formats import BUILDERS, _gzip, _run_built
+
+        class SampleMeter:
+            def __init__(self, samples):
+                self.samples = samples
+                self.draws = 0
+
+            def cpu_ms(self):
+                return self.samples[self.draws][0]
+
+            def wall_ms(self):
+                wall = self.samples[self.draws][1]
+                self.draws += 1
+                return wall
+
+        cap = TINY_SYNTHETIC_PROFILE["cpu_ms"]
+        payload = b"event_ts,note\n1700000000000,ok\n"
+        blob = _gzip(payload)
+        charges = []
+        releases = []
+        constructed = []
+        decompressed = []
+        real_charge = Ledger.charge_before_alloc
+        real_release = Ledger.release_memory
+        real_decompressobj = parsers.zlib.decompressobj
+
+        def charge(self, nbytes):
+            real_charge(self, nbytes)
+            charges.append(nbytes)
+
+        def release(self, amount):
+            releases.append(amount)
+            return real_release(self, amount)
+
+        class _Recording:
+            def __init__(self, inner):
+                constructed.append(object())
+                self._inner = inner
+
+            def decompress(self, data, max_length=-1):
+                decompressed.append(max_length)
+                return self._inner.decompress(data, max_length)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def decompressobj(*args, **kwargs):
+            return _Recording(real_decompressobj(*args, **kwargs))
+
+        Ledger.charge_before_alloc = charge
+        Ledger.release_memory = release
+        parsers.zlib.decompressobj = decompressobj
+        try:
+            stop_meter = SampleMeter([(cap, cap), (cap + 1, 0)])
+            ledger = Ledger(TINY_SYNTHETIC_PROFILE, stop_meter)
+            baseline = ledger.memory
+            with self.assertRaises(AuditStop) as caught:
+                parsers._one_gzip(blob, 0, ledger, False)
+            self.assertEqual(caught.exception.code, "CPU_CAP")
+            self.assertEqual(stop_meter.draws, 2)
+            self.assertEqual(charges, [charges[0]])
+            self.assertEqual(releases, [charges[0]])
+            self.assertEqual(ledger.memory, baseline)
+            self.assertEqual(constructed, [])
+            self.assertEqual(decompressed, [])
+
+            charges.clear()
+            releases.clear()
+            constructed.clear()
+            decompressed.clear()
+            clean_meter = SampleMeter([(cap, cap), (cap, cap)])
+            ledger = Ledger(TINY_SYNTHETIC_PROFILE, clean_meter)
+            baseline = ledger.memory
+            out, _pos = parsers._one_gzip(blob, 0, ledger, False)
+            self.assertEqual(clean_meter.draws, 2)
+            self.assertEqual(out, payload)
+            self.assertEqual(charges, [charges[0]])
+            self.assertEqual(releases, [charges[0] - len(out)])
+            self.assertEqual(ledger.memory, baseline + len(out))
+            self.assertEqual(len(constructed), 1)
+            self.assertEqual(decompressed, [charges[0]])
+
+            single, _extra = _run_built(BUILDERS["gzip_single"]())
+            self.assertEqual(single["status"], "COMPLETE")
+            self.assertNotIn("CPU_CAP", single["reasons"])
+            self.assertNotIn("DECOMPRESSION_CAP", single["reasons"])
+        finally:
+            Ledger.charge_before_alloc = real_charge
+            Ledger.release_memory = real_release
+            parsers.zlib.decompressobj = real_decompressobj
+
 
 if __name__ == "__main__":
     unittest.main()
