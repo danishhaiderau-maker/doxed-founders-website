@@ -150,6 +150,8 @@ class Session:
         self.pending_resubscribe = False
         self.resubscribe_deadline_ns = None
         self.resubscribe_count = 0
+        # What started the in-flight resubscribe: "info_20061" or "book_gap".
+        self.resubscribe_trigger = None
         self.clock_class = "ok"
         self.clock_nonok_count = 0
         self.bad_frame_count = 0
@@ -171,6 +173,7 @@ class Session:
         self.last_trade_id = None
         self.latency_analytics_valid = True
         self.gap_count = 0
+        self.checksum_fail_count = 0
         self.last_health_ns = None
         self.header_open = {stream: False for stream in STREAMS}
         for stream in STREAMS:
@@ -261,6 +264,7 @@ class Session:
             self._stop("write_fail", "queue_full", rejected=message_text)
         parsed = json.loads(message_text)
         sub = None
+        unsubscribed_book = None
         if isinstance(parsed, dict) and parsed.get("event") == "subscribed":
             if parsed.get("symbol") not in (None, self.cfg.symbol):
                 raise StartRefused("INSTRUMENT_MISMATCH")
@@ -272,7 +276,9 @@ class Session:
             self.subs[chan_id] = parsed
             sub = parsed
         elif isinstance(parsed, dict) and parsed.get("event") == "unsubscribed":
-            self.subs.pop(parsed.get("chanId"), None)
+            dropped = self.subs.pop(parsed.get("chanId"), None)
+            if isinstance(dropped, dict) and dropped.get("channel") == "book":
+                unsubscribed_book = parsed.get("chanId")
         elif isinstance(parsed, list) and parsed:
             sub = self.subs.get(parsed[0])
         classified = classify_message(parsed, sub, self.cfg.seq_layout)
@@ -310,11 +316,44 @@ class Session:
             self.last_exchange = classified["ts_exchange_ms"]
             self.last_trade_recv = recv_utc_ns
         self._follow(rec)
+        if unsubscribed_book is not None and self.shadow.valid:
+            self._invalidate_unsubscribed_book(rec, unsubscribed_book)
+
+    def _invalidate_unsubscribed_book(self, rec: dict, chan_id) -> None:
+        """F1: a book whose channel is unsubscribed is not live. It stays invalid
+        until a resubscribe delivers a fresh snapshot. Recorded as a `maintenance`
+        gap (an existing book-invalidating cause) with `maintenance_event`."""
+        after_20061 = self.resubscribe_trigger == "info_20061" and self.resubscribe_deadline_ns is not None
+        payload = {
+            "gap_start_recv": rec["ts_recv_utc_ns"],
+            "gap_end_recv": rec["ts_recv_utc_ns"],
+            "cause": "maintenance",
+            "maintenance_event": "book_unsubscribed_after_20061" if after_20061 else "book_unsubscribed",
+            "unsubscribed_chan_id": chan_id,
+            "conn_epoch_before": self.epoch,
+            "conn_epoch_after": self.epoch,
+            "venue_seq_before": self.shadow.last_conn_seq,
+            "venue_seq_after": self.shadow.last_conn_seq,
+        }
+        gap = self._stamp_common(
+            "gap", payload, None, rec["ts_recv_utc_ns"], rec["ts_recv_mono_ns"], None, None, "raw-book"
+        )
+        self.buffer["raw-book"].append(gap)
+        self.gap_count += 1
+        self._follow(gap)
+        if self.resubscribe_deadline_ns is None:
+            # No resubscribe in flight: start the snapshot deadline so a book that is
+            # never re-snapshotted ends in a reconnect, not a silent stall.
+            self.resubscribe_trigger = "book_unsubscribed"
+            self.pending_resubscribe = True
+            self.resubscribe_deadline_ns = int(rec["ts_recv_utc_ns"]) + RESUBSCRIBE_DEADLINE_S * 1_000_000_000
 
     def _follow(self, rec: dict) -> None:
         result = step(self.shadow, rec, seq_layout=self.cfg.seq_layout, inplace=True)
         self.shadow = result.state
         cause = (result.followup or {}).get("payload", {}).get("cause") if result.followup else None
+        if cause == "checksum_fail":
+            self.checksum_fail_count += 1
         if cause in RESUBSCRIBE_CAUSES and self.resubscribe_deadline_ns is None:
             # One resubscribe in flight. Later `cs` on the invalid book does not add another.
             self.pending_resubscribe = True
@@ -414,6 +453,7 @@ class Session:
         self.seq_local = 0
         self.pending_resubscribe = False
         self.resubscribe_deadline_ns = None
+        self.resubscribe_trigger = None
         start = self.last_recv if self.last_recv is not None else recv_utc_ns
         for stream in STREAMS:
             payload = {
@@ -451,11 +491,12 @@ class Session:
         self.uncommitted_received += 1
         self.received += 1
 
-    def mark_maintenance(self, recv_utc_ns: int, recv_mono_ns: int) -> None:
+    def mark_maintenance(self, recv_utc_ns: int, recv_mono_ns: int, *, event: str = "info_20060") -> None:
         payload = {
             "gap_start_recv": recv_utc_ns,
             "gap_end_recv": recv_utc_ns,
             "cause": "maintenance",
+            "maintenance_event": event,
             "conn_epoch_before": self.epoch,
             "conn_epoch_after": self.epoch,
             "venue_seq_before": self.shadow.last_conn_seq,
@@ -746,6 +787,9 @@ class Session:
             "bad_frame_count": self.bad_frame_count,
             "clock_source": "local_receive_not_ntp",
         }
+        blocked = self._floor_block(len(dumps(record)) + 80)
+        if blocked:
+            self._stop("write_fail", blocked)
         self.accounted_bytes += self.health.append_obj(record, label="health")
         self.last_health_ns = now_ns
         return record

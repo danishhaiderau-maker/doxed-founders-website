@@ -226,7 +226,10 @@ def open_session(
     priority_result: str | None = None,
     segment_max_bytes: int | None = None,
     segment_max_age_s: int | None = None,
+    free_disk_floor_bytes: int | None = None,
 ) -> Session:
+    # A caller may raise the free-space floor, never lower it below the default.
+    floor = FREE_DISK_FLOOR_BYTES if free_disk_floor_bytes is None else max(FREE_DISK_FLOOR_BYTES, int(free_disk_floor_bytes))
     if resume and not root.exists():
         raise StartRefused("RESUME_DIR_MISSING")
     reason = output_refusal(root, repo_root=repo_root, allow_root=allow_root, resume=resume)
@@ -237,9 +240,10 @@ def open_session(
     free = _probe_free(root, disk_free_probe)
     if free is None:
         raise StartRefused("disk_free_unmeasurable")
-    if int(free) <= FREE_DISK_FLOOR_BYTES:
+    if int(free) <= floor:
         raise StartRefused("disk_floor")
     cfg = _Config()
+    cfg.free_disk_floor_bytes = floor
     cfg.output_root = str(root)
     cfg.resume = bool(resume)
     cfg.repo_root = repo_root
@@ -297,17 +301,29 @@ def _liveness_lapsed(session: Session, now: int) -> bool:
 
 
 def _resubscribe_expired(session: Session, now: int) -> bool:
+    """No fresh book snapshot by the deadline -> reconnect.
+
+    F1: this no longer requires an invalid book. After 20061 the book channel is
+    unsubscribed; if the unsubscribed reply or the new snapshot never arrives
+    (lost reply, subscribe error), a book that still looks valid is stale. Any
+    applied snapshot clears the deadline (Session._follow).
+    """
     deadline = session.resubscribe_deadline_ns
-    return deadline is not None and now > int(deadline) and not session.shadow.valid
+    return deadline is not None and now > int(deadline)
 
 
-def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages: int | None = None) -> int:
-    """Read public text messages. Yields every YIELD_EVERY so the paper engine runs."""
+def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages: int | None = None, stop=None, observe=None) -> int:
+    """Read public text messages. Yields every YIELD_EVERY so the paper engine runs.
+
+    `stop()` (optional) is checked before each read; True ends the pump with a
+    final commit (graceful stop or a day rollover). A blocked read returns within
+    the socket timeout."""
     # A new connection: channel ids, an in-flight resubscribe and a maintenance
     # pause from an earlier connection are stale.
     session.subs.clear()
     session.pending_resubscribe = False
     session.resubscribe_deadline_ns = None
+    session.resubscribe_trigger = None
     session.maintenance_pause = False
     started_mono = int(mono_ns())
     data_before = session.data_count
@@ -325,6 +341,10 @@ def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages:
             session._stop("write_fail", session.watch_reason)
         if max_messages is not None and count >= max_messages:
             break
+        if stop is not None and stop():
+            break
+        if observe is not None:
+            _disk(session, observe, session, int(clock_ns()), None)
         try:
             text = transport.recv_text()
         except FrameTooLarge:
@@ -343,6 +363,11 @@ def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages:
             raise Reconnect("closed", already=False, healthy=healthy())
         now = int(clock_ns())
         mono = int(mono_ns())
+        if stop is not None and stop():
+            # The frame was received across a day boundary or stop request. It is
+            # deliberately not applied to the old day; the next day starts with a
+            # fresh connection/snapshot. Runtime records this rollover gap.
+            break
         if isinstance(text, BadFrame):
             _disk(session, session.note_bad_json, now, mono, kind=text.kind)
             count += 1
@@ -364,17 +389,27 @@ def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages:
             # Documented advice: unsubscribe and subscribe all channels again.
             session.pending_resubscribe = False
             session.resubscribe_deadline_ns = now + RESUBSCRIBE_DEADLINE_S * 1_000_000_000
+            session.resubscribe_trigger = "info_20061"
             session.resubscribe_count += 1
-            for payload in resubscribe_all_messages(session.subs):
+            _disk(session, session.mark_maintenance, now, mono, event="info_20061")
+            payloads = resubscribe_all_messages(session.subs)
+            # Old-channel snapshots must not clear the deadline. A new subscribed
+            # acknowledgement is required before a snapshot is classified as book.
+            for chan_id in [key for key, sub in session.subs.items() if sub.get("channel") == "book"]:
+                session.subs.pop(chan_id, None)
+            for payload in payloads:
                 _send_json(transport, payload)
         elif code == 20051:
             raise Reconnect("info_20051", already=False, healthy=healthy())
         if session.pending_resubscribe:
             session.pending_resubscribe = False
             session.resubscribe_deadline_ns = now + RESUBSCRIBE_DEADLINE_S * 1_000_000_000
+            session.resubscribe_trigger = "book_gap"
             session.resubscribe_count += 1
             for payload in resubscribe_book_messages(session.subs):
                 _send_json(transport, payload)
+        if observe is not None:
+            _disk(session, observe, session, now, parsed)
         if _liveness_lapsed(session, now):
             raise Reconnect("liveness", already=True, healthy=healthy())
         if _resubscribe_expired(session, now):
@@ -422,6 +457,9 @@ def run_forever(
     max_connects: int | None = None,
     watch_interval_s: float = 1.0,
     pacer: ConnectPacer | None = None,
+    stop=None,
+    free_disk_floor_bytes: int | None = None,
+    observe=None,
 ) -> Session:
     """Deprioritize first, then connect. Network errors sleep and reconnect."""
     sleeper = sleep or time.sleep
@@ -437,6 +475,7 @@ def run_forever(
         allow_root=allow_root,
         disk_free_probe=disk_free_probe,
         priority_result=priority,
+        free_disk_floor_bytes=free_disk_floor_bytes,
     )
     watch = DiskWatch(session, watch_interval_s)
     watch.start()
@@ -447,7 +486,7 @@ def run_forever(
         opener = connect or open_public_socket
         pacing = pacer or ConnectPacer()
         try:
-            _connect_loop(session, opener, pacing, sleeper, clocks, monos, max_messages, max_connects)
+            _connect_loop(session, opener, pacing, sleeper, clocks, monos, max_messages, max_connects, stop, observe)
         except StartRefused as exc:
             # Mid-run protocol refusal: flush and journal a stop record, then exit 78.
             session.record_refusal(exc.reason)
@@ -458,10 +497,14 @@ def run_forever(
         session.release()
 
 
-def _connect_loop(session, opener, pacing, sleeper, clocks, monos, max_messages, max_connects) -> None:
+def _connect_loop(session, opener, pacing, sleeper, clocks, monos, max_messages, max_connects, stop=None, observe=None) -> None:
     attempt = 1
     connects = 0
     while max_connects is None or connects < max_connects:
+        if stop is not None and stop():
+            break
+        if observe is not None:
+            _disk(session, observe, session, int(clocks()), None)
         connects += 1
         transport = None
         cause = None
@@ -469,6 +512,8 @@ def _connect_loop(session, opener, pacing, sleeper, clocks, monos, max_messages,
         wait = pacing.wait_s(int(monos()))
         if wait > 0:
             sleeper(wait)
+            if stop is not None and stop():
+                break
         pacing.record(int(monos()))
         try:
             try:
@@ -485,9 +530,12 @@ def _connect_loop(session, opener, pacing, sleeper, clocks, monos, max_messages,
                         clock_ns=clocks,
                         mono_ns=monos,
                         max_messages=max_messages,
+                        stop=stop,
+                        observe=observe,
                     )
                     attempt = 1
-                    if max_messages is not None:
+                    if max_messages is not None or stop is not None:
+                        # pump returns normally only at max_messages or on stop().
                         break
                 except Reconnect as exc:
                     cause = exc.cause
