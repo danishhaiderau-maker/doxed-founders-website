@@ -1,0 +1,15 @@
+{
+  "schema": "ext2_import_pins_v1",
+  "files": {
+    "research/ext2_calendar.py": "d6fd4111d87e9661e4415905a0135da9bb9c49691631587aa80e5faa7899414f",
+    "research/ext2_costs.py": "cf97312151a828c0274305100df33cb9227451421508d48867c0c3d35e5be1a4",
+    "research/ext2_features.py": "52ffd1248eedd9509584ccaa616cc045348259bb2cc6335124fbce50497bb913",
+    "research/ext2_lattice.py": "58ddb20d6b9b1cf4ac97fd521358975558fcd4ca08b576ca8da5571f21dbb014",
+    "research/ext2_loader.py": "d696ec61a0b3a80dcafa915d7b36b099c19dbf4b2b683cc89fad74ba51c159de",
+    "research/ext2_pipeline.py": "bc4b74cfdea7a43dce197632a687a9283f0598b2f2bed2587b90ad76afb5f165",
+    "research/ext2_rules.py": "e387723f41cf526174c01cc857a05f51dd7ef83911fa6723daf84b60b064d0dd",
+    "research/ext2_runner.py": "2227447a72d7023591b45bf9b68925703aaccdb428c72c78bd90fc0c90da48bc",
+    "research/ext2_search.py": "5f14186a87aefb917c6f96eb5e070ef09a234bf7806b3588ed5d2071033c5ec7",
+    "research/ext2_supervisor.py": "4604b13daa1cf68451881f2b020b99acc3b865986a4bf8d1b014bb45c1403342"
+  }
+}
