@@ -332,6 +332,19 @@ def open_public_socket(socket_factory=None, ssl_wrap=None, timeout_s: float = 5)
     return PublicConnection(wrapped, host=host)
 
 
+def _windows_priority_kernel(dll=None):
+    """Bind the Win32 ABI explicitly; an injected DLL permits offline checks."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = dll if dll is not None else ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.SetPriorityClass.restype = wintypes.BOOL
+    return kernel
+
+
 def deprioritize_process(*, platform_name: str | None = None, nice=None, win_call=None) -> str:
     """Drop below the paper engine. A denied nice does not raise."""
     name = platform_name if platform_name is not None else os.name
@@ -342,9 +355,12 @@ def deprioritize_process(*, platform_name: str | None = None, nice=None, win_cal
             return "windows_below_normal"
         import ctypes
 
-        kernel = ctypes.windll.kernel32
+        kernel = _windows_priority_kernel()
         ok = kernel.SetPriorityClass(kernel.GetCurrentProcess(), priority)
-        return "windows_below_normal" if ok else "priority_denied"
+        if not ok:
+            error = ctypes.get_last_error()
+            return f"priority_denied:winerror={error}"
+        return "windows_below_normal"
     fn = nice or os.nice
     try:
         fn(10)
