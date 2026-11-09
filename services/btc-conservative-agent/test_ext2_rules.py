@@ -91,6 +91,17 @@ def test_p_min_attainable_is_computed_from_the_t_tail_per_T():
     assert fields["label"].startswith("LIMITED SCOPE / NOT A VERDICT")
 
 
+def test_gate6_method_is_a_pluggable_function(monkeypatch):  # GS v4 / board: pluggable, default HAC-t
+    stat = rules.hac_statistic(np.linspace(-1.0, 3.0, 41))
+    assert rules.primary_p_from_stat(stat) == rules.student_t_sf(stat["t"], 40)
+    monkeypatch.setitem(rules.GATE6_P_FUNCTIONS, "fake", lambda st: 0.123)
+    monkeypatch.setattr(rules, "GATE6_METHODS", rules.GATE6_METHODS + ("fake",))
+    assert rules.primary_p_from_stat(stat, "fake") == 0.123
+    untested = rules.hac_statistic(np.ones(10))
+    assert rules.primary_p_from_stat(untested, "fake") == 1.0     # untested p = 1 for every method
+    assert rules.rule_receipt_fields()["day_basis"]["hac_lag_basis"] == "trade_days"
+
+
 def test_bh_bootstrap_and_role_flags():
     assert rules.bootstrap_p_value(0, 2000) == pytest.approx(1 / 2001)
     p = np.ones(181442)

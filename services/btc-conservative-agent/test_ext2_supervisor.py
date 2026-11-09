@@ -438,3 +438,19 @@ def test_receipt_binds_frozen_files_and_carries_the_gate6_wording(tmp_path):  # 
     assert ext2_rules.GATE6_DISCLOSURE == S.GATE6_DISCLOSURE
     with pytest.raises(Ext2Stop, match="STOP_BINDING_UNKNOWN"):
         S.frozen_bindings({"rulings_log": "ab" * 32})
+
+
+
+def test_timestamps_follow_the_sydney_rule_across_the_4_april_2027_change(tmp_path):  # GS v4 8.4 / RK D3
+    from datetime import datetime, timezone
+    utc = timezone.utc
+    cases = (("2026-11-10T00:00:00", "+11:00"), ("2027-04-03T15:59:59", "+11:00"),
+             ("2027-04-03T16:00:00", "+10:00"), ("2027-10-02T15:59:59", "+10:00"),
+             ("2027-10-02T16:00:00", "+11:00"), ("2026-04-04T16:00:00", "+10:00"))
+    for text, offset in cases:
+        moment = datetime.fromisoformat(text).replace(tzinfo=utc)
+        assert S.aedt_now(moment).endswith(offset), (text, S.aedt_now(moment))
+    assert S.sydney_zone(datetime(2027, 4, 3, 16, 0, tzinfo=utc)).tzname(None) == "AEST"
+    receipt, _ = _run(tmp_path, probe=FakeProbe())
+    assert receipt["start_utc"].endswith("+00:00") and receipt["end_utc"].endswith("+00:00")
+    assert "Australia/Sydney" in receipt["timestamp_zone"]

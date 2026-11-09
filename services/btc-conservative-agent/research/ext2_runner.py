@@ -47,8 +47,10 @@ from research.ext2_supervisor import (
     UNIT_NAME,
     WORKER_RECEIPT_NAME,
     HeartbeatThread,
+    TIMESTAMP_ZONE_NOTE,
     aedt_now,
     apply_worker_thread_limits,
+    utc_now,
     bindings_complete,
     frozen_bindings,
     assert_roots,
@@ -254,7 +256,8 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         "schema": "ext2_run_receipt_v2", "live": False, "paper_only": True, "edge_claim": False,
         "mode": mode, "status": "STOP", "stop_reason": "STOP", "reason": "STOP", "combos_searched": None,
         "devices": stages, "fallback": False, "card_sha": card_sha, "card_sha12": card_sha12,
-        "pr_head": pr_head, "start_aedt": aedt_now(), "label": rules.LABEL if mode == "real" else SMOKE_LABEL,
+        "pr_head": pr_head, "start_aedt": aedt_now(), "start_utc": utc_now(),
+        "timestamp_zone": TIMESTAMP_ZONE_NOTE, "label": rules.LABEL if mode == "real" else SMOKE_LABEL,
         "fee_bp": FEE_BP, "gate6_disclosure": GATE6_DISCLOSURE,
         "gate6_method": rules.GATE6_METHOD if gate6_method is None else gate6_method,
         "pair_thesis_rule": pipeline.PAIR_THESIS_RULE if pair_thesis_rule is None else pair_thesis_rule,
@@ -404,6 +407,8 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         gates = out["gates"]
         table = pipeline.cells_table(gates, calendar)
         receipt["gate_pass_counts"] = gates["gate_pass_counts"]
+        receipt["gate_day_basis"] = pipeline.day_basis_receipt(gates, calendar)
+        receipt["path_end_per_cell"] = "cells.npz field path_end_count (report-only, not a gate)"
         receipt["leads"] = len(gates["lead_ids"])
         # Fixtures (C3b/C3c) and canary: FAIL = STOP.
         tau = int(calendar.folds[0].test_censor_ms()) - 3 * 3_600_000
@@ -442,6 +447,7 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
     receipt["gate6_disclosure"] = GATE6_DISCLOSURE
     receipt["label"] = rules.LABEL if mode == "real" else SMOKE_LABEL
     receipt["end_aedt"] = aedt_now()
+    receipt["end_utc"] = utc_now()
     receipt["wall_sec"] = round(time.time() - started, 3)
     sealed = seal_receipt(pipeline.jsonable(receipt), forbidden_substrings)
     if root_ok:

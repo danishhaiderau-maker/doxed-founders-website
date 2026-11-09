@@ -155,6 +155,9 @@ def test_smoke_run_completes_with_every_output_and_key(smoke):
     assert bind["card_v4_launch"]["pending"] is True and bind["hm_r2_receipt_merged_head"]["pending"] is True
     assert "rulings_log" not in " ".join(bind)
     assert r["thread_limits"]["max_threads"] == 8
+    assert r["gate_day_basis"]["g7_white_rc"]["basis"] == "all_test_days_zero_filled"
+    assert r["start_utc"].endswith("+00:00") and "path_end_count" in r["path_end_per_cell"]
+    assert "path_end_count" in cells.dtype.names
     assert r["dual_c2_projection_hours"] > 0 and r["projection"]["lattice_measured_fp64_on_device"] is False
     for name, digest in r["outputs"].items():
         assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest

@@ -76,6 +76,10 @@ PAUSE_NAME = "pause"
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 POSIX_NICE = 10
 AEDT = timezone(timedelta(hours=11), "AEDT")
+AEST = timezone(timedelta(hours=10), "AEST")
+TIMESTAMP_ZONE_NOTE = ("receipt timestamps in Australia/Sydney local time by the NSW rule (AEDT +11 from the "
+                       "first Sunday of October 02:00 AEST to the first Sunday of April 03:00 AEDT, else AEST "
+                       "+10), with parallel *_utc fields; windows and folds are UTC")
 _ENV_MARKERS = (
     "BITFINEX_", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "API_KEY", "APIKEY",
     "PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL", "KEY", "AUTH", "PASS", "SESSION", "COOKIE",
@@ -103,8 +107,29 @@ NETWORK_AUDIT_EVENTS = ("socket.connect", "socket.getaddrinfo", "socket.gethostb
                         "urllib.Request", "http.client.connect")
 
 
-def aedt_now() -> str:
-    return datetime.now(AEDT).isoformat(timespec="seconds")
+def _first_sunday_1600_utc_eve(year: int, month: int) -> datetime:
+    """Saturday 16:00 UTC before the first Sunday of `month`: 02:00 AEST (Oct) = 03:00 AEDT (Apr)."""
+    first = datetime(year, month, 1, tzinfo=timezone.utc)
+    sunday = first + timedelta(days=(6 - first.weekday()) % 7)
+    return sunday - timedelta(hours=8)
+
+
+def sydney_zone(moment: datetime | None = None) -> timezone:
+    """Australia/Sydney offset without tz data (Windows Python ships none): no new dependency."""
+    now = datetime.now(timezone.utc) if moment is None else moment.astimezone(timezone.utc)
+    dst_end = _first_sunday_1600_utc_eve(now.year, 4)
+    dst_start = _first_sunday_1600_utc_eve(now.year, 10)
+    return AEST if dst_end <= now < dst_start else AEDT
+
+
+def aedt_now(moment: datetime | None = None) -> str:
+    """Sydney local timestamp (AEDT +11 or AEST +10 by date; the name is kept for compatibility)."""
+    now = datetime.now(timezone.utc) if moment is None else moment.astimezone(timezone.utc)
+    return now.astimezone(sydney_zone(now)).isoformat(timespec="seconds")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def install_network_audit_hook() -> None:
@@ -809,6 +834,8 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
         "units": [],
         "wall_flag_2h": False,
         "start_aedt": aedt_now(),
+        "start_utc": utc_now(),
+        "timestamp_zone": TIMESTAMP_ZONE_NOTE,
         "receipt_written": False,
     })
     source_env = dict(os.environ if env is None else env)
@@ -960,6 +987,7 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
         receipt["resource_limits"].update(guard.attestation())
     receipt["devices"] = stages
     receipt["end_aedt"] = aedt_now()
+    receipt["end_utc"] = utc_now()
     receipt["wall_sec"] = round(time.time() - started_wall, 3)
     worker = None
     if root_created:
@@ -971,7 +999,8 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
                        "end_aedt", "wall_sec", "status", "reason", "job", "devices", "units",
                        "tree_kill", "kill_command", "child_pid", "child_started", "schema", "live",
                        "paper_only", "wall_flag_2h", "receipt_written", "r10_scrub_attestation",
-                       "resource_limits", "frozen_bindings", "gate6_disclosure"}:
+                       "resource_limits", "frozen_bindings", "gate6_disclosure", "start_utc", "end_utc",
+                       "timestamp_zone"}:
                 continue
             receipt[key] = value
         receipt["worker_run_nonce_ok"] = worker.get("run_nonce") == receipt.get("run_nonce")

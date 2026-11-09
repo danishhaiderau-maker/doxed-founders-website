@@ -94,6 +94,24 @@ def test_c3b_detects_a_planted_lookahead(run, monkeypatch):
     assert not c3b["pass"]
 
 
+def test_path_end_is_counted_per_cell_and_matches_the_total(run):  # GS v4 CL17/CL29 (report-only)
+    cal, tr, ctx, out = run
+    per_cell = out["gates"]["path_end_count"]
+    assert per_cell.shape == (P.N_CELLS,)
+    assert int(per_cell[:P.N_GRID_CELLS].sum()) == out["acc"].counts["path_end_count"]
+    table = P.cells_table(out["gates"], cal)
+    assert (table["path_end_count"] == per_cell).all()
+    basis = P.day_basis_receipt(out["gates"], cal)
+    assert basis["g6_hac_t"]["basis"].startswith("trade_days") and basis["g6_hac_t"]["hac_lag_basis"] == "trade_days"
+    assert basis["g7_white_rc"]["T"] == len(cal.test_days())
+
+
+def test_canary_docstring_matches_the_flip():  # GS v4 G5 (2)
+    doc = P.canary.__doc__
+    assert "INDEPENDENTLY" in doc and "SANITY CHECK, not a calibration" in doc
+    assert "serial dependence" in doc and "skew" in doc and "dependence structure across cells is kept" not in doc
+
+
 def test_canary_and_counts_are_reported(run):
     _, _, _, out = run
     can = P.canary(out["gates"])

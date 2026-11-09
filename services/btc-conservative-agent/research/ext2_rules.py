@@ -46,6 +46,16 @@ GATE6_METHOD = GATE6_METHOD_HAC_T
 GATE6_METHODS: tuple[str, ...] = (GATE6_METHOD_HAC_T,)
 GATE6_METHODS_ACCEPTED_FOR_LAUNCH: tuple[str, ...] = (GATE6_METHOD_HAC_T,)
 GATE6_NOMINAL_ONLY = {GATE6_METHOD_HAC_T: True}
+# GS v4 CF13 / HM: per-gate day basis (disclosed, unchanged in push 4; not reconciled).
+DAY_BASIS = {
+    "g6_hac_t": "D = test days with >= 1 trade (per-cell T = t_days); HAC lags are adjacent trade days",
+    "g8_dsr": "D = test days with >= 1 trade (per-cell T = t_days)",
+    "t_min_test_days": "applied to D (trade days)",
+    "g7_white_rc": "all test days (43 on FROZEN), zeros on no-trade days (aligned joint bootstrap)",
+    "g10_concentration": "all test days (zeros on no-trade days) and ISO weeks",
+    "p_boot_reported_only": "D = test days with >= 1 trade",
+    "hac_lag_basis": "trade_days",
+}
 C2_STUDY1_DISCLOSURE = (
     "W1 and H1 sealed but previously viewed (Study1) were previously viewed by "
     "EXT-STUDY-20261031 Study1 TRAIN (coarse grammar, N=4,720, no survivors). "
@@ -223,21 +233,33 @@ def hac_statistic(daily_net: np.ndarray) -> dict[str, Any]:
 def gate6_method_check(method: str, *, real: bool = False) -> str:
     """Config key for the gate-6 p method. Unknown = STOP. A method not accepted for
     launch (null-sim acceptance + card v4 board PASS) is refused in a real run."""
-    if method not in GATE6_METHODS:
+    if method not in GATE6_METHODS or method not in GATE6_P_FUNCTIONS:
         raise Ext2Stop("STOP_GATE6_METHOD")
     if real and method not in GATE6_METHODS_ACCEPTED_FOR_LAUNCH:
         raise Ext2Stop("STOP_GATE6_METHOD_NOT_ACCEPTED")
     return method
 
 
+def _p_hac_t_student(stat: Mapping[str, Any]) -> float:
+    """Shipped gate-6 reference: one-sided Student-t, df = T-1 (nominal-level)."""
+    return float(student_t_sf(stat["t"], stat["T"] - 1))
+
+
+# Pluggable gate-6 p functions (GS v4 / board): method name -> f(hac_statistic result) -> p.
+# Every method receives the same pinned hac_statistic output; untested cells never reach it
+# (p = 1), and N / q / the BH denominator are not touched by any method.
+GATE6_P_FUNCTIONS: dict[str, Any] = {GATE6_METHOD_HAC_T: _p_hac_t_student}
+
+
 def primary_p_from_stat(stat: Mapping[str, Any], method: str | None = None) -> float:
-    """The one place the primary p is formed. Default: Student-t upper tail, df = T-1
-    (nominal-level, see GATE6_DISCLOSURE); untested -> UNTESTED_P (1.0)."""
+    """The one place the primary p is formed: dispatches to the configured gate-6 method
+    (default: Student-t, df = T-1, nominal-level, see GATE6_DISCLOSURE).
+    Untested -> UNTESTED_P (1.0) for every method. The canary calls this same function."""
     chosen = GATE6_METHOD if method is None else method
     gate6_method_check(chosen)
     if not stat["testable"]:
         return UNTESTED_P
-    return float(student_t_sf(stat["t"], stat["T"] - 1))
+    return float(GATE6_P_FUNCTIONS[chosen](stat))
 
 
 def hac_onesided_t_pvalue(daily_net: np.ndarray) -> float:
@@ -585,6 +607,7 @@ def rule_receipt_fields() -> dict[str, Any]:
         "gate6_methods_accepted_for_launch": list(GATE6_METHODS_ACCEPTED_FOR_LAUNCH),
         "gate6_disclosure": GATE6_DISCLOSURE,
         "gate6_nominal_only": GATE6_NOMINAL_ONLY.get(GATE6_METHOD, True),
+        "day_basis": DAY_BASIS,
         "hac_parametric": True,
         "newey_west_lag_rule": NEWEY_WEST_LAG_RULE,
         "t_min_test_days": T_MIN_TEST_DAYS,

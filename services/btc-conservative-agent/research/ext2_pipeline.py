@@ -289,6 +289,7 @@ class Accumulator:
         self.daily_n = np.zeros((c, n_test_days), dtype=np.int32)
         self.val_net = np.zeros((c, n_folds))
         self.val_n = np.zeros((c, n_folds), dtype=np.int64)
+        self.path_end = np.zeros(c, dtype=np.int64)  # per-cell PATH_END (code 8), report-only
         self.counts = {"liquidation_count": 0, "censored_close_count": 0, "path_end_count": 0,
                        "dropped_count": 0, "trades_oof": 0, "trades_val": 0}
 
@@ -313,6 +314,7 @@ class Accumulator:
             self.counts["liquidation_count"] += int(np.sum(code == 5))
             self.counts["censored_close_count"] += int(np.sum(code == 6))
             self.counts["path_end_count"] += int(np.sum(code == 8))
+            self.path_end += np.bincount(cell[code == 8], minlength=c)
             self.counts["trades_oof"] += int(cell.size)
         else:
             self.val_net[:, fold] += np.bincount(cell, weights=net, minlength=c)
@@ -671,6 +673,30 @@ def evaluate_gates(ctx, segments, base, acc: Accumulator, packages: Mapping[str,
                              ((1, g1), (2, g2), (3, g3), (4, g4), (5, g5), (6, g6), (7, g7), (8, g8),
                               (9, g9), (10, g10), (11, g11))},
         "daily": daily, "daily_n": daily_n,
+        "path_end_count": np.concatenate([acc.path_end, [_package_path_end(packages[name]["trades"])
+                                                          for name in ("S1", "S2")]]),
+    }
+
+
+def _package_path_end(trades: Mapping[str, np.ndarray] | None) -> int:
+    return 0 if trades is None or "code" not in trades else int(np.sum(np.asarray(trades["code"]) == 8))
+
+
+def day_basis_receipt(gates: Mapping[str, Any], calendar: Calendar) -> dict[str, Any]:
+    """GS v4 CF13: per-gate day basis and T, recorded (behaviour unchanged in push 4)."""
+    tested = np.asarray(gates["tested"], dtype=bool)
+    t_days = np.asarray(gates["t_days"])[tested]
+    t_stats = None if t_days.size == 0 else {"min": int(t_days.min()), "median": float(np.median(t_days)),
+                                              "max": int(t_days.max()), "tested_cells": int(t_days.size)}
+    all_days = len(calendar.test_days())
+    return {
+        "g6_hac_t": {"basis": "trade_days (test days with >= 1 trade)", "T": "per cell = t_days (cells.npz)",
+                     "T_tested": t_stats, "hac_lag_basis": "trade_days", "t_min_test_days": rules.T_MIN_TEST_DAYS},
+        "g8_dsr": {"basis": "trade_days", "T": "per cell = t_days (cells.npz)", "T_tested": t_stats},
+        "g7_white_rc": {"basis": "all_test_days_zero_filled", "T": all_days},
+        "g10_concentration": {"basis": "all_test_days_zero_filled", "T": all_days},
+        "p_boot": {"basis": "trade_days", "role": "reported_only"},
+        "note": "unchanged in push 4 (HM: both bases correct; not reconciled); disclosed per GS v4 CF13",
     }
 
 
@@ -682,7 +708,7 @@ CELL_DTYPE = np.dtype([
     ("white_rc_p", np.float64), ("dsr", np.float64), ("n_eff", np.float64), ("ci_low_bp", np.float64),
     ("ci_high_bp", np.float64), ("max_day_share", np.float64), ("max_week_share", np.float64),
     ("median_hold_s", np.float64), ("is_lead", np.bool_), ("net_stress_1_5_sum_bp", np.float64),
-    ("net_stress_tick_sum_bp", np.float64),
+    ("net_stress_tick_sum_bp", np.float64), ("path_end_count", np.int64),
 ])
 
 
@@ -716,7 +742,8 @@ def cells_table(gates: Mapping[str, Any], calendar: Calendar) -> np.ndarray:
                             ("n_eff", "n_eff"), ("ci_low_bp", "ci_low"), ("ci_high_bp", "ci_high"),
                             ("max_day_share", "max_day_share"), ("max_week_share", "max_week_share"),
                             ("median_hold_s", "median_hold_s"), ("is_lead", "is_lead"),
-                            ("net_stress_1_5_sum_bp", "stress_sum"), ("net_stress_tick_sum_bp", "tick_sum")):
+                            ("net_stress_1_5_sum_bp", "stress_sum"), ("net_stress_tick_sum_bp", "tick_sum"),
+                            ("path_end_count", "path_end_count")):
         table[field] = gates[key_name]
     return table
 
@@ -874,9 +901,12 @@ def fixture_c3c(segments: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def canary(gates: Mapping[str, Any], seed: int = rules.WHITE_RC_SEED, backend=None,
            gate6_method: str | None = None) -> dict[str, Any]:
     """Shuffled-label canary on a sign-randomised daily panel. Each (cell, day) net
-    sign is flipped INDEPENDENTLY at random, so the label/edge link is destroyed and
-    cross-cell dependence is NOT kept (flipping one sign per day shared by every cell
-    would keep it; HM R2 deec587f non-blocking). The daily-panel LEAD gates are re-run on it:
+    sign is flipped INDEPENDENTLY at random. This destroys the label/edge link AND
+    destroys cross-cell dependence, within-cell serial dependence and skew (sign
+    flipping symmetrises each cell's series). It is a SANITY CHECK, not a calibration
+    test: it cannot detect gate-6 failure modes from serial dependence or skew
+    (GS v4 G5 / HM). It calls the same gate-6 function (rules.primary_p_from_stat with
+    the method in force) as the main path. The daily-panel LEAD gates are re-run on it:
     gate 2 (net > 0), gate 6 (BH over N on the HAC p), gate 7 (White RC) and
     gate 8 (DSR vs SR0 with N trials). Any canary LEAD (> 0) = FAIL = STOP.
     BH-only rejections are reported separately (diagnostic, not the pass rule)."""
@@ -917,8 +947,9 @@ def canary(gates: Mapping[str, Any], seed: int = rules.WHITE_RC_SEED, backend=No
                                 "t": t_info.get(int(c), (None, None))[1], "p": float(p[c]),
                                 "white_rc_p": float(rc["p"][c])} for c in bh_only[:20]],
             "pass": not lead_cells, "gates_applied": ["g2", "g6", "g7", "g8"],
-            "note": "sign-randomised daily panel (independent per cell-day; cross-cell dependence not kept); "
-                    "BH over N, White RC and DSR re-run on the canary panel",
+            "note": "sign-randomised daily panel (independent per cell-day; destroys cross-cell and serial "
+                    "dependence and skew); sanity check, not a calibration test; BH over N, White RC and DSR "
+                    "re-run on the canary panel; bh_only_rejections are diagnostic, never evidence",
             "gate6_disclosure": rules.GATE6_DISCLOSURE}
 
 
