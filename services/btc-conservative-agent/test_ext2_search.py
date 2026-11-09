@@ -93,8 +93,22 @@ def test_gap_through_liquidation_books_the_worse_print():
                            np.array([1.0]), np.array([10**15]))
     res = LT.resolve(base, np.zeros(54, dtype=int), np.arange(54), np.full(54, 3), mts, mild,
                      np.full(54, 500), np.full(54, 100.0), np.full(54, 1.0))
-    assert set(res["code"].tolist()) <= {4, 3, 6}
+    assert set(res["code"].tolist()) <= {4, 3, 8}  # data ends before the boundary: path end (8)
     assert 5 not in res["code"]
+
+
+def test_path_end_is_produced_when_the_data_ends_before_the_boundary():  # HM R2 deec587f path_end
+    mts = np.array([1_000, 2_000, 3_000], dtype=np.int64)
+    price = np.array([100.0, 100.01, 100.02])
+    for boundary, code in ((2_500, 6), (10**15, 8)):
+        base = LT.compute_base(LT.PrintPath(mts, price, LT.NumpyBackend()), np.array([500]), np.array([100.0]),
+                               np.array([1.0]), np.array([boundary]))
+        res = LT.resolve(base, np.zeros(54, dtype=int), np.arange(54), np.full(54, 3), mts, price,
+                         np.full(54, 500), np.full(54, 100.0), np.full(54, 1.0))
+        ref = LT.reference_scan(mts, price, np.zeros(3, dtype=bool), entry_price=100.0, entry_mts=500, side=1.0,
+                                boundary=boundary)
+        late = ref["code"] == code
+        assert late.any() and (res["code"][late] == code).all()
 
 
 def test_censor_closes_at_the_last_print_before_the_boundary_and_never_reads_past_it():

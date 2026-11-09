@@ -133,7 +133,28 @@ def test_smoke_run_completes_with_every_output_and_key(smoke):
                       "finished_aedt": marker["finished_aedt"]}
     cells = np.load(out / "cells.npz")["cells"]
     assert cells.shape == (181442,)
-    assert r["lattice"]["dtype"] == "float64" and r["fixtures"] == {"C3b": True, "C3c": True, "canary": True}
+    assert r["lattice"]["dtype"] == "float64"
+    assert r["fixtures"] == {"C3b": True, "C3b_lattice": True, "C3c": True, "canary": True}
+    # Push 4: CPU phases after the lattice are their own CPU units (600 s cap), not the last GPU chunk.
+    names = [(u["name"], u["device"]) for u in r["units"]]
+    last_chunk = max(i for i, (n, _) in enumerate(names) if n.startswith("lattice_chunk_"))
+    assert names[last_chunk + 1:last_chunk + 4] == [("cell_chains", "cpu"), ("switching", "cpu"), ("gates", "cpu")]
+    # RK D1 interim wording, D3 f6 disclosure, D4 frozen bindings, B13 thread attestation.
+    assert r["gate6_disclosure"] == "gate 6 nominal-level; gate 7 White RC binding"
+    assert r["gate6_method"] == "hac_t_student_T1" and r["gate6_nominal_only"] is True
+    assert r["pair_thesis_rule"] == "lowest_id"
+    f6 = r["f6_eligibility_disclosure"]
+    assert f6["feature"] == "f6 large_print_L" and "untested, p = 1" in f6["rule"]
+    assert len(f6["eligible_share_by_L_and_fold"]) == 4
+    assert all(set(v) == {"F1", "F2", "F3", "F4"} for v in f6["eligible_share_by_L_and_fold"].values())
+    bind = {b["name"]: b for b in r["frozen_bindings"]}
+    assert bind["card_v3"]["sha256"] == S.CARD_SHA_V3
+    assert bind["build_spec_addendum_v3"]["sha256"].startswith("7a18903b")
+    assert bind["rk_ruling_pr996_gate6_h25_receipt"]["sha256"].startswith("9ac982877fbc")
+    assert bind["push_card_3"]["sha256"].startswith("46f2868d42fd")
+    assert bind["card_v4_launch"]["pending"] is True and bind["hm_r2_receipt_merged_head"]["pending"] is True
+    assert "rulings_log" not in " ".join(bind)
+    assert r["thread_limits"]["max_threads"] == 8
     assert r["dual_c2_projection_hours"] > 0 and r["projection"]["lattice_measured_fp64_on_device"] is False
     for name, digest in r["outputs"].items():
         assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest
@@ -166,3 +187,77 @@ def test_supervised_smoke_worker_end_to_end(tmp_path):
     assert seqs == sorted(seqs)
     _keys_present(receipt)
     assert receipt["label"] == R.SMOKE_LABEL
+    # B13: the parent set the thread env; the worker measured it (<= 8) and the child ran BelowNormal.
+    assert receipt["worker_thread_limits"]["ok"] is True
+    assert set(receipt["worker_thread_limits"]["thread_env"].values()) == {"8"}
+    assert receipt["resource_limits"]["applied"] is True and receipt["resource_limits"]["priority"]["ok"] is True
+
+
+class _FakeCudaBackend(NumpyBackend):
+    device = "cuda:0"
+
+
+def test_real_mode_needs_every_frozen_binding_before_touching_data(tmp_path, monkeypatch):  # RK D4
+    seal = tmp_path / "h1.seal"
+    seal.write_text("seal")
+    monkeypatch.setattr(R, "H1_SEAL_SHA", hashlib.sha256(b"seal").hexdigest())
+    kw = dict(run_nonce="n", cuda_check=lambda: True, backend=_FakeCudaBackend(),
+              prestart=lambda b: {"ok": True}, h1_seal_path=seal)
+    data, out = _roots(tmp_path / "a")
+    r = R.run_ext2(data_root=data, output_root=out, **kw)
+    assert r["stop_reason"] == "STOP_BINDING_MISSING"
+    pending = sorted(b["name"] for b in r["frozen_bindings"] if b["pending"])
+    assert pending == ["card_v4_launch", "hm_r2_receipt_merged_head", "push_card_4"]
+    fill = {name: "ab" * 32 for name in pending}
+    data, out = _roots(tmp_path / "b")
+    r = R.run_ext2(data_root=data, output_root=out, binding_overrides=fill, **kw)
+    assert r["stop_reason"] == "STOP_MANIFEST"  # bindings complete -> next gate
+    data, out = _roots(tmp_path / "c")
+    r = R.run_ext2(data_root=data, output_root=out, binding_overrides={"card_v4_launch": "short"}, **kw)
+    assert r["stop_reason"] == "STOP_BINDING_SHA"
+
+
+def test_unknown_pair_rule_or_gate6_method_stops(tmp_path):  # RK D1 / D2 config keys
+    data, out = _roots(tmp_path / "a")
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", mode="smoke", pair_thesis_rule="first")
+    assert r["stop_reason"] == "STOP_PAIR_THESIS_RULE"
+    data, out = _roots(tmp_path / "b")
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", mode="smoke", gate6_method="iid_t")
+    assert r["stop_reason"] == "STOP_GATE6_METHOD"
+
+
+def test_a_failed_c3b_lattice_fixture_stops_the_run(tmp_path, monkeypatch):  # HM R2 non-blocking: wired, enforced
+    real = R.pipeline.fixture_c3b_lattice_on_run
+    seen = []
+
+    def failing(*args, **kwargs):
+        res = dict(real(*args, **kwargs))
+        seen.append(res["pass"])
+        res["pass"] = False
+        return res
+    monkeypatch.setattr(R.pipeline, "fixture_c3b_lattice_on_run", failing)
+    cal = small_calendar()
+    data, out = _roots(tmp_path)
+    r = R.run_ext2(data_root=data, output_root=out, mode="smoke", calendar=cal,
+                   trades=synth_trades(cal.days(), seed=7), run_nonce="n")
+    assert seen == [True]
+    assert r["status"] == "STOP" and r["stop_reason"] == "STOP_FIXTURE_C3"
+    assert r["fixtures"]["C3b_lattice"] is False and not (out / "COMPLETE").exists()
+
+
+def test_unit_announcer_pauses_new_work_while_the_pause_file_exists(tmp_path):  # B13
+    pause = tmp_path / S.PAUSE_NAME
+    pause.write_text("{}")
+    waits = []
+
+    def fake_sleep(sec):
+        waits.append(sec)
+        if len(waits) == 3:
+            pause.unlink()
+    ann = R.UnitAnnouncer(tmp_path, sleep=fake_sleep)
+    ann("load", "cpu")
+    assert [(u["name"], u["device"]) for u in ann.log] == [("ram_pause", "pause"), ("load", "cpu")]
+    assert len(waits) == 3 and ann.pauses == 1
+    assert json.loads((tmp_path / S.UNIT_NAME).read_text())["name"] == "load"
+    ann("features", "cpu")
+    assert ann.pauses == 1 and ann.log[-1]["name"] == "features"

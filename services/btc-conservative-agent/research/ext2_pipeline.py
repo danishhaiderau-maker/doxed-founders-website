@@ -56,6 +56,13 @@ S1_CELL = N_GRID_CELLS
 S2_CELL = N_GRID_CELLS + 1
 N_CELLS = N_GRID_CELLS + 2  # 181442
 SWITCH_REGIMES = (1, 2, 3)
+# RK D2 (10 Nov): which feature's thesis cut a PAIR uses is undefined in card v3 / A10.
+# Hook only; Strategist pre-registers one choice in v4. Default = the shipped rule.
+#   lowest_id: the pair's lower feature id (shipped behaviour)
+#   either:    cut at the first print where EITHER feature's thesis has crossed back
+#   both:      cut at the first print where BOTH have crossed back (the later of the two)
+PAIR_THESIS_RULES = ("lowest_id", "either", "both")
+PAIR_THESIS_RULE = "lowest_id"
 
 
 def key_id(member: int, li: int, pi: int, mi: int, gi: int) -> int:
@@ -163,6 +170,25 @@ def member_directions(ctx: Mapping[str, Any], member: int, li: int, pi: int, bar
         e = ctx["trig"][(other, li)][bars, pi]
         d = np.where(d == e, d, 0).astype(np.int8)
     return d
+
+
+def pair_thesis_rule_check(rule: str) -> str:
+    if rule not in PAIR_THESIS_RULES:
+        raise Ext2Stop("STOP_PAIR_THESIS_RULE")
+    return rule
+
+
+def thesis_print_index(th_all: np.ndarray, member: np.ndarray, li: np.ndarray, di: np.ndarray, bar: np.ndarray,
+                       rule: str | None = None) -> np.ndarray:
+    """Thesis-cut print index per chain (singles: their own feature; pairs: RK D2 hook)."""
+    chosen = pair_thesis_rule_check(PAIR_THESIS_RULE if rule is None else rule)
+    first = th_all[_FIRST_FEATURE[member], li, di, bar]
+    if chosen == "lowest_id":
+        return first
+    last = th_all[_LAST_FEATURE[member], li, di, bar]
+    if chosen == "either":
+        return np.minimum(first, last)
+    return np.maximum(first, last)
 
 
 def build_segments(ctx: Mapping[str, Any], calendar: Calendar = FROZEN) -> list[dict[str, Any]]:
@@ -370,6 +396,7 @@ def run_chains(ctx: Mapping[str, Any], seg: Mapping[str, Any], base: Mapping[str
     ent = seg["entries"]
     fric = float(seg["friction_bp_per_side"])
     th_all = ctx["thesis_idx"]
+    thesis_rule = ctx.get("pair_thesis_rule", PAIR_THESIS_RULE)
     records: list[dict[str, np.ndarray]] = []
     buffered: list[dict[str, np.ndarray]] = []
     buffered_n = 0
@@ -382,11 +409,10 @@ def run_chains(ctx: Mapping[str, Any], seg: Mapping[str, Any], base: Mapping[str
         member = key // (N_L * N_P * N_M * N_G)
         li = (key // (N_P * N_M * N_G)) % N_L
         mi = (key // N_G) % N_M
-        first_feat = _FIRST_FEATURE[member]
         trigger_dir = side * np.where(mi == 0, 1.0, -1.0)
         di = np.where(trigger_dir > 0, 0, 1)
         bar = bars[u]
-        th = th_all[first_feat, li, di, bar]
+        th = thesis_print_index(th_all, member, li, di, bar, thesis_rule)
         ev = int(seg["event_offset"]) + np.where(side > 0, 0, m) + u
         e_mts = ent["entry_mts"][u]
         e_px = ent["entry_price"][u]
@@ -429,6 +455,7 @@ def run_chains(ctx: Mapping[str, Any], seg: Mapping[str, Any], base: Mapping[str
 
 
 _FIRST_FEATURE = np.asarray([members[0] for members in MEMBERS], dtype=np.int64)
+_LAST_FEATURE = np.asarray([members[-1] for members in MEMBERS], dtype=np.int64)
 
 
 def _flush(acc: Accumulator, seg: Mapping[str, Any], buffered: list[dict[str, np.ndarray]]) -> None:
@@ -568,12 +595,13 @@ def evaluate_gates(ctx, segments, base, acc: Accumulator, packages: Mapping[str,
     t_count = (daily_n > 0).sum(axis=1)
     tested = np.zeros(N_CELLS, dtype=bool)
     sr = np.full(N_CELLS, np.nan)
+    gate6_method = ctx.get("gate6_method", rules.GATE6_METHOD)
     for cell in np.flatnonzero(t_count >= rules.T_MIN_TEST_DAYS):
         series = daily[cell][daily_n[cell] > 0]
         stat = rules.hac_statistic(series)
         if stat["testable"]:
             tested[cell] = True
-            p_hac[cell] = rules.primary_p_from_stat(stat)
+            p_hac[cell] = rules.primary_p_from_stat(stat, gate6_method)
             sst = rules.sharpe_stats(series)
             if sst is not None:
                 sr[cell] = sst["sr"]
@@ -799,6 +827,37 @@ def fixture_c3b_lattice(path_mts: np.ndarray, path_price: np.ndarray, base_fn, e
     return {"fixture": "C3b-lattice", "mismatches": bad, "pass": not bad}
 
 
+def fixture_c3b_lattice_on_run(ctx: Mapping[str, Any], segments: Sequence[Mapping[str, Any]], backend,
+                               tau_mts: int, max_events: int = 4096) -> dict[str, Any]:
+    """Runs fixture_c3b_lattice on the run's own print path with up to `max_events`
+    valid entries of the first segment (both sides). FAIL = STOP (runner)."""
+    trades = ctx["trades"]
+    ent = segments[0]["entries"]
+    pick = np.flatnonzero(ent["valid"] & (ent["entry_mts"] < int(tau_mts)))[: max_events // 2]
+    em = np.concatenate([ent["entry_mts"][pick]] * 2)
+    events = {"mts": em, "price": np.concatenate([ent["entry_price"][pick]] * 2),
+              "side": np.concatenate([np.ones(pick.size), -np.ones(pick.size)]),
+              "boundary": np.full(em.shape[0], int(segments[0]["boundary_mts"]), dtype=np.int64)}
+
+    def base_fn(m, pr, ev):
+        return compute_base(PrintPath(m, pr, backend), ev["mts"], ev["price"], ev["side"], ev["boundary"])
+    out = fixture_c3b_lattice(trades["mts"], trades["price"], base_fn, events, tau_mts)
+    out["events_checked"] = int(em.shape[0])
+    return out
+
+
+def f6_eligibility_disclosure(dry: Mapping[str, Any]) -> dict[str, Any]:
+    """RK D3: f6 (large_print_L) eligibility per L and fold (structural ~5% in F1 from the
+    double 30-day window). Ineligible cells stay in N as untested at p = 1; the 95%
+    threshold is frozen and the span is never shortened."""
+    member = dry.get("per_member", {}).get("large_print_L", {})
+    shares = {lb: {fold: row["eligible_share"] for fold, row in entry["by_fold"].items()}
+              for lb, entry in member.items()}
+    return {"feature": "f6 large_print_L", "eligible_share_by_L_and_fold": shares,
+            "rule": "ineligible cells stay in N (181,442) as untested, p = 1; 95% threshold frozen; "
+                    "30-day span never shortened (RK D3 / O2)"}
+
+
 def fixture_c3c(segments: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """C3c: every valid entry print is strictly after bar close + latency (1 s)."""
     violations = 0
@@ -812,10 +871,12 @@ def fixture_c3c(segments: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {"fixture": "C3c", "entries_checked": checked, "violations": violations, "pass": violations == 0}
 
 
-def canary(gates: Mapping[str, Any], seed: int = rules.WHITE_RC_SEED, backend=None) -> dict[str, Any]:
-    """Shuffled-label canary on a sign-randomised daily panel (each cell-day's net
-    sign flipped at random; the label/edge link is destroyed, the dependence
-    structure across cells is kept). The daily-panel LEAD gates are re-run on it:
+def canary(gates: Mapping[str, Any], seed: int = rules.WHITE_RC_SEED, backend=None,
+           gate6_method: str | None = None) -> dict[str, Any]:
+    """Shuffled-label canary on a sign-randomised daily panel. Each (cell, day) net
+    sign is flipped INDEPENDENTLY at random, so the label/edge link is destroyed and
+    cross-cell dependence is NOT kept (flipping one sign per day shared by every cell
+    would keep it; HM R2 deec587f non-blocking). The daily-panel LEAD gates are re-run on it:
     gate 2 (net > 0), gate 6 (BH over N on the HAC p), gate 7 (White RC) and
     gate 8 (DSR vs SR0 with N trials). Any canary LEAD (> 0) = FAIL = STOP.
     BH-only rejections are reported separately (diagnostic, not the pass rule)."""
@@ -831,7 +892,7 @@ def canary(gates: Mapping[str, Any], seed: int = rules.WHITE_RC_SEED, backend=No
     for cell in np.flatnonzero(gates["tested"]):
         series = flipped[cell][daily_n[cell] > 0]
         stat = rules.hac_statistic(series)
-        p[cell] = rules.primary_p_from_stat(stat)
+        p[cell] = rules.primary_p_from_stat(stat, gate6_method)
         if stat["testable"]:
             tested[cell] = True
             t_info[int(cell)] = (stat["T"], stat["t"])
@@ -856,7 +917,9 @@ def canary(gates: Mapping[str, Any], seed: int = rules.WHITE_RC_SEED, backend=No
                                 "t": t_info.get(int(c), (None, None))[1], "p": float(p[c]),
                                 "white_rc_p": float(rc["p"][c])} for c in bh_only[:20]],
             "pass": not lead_cells, "gates_applied": ["g2", "g6", "g7", "g8"],
-            "note": "sign-randomised daily panel; BH over N, White RC and DSR re-run on the canary panel"}
+            "note": "sign-randomised daily panel (independent per cell-day; cross-cell dependence not kept); "
+                    "BH over N, White RC and DSR re-run on the canary panel",
+            "gate6_disclosure": rules.GATE6_DISCLOSURE}
 
 
 def plus_one_bar(ctx, segments, base, gates: Mapping[str, Any]) -> dict[str, Any]:
@@ -874,15 +937,28 @@ def plus_one_bar(ctx, segments, base, gates: Mapping[str, Any]) -> dict[str, Any
     return {"diagnostic": "+1-bar", "leads": out}
 
 
+PHASES_AFTER_LATTICE = ("cell_chains", "switching", "gates")
+
+
 def run_search(ctx: Mapping[str, Any], backend, *, on_chunk=None,
-               timer: Callable[[str, float], None] | None = None) -> dict[str, Any]:
-    """Full A19 path from prepared features to gate results."""
+               on_phase: Callable[[str], None] | None = None,
+               timer: Callable[[str, float], None] | None = None,
+               gate6_method: str | None = None, pair_thesis_rule: str | None = None) -> dict[str, Any]:
+    """Full A19 path from prepared features to gate results. `on_phase` announces the
+    CPU phases after the lattice (cell_chains, switching, gates) as their own units, so
+    they run under the 600 s CPU cap, not the last GPU lattice chunk's 120 s cap."""
     calendar: Calendar = ctx["calendar"]
+    if gate6_method is not None:
+        ctx["gate6_method"] = rules.gate6_method_check(gate6_method)
+    if pair_thesis_rule is not None:
+        ctx["pair_thesis_rule"] = pair_thesis_rule_check(pair_thesis_rule)
+    phase = on_phase or (lambda name: None)
     segments = build_segments(ctx, calendar)
     base = compute_lattice(ctx, segments, backend, on_chunk=on_chunk)
     if timer is not None:
         timer("exit_lattice", base["seconds"])
     acc = Accumulator(len(calendar.test_days()), len(calendar.folds))
+    phase("cell_chains")
     t0 = time.monotonic()
     chain_info = {}
     for seg in segments:
@@ -890,7 +966,9 @@ def run_search(ctx: Mapping[str, Any], backend, *, on_chunk=None,
         chain_info[seg["name"]] = info
     if timer is not None:
         timer("cell_chains", time.monotonic() - t0)
+    phase("switching")
     packages = switching(ctx, segments, base, acc)
+    phase("gates")
     gates = evaluate_gates(ctx, segments, base, acc, packages, backend=backend, timer=timer)
     stale = sum(int(seg["entries"]["stale"].sum()) for seg in segments)
     lat = np.concatenate([seg["entries"]["latency_ms"][seg["entries"]["valid"]] for seg in segments])

@@ -4,6 +4,11 @@ The heartbeat thread only proves the worker is alive. Caps are enforced here,
 outside the worker: 600 s per CPU unit and 120 s per GPU unit (the worker
 announces each unit in `unit.json`; the parent times it on its own clock),
 a 2 h run-level flag and a 4 h run-level hard stop. Caps cannot be raised.
+Card v3 section 6 / section 10 STOP 7 (B13): the worker gets <= 8 threads (thread
+env + torch.set_num_threads), BelowNormal priority (Windows priority class on the
+process and the Job; nice 10 on POSIX), a 24 GB memory cap (Job Object job-memory
+limit on Windows, process-group RSS watchdog on POSIX), new work pauses while
+free RAM < 8 GB, and free RAM < 8 GB for more than 10 min is STOP_RAM_FLOOR.
 The run root is created new (exclusive); nothing is ever overwritten. A fresh
 run nonce is minted at child start; only a COMPLETE marker carrying that
 nonce counts. On Windows the child is created suspended, assigned to a
@@ -45,6 +50,31 @@ SUMS_NAME = "SHA256SUMS.txt"
 NONCE_ENV = "EXT2_RUN_NONCE"
 CARD_ENV = "EXT2_CARD_SHA12"
 CARD_SHA_V3 = "873fe69e0eaec8dfa2a208992778f8633505289f7e932e3e6f0b94768ccf59fe"
+ADDENDUM_SHA_V3 = "7a18903b8d0a88cb31706e374f80b23a94a01c2b3e27eb69712deb4c22c2ca7e"
+RK_RULING_PR996_SHA = "9ac982877fbcb8f8eb1a5b5569263e4bced6886d2de8ceaf121d3762ec996628"
+PUSH3_CARD_SHA = "46f2868d42fdb50507540335f7647bc8665e15ff2510f25c95200d8483ad747a"
+# RK D4 (C6): the receipt binds FROZEN files only (never the rolling rulings log).
+# None = not yet frozen; a real launch needs every binding filled (STOP_BINDING_MISSING).
+FROZEN_BINDINGS: tuple[tuple[str, str | None, str], ...] = (
+    ("card_v4_launch", None, "launch card v4 (PENDING: not yet written / board PASS)"),
+    ("card_v3", CARD_SHA_V3, "RUN-CARD-EXT2-FIRST-REAL-20261109-v3.md"),
+    ("build_spec_addendum_v3", ADDENDUM_SHA_V3, "RUN-CARD-v3-BUILD-SPEC-ADDENDUM-20261109.md"),
+    ("rk_ruling_pr996_gate6_h25_receipt", RK_RULING_PR996_SHA,
+     "RK-PR996-GATE6-H25-RECEIPT-RULING-20261110.md"),
+    ("hm_r2_receipt_merged_head", None, "HM R2 receipt at the merged head (PENDING merge)"),
+    ("push_card_3", PUSH3_CARD_SHA, "pr996-consolidated-push-3-20261109.md"),
+    ("push_card_4", None, "push-4 card (PENDING: no frozen file yet)"),
+)
+MAX_THREADS = 8
+THREAD_ENV_KEYS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                   "VECLIB_MAXIMUM_THREADS", "TORCH_NUM_THREADS")
+RAM_CAP_BYTES = 24 * 1024 ** 3
+RAM_PAUSE_FREE_BYTES = 8 * 1024 ** 3
+RAM_STOP_SEC = 10 * 60
+PAUSE_UNIT_SEC = 12 * 60  # a worker 'ram_pause' unit may last 1.2 x the STOP 7 window
+PAUSE_NAME = "pause"
+BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+POSIX_NICE = 10
 AEDT = timezone(timedelta(hours=11), "AEDT")
 _ENV_MARKERS = (
     "BITFINEX_", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "API_KEY", "APIKEY",
@@ -126,6 +156,8 @@ def scrubbed_values(env: Mapping[str, str]) -> tuple[str, ...]:
 
 CREATE_SUSPENDED = 0x00000004
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JOB_OBJECT_LIMIT_PRIORITY_CLASS = 0x00000020
+JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 TH32CS_SNAPTHREAD = 0x00000004
 THREAD_SUSPEND_RESUME = 0x0002
@@ -181,6 +213,153 @@ def _build_job_structs():
     return IoCounters, BasicLimit, ExtendedLimit, ThreadEntry32
 
 
+def job_limit_flags() -> int:
+    """KILL_ON_JOB_CLOSE + PRIORITY_CLASS (BelowNormal for every member) + JOB_MEMORY (24 GB)."""
+    return JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PRIORITY_CLASS | JOB_OBJECT_LIMIT_JOB_MEMORY
+
+
+def fill_job_limits(info, ram_cap_bytes: int = RAM_CAP_BYTES):
+    """B13: one place the Job limits are set (unit-tested on every OS with the cached structs)."""
+    info.BasicLimitInformation.LimitFlags = job_limit_flags()
+    info.BasicLimitInformation.PriorityClass = BELOW_NORMAL_PRIORITY_CLASS
+    info.JobMemoryLimit = int(ram_cap_bytes)
+    return info
+
+
+def thread_limit_env(max_threads: int = MAX_THREADS) -> dict[str, str]:
+    """Thread caps for the worker's numeric libraries; set by the parent before the
+    child imports numpy/torch (they read these at import)."""
+    if int(max_threads) < 1 or int(max_threads) > MAX_THREADS:
+        raise Ext2Stop("STOP_THREADS_EXTENDED")
+    return {key: str(int(max_threads)) for key in THREAD_ENV_KEYS}
+
+
+def apply_worker_thread_limits(environ: Mapping[str, str] | None = None, torch_module: Any = None) -> dict[str, Any]:
+    """Worker side: measure the thread env the parent set and cap torch intra-op threads.
+    `ok` is False when any thread env is missing or above MAX_THREADS."""
+    env = os.environ if environ is None else environ
+    seen = {key: env.get(key) for key in THREAD_ENV_KEYS}
+    ok = all(v is not None and v.isdigit() and 1 <= int(v) <= MAX_THREADS for v in seen.values())
+    torch = torch_module if torch_module is not None else sys.modules.get("torch")
+    torch_threads = None
+    if torch is not None:
+        torch.set_num_threads(MAX_THREADS)
+        torch_threads = int(torch.get_num_threads())
+        ok = ok and torch_threads <= MAX_THREADS
+    return {"max_threads": MAX_THREADS, "thread_env": seen, "torch_threads": torch_threads, "ok": bool(ok)}
+
+
+class SystemProbe:
+    """Real RAM / priority probe. No psutil dependency (not on the box or CI): Windows
+    uses kernel32 GlobalMemoryStatusEx / SetPriorityClass / the Job's peak job memory;
+    POSIX uses /proc/meminfo MemAvailable, /proc/*/stat process-group RSS and setpriority.
+    Tests inject a fake probe with the same three methods."""
+
+    def available_bytes(self) -> int | None:
+        if os.name == "nt":
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32)] + [
+                    (name, ctypes.c_ulonglong) for name in (
+                        "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
+                        "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")]
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(MemoryStatusEx)
+            if not ctypes.WinDLL("kernel32").GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return int(status.ullAvailPhys)
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            return None
+        return None
+
+    def tree_rss_bytes(self, pid: int, pgid: int | None, job: Any = None) -> int | None:
+        if os.name == "nt":
+            return None if job is None else job.peak_job_memory()
+        target = pgid if pgid is not None else pid
+        page = os.sysconf("SC_PAGE_SIZE")
+        total = 0
+        for stat in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                text = stat.read_text(encoding="ascii")
+                fields = text[text.rindex(")") + 2:].split()
+                if int(fields[2]) == int(target):
+                    total += int(fields[21]) * page
+            except (OSError, ValueError, IndexError):
+                continue
+        return total
+
+    def set_below_normal(self, proc: Any) -> dict[str, Any]:
+        if os.name == "nt":
+            import ctypes
+            ok = bool(ctypes.WinDLL("kernel32").SetPriorityClass(int(proc._handle), BELOW_NORMAL_PRIORITY_CLASS))
+            return {"kind": "windows_priority_class", "requested": "BELOW_NORMAL", "ok": ok,
+                    "job_priority_class_limit": True}
+        os.setpriority(os.PRIO_PROCESS, proc.pid, POSIX_NICE)
+        measured = os.getpriority(os.PRIO_PROCESS, proc.pid)
+        return {"kind": "posix_nice", "requested": POSIX_NICE, "measured": measured,
+                "ok": measured >= POSIX_NICE}
+
+
+class ResourceGuard:
+    """Card v3 section 6 + section 10 STOP 7 on the parent's (injectable) clock.
+    check() -> (pause_new_work, stop_reason_or_None)."""
+
+    def __init__(self, probe: Any, *, ram_stop_sec: float = RAM_STOP_SEC,
+                 pause_free_bytes: int = RAM_PAUSE_FREE_BYTES, ram_cap_bytes: int = RAM_CAP_BYTES):
+        self.probe = probe
+        self.ram_stop_sec = float(ram_stop_sec)
+        self.pause_free_bytes = int(pause_free_bytes)
+        self.ram_cap_bytes = int(ram_cap_bytes)
+        self.low_since: float | None = None
+        self.paused = False
+        self.pause_events = 0
+        self.min_free: int | None = None
+        self.max_rss: int | None = None
+        self.longest_low_sec = 0.0
+
+    def check(self, now: float, pid: int | None = None, pgid: int | None = None,
+              job: Any = None) -> tuple[bool, str | None]:
+        free = self.probe.available_bytes()
+        if free is None:
+            return self.paused, "STOP_RAM_PROBE"
+        free = int(free)
+        self.min_free = free if self.min_free is None else min(self.min_free, free)
+        if free < self.pause_free_bytes:
+            if self.low_since is None:
+                self.low_since = now
+            if not self.paused:
+                self.paused = True
+                self.pause_events += 1
+            low = now - self.low_since
+            self.longest_low_sec = max(self.longest_low_sec, low)
+            if low > self.ram_stop_sec:
+                return True, "STOP_RAM_FLOOR"
+        else:
+            self.low_since = None
+            self.paused = False
+        if pid is not None:
+            rss = self.probe.tree_rss_bytes(pid, pgid, job)
+            if rss is not None:
+                self.max_rss = int(rss) if self.max_rss is None else max(self.max_rss, int(rss))
+                if int(rss) > self.ram_cap_bytes:
+                    return self.paused, "STOP_RAM_CAP"
+        return self.paused, None
+
+    def attestation(self) -> dict[str, Any]:
+        return {"ram_cap_bytes": self.ram_cap_bytes, "pause_free_bytes": self.pause_free_bytes,
+                "ram_stop_sec": self.ram_stop_sec, "pause_events": self.pause_events,
+                "min_free_bytes": self.min_free, "max_tree_rss_bytes": self.max_rss,
+                "longest_low_ram_sec": round(self.longest_low_sec, 3),
+                "ram_cap_enforcement": "windows: Job JOB_MEMORY limit (OS) + peak job memory watchdog; "
+                                       "posix: process-group RSS watchdog",
+                "stop_7": "free RAM < 8 GB for > 10 min = STOP_RAM_FLOOR"}
+
+
 def job_struct_sizes() -> dict[str, int]:
     """Expected on 64-bit Windows: basic 64, IO_COUNTERS 48, extended 144, THREADENTRY32 28."""
     import ctypes
@@ -218,6 +397,9 @@ def _kernel32():
     k.OpenThread.restype = wintypes.HANDLE
     k.ResumeThread.argtypes = [wintypes.HANDLE]
     k.ResumeThread.restype = wintypes.DWORD
+    k.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                            ctypes.POINTER(ctypes.c_uint32)]
+    k.QueryInformationJobObject.restype = wintypes.BOOL
     return k
 
 
@@ -240,6 +422,18 @@ class WindowsJob:
     def supervisor_outside(self) -> bool:
         return not self.contains(self.kernel.GetCurrentProcess())
 
+    def peak_job_memory(self) -> int | None:
+        """Peak committed job memory (>= current; conservative for the 24 GB watchdog)."""
+        import ctypes
+        _, _, extended, _ = _job_structs()
+        info = extended()
+        size = ctypes.c_uint32(0)
+        query = getattr(self.kernel, "QueryInformationJobObject", None)
+        if query is None or not query(self.handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                                      ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(size)):
+            return None
+        return int(info.PeakJobMemoryUsed)
+
     def close(self) -> None:
         if self.closed:
             return
@@ -248,8 +442,9 @@ class WindowsJob:
         self.closed = True
 
 
-def start_worker(command: list[str], *, env: Mapping[str, str], cwd: str):
-    """Windows: create suspended, assign a KILL_ON_JOB_CLOSE job, then resume.
+def start_worker(command: list[str], *, env: Mapping[str, str], cwd: str, ram_cap_bytes: int = RAM_CAP_BYTES):
+    """Windows: create suspended (BelowNormal), assign a KILL_ON_JOB_CLOSE job with the
+    BelowNormal priority-class and 24 GB job-memory limits, then resume.
     POSIX: a new session (process group) so the whole tree can be killed."""
     if os.name != "nt":
         return subprocess.Popen(list(command), env=dict(env), cwd=cwd, start_new_session=True), None
@@ -257,15 +452,15 @@ def start_worker(command: list[str], *, env: Mapping[str, str], cwd: str):
 
     kernel = _kernel32()
     _, _, extended, thread_entry = _job_structs()
-    proc = subprocess.Popen(list(command), env=dict(env), cwd=cwd, creationflags=CREATE_SUSPENDED)
+    proc = subprocess.Popen(list(command), env=dict(env), cwd=cwd,
+                            creationflags=CREATE_SUSPENDED | BELOW_NORMAL_PRIORITY_CLASS)
     job = None
     try:
         handle = kernel.CreateJobObjectW(None, None)
         if not handle:
             raise Ext2Stop("STOP_JOB")
         job = WindowsJob(kernel, handle)
-        info = extended()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info = fill_job_limits(extended(), ram_cap_bytes)
         if not kernel.SetInformationJobObject(handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
                                               ctypes.byref(info), ctypes.sizeof(info)):
             raise Ext2Stop("STOP_JOB")
@@ -520,12 +715,33 @@ def verify_import_pins(pin_path: Path, service_root: Path) -> None:
 
 
 RECEIPT_REQUIRED_KEYS = (
-    "card_sha", "card_sha12", "pr_head", "import_pins", "allowlist_sha", "h1_seal_sha", "windows", "folds",
+    "card_sha", "card_sha12", "frozen_bindings", "pr_head", "import_pins", "allowlist_sha", "h1_seal_sha",
+    "windows", "folds",
     "undefined_stat_bars", "censored_close_count", "liquidation_count", "path_end_count",
     "cuda_prestart", "dual_c2_projection_hours", "start_aedt", "end_aedt", "wall_sec",
     "child_exit_code", "completion_marker_ok", "run_nonce", "stop_reason", "r10_scrub_attestation",
-    "label",
+    "label", "resource_limits", "gate6_disclosure", "f6_eligibility_disclosure",
 )
+GATE6_DISCLOSURE = "gate 6 nominal-level; gate 7 White RC binding"
+
+
+def frozen_bindings(overrides: Mapping[str, str | None] | None = None) -> list[dict[str, Any]]:
+    """RK D4 list field: every frozen file the run is bound to (sha256 or None = pending)."""
+    extra = dict(overrides or {})
+    unknown = set(extra) - {name for name, _, _ in FROZEN_BINDINGS}
+    if unknown:
+        raise Ext2Stop("STOP_BINDING_UNKNOWN")
+    out = []
+    for name, sha, what in FROZEN_BINDINGS:
+        value = extra.get(name, sha)
+        if value is not None and (len(str(value)) != 64 or any(c not in "0123456789abcdef" for c in str(value))):
+            raise Ext2Stop("STOP_BINDING_SHA")
+        out.append({"name": name, "sha256": value, "file": what, "pending": value is None})
+    return out
+
+
+def bindings_complete(bindings: Sequence[Mapping[str, Any]]) -> bool:
+    return bool(bindings) and all(b.get("sha256") for b in bindings)
 
 
 def _read_unit(path: Path) -> dict[str, Any] | None:
@@ -551,8 +767,12 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
               heartbeat_stall_sec: float | None = None, output_cap_bytes: int | None = None,
               require_gpu: bool = False, forbidden_substrings: Sequence[str] = (),
               card_sha: str = CARD_SHA_V3, pr_head: str | None = None,
-              poll_sec: float = 0.05, cuda_check: Callable[[], bool] | None = None) -> dict[str, Any]:
-    """Run one worker. The parent owns the caps, the disk floor, the nonce and the final kill."""
+              poll_sec: float = 0.05, cuda_check: Callable[[], bool] | None = None,
+              probe: Any = None, ram_stop_sec: float | None = None, ram_cap_bytes: int | None = None,
+              clock: Callable[[], float] = time.monotonic,
+              binding_overrides: Mapping[str, str | None] | None = None) -> dict[str, Any]:
+    """Run one worker. The parent owns the caps, the disk floor, the RAM floor/cap,
+    priority, the nonce and the final kill. `probe`/`clock` are injectable for tests."""
     data_root = Path(data_root)
     output_root = Path(output_root)
     started_wall = time.time()
@@ -566,6 +786,7 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
         "card_sha": card_sha,
         "card_sha12": card_sha12,
         "pr_head": pr_head,
+        "gate6_disclosure": GATE6_DISCLOSURE,
         "child_started": False,
         "tree_kill": False,
         "status": "STOP",
@@ -594,16 +815,28 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
     job = None
     pgid = None
     root_created = False
+    guard = None
+    receipt["resource_limits"] = {"max_threads": MAX_THREADS, "ram_cap_bytes": RAM_CAP_BYTES,
+                                  "pause_free_bytes": RAM_PAUSE_FREE_BYTES, "ram_stop_sec": RAM_STOP_SEC,
+                                  "applied": False}
     try:
+        receipt["frozen_bindings"] = frozen_bindings(binding_overrides)
         assert_roots(data_root, output_root)
         hard = _cap("STOP_HARD_STOP_EXTENDED", hard_stop_sec, HARD_STOP_SEC)
+        ram_stop = _cap("STOP_RAM_STOP_EXTENDED", ram_stop_sec, RAM_STOP_SEC)
+        ram_cap = int(_cap("STOP_RAM_CAP_EXTENDED", ram_cap_bytes, RAM_CAP_BYTES))
+        guard = ResourceGuard(probe if probe is not None else SystemProbe(), ram_stop_sec=ram_stop,
+                              ram_cap_bytes=ram_cap)
         flag = _cap("STOP_FLAG_EXTENDED", flag_sec, FLAG_SEC)
         caps = {"cpu": _cap("STOP_CPU_CAP_EXTENDED", cpu_unit_sec, CPU_UNIT_SEC),
-                "gpu": _cap("STOP_GPU_CAP_EXTENDED", gpu_unit_sec, GPU_UNIT_SEC)}
+                "gpu": _cap("STOP_GPU_CAP_EXTENDED", gpu_unit_sec, GPU_UNIT_SEC),
+                "pause": ram_stop * PAUSE_UNIT_SEC / RAM_STOP_SEC}
         stall = HEARTBEAT_STALL_SEC if heartbeat_stall_sec is None else float(heartbeat_stall_sec)
         cap_bytes = OUTPUT_CAP_BYTES if output_cap_bytes is None else int(output_cap_bytes)
         if int(disk_free()) < DISK_FLOOR_BYTES:
             raise Ext2Stop("STOP_DISK_FLOOR")
+        if guard.probe.available_bytes() is None:
+            raise Ext2Stop("STOP_RAM_PROBE")
         if require_gpu:
             from research.ext2_lattice import cuda_available
             check = cuda_check or cuda_available
@@ -624,12 +857,19 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
         receipt["run_nonce"] = run_nonce
         clean.update({NONCE_ENV: run_nonce, CARD_ENV: card_sha12,
                       "TEMP": str(tmp_dir), "TMP": str(tmp_dir), "TMPDIR": str(tmp_dir)})
+        clean.update(thread_limit_env())
         proc, job = start_worker(list(command), env=clean, cwd=str(output_root))
         receipt["child_started"] = True
         receipt["child_pid"] = proc.pid
         pgid = None if os.name == "nt" else os.getpgid(proc.pid)
         receipt["job"] = job_attestation(proc, job)
-        started = time.monotonic()
+        priority = guard.probe.set_below_normal(proc)
+        receipt["resource_limits"].update({"applied": True, "thread_env": thread_limit_env(),
+                                           "priority": priority})
+        if not priority.get("ok"):
+            raise Ext2Stop("STOP_PRIORITY")
+        pause_path = output_root / PAUSE_NAME
+        started = clock()
         beat_path = output_root / HEARTBEAT_NAME
         unit_path = output_root / UNIT_NAME
         reason = None
@@ -638,16 +878,16 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
         unit_device = "cpu"
         last_slow = 0.0
         while proc.poll() is None:
-            now = time.monotonic()
+            now = clock()
             unit = _read_unit(unit_path)
             if unit is not None and (unit.get("seq"), unit.get("device")) != unit_key:
                 unit_key = (unit.get("seq"), unit.get("device"))
                 unit_started = now
-                unit_device = "gpu" if unit.get("device") == "gpu" else "cpu"
+                unit_device = unit.get("device") if unit.get("device") in ("gpu", "pause") else "cpu"
                 receipt["units"].append({"seq": unit.get("seq"), "device": unit_device,
                                          "name": str(unit.get("name", ""))[:64]})
             if now - unit_started >= caps[unit_device]:
-                reason = "STOP_GPU_UNIT_CAP" if unit_device == "gpu" else "STOP_UNIT_CAP"
+                reason = {"gpu": "STOP_GPU_UNIT_CAP", "pause": "STOP_PAUSE_CAP"}.get(unit_device, "STOP_UNIT_CAP")
                 break
             if now - started >= flag and not receipt["wall_flag_2h"]:
                 receipt["wall_flag_2h"] = True
@@ -666,6 +906,15 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
                 if _dir_size(output_root) > cap_bytes:
                     reason = "STOP_OUTPUT_CAP"
                     break
+                was_paused = guard.paused
+                paused, ram_reason = guard.check(now, proc.pid, pgid, job)
+                if ram_reason is not None:
+                    reason = ram_reason
+                    break
+                if paused and not was_paused:
+                    write_control(pause_path, json.dumps({"pause": True, "since": aedt_now()}))
+                elif was_paused and not paused and pause_path.exists():
+                    pause_path.unlink()
             time.sleep(poll_sec)
         if reason is not None:
             receipt["tree_kill"] = True
@@ -697,6 +946,8 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
     finally:
         if job is not None:
             job.close()
+    if guard is not None:
+        receipt["resource_limits"].update(guard.attestation())
     receipt["devices"] = stages
     receipt["end_aedt"] = aedt_now()
     receipt["wall_sec"] = round(time.time() - started_wall, 3)
@@ -709,10 +960,12 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
             if key in {"child_exit_code", "exit_code", "completion_marker_ok", "run_nonce", "start_aedt",
                        "end_aedt", "wall_sec", "status", "reason", "job", "devices", "units",
                        "tree_kill", "kill_command", "child_pid", "child_started", "schema", "live",
-                       "paper_only", "wall_flag_2h", "receipt_written", "r10_scrub_attestation"}:
+                       "paper_only", "wall_flag_2h", "receipt_written", "r10_scrub_attestation",
+                       "resource_limits", "frozen_bindings", "gate6_disclosure"}:
                 continue
             receipt[key] = value
         receipt["worker_run_nonce_ok"] = worker.get("run_nonce") == receipt.get("run_nonce")
+        receipt["worker_thread_limits"] = worker.get("thread_limits")
         if receipt["reason"] == "STOP_CHILD_EXIT" and str(worker.get("stop_reason", "")).startswith("STOP"):
             receipt["worker_stop_reason"] = worker["stop_reason"]
     # A smoke worker (synthetic data, labelled SMOKE-NOT-A-RUN) may use the CPU lattice;
@@ -733,7 +986,7 @@ def supervise(command: Sequence[str], *, data_root: Path, output_root: Path,
                       data_root=data_root, output_root=output_root)
         lines = []
         for path in sorted(output_root.rglob("*")):
-            if path.is_file() and path.name not in {SUMS_NAME, HEARTBEAT_NAME, UNIT_NAME} \
+            if path.is_file() and path.name not in {SUMS_NAME, HEARTBEAT_NAME, UNIT_NAME, PAUSE_NAME} \
                     and "tmp" not in path.relative_to(output_root).parts:
                 lines.append(f"{_sha256_file(path)}  {path.relative_to(output_root).as_posix()}")
         guarded_write(output_root / SUMS_NAME, "\n".join(lines) + "\n",

@@ -36,6 +36,16 @@ NEWEY_WEST_LAG_RULE = "floor(4*(T/100)**(2/9))"
 P_METHOD = "one_sided_student_t_hac_newey_west"
 P_DISTRIBUTION = "student_t_df_T_minus_1"
 SIGMA_ESTIMATOR = "trailing_causal_29d_hourly_r24"
+# Gate 6 (RK D1, 10 Nov): the shipped HAC-t (Student-t T-1) over-rejects in small T
+# (HM null sim: ~47x nominal at the BH region at T=41, lag 3). Until a pre-registered
+# null-sim acceptance passes AND card v4 has a board PASS, gate 6 is NOMINAL-LEVEL and
+# gate 7 (White RC) is the binding control. Method is a config key; default unchanged.
+GATE6_DISCLOSURE = "gate 6 nominal-level; gate 7 White RC binding"
+GATE6_METHOD_HAC_T = "hac_t_student_T1"
+GATE6_METHOD = GATE6_METHOD_HAC_T
+GATE6_METHODS: tuple[str, ...] = (GATE6_METHOD_HAC_T,)
+GATE6_METHODS_ACCEPTED_FOR_LAUNCH: tuple[str, ...] = (GATE6_METHOD_HAC_T,)
+GATE6_NOMINAL_ONLY = {GATE6_METHOD_HAC_T: True}
 C2_STUDY1_DISCLOSURE = (
     "W1 and H1 sealed but previously viewed (Study1) were previously viewed by "
     "EXT-STUDY-20261031 Study1 TRAIN (coarse grammar, N=4,720, no survivors). "
@@ -210,9 +220,21 @@ def hac_statistic(daily_net: np.ndarray) -> dict[str, Any]:
     return result
 
 
-def primary_p_from_stat(stat: Mapping[str, Any]) -> float:
-    """The one place the primary p is formed: Student-t upper tail, df = T-1;
-    untested -> UNTESTED_P (1.0)."""
+def gate6_method_check(method: str, *, real: bool = False) -> str:
+    """Config key for the gate-6 p method. Unknown = STOP. A method not accepted for
+    launch (null-sim acceptance + card v4 board PASS) is refused in a real run."""
+    if method not in GATE6_METHODS:
+        raise Ext2Stop("STOP_GATE6_METHOD")
+    if real and method not in GATE6_METHODS_ACCEPTED_FOR_LAUNCH:
+        raise Ext2Stop("STOP_GATE6_METHOD_NOT_ACCEPTED")
+    return method
+
+
+def primary_p_from_stat(stat: Mapping[str, Any], method: str | None = None) -> float:
+    """The one place the primary p is formed. Default: Student-t upper tail, df = T-1
+    (nominal-level, see GATE6_DISCLOSURE); untested -> UNTESTED_P (1.0)."""
+    chosen = GATE6_METHOD if method is None else method
+    gate6_method_check(chosen)
     if not stat["testable"]:
         return UNTESTED_P
     return float(student_t_sf(stat["t"], stat["T"] - 1))
@@ -558,6 +580,11 @@ def rule_receipt_fields() -> dict[str, Any]:
         "funding": "set_aside",
         "p_method": P_METHOD,
         "p_distribution": P_DISTRIBUTION,
+        "gate6_default_method": GATE6_METHOD,
+        "gate6_methods_available": list(GATE6_METHODS),
+        "gate6_methods_accepted_for_launch": list(GATE6_METHODS_ACCEPTED_FOR_LAUNCH),
+        "gate6_disclosure": GATE6_DISCLOSURE,
+        "gate6_nominal_only": GATE6_NOMINAL_ONLY.get(GATE6_METHOD, True),
         "hac_parametric": True,
         "newey_west_lag_rule": NEWEY_WEST_LAG_RULE,
         "t_min_test_days": T_MIN_TEST_DAYS,

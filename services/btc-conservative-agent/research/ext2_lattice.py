@@ -367,7 +367,9 @@ def resolve(base: Mapping[str, np.ndarray], ev: np.ndarray, x: np.ndarray, thesi
     limit = np.minimum(cens, n)
     dropped = start >= limit
     late = best >= limit
-    bounded = np.ones(ev.shape, dtype=bool) if has_boundary is None else np.asarray(has_boundary, dtype=bool)
+    # Censored (6) when a print at/after the boundary exists, i.e. the path continues past
+    # it; path end (8) when the data ends before the boundary (cens == n).
+    bounded = (cens < n) if has_boundary is None else np.asarray(has_boundary, dtype=bool)
     code = np.where(late, np.where(bounded, 6, 8), code)
     best = np.where(late, limit - 1, best)
     code = np.where(dropped, 7, code)
@@ -431,7 +433,8 @@ def reference_scan(mts: np.ndarray, price: np.ndarray, thesis: np.ndarray, *, en
             if idxs.size == 0:
                 codes[x] = 7
                 continue
-            chosen = (idxs[-1], 6 if boundary is not None else 8)
+            censored = boundary is not None and bool(np.any(mts >= int(boundary)))
+            chosen = (idxs[-1], 6 if censored else 8)
         i, code = chosen
         codes[x] = code
         exit_i[x] = i

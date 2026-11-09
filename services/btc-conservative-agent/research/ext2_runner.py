@@ -39,13 +39,18 @@ from research.ext2_supervisor import (
     CARD_ENV,
     CARD_SHA_V3,
     COMPLETION_NAME,
+    GATE6_DISCLOSURE,
     HEARTBEAT_NAME,
     NONCE_ENV,
+    PAUSE_NAME,
     RECEIPT_REQUIRED_KEYS,
     UNIT_NAME,
     WORKER_RECEIPT_NAME,
     HeartbeatThread,
     aedt_now,
+    apply_worker_thread_limits,
+    bindings_complete,
+    frozen_bindings,
     assert_roots,
     audit_files,
     guarded_write,
@@ -76,19 +81,35 @@ assert FEE_BP == 0.0, "fee_bp must be 0 (frozen card)"
 
 
 class UnitAnnouncer:
-    """Writes unit.json so the supervisor can time each CPU/GPU unit on its own clock."""
+    """Writes unit.json so the supervisor can time each CPU/GPU unit on its own clock.
 
-    def __init__(self, root: Path | None):
+    B13: before starting new work it honours the supervisor's `pause` control file
+    (free RAM < 8 GB): it announces one `ram_pause` unit (device "pause") and waits
+    until the file is gone. The supervisor owns STOP 7 (> 10 min) and the kill."""
+
+    def __init__(self, root: Path | None, *, sleep: Callable[[float], None] = time.sleep,
+                 pause_poll_sec: float = 1.0):
         self.root = root
         self.seq = 0
         self.log: list[dict[str, Any]] = []
+        self.sleep = sleep
+        self.pause_poll_sec = pause_poll_sec
+        self.pauses = 0
 
-    def __call__(self, name: str, device: str) -> None:
+    def _emit(self, name: str, device: str) -> None:
         self.seq += 1
-        entry = {"seq": self.seq, "device": "gpu" if device == "gpu" else "cpu", "name": name}
+        entry = {"seq": self.seq, "device": device, "name": name}
         self.log.append(entry)
         if self.root is not None:
             write_control(self.root / UNIT_NAME, json.dumps(entry))
+
+    def __call__(self, name: str, device: str) -> None:
+        if self.root is not None and (self.root / PAUSE_NAME).exists():
+            self.pauses += 1
+            self._emit("ram_pause", "pause")
+            while (self.root / PAUSE_NAME).exists():
+                self.sleep(self.pause_poll_sec)
+        self._emit(name, "gpu" if device == "gpu" else "cpu")
 
 
 def _micro_path(seed: int = 11, n: int = 20_000):
@@ -218,7 +239,9 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
              supervised: bool = False, h1_seal_path: Path | None = None,
              cuda_check: Callable[[], bool] | None = None,
              prestart: Callable[[Any], dict[str, Any]] | None = None,
-             projection_cap_hours: float = 2.0, announce: UnitAnnouncer | None = None) -> dict[str, Any]:
+             projection_cap_hours: float = 2.0, announce: UnitAnnouncer | None = None,
+             gate6_method: str | None = None, pair_thesis_rule: str | None = None,
+             binding_overrides: Mapping[str, str | None] | None = None) -> dict[str, Any]:
     """One EXT2 W1 run (A19 order). Returns the sealed worker receipt."""
     data_root = Path(data_root)
     root = Path(output_root)
@@ -232,7 +255,10 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         "mode": mode, "status": "STOP", "stop_reason": "STOP", "reason": "STOP", "combos_searched": None,
         "devices": stages, "fallback": False, "card_sha": card_sha, "card_sha12": card_sha12,
         "pr_head": pr_head, "start_aedt": aedt_now(), "label": rules.LABEL if mode == "real" else SMOKE_LABEL,
-        "fee_bp": FEE_BP,
+        "fee_bp": FEE_BP, "gate6_disclosure": GATE6_DISCLOSURE,
+        "gate6_method": rules.GATE6_METHOD if gate6_method is None else gate6_method,
+        "pair_thesis_rule": pipeline.PAIR_THESIS_RULE if pair_thesis_rule is None else pair_thesis_rule,
+        "thread_limits": apply_worker_thread_limits(),
     })
     files: dict[str, str] = {}
     announce = announce or UnitAnnouncer(root if supervised else None)
@@ -244,6 +270,9 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
             raise Ext2Stop("STOP_CPU_FALLBACK_FORBIDDEN")
         if FEE_BP != 0.0:
             raise Ext2Stop("STOP_FEE")
+        receipt["frozen_bindings"] = frozen_bindings(binding_overrides)
+        rules.gate6_method_check(receipt["gate6_method"], real=mode == "real")
+        pipeline.pair_thesis_rule_check(receipt["pair_thesis_rule"])
         assert_roots(data_root, root)
         if supervised:
             if not root.is_dir():
@@ -275,6 +304,8 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         stages.append({"stage": "source_audit", "device": "cpu", "fallback": False})
         if mode == "real" and not is_frozen(calendar):
             raise Ext2Stop("STOP_CALENDAR")
+        if mode == "real" and supervised and not receipt["thread_limits"]["ok"]:
+            raise Ext2Stop("STOP_THREAD_LIMITS")
         receipt["windows"] = calendar.describe()["windows"]
         receipt["folds"] = calendar.describe()["folds"]
         receipt["calendar_label"] = calendar.label
@@ -310,6 +341,9 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         blocked = real_run_device_stop(stages) if mode == "real" else None
         if blocked:
             raise Ext2Stop(blocked)
+        # RK D4: a real run never touches data unless every frozen binding is filled.
+        if mode == "real" and not bindings_complete(receipt["frozen_bindings"]):
+            raise Ext2Stop("STOP_BINDING_MISSING")
         # Load (A1-A4).
         announce("load", "cpu")
         if mode == "real":
@@ -339,6 +373,7 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         receipt["dry_check"] = {k: dry[k] for k in ("structurally_untestable_cells", "empty_bar_count",
                                                     "trade_minute_share", "regime_undefined_scored_bars",
                                                     "first_sigma_utc", "scored_bars")}
+        receipt["f6_eligibility_disclosure"] = pipeline.f6_eligibility_disclosure(dry)
         _write(root, data_root, "dry_check.json", pipeline.dumps(dry), files)
         announce("projection", device_kind)
         proj = _projection(ctx, lambda: pipeline.build_segments(ctx, calendar), backend, prepare_s,
@@ -354,7 +389,8 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         def on_chunk(index: int) -> None:
             chunk_seq["n"] += 1
             announce(f"lattice_chunk_{index}", device_kind)
-        out = pipeline.run_search(ctx, backend, on_chunk=on_chunk)
+        out = pipeline.run_search(ctx, backend, on_chunk=on_chunk, on_phase=lambda name: announce(name, "cpu"),
+                                  gate6_method=receipt["gate6_method"], pair_thesis_rule=receipt["pair_thesis_rule"])
         announce("outputs", "cpu")
         acc = out["acc"]
         receipt.update({k: acc.counts[k] for k in ("censored_close_count", "liquidation_count", "path_end_count")})
@@ -373,20 +409,22 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         tau = int(calendar.folds[0].test_censor_ms()) - 3 * 3_600_000
         c3b = pipeline.fixture_c3b(lambda t: build_grid(t, calendar.days()), trades_arr, ctx, tau, calendar)
         c3c = pipeline.fixture_c3c(out["segments"])
-        can = pipeline.canary(gates, backend=backend)
+        c3b_lat = pipeline.fixture_c3b_lattice_on_run(ctx, out["segments"], backend, tau)
+        can = pipeline.canary(gates, backend=backend, gate6_method=receipt["gate6_method"])
         plus = pipeline.plus_one_bar(ctx, out["segments"], base, gates)
-        receipt["fixtures"] = {"C3b": c3b["pass"], "C3c": c3c["pass"], "canary": can["pass"]}
+        receipt["fixtures"] = {"C3b": c3b["pass"], "C3b_lattice": c3b_lat["pass"], "C3c": c3c["pass"],
+                               "canary": can["pass"]}
         receipt["canary_leads"] = can["canary_leads"]
         receipt["canary_bh_only_rejections"] = can["bh_only_rejections"]
         buf = io.BytesIO()
         np.savez_compressed(buf, cells=table)
         _write(root, data_root, "cells.npz", buf.getvalue(), files)
         _write(root, data_root, "leads.json", pipeline.dumps(pipeline.leads_json(gates, table)), files)
-        _write(root, data_root, "fixtures.json", pipeline.dumps({"C3b": c3b, "C3c": c3c, "plus_one_bar": plus}),
-               files)
+        _write(root, data_root, "fixtures.json", pipeline.dumps({"C3b": c3b, "C3b_lattice": c3b_lat, "C3c": c3c,
+                                                                 "plus_one_bar": plus}), files)
         _write(root, data_root, "canary.json", pipeline.dumps(can), files)
         _write(root, data_root, "notes_not_tested.md", NOT_TESTED_NOTES, files)
-        if not (c3b["pass"] and c3c["pass"]):
+        if not (c3b["pass"] and c3b_lat["pass"] and c3c["pass"]):
             raise Ext2Stop("STOP_FIXTURE_C3")
         if not can["pass"]:
             raise Ext2Stop("STOP_CANARY")
@@ -401,6 +439,7 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
     receipt["units"] = announce.log
     receipt["outputs"] = files
     receipt.update(rules.rule_receipt_fields())
+    receipt["gate6_disclosure"] = GATE6_DISCLOSURE
     receipt["label"] = rules.LABEL if mode == "real" else SMOKE_LABEL
     receipt["end_aedt"] = aedt_now()
     receipt["wall_sec"] = round(time.time() - started, 3)
