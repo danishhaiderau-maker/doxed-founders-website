@@ -44,6 +44,7 @@ REL_DIR = {
 TRACE_MAX = 512
 # One book resubscribe in flight at a time. No new snapshot by then -> reconnect.
 RESUBSCRIBE_DEADLINE_S = 30
+DATA_CHANNELS = frozenset({"book_snapshot", "book_delta", "trade", "checksum"})
 
 
 def _root_size(root: Path) -> int:
@@ -152,6 +153,8 @@ class Session:
         self.clock_class = "ok"
         self.clock_nonok_count = 0
         self.bad_frame_count = 0
+        # Messages on a confirmed channel (book, trades, cs). Info events do not count.
+        self.data_count = 0
         self.watch_reason = None
         self.maintenance_pause = False
         self.segment_opened_ns: dict[str, int] = {}
@@ -309,15 +312,18 @@ class Session:
         self._follow(rec)
 
     def _follow(self, rec: dict) -> None:
-        was_valid = bool(self.shadow.valid)
         result = step(self.shadow, rec, seq_layout=self.cfg.seq_layout, inplace=True)
         self.shadow = result.state
         cause = (result.followup or {}).get("payload", {}).get("cause") if result.followup else None
         if cause in RESUBSCRIBE_CAUSES and self.resubscribe_deadline_ns is None:
             # One resubscribe in flight. Later `cs` on the invalid book does not add another.
             self.pending_resubscribe = True
-        if rec.get("channel") == "book_snapshot" and self.shadow.valid and not was_valid:
+        if rec.get("channel") == "book_snapshot" and self.shadow.valid:
+            # Any applied snapshot ends an in-flight resubscribe, including one sent
+            # after 20061 while the book was still valid.
             self.resubscribe_deadline_ns = None
+        if rec.get("channel") in DATA_CHANNELS:
+            self.data_count += 1
         if rec.get("channel") == "trade":
             for norm in result.norms:
                 if norm.get("trade_id") is not None and norm.get("counted"):
@@ -744,6 +750,18 @@ class Session:
         self.last_health_ns = now_ns
         return record
 
+    def record_refusal(self, reason: str) -> str:
+        """Mid-run StartRefused (protocol error, instrument mismatch): flush buffered
+        messages and journal a capture_stop, then the caller exits 78. Never raises
+        for disk limits; a failure is reported in the returned stderr text."""
+        if self.stopped:
+            return self.stderr
+        try:
+            stderr = self._stop("start_refused", str(reason))
+        except CaptureStopped as exc:
+            stderr = exc.stderr
+        return stderr
+
     def _stop(self, cause: str, detail: str, rejected: str | None = None) -> None:
         stderr = (
             f"CAPTURE_STOP cause={cause} detail={detail} "
@@ -867,7 +885,12 @@ def inspect_torn_tail(path: Path, *, tail_max: int = TAIL_READ_MAX, committed: d
                 commit_verified = sha256_bytes(member) == committed.get("member_sha256")
                 if commit_verified:
                     rows = decode_member(member)
-            if size == end:
+                else:
+                    last_raw_id = None
+            if commit_verified is False:
+                # The bytes in the committed range are not what the journal recorded.
+                tail_state = "committed_member_mismatch"
+            elif size == end:
                 tail_state = "ends_at_committed_boundary"
             elif size - end > limit:
                 # Not decoded: a read cut at the limit would look torn when it is not.

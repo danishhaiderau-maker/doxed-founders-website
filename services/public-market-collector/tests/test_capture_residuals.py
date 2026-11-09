@@ -52,15 +52,21 @@ def _js(value) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
+_GREETING = json.dumps({"event": "info", "version": 2, "serverId": "x", "platform": {"status": 1}}, separators=(",", ":"))
+_BOOK_SUB = json.dumps({"event": "subscribed", "channel": "book", "chanId": 7, "symbol": "tBTCF0:USTF0", "len": "250"}, separators=(",", ":"))
+_SNAP = json.dumps([7, [[6000, 1, 1], [6100, 1, -1]]], separators=(",", ":"))
+
+
 class _ScriptSock:
     """Server side of one websocket. Ends with EOF (recv returns b"") or a close frame."""
 
-    def __init__(self, texts, *, end="eof", status=b"101 Switching Protocols", bad_accept=False, raw_frames=()):
+    def __init__(self, texts, *, end="eof", status=b"101 Switching Protocols", bad_accept=False, raw_frames=(), after_close=b""):
         self.texts = list(texts)
         self.end = end
         self.status = status
         self.bad_accept = bad_accept
         self.raw_frames = list(raw_frames)
+        self.after_close = after_close
         self.sent = b""
         self.incoming = b""
         self._armed = False
@@ -81,7 +87,7 @@ class _ScriptSock:
         body = b"".join(encode_server_frame(0x1, text.encode("utf-8")) for text in self.texts)
         body += b"".join(self.raw_frames)
         if self.end == "close":
-            body += encode_server_frame(0x8, b"")
+            body += encode_server_frame(0x8, b"") + self.after_close
         self.incoming = head + body
         self._armed = True
 
@@ -141,13 +147,19 @@ class ResidualTests(unittest.TestCase):
 
     def _run(self, name, connect, sleeps, *, max_connects, clock=None, **kwargs):
         clock = clock or _Clock()
+
+        def sleep(seconds):
+            # Fake time: a sleep advances the clock, as real sleep does.
+            sleeps.append(seconds)
+            clock.now += int(seconds * 1_000_000_000)
+
         return run_forever(
             self.base / name,
             resume=kwargs.pop("resume", False),
             repo_root=None,
             allow_root=self.base,
             connect=connect,
-            sleep=sleeps.append,
+            sleep=sleep,
             clock_ns=clock,
             mono_ns=clock,
             deprioritize=lambda: "posix_nice_10",
@@ -247,17 +259,76 @@ class ResidualTests(unittest.TestCase):
 
     # ---- item 2 (B3): backoff resets after a real ConnectionError ----
     def test_item02_backoff_resets_after_real_connection_error(self):
+        # Data on a confirmed channel, connection up >= 30 s (clock steps 5 s per read), then
+        # EOF or a close frame raising ConnectionError: the backoff resets every time.
         socks = []
         for index in range(8):
-            socks.append(_ScriptSock([_js([7, "hb"]), _js([7, "hb"])], end="eof" if index % 2 == 0 else "close"))
+            socks.append(
+                _ScriptSock(
+                    [_GREETING, _BOOK_SUB, _SNAP, _js([7, "hb"]), _js([7, [6000, 1, 2]]), _js([7, "hb"])],
+                    end="eof" if index % 2 == 0 else "close",
+                )
+            )
         sleeps = []
-        self._run("reset-real", _connector(socks), sleeps, max_connects=8)
+        self._run("reset-real", _connector(socks), sleeps, max_connects=8, clock=_Clock(step_ns=5_000_000_000))
         self.assertEqual(sleeps, [1.0] * 8)
         self.assertTrue(all(sock.closed for sock in socks), "each socket is closed on reconnect (item 17)")
         silent = [_ScriptSock([], end="eof") for _ in range(6)]
         quiet = []
         self._run("no-reset-silent", _connector(silent), quiet, max_connects=6)
-        self.assertEqual(quiet, [1.0, 2.0, 4.0, 8.0, 16.0, 30.0])
+        self.assertEqual([round(x) for x in quiet], [3, 3, 4, 8, 16, 30])
+
+    # ---- NB1: the greeting is not a healthy connection; connect pacing ----
+    def test_nb1_greeting_then_eof_grows_backoff(self):
+        socks = [_ScriptSock([_GREETING], end="eof" if i % 2 == 0 else "close") for i in range(8)]
+        sleeps = []
+        connects = []
+        clock = _Clock()
+        inner = _connector(socks)
+
+        def connect():
+            connects.append(clock.now)
+            return inner()
+
+        self._run("greeting-eof", connect, sleeps, max_connects=8, clock=clock)
+        self.assertEqual([round(x) for x in sleeps], [3, 3, 4, 8, 16, 30, 30, 30])
+        gaps = [b - a for a, b in zip(connects, connects[1:])]
+        self.assertTrue(all(gap >= 3_000_000_000 for gap in gaps), gaps)
+
+    def test_nb1_info_20051_cycle_and_short_data_connection_do_not_reset(self):
+        cycle = [_ScriptSock([_GREETING, _js({"event": "info", "code": 20051})]) for _ in range(6)]
+        sleeps = []
+        self._run("cycle-20051", _connector(cycle), sleeps, max_connects=6)
+        self.assertEqual([round(x) for x in sleeps], [3, 3, 4, 8, 16, 30])
+        short = [_ScriptSock([_GREETING, _BOOK_SUB, _SNAP, _js([7, [6000, 1, 2]])]) for _ in range(6)]
+        brief = []
+        self._run("short-data", _connector(short), brief, max_connects=6, clock=_Clock(step_ns=1_000_000_000))
+        self.assertEqual([round(x) for x in brief], [1, 2, 4, 8, 16, 30], "data but < 30 s lifetime: no reset")
+
+    def test_nb1_connect_pacer_floor_and_rolling_cap(self):
+        self.assertEqual(public_run.CONNECT_MIN_INTERVAL_S, 3)
+        self.assertLessEqual(public_run.CONNECTS_PER_WINDOW_MAX, 20)
+        pacer = public_run.ConnectPacer()
+        second = 1_000_000_000
+        self.assertEqual(pacer.wait_s(0), 0)
+        for index in range(10):
+            now = index * 3 * second
+            self.assertLessEqual(pacer.wait_s(now), 0)
+            pacer.record(now)
+        # 10 connects since t=0: the next waits until t0 + 60 s.
+        self.assertEqual(pacer.wait_s(28 * second), 32.0)
+        self.assertEqual(pacer.wait_s(60 * second), 0)
+        tight = public_run.ConnectPacer(min_interval_s=0, max_in_window=20)
+        t = 0
+        times = []
+        while t < 180 * second:
+            if tight.wait_s(t) == 0:
+                tight.record(t)
+                times.append(t)
+            t += second // 10
+        for start in times:
+            self.assertLessEqual(len([x for x in times if start <= x < start + 60 * second]), 20)
+        self.assertEqual(len(times), 60)
 
     # ---- item 3 (B4): resume decodes only from member boundaries ----
     def _fill(self, session, records, size=1200):
@@ -348,7 +419,7 @@ class ResidualTests(unittest.TestCase):
         sleeps = []
         session = self._run("bad-utf8", _connector([sock]), sleeps, max_connects=1)
         self.assertEqual(session.bad_frame_count, 1)
-        self.assertEqual(sleeps, [1.0])
+        self.assertEqual([round(x) for x in sleeps], [3])
         session_b = self._open("malformed")
         session_b.handle(_js({"event": "subscribed", "channel": "book", "chanId": 7, "symbol": SYMBOL}), recv_utc_ns=1, recv_mono_ns=1)
         session_b.handle(_js([7, [[6000, 1, 1], [6100, 1, -1]]]), recv_utc_ns=2, recv_mono_ns=2)
@@ -361,7 +432,7 @@ class ResidualTests(unittest.TestCase):
         statuses = [_ScriptSock([], status=b"503 Service Unavailable"), _ScriptSock([], status=b"429 Too Many Requests")]
         retry = []
         self._run("non-101", _connector(statuses), retry, max_connects=2)
-        self.assertEqual(retry, [1.0, 2.0])
+        self.assertEqual([round(x) for x in retry], [3, 3])
         with self.assertRaises(StartRefused):
             self._run("bad-accept", _connector([_ScriptSock([], bad_accept=True)]), [], max_connects=1)
 
@@ -546,6 +617,230 @@ class ResidualTests(unittest.TestCase):
         got = [js_number_string(float(value)) for value in values]
         mismatches = [(v, e, g) for v, e, g in zip(values, expected, got) if e != g]
         self.assertEqual(mismatches[:5], [])
+
+
+class _ListTransport:
+    """Scripted transport for pump. An exhausted script raises ConnectionError (real shape)."""
+
+    def __init__(self, messages, *, then="eof"):
+        self.messages = list(messages)
+        self.sent = []
+        self.then = then
+
+    def send_text(self, text):
+        self.sent.append(json.loads(text))
+
+    def recv_text(self):
+        if self.messages:
+            return self.messages.pop(0)
+        if self.then == "timeout":
+            raise TimeoutError("idle")
+        raise ConnectionError("closed")
+
+
+def _norm_rows(root):
+    from public_market_collector.framing import durable_view
+
+    journal, _stopped = read_journal(root / "index.journal")
+    rows = []
+    for folder in ("norm/book", "norm/trades"):
+        for path in sorted((root / folder).glob("*.gz")):
+            rows.extend(durable_view(path, journal, path.name[:-3])["records"])
+    return rows
+
+
+def _raw_rows(root):
+    from public_market_collector.framing import durable_view
+
+    journal, _stopped = read_journal(root / "index.journal")
+    rows = []
+    for folder in ("raw/book", "raw/trades"):
+        for path in sorted((root / folder).glob("*.gz")):
+            rows.extend(durable_view(path, journal, path.name[:-3])["records"])
+    return rows
+
+
+class SecondRoundTests(unittest.TestCase):
+    """HM R2 at a4a72e5b: N1, N2, N3 (HM01-HM14 survivors) and N5."""
+
+    setUp = ResidualTests.setUp
+    tearDown = ResidualTests.tearDown
+    _probe = ResidualTests._probe
+    _open = ResidualTests._open
+    _run = ResidualTests._run
+
+    def test_hm01_every_reconnect_invalidates_the_book(self):
+        for name, first in (
+            ("eof", _ScriptSock([_BOOK_SUB, _SNAP], end="eof")),
+            ("close", _ScriptSock([_BOOK_SUB, _SNAP], end="close")),
+            ("20051", _ScriptSock([_BOOK_SUB, _SNAP, _js({"event": "info", "code": 20051})], end="eof")),
+        ):
+            second = _ScriptSock(
+                [_js({"event": "subscribed", "channel": "book", "chanId": 9, "symbol": SYMBOL}), _js([9, [6000, 2, 2]])],
+                end="eof",
+            )
+            self._run(f"hm01-{name}", _connector([first, second]), [], max_connects=2)
+            root = self.base / f"hm01-{name}"
+            gaps = [row["payload"] for row in _raw_rows(root) if row["channel"] == "gap"]
+            self.assertTrue(gaps)
+            self.assertTrue(all(gap["cause"] == "disconnect" for gap in gaps), (name, gaps))
+            if name == "20051":
+                self.assertIn("info_20051", {gap.get("reconnect_reason") for gap in gaps})
+            deltas = [row for row in _norm_rows(root) if row["channel"] == "book_delta"]
+            self.assertEqual(len(deltas), 1)
+            self.assertFalse(deltas[0]["applied"], f"{name}: a delta from the new connection hit the stale book")
+            self.assertFalse(deltas[0]["book_valid"])
+
+    def test_hm02_subs_cleared_for_each_connection(self):
+        session = self._open("hm02")
+        first = _ListTransport([_BOOK_SUB, _js({"event": "subscribed", "channel": "trades", "chanId": 8, "symbol": SYMBOL})])
+        with self.assertRaises(Reconnect):
+            pump(session, first, sleep=lambda _s: None, clock_ns=_Clock(), mono_ns=_Clock())
+        second = _ListTransport([_js({"event": "info", "code": 20061})])
+        with self.assertRaises(Reconnect):
+            pump(session, second, sleep=lambda _s: None, clock_ns=_Clock(), mono_ns=_Clock())
+        self.assertEqual([item for item in second.sent if item.get("event") == "unsubscribe"], [])
+        session.release()
+
+    def test_hm03_frames_after_a_close_frame_are_not_processed(self):
+        after = encode_server_frame(0x1, _js({"event": "info", "marker": "after-close"}).encode())
+        # The post-close frame arrives in the same read as the close frame.
+        sock = _ScriptSock([_js({"event": "info", "marker": "before-close"})], end="close", after_close=after)
+
+        def connect():
+            return open_public_socket(socket_factory=lambda _a, _t: sock, ssl_wrap=lambda raw, _h: raw)
+
+        self._run("hm03", connect, [], max_connects=1)
+        verbatim = [row.get("payload_verbatim") or "" for row in _raw_rows(self.base / "hm03")]
+        self.assertTrue(any("before-close" in text for text in verbatim))
+        self.assertFalse(any("after-close" in text for text in verbatim))
+
+    def test_hm07_n5_protocol_errors_exit_78_with_stop_record_and_flush(self):
+        masked = bytes([0x81, 0x80 | 2]) + b"\x01\x02\x03\x04" + b"hi"
+        bad_opcode = bytes([0x83, 0x00])
+        bad_fragment = encode_server_frame(0x0, b"x")
+        for name, frame, reason in (
+            ("masked", masked, "WS_SERVER_MASKED"),
+            ("opcode", bad_opcode, "WS_OPCODE"),
+            ("fragment", bad_fragment, "WS_FRAGMENT"),
+        ):
+            sock = _ScriptSock([_BOOK_SUB, _SNAP], raw_frames=[frame], end="eof")
+            sleeps = []
+            with self.assertRaises(StartRefused) as caught:
+                self._run(f"hm07-{name}", _connector([sock, _ScriptSock([])]), sleeps, max_connects=2)
+            self.assertEqual(str(caught.exception), reason)
+            self.assertEqual(sleeps, [], f"{name}: a protocol error must not back off and reconnect")
+            root = self.base / f"hm07-{name}"
+            records, _stopped = read_journal(root / "index.journal")
+            stops = [row for row in records if row.get("kind") == "capture_stop"]
+            self.assertEqual([(row["cause"], row["detail"]) for row in stops], [("start_refused", reason)])
+            verbatim = [row.get("payload_verbatim") for row in _raw_rows(root)]
+            self.assertIn(_SNAP, verbatim, "messages buffered before the refusal are committed")
+        code = public_run.execute_capture(
+            str(self.base / "never"), resume=False, repo_root=self.base / "no-repo", allow_root=str(self.base),
+            runner=lambda *_a: 78,
+        )
+        self.assertEqual(code, 78)
+
+    def test_hm08_scan_requires_a_decodable_member(self):
+        from public_market_collector.framing import gzip_member, jsonl_bytes
+        from public_market_collector.session import _MEMBER_HEADER, _scan_boundary
+
+        member = gzip_member(jsonl_bytes([{"raw_id": "s:0:0", "channel": "info"}]))
+        fake = _MEMBER_HEADER + b"\x02\xffnot-deflate-data"
+        tail = b"junk" + fake + member
+        self.assertEqual(_scan_boundary(tail), 4 + len(fake))
+        path = self.base / "fake-header.gz"
+        path.write_bytes(b"X" * 4096 + tail)
+        report = inspect_torn_tail(path, tail_max=len(tail))
+        self.assertEqual(report["boundary_source"], "scan")
+        self.assertIsNone(report["torn_offset"])
+        self.assertEqual(report["decodable_records"], 1)
+
+    def test_hm09_resubscribe_deadline_fires_on_idle_timeouts(self):
+        session = self._open("hm09")
+        book = Book()
+        book.replace_agg([[6000, 1, 1], [6100, 1, -1]])
+        script = [_BOOK_SUB, _SNAP, _js([7, "cs", book.checksum()[1] + 1])]
+        clock = _Clock(step_ns=4_000_000_000)
+        with self.assertRaises(Reconnect) as caught:
+            pump(session, _ListTransport(script, then="timeout"), sleep=lambda _s: None, clock_ns=clock, mono_ns=clock)
+        self.assertEqual(caught.exception.cause, "resubscribe_timeout")
+        session.release()
+
+    def test_hm13_committed_member_mismatch_is_reported(self):
+        session = self._open("hm13")
+        session.handle(_js({"event": "info", "n": 1}), recv_utc_ns=1, recv_mono_ns=1)
+        session.commit()
+        session.release()
+        segment = self.base / "hm13" / "raw" / "book" / "book-0001.gz"
+        records, _stopped = read_journal(self.base / "hm13" / "index.journal")
+        commit = [row for row in records if row.get("kind") == "commit" and row["segment_rel"] == "raw/book/book-0001.gz"][-1]
+        good = inspect_torn_tail(segment, committed=commit)
+        self.assertTrue(good["commit_verified"])
+        self.assertGreater(good["decodable_records"], 0)
+        forged = dict(commit, member_sha256="0" * 64)
+        bad = inspect_torn_tail(segment, committed=forged)
+        self.assertFalse(bad["commit_verified"])
+        self.assertEqual(bad["decodable_records"], 0)
+        self.assertEqual(bad["tail_state"], "committed_member_mismatch")
+        self.assertIsNone(bad["last_raw_id"])
+
+    def test_hm14_disconnect_clears_pending_resubscribe(self):
+        session = self._open("hm14")
+        book = Book()
+        book.replace_agg([[6000, 1, 1], [6100, 1, -1]])
+        session.handle(_BOOK_SUB, recv_utc_ns=1, recv_mono_ns=1)
+        session.handle(_SNAP, recv_utc_ns=2, recv_mono_ns=2)
+        session.handle(_js([7, "cs", book.checksum()[1] + 1]), recv_utc_ns=3, recv_mono_ns=3)
+        self.assertTrue(session.pending_resubscribe)
+        session.disconnect(recv_utc_ns=4, recv_mono_ns=4, cause="disconnect")
+        self.assertFalse(session.pending_resubscribe)
+        self.assertIsNone(session.resubscribe_deadline_ns)
+        session.release()
+
+    def test_n1_maintenance_pause_cleared_on_reconnect(self):
+        session = self._open("n1")
+        with self.assertRaises(Reconnect):
+            pump(session, _ListTransport([_js({"event": "info", "code": 20060})]), sleep=lambda _s: None, clock_ns=_Clock(), mono_ns=_Clock())
+        self.assertTrue(session.maintenance_pause)
+        with self.assertRaises(Reconnect):
+            pump(session, _ListTransport([_GREETING]), sleep=lambda _s: None, clock_ns=_Clock(), mono_ns=_Clock())
+        self.assertFalse(session.maintenance_pause)
+        session.release()
+
+    def test_n2_deadline_cleared_by_snapshot_after_20061_on_valid_book(self):
+        session = self._open("n2")
+        book = Book()
+        book.replace_agg([[6000, 1, 1], [6100, 1, -1]])
+        good = book.checksum()[1]
+        clock = _Clock(step_ns=1_000_000_000)
+        script = [
+            _BOOK_SUB,
+            _SNAP,
+            _js([7, "cs", good]),
+            _js({"event": "info", "code": 20061}),
+            _js({"event": "subscribed", "channel": "book", "chanId": 9, "symbol": SYMBOL}),
+            _js([9, [[6000, 1, 1], [6100, 1, -1]]]),
+        ]
+        seen = {}
+
+        class _Watch(_ListTransport):
+            def recv_text(self):
+                if len(self.messages) == 41:
+                    seen["valid"] = session.shadow.valid
+                    seen["deadline"] = session.resubscribe_deadline_ns
+                return super().recv_text()
+
+        # ~80 s of heartbeats on the new channel, then one checksum mismatch.
+        script += [_js([9, "hb"])] * 40 + [_js([9, "cs", good + 1]), _js([9, "hb"])]
+        transport = _Watch(script)
+        pump(session, transport, sleep=lambda _s: None, clock_ns=clock, mono_ns=clock, max_messages=len(script))
+        self.assertTrue(seen["valid"])
+        self.assertIsNone(seen["deadline"], "the snapshot after 20061 ends the in-flight resubscribe")
+        unsubs = [item for item in transport.sent if item.get("event") == "unsubscribe" and item.get("chanId") == 9]
+        self.assertEqual(len(unsubs), 1, "a later mismatch resubscribes instead of a spurious reconnect")
+        session.release()
 
 
 def _all_raw(session):

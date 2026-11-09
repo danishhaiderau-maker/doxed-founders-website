@@ -486,6 +486,10 @@ class CaptureSafetyTests(unittest.TestCase):
         self.assertEqual(sentinel.read_bytes(), b"keep-me")
         self.assertFalse(forbidden.exists())
         safe = self._root()
+        if entrypoint._REPO in self.base.resolve().parents:
+            # This checkout contains the temp dir (for example a copy under /tmp). The
+            # allow root would sit inside the inferred checkout and is refused by design.
+            self.skipTest("temp dir is inside the inferred checkout")
         code = entrypoint.main(
             ["capture", "--output", str(safe), "--allow-root", str(self.base)],
             runner=runner,
@@ -581,7 +585,8 @@ class CaptureSafetyTests(unittest.TestCase):
             disk_free_probe=self._probe,
             max_connects=1,
         )
-        self.assertEqual(sleeps, [1.0])
+        # One failed connect: max(1 s backoff, 3 s connect floor).
+        self.assertEqual(sleeps, [3.0])
         for exc in (ssl.SSLError("handshake"), socket.gaierror(1, "dns")):
             sleeps.clear()
 
@@ -601,12 +606,22 @@ class CaptureSafetyTests(unittest.TestCase):
                 disk_free_probe=self._probe,
                 max_connects=1,
             )
-            self.assertEqual(sleeps, [1.0])
+            self.assertEqual(sleeps, [3.0])
 
     def test_healthy_connection_resets_backoff(self):
         # The real transport never returns None: EOF and close frames raise ConnectionError.
+        # Healthy = data on a confirmed channel and >= 30 s up. Fake time: sleep advances it.
         sleeps = []
         phase = {"n": 0}
+        now = {"ns": 0}
+
+        def tick():
+            now["ns"] += 10_000_000_000
+            return now["ns"]
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now["ns"] += int(seconds * 1_000_000_000)
 
         class _Closing(_Transport):
             def recv_text(self):
@@ -619,7 +634,13 @@ class CaptureSafetyTests(unittest.TestCase):
             phase["n"] += 1
             if phase["n"] in (1, 2):
                 raise socket.timeout("timed out")
-            return _Closing([_js([7, "hb"])])
+            return _Closing(
+                [
+                    _js({"event": "subscribed", "channel": "book", "chanId": 7, "symbol": SYMBOL}),
+                    _js([7, [[6000, 1, 1], [6100, 1, -1]]]),
+                    _js([7, "hb"]),
+                ]
+            )
 
         run_forever(
             self.base / "reset-backoff",
@@ -627,15 +648,33 @@ class CaptureSafetyTests(unittest.TestCase):
             repo_root=None,
             allow_root=self.base,
             connect=connect,
-            sleep=sleeps.append,
-            clock_ns=lambda: 20,
-            mono_ns=lambda: 21,
+            sleep=sleep,
+            clock_ns=tick,
+            mono_ns=tick,
             deprioritize=lambda: "posix_nice_10",
             disk_free_probe=self._probe,
             max_connects=5,
         )
         # Two failed connects grow the delay; each connection that carried a message resets it.
         self.assertEqual(sleeps, [1.0, 2.0, 1.0, 1.0, 1.0])
+        # A connection that carries only the info greeting is not healthy (NB1).
+        greeting = []
+        run_forever(
+            self.base / "greeting-only",
+            resume=False,
+            repo_root=None,
+            allow_root=self.base,
+            connect=lambda: _Closing([_js({"event": "info", "version": 2})]),
+            sleep=greeting.append,
+            clock_ns=lambda: 20,
+            mono_ns=lambda: 21,
+            deprioritize=lambda: "posix_nice_10",
+            disk_free_probe=self._probe,
+            max_connects=4,
+        )
+        # Frozen clock: every post-failure sleep is followed by the 3 s pre-connect floor.
+        self.assertEqual(greeting[0::2], [3.0, 3.0, 4.0, 8.0])
+        self.assertEqual(greeting[1::2], [3.0, 3.0, 3.0])
 
     def test_liveness_info_codes_and_disk_watch(self):
         session = self._open(self.base / "liveness", resume=False)

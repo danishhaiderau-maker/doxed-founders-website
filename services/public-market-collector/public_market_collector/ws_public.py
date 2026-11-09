@@ -158,6 +158,9 @@ def parse_server_frames(buf: bytes, max_bytes: int) -> tuple[list[tuple[int, int
         b0 = buf[offset]
         b1 = buf[offset + 1]
         if b1 & 0x80:
+            if frames:
+                # Return the good frames first; the next call raises on this one.
+                break
             raise StartRefused("WS_SERVER_MASKED")
         length = b1 & 0x7F
         header = 2
@@ -204,6 +207,7 @@ class PublicConnection:
         self._fragments = b""
         self._fragment_opcode: int | None = None
         self._close_seen = False
+        self._deferred: StartRefused | None = None
         self._handshake()
 
     def _handshake(self) -> None:
@@ -239,6 +243,9 @@ class PublicConnection:
         while True:
             if self._pending:
                 return self._pending.pop(0)
+            if self._deferred is not None:
+                # Messages decoded before the protocol error were returned first.
+                raise self._deferred
             if self._close_seen:
                 # Messages that arrived before the close frame were returned first.
                 raise ConnectionError("close")
@@ -249,7 +256,13 @@ class PublicConnection:
                     raise FrameTooLarge(len(self._buf))
                 continue
             for fin, opcode, payload in frames:
-                text = self._consume(fin, opcode, payload)
+                try:
+                    text = self._consume(fin, opcode, payload)
+                except StartRefused as exc:
+                    if not self._pending:
+                        raise
+                    self._deferred = exc
+                    break
                 if text is not None:
                     self._pending.append(text)
                 if self._close_seen:
