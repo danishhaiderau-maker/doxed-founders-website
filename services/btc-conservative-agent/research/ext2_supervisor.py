@@ -36,7 +36,7 @@ _ENV_MARKERS = (
     "PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL",
 )
 _IMPORT_ALLOW = frozenset({
-    "__future__", "ast", "collections", "datetime", "gzip", "hashlib", "io", "itertools",
+    "__future__", "ast", "collections", "ctypes", "datetime", "gzip", "hashlib", "io", "itertools",
     "json", "math", "os", "pathlib", "signal", "subprocess", "threading", "time",
     "typing", "numpy", "torch", "research",
 })
@@ -81,6 +81,76 @@ def scrub_env(env: Mapping[str, str]) -> dict[str, str]:
             continue
         clean[key] = value
     return clean
+
+
+CREATE_SUSPENDED = 0x00000004
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+WINDOWS_CHILD_START = ("create_suspended", "assign_job", "resume")
+
+
+def windows_child_start_order() -> tuple[str, ...]:
+    return WINDOWS_CHILD_START
+
+
+def start_worker(command: list[str], *, env: Mapping[str, str], cwd: str):
+    """On Windows: create suspended, assign the job, then resume. Supervisor stays out."""
+    if os.name != "nt":
+        return subprocess.Popen(list(command), env=dict(env), cwd=cwd, start_new_session=True), None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    proc = subprocess.Popen(list(command), env=dict(env), cwd=cwd, creationflags=CREATE_SUSPENDED)
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        proc.kill()
+        raise Ext2Stop("STOP_JOB")
+
+    class Basic(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [
+            ("Basic", Basic), ("pad", ctypes.c_ulonglong * 16),
+            ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    info = Extended()
+    info.Basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        proc.kill()
+        raise Ext2Stop("STOP_JOB")
+    if not kernel.AssignProcessToJobObject(job, ctypes.c_void_p(int(proc._handle))):
+        proc.kill()
+        raise Ext2Stop("STOP_JOB")
+
+    class ThreadEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG), ("tpDeltaPri", wintypes.LONG), ("dwFlags", wintypes.DWORD),
+        ]
+
+    snap = kernel.CreateToolhelp32Snapshot(0x00000004, 0)
+    entry = ThreadEntry()
+    entry.dwSize = ctypes.sizeof(ThreadEntry)
+    ok = kernel.Thread32First(snap, ctypes.byref(entry))
+    while ok:
+        if entry.th32OwnerProcessID == proc.pid:
+            thread = kernel.OpenThread(0x0002, False, entry.th32ThreadID)
+            if thread:
+                kernel.ResumeThread(thread)
+                kernel.CloseHandle(thread)
+        ok = kernel.Thread32Next(snap, ctypes.byref(entry))
+    kernel.CloseHandle(snap)
+    return proc, job
 
 
 def windows_job_members(supervisor_pid: int, child_pid: int) -> dict[str, Any]:

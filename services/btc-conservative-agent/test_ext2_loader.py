@@ -1,8 +1,7 @@
-"""Synthetic Bitfinex files. No machine path and no row after 2025-01-28."""
+"""Synthetic jsonl.gz fixtures. No machine path and no row after 2025-01-28."""
 import gzip
-import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -16,122 +15,102 @@ def _ms(day: str, minute: int = 0) -> int:
     return base + minute * 60_000
 
 
-def _write(path: Path, rows) -> str:
+def _jsonl(path: Path, rows) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wb") as handle:
-        handle.write(json.dumps(rows).encode())
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
 
 
-def _pack(root: Path, day: str = "2024-11-01"):
-    trades = [[index + 1, _ms(day, index), 0.01, 100.0 + index] for index in range(5)]
-    candles = [[_ms(day, index), 100.0, 50.0, 101.0, 99.0, 1.0] for index in range(5)]
-    trade_sha = _write(root / "trades" / f"{day}.json.gz", trades)
-    candle_sha = _write(root / "candles1m" / f"{day}.json.gz", candles)
-    manifest = {f"trades/{day}.json.gz": trade_sha, f"candles1m/{day}.json.gz": candle_sha}
-    allow = list(manifest)
-    return manifest, allow
+def test_streams_jsonl_arrays_and_empty_minutes_are_not_prints(tmp_path):
+    day = date(2024, 11, 1)
+    start = loader.day_start_ms(day)
+    rows = [
+        (1, start + 60_000, 0.2, 100.0),
+        (2, start + 180_000, -0.1, 101.0),
+    ]
+    path = tmp_path / "trades" / "2024-11-01.jsonl.gz"
+    _jsonl(path, [list(row) for row in rows])
+    parsed = [loader._trade_tuple(row) for row in loader.iter_jsonl_gz(path)]
+    assert parsed == rows
+    bars = loader.minute_grid(rows, [day])
+    assert loader.empty_bar_count(bars) > 0
+    empty = next(bar for bar in bars if bar["empty"])
+    assert empty["trade_count"] == 0
+    assert empty["open"] is None and empty["close"] is None
+    assert loader.bar_ohlc_usable_as_print(empty) is False
+    filled = next(bar for bar in bars if not bar["empty"])
+    assert filled["close"] == 100.0
+    assert "candle" not in json.dumps(bars).lower()
+    assert features_from_trade_bars([filled])[0]["close"] == 100.0
 
 
-def test_bars_come_from_trades_and_features_do_not_read_candles(tmp_path):
-    manifest, allow = _pack(tmp_path)
-    loaded = loader.load_bitfinex(tmp_path, manifest, allowlist=allow)
-    assert loaded["bars"][0]["source"] == "trades"
-    assert loaded["bars"][-1]["close"] == 104.0
-    assert "candle" not in json.dumps(loaded["bars"]).lower()
-    features = features_from_trade_bars(loaded["bars"])
-    assert features[-1]["close"] == 104.0
-    candles = [[_ms("2024-11-01", index), 1.0, 9_999.0, 1.0, 1.0, 1.0] for index in range(5)]
-    candle_sha = _write(tmp_path / "candles1m" / "2024-11-01.json.gz", candles)
-    manifest["candles1m/2024-11-01.json.gz"] = candle_sha
-    again = loader.load_bitfinex(tmp_path, manifest, allowlist=allow)
-    assert features_from_trade_bars(again["bars"]) == features
-    assert again["bars"][-1]["close"] == 104.0
+def test_bad_jsonl_line_is_ext2stop(tmp_path):
+    path = tmp_path / "bad.jsonl.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.write("{not-json}\n")
+    with pytest.raises(loader.Ext2Stop, match="STOP_PARSE"):
+        list(loader.iter_jsonl_gz(path))
 
 
-def test_feature_function_does_not_mention_candles():
-    import inspect
-    source = inspect.getsource(features_from_trade_bars).lower()
-    assert "candle" not in source
-
-
-def test_sha_mismatch_stops_before_a_later_parse(tmp_path):
-    day = "2024-11-02"
-    good = _write(tmp_path / "trades" / f"{day}.json.gz", [[1, _ms(day), 0.1, 100.0]])
-    garbage = tmp_path / "candles1m" / f"{day}.json.gz"
-    garbage.parent.mkdir(parents=True, exist_ok=True)
-    garbage.write_bytes(b"not a gzip")
-    manifest = {
-        f"trades/{day}.json.gz": good,
-        f"candles1m/{day}.json.gz": "0" * 64,
-    }
-    allow = list(manifest)
-    with pytest.raises(loader.Ext2Stop, match="STOP_SHA_MISMATCH"):
-        loader.load_bitfinex(tmp_path, manifest, allowlist=allow)
-
-
-def test_date_after_the_ceiling_is_not_opened(tmp_path):
-    rel = "trades/2025-01-29.json.gz"
-    manifest = {rel: "a" * 64}
+def test_partial_manifest_and_post_ceiling_name_stop(tmp_path):
+    with pytest.raises(loader.Ext2Stop, match="STOP_ALLOWLIST"):
+        loader.load_bitfinex(tmp_path, {"trades/2024-11-01.jsonl.gz": "ab" * 32})
     with pytest.raises(loader.Ext2Stop, match="STOP_DATE"):
-        loader.load_bitfinex(tmp_path, manifest, allowlist=[rel])
-    assert not (tmp_path / rel).exists()
+        loader._check_name("trades/2025-01-29.jsonl.gz", {"trades/2025-01-29.jsonl.gz"})
 
 
-def test_red_gap_in_warmup_or_w1_stops_without_dropping_the_day(tmp_path):
-    warmup = "2024-10-30"
-    late = _ms(warmup) + 61 * 60_000
-    trade_sha = _write(
-        tmp_path / "trades" / f"{warmup}.json.gz",
-        [[1, _ms(warmup), 0.1, 100.0], [2, late, 0.1, 101.0]],
-    )
-    candle_sha = _write(tmp_path / "candles1m" / f"{warmup}.json.gz", [[_ms(warmup), 1, 1, 1, 1, 1]])
-    manifest = {f"trades/{warmup}.json.gz": trade_sha, f"candles1m/{warmup}.json.gz": candle_sha}
+def test_red_gap_covers_midnight_lead_and_a_foreign_row():
+    day = date(2024, 11, 1)
+    nxt = date(2024, 11, 2)
+    start = loader.day_start_ms(day)
+    late = start + 5 * 60 * 60 * 1000
     with pytest.raises(loader.Ext2Stop, match="STOP_RED_GAP"):
-        loader.load_bitfinex(tmp_path, manifest, allowlist=list(manifest))
-
-
-def test_two_days_stop_on_the_gapped_day_instead_of_returning_the_clean_one(tmp_path):
-    clean, allow = _pack(tmp_path, "2024-11-01")
-    bad_day = "2024-11-02"
-    late = _ms(bad_day) + 61 * 60_000
-    clean[f"trades/{bad_day}.json.gz"] = _write(
-        tmp_path / "trades" / f"{bad_day}.json.gz",
-        [[1, _ms(bad_day), 0.2, 100.0], [2, late, 0.2, 100.0]],
-    )
-    clean[f"candles1m/{bad_day}.json.gz"] = _write(
-        tmp_path / "candles1m" / f"{bad_day}.json.gz",
-        [[_ms(bad_day), 1, 1, 1, 1, 1]],
-    )
-    allow = list(clean)
+        loader.assert_trade_continuity([(1, late, 0.1, 100.0)], [day])
+    first = start + 1_000
+    second = loader.day_start_ms(nxt) + 2 * 60 * 60 * 1000
     with pytest.raises(loader.Ext2Stop, match="STOP_RED_GAP"):
-        loader.load_bitfinex(tmp_path, clean, allowlist=allow)
+        loader.assert_trade_continuity(
+            [(1, first, 0.1, 100.0), (2, second, 0.1, 100.0)], [day, nxt],
+        )
+    foreign = loader.day_start_ms(nxt) + 1_000
+    with pytest.raises(loader.Ext2Stop, match="STOP_RED_GAP"):
+        loader.assert_trade_continuity([(1, foreign, 0.1, 100.0)], [day])
 
 
-def test_trade_at_the_forbidden_instant_stops(tmp_path):
-    day = "2025-01-28"
-    trade_sha = _write(
-        tmp_path / "trades" / f"{day}.json.gz",
-        [[1, loader.FORBIDDEN_MTS, 0.1, 100.0]],
+def test_exact_sixty_minute_gap_is_allowed_and_sixty_plus_one_is_not():
+    day = date(2024, 11, 1)
+    start = loader.day_start_ms(day) + 1_000
+    loader.assert_trade_continuity(
+        [(1, start, 0.1, 100.0), (2, start + loader.MAX_GAP_MS, 0.1, 101.0)],
+        [day],
     )
-    candle_sha = _write(tmp_path / "candles1m" / f"{day}.json.gz", [[_ms(day), 1, 1, 1, 1, 1]])
-    manifest = {f"trades/{day}.json.gz": trade_sha, f"candles1m/{day}.json.gz": candle_sha}
-    with pytest.raises(loader.Ext2Stop, match="STOP_MTS"):
-        loader.load_bitfinex(tmp_path, manifest, allowlist=list(manifest))
+    with pytest.raises(loader.Ext2Stop, match="STOP_RED_GAP"):
+        loader.assert_trade_continuity(
+            [(1, start, 0.1, 100.0), (2, start + loader.MAX_GAP_MS + 1, 0.1, 101.0)],
+            [day],
+        )
 
 
-def test_allowlist_is_warmup_plus_w1_and_the_source_has_no_machine_path():
+def test_aggregate_mismatch_stops_before_parse(monkeypatch):
+    name = "trades/2024-11-01.jsonl.gz"
+    monkeypatch.setattr(loader, "allowlist_paths", lambda days=None: (name,))
+    monkeypatch.setattr(loader, "ALLOWLIST_AGGREGATE_SHA", "f" * 64)
+    with pytest.raises(loader.Ext2Stop, match="STOP_AGGREGATE_SHA"):
+        loader.assert_manifest_complete({name: "ab" * 32})
+
+
+def test_allowlist_names_are_jsonl_and_the_source_has_no_machine_path():
     assert len(loader.default_allowlist_dates()) == 91
-    assert len(loader.allowlist_paths()) == 182
-    assert loader.LAST_READ_DAY.isoformat() == "2025-01-28"
+    paths = loader.allowlist_paths()
+    assert len(paths) == 182
+    assert all(path.endswith(".jsonl.gz") for path in paths)
+    assert loader.ALLOWLIST_AGGREGATE_SHA.startswith("fd4152a6021d664f")
     text = Path(loader.__file__).read_text(encoding="utf-8")
     assert "DoxxedCrypto" not in text
     assert "C:\\" not in text
 
 
-def test_exact_sixty_minute_gap_is_not_a_red_gap():
-    rows = [[1, 0, 0.1, 100.0], [2, loader.MAX_GAP_MS, 0.1, 101.0]]
-    bars = loader._trade_bars(rows)
-    assert len(bars) == 2
-    with pytest.raises(loader.Ext2Stop, match="STOP_RED_GAP"):
-        loader._trade_bars([[1, 0, 0.1, 100.0], [2, loader.MAX_GAP_MS + 1, 0.1, 101.0]])
+def test_feature_function_does_not_mention_candles():
+    import inspect
+    assert "candle" not in inspect.getsource(features_from_trade_bars).lower()

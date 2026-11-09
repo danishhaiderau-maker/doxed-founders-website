@@ -229,8 +229,10 @@ test_expired_orders_boot_rebuild.py
 test_ext2_costs.py
 test_ext2_loader.py
 test_ext2_runner.py
+test_ext2_rules.py
 test_ext2_search.py
 test_ext2_supervisor.py
+test_ext2_windows_job.py
 test_family_global_chase_gate.py
 test_family_policy_common.py
 test_family_tile_runtime_peak_persistence.py

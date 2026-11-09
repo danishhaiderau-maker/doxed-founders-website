@@ -13,6 +13,7 @@ from typing import Any
 
 from research.ext2_costs import Ext2Stop
 from research.ext2_loader import verify_manifest_shas
+from research.ext2_rules import rule_receipt_fields
 from research.ext2_search import _cuda_available, count_combos
 from research.ext2_supervisor import (
     assert_roots,
@@ -31,6 +32,8 @@ SOURCE_FILES = (
     "ext2_search.py",
     "ext2_supervisor.py",
     "ext2_runner.py",
+    "ext2_rules.py",
+    "ext2_features.py",
 )
 
 
@@ -60,7 +63,7 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
             raise Ext2Stop("STOP_NETWORK")
         stages.append({"stage": "source_audit", "device": "cpu", "fallback": False})
         if manifest is not None:
-            verify_manifest_shas(Path(data_root), manifest, allowlist=allowlist)
+            verify_manifest_shas(Path(data_root), manifest)
             stages.append({"stage": "data_sha", "device": "cpu", "fallback": False, "files": len(manifest)})
         counted = count_combos()
         receipt["combos_searched"] = counted
@@ -81,6 +84,7 @@ def run_ext2(*, data_root: Path, output_root: Path, manifest: Mapping[str, str] 
         receipt["reason"] = exc.reason
     receipt["devices"] = stages
     receipt["combos_searched"] = receipt["combos_searched"] if receipt["combos_searched"] is not None else None
+    receipt.update(rule_receipt_fields())
     sealed = seal_receipt(receipt, forbidden_substrings)
     guarded_write(
         Path(output_root) / "run_receipt.json",

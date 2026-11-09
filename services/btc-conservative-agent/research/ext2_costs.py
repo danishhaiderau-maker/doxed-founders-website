@@ -56,6 +56,19 @@ def net_bp(gross_bp: float, roll_half_spread_bp: float) -> float:
     return float(gross_bp) - side - side
 
 
+def tick_adverse_bp(price: float) -> float:
+    """One $1 tick, in bp of the fill price. Adverse, so callers subtract it."""
+    value = float(price)
+    if not math.isfinite(value) or value <= 0.0:
+        raise Ext2Stop("STOP_TICK")
+    return 10000.0 / value
+
+
+def stress_net_bp(gross_bp: float, roll_half_spread_bp: float, price: float) -> float:
+    side = stress_friction_bp_per_side(roll_half_spread_bp)
+    return float(gross_bp) - side - side - tick_adverse_bp(price)
+
+
 def roll_half_spread_bp(prices: Sequence[float]) -> float:
     """Roll (1984) half-spread, in bp of the mean price. Needs at least 3 prints."""
     values = np.asarray(prices, dtype=np.float64)

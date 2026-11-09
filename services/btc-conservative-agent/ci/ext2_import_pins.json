@@ -1,10 +1,12 @@
 {
   "schema": "ext2_import_pins_v1",
   "files": {
-    "research/ext2_costs.py": "5bcae1b0d54e6b49d86e55b0738f76e797420c44bade0f6981d175d8aa1fd8a1",
-    "research/ext2_loader.py": "387b5ab949cb04a697134b11d41011e3871190b31ff01ed160f4c1f827ac4e74",
-    "research/ext2_search.py": "b76576a59a25a11eed464ddbe23629d0f1953e49c9578ac4e620f1f67f83ed58",
-    "research/ext2_supervisor.py": "47a67b17edbf0e323fb3b26304a61e2ea02c41276484a06b52165b8bd38ae57a",
-    "research/ext2_runner.py": "bcf99b148cfc7dc13e7a9fa29b170263a6315f4954a0d167a42ee172b5f5c6d0"
+    "research/ext2_costs.py": "cf97312151a828c0274305100df33cb9227451421508d48867c0c3d35e5be1a4",
+    "research/ext2_loader.py": "e10225c1e399934bd0912e11ebd718e57be43111b4331137f70b4f9bfabc09d1",
+    "research/ext2_search.py": "4f1262a96ec0cbff1dea3bd0d26d2d5326cd2e53bb8cfa01a64863f6970982b2",
+    "research/ext2_supervisor.py": "6fd4b30d953778970df9fa5ef88894c823a39913a7a2d15487f0b17857376f70",
+    "research/ext2_runner.py": "6e3fab546d958272d2e6a6815b521dafb3080d288e4ef9b2146fdec633b0ff10",
+    "research/ext2_rules.py": "c2ad6e677544e0182fc0c6e69a36031d0bcc04ce4f58ac74253763fd3fcbe61b",
+    "research/ext2_features.py": "c5251813876d7d7067c52dee2dd0517db1370e82f51cacffe64f0761674f6c0f"
   }
 }

@@ -28,6 +28,7 @@ from research.ext2_costs import (
     net_bp,
     utc_ms,
 )
+from research.ext2_rules import liquidation_fill_price
 
 COMBOS_SEARCHED = 181_442
 PARITY_ATOL = 1e-9
@@ -225,121 +226,172 @@ def censor_prints(print_mts: np.ndarray, print_price: np.ndarray, thesis: np.nda
     return print_mts[keep], print_price[keep], thesis[keep]
 
 
-def _scan_numpy(price: np.ndarray, mts: np.ndarray, thesis: np.ndarray, *, entry_price: float,
-                entry_mts: int, side: float, friction: float, mode: str) -> dict[str, Any]:
-    take, hold_min, thesis_on, stop = _exit_table()
-    width = take.size
-    done = np.zeros(width, dtype=bool)
-    code = np.zeros(width, dtype=np.int64)
-    exit_px = np.full(width, np.nan)
-    read_max = None
-    for index in range(price.size):
-        read_max = int(mts[index])
-        gross = float(side) * (float(price[index]) / float(entry_price) - 1.0) * 10000.0
-        elapsed = int(mts[index]) - int(entry_mts)
-        liquidated = gross <= -LIQUIDATION_ADVERSE_BP
-        stopped = gross <= -stop
-        target = gross >= take
-        crossed = (thesis_on > 0.0) & bool(thesis[index])
-        timed = elapsed >= hold_min * 60_000.0
-        decision = np.zeros(width, dtype=np.int64)
-        decision = np.where(timed, 1, decision)
-        decision = np.where(crossed, 2, decision)
-        decision = np.where(target, 3, decision)
-        decision = np.where(stopped, 4, decision)
-        decision = np.where(liquidated, 5, decision)
-        hit = (~done) & (decision > 0)
-        exit_px = np.where(hit, float(price[index]), exit_px)
-        code = np.where(hit, decision, code)
-        done = done | hit
-    still = ~done
-    if price.size == 0 or mode == "drop":
-        code = np.where(still, 7, code)
-    elif mode == "force_close":
-        exit_px = np.where(still, float(price[-1]), exit_px)
-        code = np.where(still, 6, code)
-    else:
-        exit_px = np.where(still, float(price[-1]), exit_px)
-        code = np.where(still, 8, code)
-    gross = np.full(width, np.nan)
-    nets = np.full(width, np.nan)
+def liquidation_price(entry_price: float, side: float) -> float:
+    """Derived 100x liquidation level. The crossing print is only the detector."""
+    return float(entry_price) * (1.0 - float(side) * LIQUIDATION_ADVERSE_BP / 10000.0)
+
+
+def _first_index(mask: np.ndarray) -> np.ndarray:
+    width = mask.shape[0]
+    if mask.ndim == 1:
+        if not bool(mask.any()):
+            return np.asarray(width)
+        return np.asarray(int(np.argmax(mask)))
+    found = mask.any(axis=0)
+    index = np.argmax(mask, axis=0)
+    return np.where(found, index, width)
+
+
+def _apply_priority(indexes: list[np.ndarray], codes: list[int], width: int) -> tuple[np.ndarray, np.ndarray]:
+    best = np.full(indexes[0].shape, width + 1)
+    code = np.zeros(indexes[0].shape, dtype=np.int64)
+    for idx, reason in zip(indexes, codes):
+        better = idx < best
+        best = np.where(better, idx, best)
+        code = np.where(better, reason, code)
+    return best, code
+
+
+def _finish_scan(code: np.ndarray, exit_px: np.ndarray, *, side: float, entry_price: float,
+                 friction: float, mts: np.ndarray) -> dict[str, Any]:
+    from research.ext2_costs import stress_friction_bp_per_side, tick_adverse_bp
+    gross = np.full(code.shape, np.nan)
+    nets = np.full(code.shape, np.nan)
+    stress = np.full(code.shape, np.nan)
+    ticked = np.full(code.shape, np.nan)
     kept = code != 7
-    if price.size:
+    if np.any(kept):
         gross[kept] = float(side) * (exit_px[kept] / float(entry_price) - 1.0) * 10000.0
         nets[kept] = gross[kept] - friction - friction
+        stress_side = stress_friction_bp_per_side(0.0 if friction <= 1.0 else friction - 0.5)
+        # friction passed in is already max(1, roll+0.5); 1.5x that per side
+        stress[kept] = gross[kept] - 1.5 * friction - 1.5 * friction
+        tick = tick_adverse_bp(entry_price) + tick_adverse_bp(float(np.nanmean(exit_px[kept])))
+        ticked[kept] = nets[kept] - tick
     return {
         "reason_code": code,
         "exit_price": exit_px,
         "gross_bp": gross,
         "net_bp": nets,
-        "print_mts_read_max": read_max,
+        "net_stress_bp": stress,
+        "net_tick_bp": ticked,
+        "print_mts_read_max": None if mts.size == 0 else int(mts.max()),
         "liquidation_count": int(np.sum(code == 5)),
         "dropped_count": int(np.sum(code == 7)),
+        "path_end_count": int(np.sum(code == 8)),
+        "censored_count": int(np.sum(code == 6)),
     }
+
+
+def _scan_numpy(price: np.ndarray, mts: np.ndarray, thesis: np.ndarray, *, entry_price: float,
+                entry_mts: int, side: float, friction: float, mode: str) -> dict[str, Any]:
+    """Vectorised over the 54 exits. No per-print Python loop."""
+    take, hold_min, thesis_on, stop = _exit_table()
+    width = int(take.size)
+    code = np.zeros(width, dtype=np.int64)
+    exit_px = np.full(width, np.nan)
+    if price.size == 0 or mode == "drop" and price.size == 0:
+        code[:] = 7
+        return _finish_scan(code, exit_px, side=side, entry_price=entry_price, friction=friction, mts=mts)
+    gross = float(side) * (price / float(entry_price) - 1.0) * 10000.0
+    elapsed = mts.astype(np.float64) - float(entry_mts)
+    level = liquidation_price(entry_price, side)
+    liquidated = price <= level if side > 0 else price >= level
+    stop_hit = gross[:, None] <= -stop[None, :]
+    take_hit = gross[:, None] >= take[None, :]
+    thesis_hit = (thesis_on[None, :] > 0.0) & thesis[:, None]
+    time_hit = elapsed[:, None] >= hold_min[None, :] * 60_000.0
+    liq_i = np.full(width, _first_index(liquidated))
+    best, code = _apply_priority(
+        [liq_i, _first_index(stop_hit), _first_index(take_hit), _first_index(thesis_hit), _first_index(time_hit)],
+        [5, 4, 3, 2, 1],
+        price.size,
+    )
+    no_hit = best > price.size - 1
+    if mode == "drop":
+        code = np.where(no_hit, 7, code)
+    elif mode == "force_close":
+        code = np.where(no_hit, 6, code)
+        best = np.where(no_hit, price.size - 1, best)
+    else:
+        code = np.where(no_hit, 8, code)
+        best = np.where(no_hit, price.size - 1, best)
+    printable = code != 7
+    chosen = np.clip(best, 0, max(price.size - 1, 0)).astype(np.int64)
+    exit_px = np.where(printable, price[chosen], np.nan)
+    if np.any(code == 5):
+        worse = np.array([
+            liquidation_fill_price(entry_price, side, float(price[int(chosen[i])])) if code[i] == 5 else np.nan
+            for i in range(code.size)
+        ])
+        exit_px = np.where(code == 5, worse, exit_px)
+    return _finish_scan(code, exit_px.astype(np.float64), side=side, entry_price=entry_price, friction=friction, mts=mts)
 
 
 def _scan_torch(price: np.ndarray, mts: np.ndarray, thesis: np.ndarray, *, entry_price: float,
                 entry_mts: int, side: float, friction: float, mode: str, device: str) -> dict[str, Any]:
+    """Same lattice on a torch device, vectorised across prints and the 54 exits."""
     import torch
 
     take_np, hold_np, thesis_np, stop_np = _exit_table()
-    torch_device = torch.device(device)
-    take = torch.as_tensor(take_np, dtype=torch.float64, device=torch_device)
-    hold_min = torch.as_tensor(hold_np, dtype=torch.float64, device=torch_device)
-    thesis_on = torch.as_tensor(thesis_np, dtype=torch.float64, device=torch_device)
-    stop = torch.as_tensor(stop_np, dtype=torch.float64, device=torch_device)
+    dev = torch.device(device)
+    price_t = torch.as_tensor(price, dtype=torch.float64, device=dev)
+    mts_t = torch.as_tensor(mts, dtype=torch.float64, device=dev)
+    thesis_t = torch.as_tensor(thesis.astype(np.bool_), dtype=torch.bool, device=dev)
+    take = torch.as_tensor(take_np, dtype=torch.float64, device=dev)
+    hold_min = torch.as_tensor(hold_np, dtype=torch.float64, device=dev)
+    thesis_on = torch.as_tensor(thesis_np, dtype=torch.float64, device=dev)
+    stop = torch.as_tensor(stop_np, dtype=torch.float64, device=dev)
     width = int(take.shape[0])
-    done = torch.zeros(width, dtype=torch.bool, device=torch_device)
-    code = torch.zeros(width, dtype=torch.int64, device=torch_device)
-    exit_px = torch.full((width,), float("nan"), dtype=torch.float64, device=torch_device)
-    read_max = None
-    for index in range(price.size):
-        read_max = int(mts[index])
-        gross = float(side) * (float(price[index]) / float(entry_price) - 1.0) * 10000.0
-        elapsed = int(mts[index]) - int(entry_mts)
-        liquidated = gross <= -LIQUIDATION_ADVERSE_BP
-        stopped = gross <= -stop
-        target = gross >= take
-        crossed = (thesis_on > 0.0) & bool(thesis[index])
-        timed = elapsed >= hold_min * 60_000.0
-        decision = torch.zeros(width, dtype=torch.int64, device=torch_device)
-        decision = torch.where(timed, torch.ones_like(decision), decision)
-        decision = torch.where(crossed, torch.full_like(decision, 2), decision)
-        decision = torch.where(target, torch.full_like(decision, 3), decision)
-        decision = torch.where(stopped, torch.full_like(decision, 4), decision)
-        decision = torch.where(
-            torch.as_tensor(liquidated, device=torch_device), torch.full_like(decision, 5), decision
-        )
-        hit = (~done) & (decision > 0)
-        exit_px = torch.where(hit, torch.as_tensor(float(price[index]), dtype=torch.float64, device=torch_device), exit_px)
-        code = torch.where(hit, decision, code)
-        done = done | hit
-    still = ~done
-    if price.size == 0 or mode == "drop":
-        code = torch.where(still, torch.full_like(code, 7), code)
+    if price_t.numel() == 0:
+        return _scan_numpy(price, mts, thesis, entry_price=entry_price, entry_mts=entry_mts, side=side, friction=friction, mode=mode)
+    gross = float(side) * (price_t / float(entry_price) - 1.0) * 10000.0
+    elapsed = mts_t - float(entry_mts)
+    level = liquidation_price(entry_price, side)
+    liquidated = price_t <= level if side > 0 else price_t >= level
+
+    def first(mask: torch.Tensor) -> torch.Tensor:
+        found = mask.any(dim=0)
+        index = mask.to(torch.int64).argmax(dim=0)
+        return torch.where(found, index, torch.full_like(index, price_t.shape[0]))
+
+    liq_i = torch.full((width,), int(liquidated.to(torch.int64).argmax()) if bool(liquidated.any()) else price_t.shape[0], device=dev)
+    best = torch.full((width,), price_t.shape[0] + 1, device=dev)
+    code = torch.zeros(width, dtype=torch.int64, device=dev)
+    for idx, reason in (
+        (liq_i, 5),
+        (first(gross[:, None] <= -stop[None, :]), 4),
+        (first(gross[:, None] >= take[None, :]), 3),
+        (first((thesis_on[None, :] > 0) & thesis_t[:, None]), 2),
+        (first(elapsed[:, None] >= hold_min[None, :] * 60_000.0), 1),
+    ):
+        better = idx < best
+        best = torch.where(better, idx, best)
+        code = torch.where(better, torch.full_like(code, reason), code)
+    no_hit = best > price_t.shape[0] - 1
+    if mode == "drop":
+        code = torch.where(no_hit, torch.full_like(code, 7), code)
     elif mode == "force_close":
-        exit_px = torch.where(still, torch.as_tensor(float(price[-1]), dtype=torch.float64, device=torch_device), exit_px)
-        code = torch.where(still, torch.full_like(code, 6), code)
+        code = torch.where(no_hit, torch.full_like(code, 6), code)
+        best = torch.where(no_hit, torch.full_like(best, price_t.shape[0] - 1), best)
     else:
-        exit_px = torch.where(still, torch.as_tensor(float(price[-1]), dtype=torch.float64, device=torch_device), exit_px)
-        code = torch.where(still, torch.full_like(code, 8), code)
-    code_np = code.detach().cpu().numpy()
-    exit_np = exit_px.detach().cpu().numpy()
-    gross = np.full(width, np.nan)
-    nets = np.full(width, np.nan)
-    kept = code_np != 7
-    if price.size:
-        gross[kept] = float(side) * (exit_np[kept] / float(entry_price) - 1.0) * 10000.0
-        nets[kept] = gross[kept] - friction - friction
-    return {
-        "reason_code": code_np,
-        "exit_price": exit_np,
-        "gross_bp": gross,
-        "net_bp": nets,
-        "print_mts_read_max": read_max,
-        "liquidation_count": int(np.sum(code_np == 5)),
-        "dropped_count": int(np.sum(code_np == 7)),
-    }
+        code = torch.where(no_hit, torch.full_like(code, 8), code)
+        best = torch.where(no_hit, torch.full_like(best, price_t.shape[0] - 1), best)
+    chosen = best.clamp(0, price_t.shape[0] - 1)
+    exit_px = price_t[chosen]
+    if bool((code == 5).any()):
+        prints = exit_px.detach().cpu().numpy()
+        codes = code.detach().cpu().numpy()
+        worse = np.array([
+            liquidation_fill_price(entry_price, side, float(prints[i])) if codes[i] == 5 else np.nan
+            for i in range(codes.size)
+        ])
+        exit_px = torch.as_tensor(np.where(codes == 5, worse, prints), dtype=torch.float64, device=dev)
+    exit_px = torch.where(code == 7, torch.full_like(exit_px, float("nan")), exit_px)
+    return _finish_scan(
+        code.detach().cpu().numpy(), exit_px.detach().cpu().numpy(),
+        side=side, entry_price=entry_price, friction=friction, mts=mts,
+    )
 
 
 def _one_event(price, mts, thesis, *, entry_price, entry_mts, side, friction, mode, kernel, device):
@@ -375,6 +427,8 @@ def evaluate_exit_lattice(events: Sequence[dict[str, Any]], *, roll_half_spread_
     cells = []
     liquidation_count = 0
     dropped_count = 0
+    path_end_count = 0
+    censored_count = 0
     for event in events:
         boundary = active_censor_mts(int(event["entry_mts"]), boundaries)
         raw_mts = np.asarray(event["print_mts"], dtype=np.int64)
@@ -398,6 +452,8 @@ def evaluate_exit_lattice(events: Sequence[dict[str, Any]], *, roll_half_spread_
             raise Ext2Stop("STOP_CENSOR")
         liquidation_count += scanned["liquidation_count"]
         dropped_count += scanned["dropped_count"]
+        path_end_count += scanned["path_end_count"]
+        censored_count += scanned["censored_count"]
         cells.append({
             "boundary_mts": boundary,
             "reasons": [REASON.get(int(code), "NONE") for code in scanned["reason_code"]],
@@ -406,6 +462,8 @@ def evaluate_exit_lattice(events: Sequence[dict[str, Any]], *, roll_half_spread_
             "net_bp": [None if not math.isfinite(float(value)) else float(value) for value in scanned["net_bp"]],
             "print_mts_read_max": scanned["print_mts_read_max"],
             "liquidation_count": scanned["liquidation_count"],
+            "path_end_count": scanned["path_end_count"],
+            "censored_count": scanned["censored_count"],
         })
     device_name = "gpu" if device == "cuda" else "cpu"
     return {
@@ -419,6 +477,8 @@ def evaluate_exit_lattice(events: Sequence[dict[str, Any]], *, roll_half_spread_
         "lattice_evaluated": len(events) * EXIT_GRID_N,
         "liquidation_count": liquidation_count,
         "dropped_count": dropped_count,
+        "path_end_count": path_end_count,
+        "censored_close_count": censored_count,
         "costs": {"fee_bp": FEE_BP, "funding": FUNDING, "friction_bp_per_side": friction, "funding_in_net": False},
         "kernel": "torch" if kernel == "torch" else "numpy",
         "device": device_name,

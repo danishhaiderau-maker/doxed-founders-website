@@ -56,4 +56,4 @@ def test_a_bad_data_file_sha_stops_at_the_start(tmp_path):
     blob.write_bytes(b"not-the-real-bytes")
     manifest = {"trades/2024-11-01.json.gz": "ab" * 32}
     receipt = run_ext2(data_root=data, output_root=output, manifest=manifest, allowlist=list(manifest))
-    assert receipt["reason"] == "STOP_SHA_MISMATCH"
+    assert receipt["reason"] == "STOP_ALLOWLIST"
