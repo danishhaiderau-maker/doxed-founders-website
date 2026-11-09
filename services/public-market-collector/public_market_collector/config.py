@@ -85,7 +85,9 @@ def backoff_delay(attempt: int, *, initial_s, cap_s, jitter_s) -> float:
         raise ValueError("attempt")
     if initial_s < 0 or cap_s < 0 or jitter_s < 0:
         raise ValueError("backoff")
-    base = float(initial_s) * (2 ** (attempt - 1))
+    # 2**1024 cannot convert to float. Cap the exponent; the delay cap applies first in practice.
+    exponent = min(int(attempt) - 1, 30)
+    base = float(initial_s) * (2 ** exponent)
     delay = base + float(jitter_s)
     if delay > float(cap_s):
         delay = float(cap_s)

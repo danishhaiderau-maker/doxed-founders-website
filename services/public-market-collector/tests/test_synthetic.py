@@ -202,9 +202,14 @@ class SyntheticTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "root"
+        self._saved_api_key = os.environ.get("BITFINEX_API_KEY")
         os.environ["BITFINEX_API_KEY"] = "canary-secret-value"
 
     def tearDown(self):
+        if self._saved_api_key is None:
+            os.environ.pop("BITFINEX_API_KEY", None)
+        else:
+            os.environ["BITFINEX_API_KEY"] = self._saved_api_key
         self.tmp.cleanup()
 
     def _session(self, **overrides) -> Session:

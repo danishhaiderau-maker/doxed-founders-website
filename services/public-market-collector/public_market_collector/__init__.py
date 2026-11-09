@@ -1,8 +1,10 @@
 """Public keyless Bitfinex book and raw-trade collector.
 
 This package is isolated from the paper engine. With no arguments the process
-refuses to start. `capture --output` writes the public perpetual book and
-trades into a new directory. It does not read API keys and it does not arm
+refuses to start. `capture --output DIR --allow-root ROOT` writes the public
+perpetual book and trades into a new directory that does not yet exist.
+Pass `--resume` only to append to that directory later. Run with `python -B`
+or PYTHONDONTWRITEBYTECODE=1. It does not read API keys and it does not arm
 live trading.
 """
 

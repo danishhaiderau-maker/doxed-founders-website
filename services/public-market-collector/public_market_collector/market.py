@@ -6,6 +6,7 @@ do not specify where SEQ_ALL places the integer.
 
 from __future__ import annotations
 
+import math
 import zlib
 from dataclasses import dataclass, field
 
@@ -31,15 +32,56 @@ def signed_crc32(text: str) -> int:
     return raw
 
 
+# Bitfinex checksum strings use JavaScript Number.toString (ES ToString), not Python str().
+# Trade ids are not a contiguous sequence, so a missing id is not proof a trade was lost.
+TRADE_ID_WINDOW = 100_000
+
+
+def js_number_string(value: float) -> str:
+    """JavaScript Number.toString for a finite float. Pinned against node in tests."""
+    if value != value or math.isinf(value):
+        raise ValueError("checksum number")
+    if value == 0.0:
+        return "-0" if math.copysign(1.0, value) < 0 else "0"
+    sign = "-" if value < 0 else ""
+    mag = abs(float(value))
+    text = None
+    for prec in range(1, 18):
+        candidate = format(mag, f".{prec}g")
+        if float(candidate) == mag:
+            text = candidate.lower()
+            break
+    if text is None:
+        text = format(mag, ".17g").lower()
+    if "e" not in text:
+        return sign + text
+    mant, exp_s = text.split("e")
+    exp_i = int(exp_s)
+    if 1e-6 <= mag < 1e21:
+        if "." in mant:
+            whole, frac = mant.split(".")
+        else:
+            whole, frac = mant, ""
+        digits = whole + frac
+        point = 1 + exp_i
+        if point <= 0:
+            fixed = "0." + ("0" * (-point)) + digits
+        elif point >= len(digits):
+            fixed = digits + ("0" * (point - len(digits)))
+        else:
+            fixed = digits[:point] + "." + digits[point:]
+        return sign + fixed
+    if "." in mant:
+        mant = mant.rstrip("0").rstrip(".")
+    exp_out = ("+" + str(exp_i)) if exp_i >= 0 else str(exp_i)
+    return sign + f"{mant}e{exp_out}"
+
+
 def canon_number(value) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("checksum number")
     if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
-            raise ValueError("checksum number")
-        if not value.is_integer():
-            raise ValueError("non_integer_checksum_stringification_unknown")
-        value = int(value)
+        return js_number_string(value)
     return str(value)
 
 
@@ -467,8 +509,11 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
                 and int(trade_id) < int(state.max_trade_id)
             )
             if trade_id is not None and not duplicate:
-                state.seen_trade_ids.add(trade_id)
-                state.max_trade_id = trade_id if state.max_trade_id is None else max(int(state.max_trade_id), int(trade_id))
+                state.seen_trade_ids.add(int(trade_id))
+                state.max_trade_id = int(trade_id) if state.max_trade_id is None else max(int(state.max_trade_id), int(trade_id))
+                if len(state.seen_trade_ids) > TRADE_ID_WINDOW:
+                    floor_id = int(state.max_trade_id) - TRADE_ID_WINDOW
+                    state.seen_trade_ids = {item for item in state.seen_trade_ids if int(item) >= floor_id}
             side = None
             if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                 if amount > 0:
@@ -509,11 +554,11 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
         cause = payload.get("cause")
         interval_event = None
         interval_id = None
-        if cause in {"checksum_fail", "seq_jump", "disconnect"} and state.interval_id:
+        if cause in {"checksum_fail", "seq_jump", "disconnect", "maintenance"} and state.interval_id:
             interval_event = "close"
             interval_id = state.interval_id
             state.interval_id = None
-        if cause in {"checksum_fail", "seq_jump", "disconnect", "write_fail", "startup"}:
+        if cause in {"checksum_fail", "seq_jump", "disconnect", "write_fail", "startup", "maintenance"}:
             state.valid = False
         if cause == "disconnect":
             state.last_conn_seq = None

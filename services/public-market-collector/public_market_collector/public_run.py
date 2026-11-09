@@ -1,14 +1,22 @@
 """Forward public capture. Separate process, new directory, bounded disk.
 
-The paper engine is not imported and is not asked to store this book. This
-process lowers its priority and sleeps between commits so a full-depth book
-does not sit on the paper engine's lock or fill the laptop disk.
+Launch with `python -B` or PYTHONDONTWRITEBYTECODE=1 so the checkout does not
+gain __pycache__. The paper engine is not imported.
+
+Free space is probed by a daemon thread. That thread only sets a stop flag.
+The writer checks the flag and the floor again before each member. A stalled
+write is not aborted mid-syscall.
+
+The process asks for below-normal priority and sleeps 5 ms every 20 messages.
+Commit work is incremental: only the new rows are normalised, and segment
+hashes and byte totals are running counters.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +31,7 @@ from .ws_public import (
     FrameTooLarge,
     deprioritize_process,
     open_public_socket,
+    resubscribe_book_messages,
     subscribe_payloads,
 )
 
@@ -37,6 +46,44 @@ HEARTBEAT_TIMEOUT_S = 30
 BACKOFF_INITIAL_S = 1
 BACKOFF_CAP_S = 30
 BACKOFF_JITTER_S = 0
+MAX_BACKOFF_ATTEMPT = 16
+SEGMENT_MAX_BYTES = 64 * 1024 * 1024
+SEGMENT_MAX_AGE_S = 3600
+CLOCK_WARN_MS = 250
+CLOCK_INVALID_MS = 2000
+APPLIED_PRIORITY = frozenset({"posix_nice_10", "windows_below_normal"})
+
+
+class Reconnect(Exception):
+    def __init__(self, cause: str, *, already: bool = False, healthy: bool = False):
+        super().__init__(cause)
+        self.cause = cause
+        self.already = already
+        self.healthy = healthy
+
+
+class DiskWatch:
+    """Separate thread. It does not write, rename, or delete."""
+
+    def __init__(self, session: Session, interval_s: float = 1.0):
+        self.session = session
+        self.interval_s = interval_s
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="pmc-disk-watch", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self.thread.is_alive():
+            self.thread.join(timeout=2)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            reason = self.session._floor_block(1)
+            if reason:
+                self.session.watch_reason = reason
 
 
 class _Config:
@@ -57,12 +104,15 @@ class _Config:
     backoff_cap_s = BACKOFF_CAP_S
     backoff_jitter_s = BACKOFF_JITTER_S
     health_interval_s = 30
-    clock_warn_ms = None
-    clock_invalid_ms = None
     trade_quiet_warn_s = None
-    segment_max_bytes = None
+    segment_max_bytes = SEGMENT_MAX_BYTES
+    segment_max_age_s = SEGMENT_MAX_AGE_S
     seq_layout = None
     seq_scope = None
+    allow_root = None
+    priority_result = None
+    clock_warn_ms = CLOCK_WARN_MS
+    clock_invalid_ms = CLOCK_INVALID_MS
     free_disk_bytes = None
     disk_free_probe = None
     repo_root = None
@@ -102,8 +152,20 @@ def _probe_free(root: Path, probe) -> int | None:
     return fn(target)
 
 
-def open_session(root: Path, *, resume: bool, repo_root: Path | None, disk_free_probe=None) -> Session:
-    reason = output_refusal(root, repo_root=repo_root)
+def open_session(
+    root: Path,
+    *,
+    resume: bool,
+    repo_root: Path | None,
+    allow_root: Path | None,
+    disk_free_probe=None,
+    priority_result: str | None = None,
+    segment_max_bytes: int | None = None,
+    segment_max_age_s: int | None = None,
+) -> Session:
+    if resume and not root.exists():
+        raise StartRefused("RESUME_DIR_MISSING")
+    reason = output_refusal(root, repo_root=repo_root, allow_root=allow_root, resume=resume)
     if reason:
         raise StartRefused(reason)
     if root.exists() and foreign_entries(root):
@@ -117,8 +179,14 @@ def open_session(root: Path, *, resume: bool, repo_root: Path | None, disk_free_
     cfg.output_root = str(root)
     cfg.resume = bool(resume)
     cfg.repo_root = repo_root
+    cfg.allow_root = allow_root
     cfg.disk_free_probe = disk_free_probe
     cfg.free_disk_bytes = int(free)
+    cfg.priority_result = priority_result
+    if segment_max_bytes is not None:
+        cfg.segment_max_bytes = segment_max_bytes
+    if segment_max_age_s is not None:
+        cfg.segment_max_age_s = segment_max_age_s
     ids = allocate_segment_ids(root)
     cfg.segment_id_book = ids["segment_id_book"]
     cfg.segment_id_trades = ids["segment_id_trades"]
@@ -139,24 +207,58 @@ def cite_prior_segments(session: Session) -> None:
             append_startup_gap(root, path, report)
 
 
+def _send_json(transport, payload: dict) -> None:
+    transport.send_text(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+
+
 def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages: int | None = None) -> int:
     """Read public text messages. Yields every YIELD_EVERY so the paper engine runs."""
     for payload in subscribe_payloads():
-        transport.send_text(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        _send_json(transport, payload)
+    if session.last_liveness is None:
+        session.last_liveness = int(clock_ns())
     count = 0
     while True:
+        if session.watch_reason:
+            session._stop("write_fail", session.watch_reason)
         if max_messages is not None and count >= max_messages:
             break
         try:
             text = transport.recv_text()
         except FrameTooLarge:
             session._stop("write_fail", "ws_frame_cap")
+        except TimeoutError:
+            now = int(clock_ns())
+            if session.poll_liveness(now):
+                raise Reconnect("liveness", already=True)
+            continue
         if text is None:
-            raise ConnectionError("closed")
+            raise Reconnect("closed", already=False, healthy=count > 0)
         now = int(clock_ns())
         mono = int(mono_ns())
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            session.note_bad_json(now, mono)
+            continue
+        code = parsed.get("code") if isinstance(parsed, dict) and parsed.get("event") == "info" else None
         session.handle(text, recv_utc_ns=now, recv_mono_ns=mono)
         count += 1
+        if code == 20060:
+            session.maintenance_pause = True
+            session.mark_maintenance(now, mono)
+        elif code == 20061:
+            session.maintenance_pause = False
+            for payload in subscribe_payloads():
+                _send_json(transport, payload)
+        elif code == 20051:
+            raise Reconnect("info_20051", already=False)
+        if session.pending_resubscribe:
+            session.pending_resubscribe = False
+            for payload in resubscribe_book_messages(session.subs):
+                _send_json(transport, payload)
+        if session.poll_liveness(now):
+            raise Reconnect("liveness", already=True)
         if session.uncommitted_received >= YIELD_EVERY:
             session.commit()
             session.cfg.free_disk_bytes = _probe_free(session.root, session.cfg.disk_free_probe)
@@ -168,11 +270,18 @@ def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages:
     return count
 
 
+def _recover(session: Session, clocks, monos, *, already: bool, cause: str) -> None:
+    if not already:
+        session.disconnect(recv_utc_ns=int(clocks()), recv_mono_ns=int(monos()), cause=cause)
+    session.commit()
+
+
 def run_forever(
     root: Path,
     *,
     resume: bool,
     repo_root: Path | None,
+    allow_root: Path | None,
     connect=None,
     sleep=None,
     clock_ns=None,
@@ -181,16 +290,30 @@ def run_forever(
     disk_free_probe=None,
     max_messages: int | None = None,
     max_connects: int | None = None,
+    watch_interval_s: float = 1.0,
 ) -> Session:
-    """Deprioritize first, then connect. Reconnect sleeps the backoff."""
+    """Deprioritize first, then connect. Network errors sleep and reconnect."""
     sleeper = sleep or time.sleep
     clocks = clock_ns or time.time_ns
     monos = mono_ns or time.monotonic_ns
-    (deprioritize or deprioritize_process)()
-    session = open_session(root, resume=resume, repo_root=repo_root, disk_free_probe=disk_free_probe)
+    priority = (deprioritize or deprioritize_process)()
+    if priority not in APPLIED_PRIORITY:
+        raise StartRefused(f"PRIORITY_DENIED:{priority}")
+    session = open_session(
+        root,
+        resume=resume,
+        repo_root=repo_root,
+        allow_root=allow_root,
+        disk_free_probe=disk_free_probe,
+        priority_result=priority,
+    )
+    watch = DiskWatch(session, watch_interval_s)
+    watch.start()
     try:
         if resume:
             cite_prior_segments(session)
+            session.accounted_bytes = _root_size_after_cite(session)
+        attempt = 1
         connects = 0
         opener = connect or open_public_socket
         while max_connects is None or connects < max_connects:
@@ -205,30 +328,53 @@ def run_forever(
                     mono_ns=monos,
                     max_messages=max_messages,
                 )
+                attempt = 1
                 if max_messages is not None:
                     break
-            except ConnectionError:
-                delay = session.plan_reconnect(connects)
-                session.disconnect(recv_utc_ns=int(clocks()), recv_mono_ns=int(monos()), cause="disconnect")
-                session.commit()
+            except Reconnect as exc:
+                if exc.healthy:
+                    attempt = 1
+                _recover(session, clocks, monos, already=exc.already, cause=exc.cause)
+                delay = session.plan_reconnect(attempt)
+                attempt = min(attempt + 1, MAX_BACKOFF_ATTEMPT)
                 sleeper(delay)
-                if max_connects is not None and connects >= max_connects:
-                    break
+            except OSError:
+                _recover(session, clocks, monos, already=False, cause="disconnect")
+                delay = session.plan_reconnect(attempt)
+                attempt = min(attempt + 1, MAX_BACKOFF_ATTEMPT)
+                sleeper(delay)
+            if max_connects is not None and connects >= max_connects:
+                break
         return session
     finally:
+        watch.stop()
         session.release()
 
 
-def execute_capture(output: str, *, resume: bool, repo_root: Path, runner=None) -> int:
+def _root_size_after_cite(session: Session) -> int:
+    from .session import _root_size
+
+    return _root_size(session.root)
+
+
+def execute_capture(
+    output: str,
+    *,
+    resume: bool,
+    repo_root: Path,
+    allow_root: str,
+    runner=None,
+) -> int:
     root = Path(output)
-    reason = output_refusal(root, repo_root=repo_root)
+    allow = Path(allow_root)
+    reason = output_refusal(root, repo_root=repo_root, allow_root=allow, resume=resume)
     if reason:
         sys.stderr.write(f"REFUSED capture: {reason}\n")
         return 78
     if runner is not None:
-        return int(runner(root, resume, repo_root))
+        return int(runner(root, resume, repo_root, allow))
     try:
-        run_forever(root, resume=resume, repo_root=repo_root)
+        run_forever(root, resume=resume, repo_root=repo_root, allow_root=allow)
     except StartRefused as exc:
         sys.stderr.write(f"REFUSED capture: {exc}\n")
         return 78

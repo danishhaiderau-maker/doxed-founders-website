@@ -237,6 +237,7 @@ class AppendJournal:
         self.trace.append(label)
         os.fsync(self.fd)
         self.trace.append(f"{label}:fsync_journal")
+        return len(line)
 
     def close(self) -> None:
         os.close(self.fd)
@@ -249,6 +250,8 @@ class SegmentFile:
         self.fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_WRONLY, 0o644)
         self.size = 0
         self.closed = False
+        self._prefix = hashlib.sha256()
+        self.last_journal_bytes = 0
 
     def read_bytes(self) -> bytes:
         with open(self.path, "rb") as handle:
@@ -262,8 +265,10 @@ class SegmentFile:
         if fault == "io_error":
             raise OSError("injected write failure")
         if fault == "partial_member":
-            _write_all(self.fd, member[:8])
-            self.size += 8
+            partial = member[:8]
+            _write_all(self.fd, partial)
+            self.size += len(partial)
+            self._prefix.update(partial)
             self.trace.append(f"{label}:partial_member")
             raise CrashFault("partial_member")
         start = self.size
@@ -271,11 +276,9 @@ class SegmentFile:
         self.size += len(member)
         os.fsync(self.fd)
         self.trace.append(f"{label}:fsync_segment")
+        self._prefix.update(member)
         if fault == "after_fsync_before_commit":
             raise CrashFault("after_fsync_before_commit")
-        blob = self.read_bytes()
-        if len(blob) != self.size:
-            raise OSError("size mismatch after fsync")
         end = start + len(member)
         record = {
             "kind": "commit",
@@ -287,12 +290,14 @@ class SegmentFile:
             "member_end_offset": end,
             "last_raw_id": rows[-1].get("raw_id"),
             "record_count": len(rows),
-            "member_sha256": sha256_bytes(blob[start:end]),
-            "prefix_sha256": sha256_bytes(blob[:end]),
+            "member_sha256": sha256_bytes(member),
+            "prefix_sha256": self._prefix.hexdigest(),
         }
         if "segment_sha256" in record:
             raise AssertionError("commit must not carry the whole-segment digest")
-        journal.append_obj(record, label=f"{label}:checksummed_commit", fault_torn=(fault == "torn_journal"))
+        self.last_journal_bytes = journal.append_obj(
+            record, label=f"{label}:checksummed_commit", fault_torn=(fault == "torn_journal")
+        )
         return record
 
     def mark_closed(self) -> None:

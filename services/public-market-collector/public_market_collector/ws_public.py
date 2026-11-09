@@ -250,7 +250,17 @@ class PublicConnection:
         raise StartRefused("WS_OPCODE")
 
 
-def open_public_socket(socket_factory=None, ssl_wrap=None, timeout_s: float = 10):
+def resubscribe_book_messages(subs: dict) -> list[dict]:
+    """Unsubscribe the book channel and subscribe it again. No credentials."""
+    messages = []
+    for chan_id, sub in subs.items():
+        if isinstance(sub, dict) and sub.get("channel") == "book":
+            messages.append({"event": "unsubscribe", "chanId": chan_id})
+    messages.append(subscribe_payloads()[1])
+    return messages
+
+
+def open_public_socket(socket_factory=None, ssl_wrap=None, timeout_s: float = 5):
     """Connect only to the documented public host. Factory is for tests."""
     host, _path = public_endpoint()
     assert_public_host(host)

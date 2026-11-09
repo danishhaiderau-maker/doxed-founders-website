@@ -172,6 +172,9 @@ jobs:
       - name: Every module bot.py (and each entrypoint process) imports is in the image context and imports
         run: python ci_image_import_check.py --src . --ctx /tmp/bot-image-ctx
 
+  # Additive job only. HOLD #985 inserts a step inside the unit-tests job
+  # (strategy package validation, near the tile-registry audit). This job stays
+  # at the end of the file so the two hunks do not overlap.
   public-market-collector:
     runs-on: ubuntu-latest
     timeout-minutes: 10
