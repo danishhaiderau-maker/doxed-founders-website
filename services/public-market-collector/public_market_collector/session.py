@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import zlib
+from collections import deque
 from pathlib import Path
 
 from .config import (
@@ -22,12 +24,13 @@ from .framing import (
     AppendJournal,
     SegmentFile,
     confine,
+    decode_member,
     decode_prefix,
     dumps,
     read_journal,
     sha256_bytes,
 )
-from .market import FeedState, classify_message, step
+from .market import RESUBSCRIBE_CAUSES, FeedState, classify_message, step
 
 STREAMS = ("raw-book", "raw-trades")
 NORM_STREAM = {"raw-book": "norm-book", "raw-trades": "norm-trades"}
@@ -37,6 +40,10 @@ REL_DIR = {
     "norm-book": "norm/book",
     "norm-trades": "norm/trades",
 }
+# Write-order trace for tests. A bounded ring so a multi-day capture does not grow it.
+TRACE_MAX = 512
+# One book resubscribe in flight at a time. No new snapshot by then -> reconnect.
+RESUBSCRIBE_DEADLINE_S = 30
 
 
 def _root_size(root: Path) -> int:
@@ -109,7 +116,7 @@ class Session:
         self.cfg = cfg
         self.root = root.resolve()
         self._released = False
-        self.trace: list[str] = []
+        self.trace: deque[str] = deque(maxlen=TRACE_MAX)
         self.index = AppendJournal(confine(self.root, "index.journal"), self.trace, exclusive=exclusive)
         self.health = AppendJournal(confine(self.root, "health.journal"), self.trace, exclusive=exclusive)
         self.files: dict[str, SegmentFile] = {}
@@ -135,9 +142,16 @@ class Session:
         self.durable_raw: list[dict] = []
         self.keep_raw_history = not public
         self.norm_emitted = 0
+        # Two independent states, each advanced in place over the same record
+        # sequence: `shadow` at receive time, `_norm_state` at commit time.
         self._norm_state = FeedState(prec=cfg.prec, seq_scope=cfg.seq_scope)
-        self.shadow = self._norm_state
+        self.shadow = FeedState(prec=cfg.prec, seq_scope=cfg.seq_scope)
         self.pending_resubscribe = False
+        self.resubscribe_deadline_ns = None
+        self.resubscribe_count = 0
+        self.clock_class = "ok"
+        self.clock_nonok_count = 0
+        self.bad_frame_count = 0
         self.watch_reason = None
         self.maintenance_pause = False
         self.segment_opened_ns: dict[str, int] = {}
@@ -247,8 +261,15 @@ class Session:
         if isinstance(parsed, dict) and parsed.get("event") == "subscribed":
             if parsed.get("symbol") not in (None, self.cfg.symbol):
                 raise StartRefused("INSTRUMENT_MISMATCH")
-            self.subs[parsed.get("chanId")] = parsed
+            chan_id = parsed.get("chanId")
+            if parsed.get("channel") == "book":
+                # A confirmed book subscription makes earlier book channel ids stale.
+                for old_id in [key for key, value in self.subs.items() if isinstance(value, dict) and value.get("channel") == "book"]:
+                    self.subs.pop(old_id, None)
+            self.subs[chan_id] = parsed
             sub = parsed
+        elif isinstance(parsed, dict) and parsed.get("event") == "unsubscribed":
+            self.subs.pop(parsed.get("chanId"), None)
         elif isinstance(parsed, list) and parsed:
             sub = self.subs.get(parsed[0])
         classified = classify_message(parsed, sub, self.cfg.seq_layout)
@@ -288,10 +309,15 @@ class Session:
         self._follow(rec)
 
     def _follow(self, rec: dict) -> None:
-        result = step(self.shadow, rec, seq_layout=self.cfg.seq_layout)
+        was_valid = bool(self.shadow.valid)
+        result = step(self.shadow, rec, seq_layout=self.cfg.seq_layout, inplace=True)
         self.shadow = result.state
-        if result.followup and (result.followup.get("payload") or {}).get("cause") == "checksum_fail":
+        cause = (result.followup or {}).get("payload", {}).get("cause") if result.followup else None
+        if cause in RESUBSCRIBE_CAUSES and self.resubscribe_deadline_ns is None:
+            # One resubscribe in flight. Later `cs` on the invalid book does not add another.
             self.pending_resubscribe = True
+        if rec.get("channel") == "book_snapshot" and self.shadow.valid and not was_valid:
+            self.resubscribe_deadline_ns = None
         if rec.get("channel") == "trade":
             for norm in result.norms:
                 if norm.get("trade_id") is not None and norm.get("counted"):
@@ -313,7 +339,7 @@ class Session:
         )
         self.buffer[rec["stream"]].append(gap)
         self.gap_count += 1
-        followed = step(self.shadow, gap, seq_layout=self.cfg.seq_layout)
+        followed = step(self.shadow, gap, seq_layout=self.cfg.seq_layout, inplace=True)
         self.shadow = followed.state
         if followed.followup is not None:
             raise RuntimeError("gap produced another gap")
@@ -324,7 +350,12 @@ class Session:
         )
         self.last_clock_offset_ms = int(offset_ms)
         self.latency_analytics_valid = kind != "invalid"
-        if kind == "ok":
+        if kind != "ok":
+            self.clock_nonok_count += 1
+        previous = self.clock_class
+        self.clock_class = kind
+        if kind == previous:
+            # Record only class changes. One record per late trade would flood the journal.
             return kind
         payload = {
             "gap_start_recv": recv_utc_ns,
@@ -335,7 +366,9 @@ class Session:
             "venue_seq_before": self.shadow.last_conn_seq,
             "venue_seq_after": self.shadow.last_conn_seq,
             "offset_ms": int(offset_ms),
+            "offset_includes": "network_latency_and_clock_skew",
             "clock_class": kind,
+            "clock_class_before": previous,
             "latency_analytics_valid": self.latency_analytics_valid,
         }
         gap = self._stamp_common("gap", payload, None, recv_utc_ns, recv_mono_ns, None, None, "raw-book")
@@ -373,12 +406,17 @@ class Session:
         after = self.epoch_ids[self.epoch_pos]
         self.epoch = after
         self.seq_local = 0
+        self.pending_resubscribe = False
+        self.resubscribe_deadline_ns = None
         start = self.last_recv if self.last_recv is not None else recv_utc_ns
         for stream in STREAMS:
             payload = {
                 "gap_start_recv": start,
                 "gap_end_recv": recv_utc_ns,
-                "cause": cause,
+                # Always "disconnect" so the book is invalidated and sequence state
+                # cleared for every reconnect reason. The reason itself is kept.
+                "cause": "disconnect",
+                "reconnect_reason": cause,
                 "conn_epoch_before": before,
                 "conn_epoch_after": after,
                 "venue_seq_before": self.shadow.last_conn_seq,
@@ -390,11 +428,12 @@ class Session:
             self._follow(gap)
         self.last_liveness = recv_utc_ns
 
-    def note_bad_json(self, recv_utc_ns: int, recv_mono_ns: int) -> None:
+    def note_bad_json(self, recv_utc_ns: int, recv_mono_ns: int, *, kind: str = "bad_json") -> None:
         """Keep a record of an undecodable frame. The frame is not dropped silently."""
+        self.bad_frame_count += 1
         rec = self._stamp_common(
             "info",
-            {"kind": "bad_json"},
+            {"kind": kind},
             None,
             recv_utc_ns,
             recv_mono_ns,
@@ -447,7 +486,7 @@ class Session:
         norms: list[dict] = []
         state = self._norm_state
         for rec in batch:
-            result = step(state, rec, seq_layout=self.cfg.seq_layout)
+            result = step(state, rec, seq_layout=self.cfg.seq_layout, inplace=True)
             state = result.state
             norms.extend(result.norms)
         self._norm_state = state
@@ -465,7 +504,6 @@ class Session:
             self._write_rows(stream, rows)
         self.durable += len(batch)
         self.uncommitted_received = 0
-        self.shadow = state
 
     def _accept_write(self, rows: list[dict], from_stop: bool) -> bool:
         if self.watch_reason:
@@ -501,6 +539,10 @@ class Session:
         if max_bytes is not None and current.size >= int(max_bytes):
             roll = True
         opened = self.segment_opened_ns.get(stream)
+        if opened is None and self.last_recv is not None:
+            # Opened before any receive: age starts at the first receive, not at 0.
+            self.segment_opened_ns[stream] = int(self.last_recv)
+            opened = None
         if (
             not roll
             and max_age is not None
@@ -511,12 +553,34 @@ class Session:
             roll = True
         if not roll:
             return False
+        self._close_record_at_roll(stream, current)
         if not current.closed:
             current.mark_closed()
         self.files.pop(stream, None)
         self._advance_segment_id(stream)
         self.member_index[stream] = 0
         return True
+
+    def _close_record_at_roll(self, stream: str, segment: SegmentFile) -> None:
+        """Whole-segment digest from the running hash. The file is not re-read."""
+        record = {
+            "kind": "close",
+            "stream": stream,
+            "segment_id": self.segment_id[stream],
+            "segment_rel": f"{REL_DIR[stream]}/{self.segment_id[stream]}.gz",
+            "segment_sha256": segment.prefix_sha256(),
+            "bytes": int(segment.size),
+            "members": int(self.member_index[stream]),
+            "reason": "rollover",
+            "digest_source": "running_hash_of_bytes_written",
+        }
+        if self.stopped or self.watch_reason:
+            return
+        encoded = len(dumps(record)) + 80
+        if self.accounted_bytes + encoded > int(self.cfg.disk_cap_bytes) or self._floor_block(encoded):
+            # No stop here: the member write that follows runs the same checks and stops cleanly.
+            return
+        self.accounted_bytes += self.index.append_obj(record, label=f"{stream}:close")
 
     def _advance_segment_id(self, stream: str) -> None:
         current = self.segment_id[stream]
@@ -575,7 +639,7 @@ class Session:
         if stream not in self.files:
             relative = f"{REL_DIR[stream]}/{self.segment_id[stream]}.gz"
             self.files[stream] = SegmentFile(confine(self.root, relative), self.trace)
-            self.segment_opened_ns[stream] = int(self.last_recv or 0)
+            self.segment_opened_ns[stream] = None if self.last_recv is None else int(self.last_recv)
         return self.files[stream]
 
     def _write_rows(self, stream: str, rows: list[dict]) -> dict:
@@ -668,6 +732,12 @@ class Session:
             "trade_quiet": trade_quiet,
             "now_ns": now_ns,
             "last_clock_offset_ms": self.last_clock_offset_ms,
+            "clock_offset_includes": "network_latency_and_clock_skew",
+            "clock_class": self.clock_class,
+            "clock_nonok_count": self.clock_nonok_count,
+            "maintenance_pause": self.maintenance_pause,
+            "resubscribe_count": self.resubscribe_count,
+            "bad_frame_count": self.bad_frame_count,
             "clock_source": "local_receive_not_ntp",
         }
         self.accounted_bytes += self.health.append_obj(record, label="health")
@@ -729,24 +799,131 @@ def _read_tail(path: Path, limit: int) -> tuple[int, int, bytes]:
     return size, start, tail
 
 
-def inspect_torn_tail(path: Path, *, tail_max: int = TAIL_READ_MAX) -> dict:
-    """Inspect a segment from its tail only. Does not write, copy, or truncate `path`."""
+def _read_range(path: Path, start: int, limit: int) -> bytes:
+    with path.open("rb") as handle:
+        handle.seek(start)
+        return handle.read(limit)
+
+
+# Members are written by gzip.compress(..., mtime=0): fixed 10-byte header.
+_MEMBER_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00"
+
+
+def _scan_boundary(tail: bytes) -> int | None:
+    """First offset in `tail` where whole gzip members decode to the end or to a torn tail."""
+    pos = tail.find(_MEMBER_HEADER)
+    while pos >= 0:
+        try:
+            rows, _torn = decode_prefix(tail[pos:])
+        except (OSError, EOFError, ValueError, UnicodeError, zlib.error):
+            rows = None
+        if rows:
+            return pos
+        pos = tail.find(_MEMBER_HEADER, pos + 1)
+    return None
+
+
+def last_commits_by_segment(journal_records: list[dict]) -> dict[str, dict]:
+    """Last `commit` record per segment_rel, from a journal already read and checked."""
+    last: dict[str, dict] = {}
+    for row in journal_records:
+        if row.get("kind") == "commit" and row.get("segment_rel"):
+            last[str(row["segment_rel"])] = row
+    return last
+
+
+def inspect_torn_tail(path: Path, *, tail_max: int = TAIL_READ_MAX, committed: dict | None = None) -> dict:
+    """Inspect a segment from its tail only. Does not write, copy, or truncate `path`.
+
+    Decoding only starts at a gzip member boundary, never at an arbitrary byte:
+    - `journal`: the last journal commit's member_end_offset for this segment
+      (the committed member itself is re-hashed when it fits in `tail_max`);
+    - `file_start`: the whole file fits in `tail_max`;
+    - `scan`: a member header found in the tail whose members decode;
+    - `none`: no boundary in the tail. torn_offset is then unknown, not intact.
+    """
     limit = int(tail_max)
     size, start, tail = _read_tail(path, limit)
-    digest = sha256_bytes(tail if start else tail)
-    rows, torn = decode_prefix(tail)
+    digest = sha256_bytes(tail)
+    total_read = len(tail)
+    rows: list[dict] = []
+    torn_offset = None
+    tail_state = "unknown"
+    boundary = None
+    source = "none"
+    commit_verified = None
+    last_raw_id = None
+    end = None
+    if committed is not None:
+        end = int(committed.get("member_end_offset", -1))
+        begin = int(committed.get("member_start_offset", -1))
+        if 0 <= begin <= end <= size:
+            source = "journal"
+            boundary = end
+            last_raw_id = committed.get("last_raw_id")
+            if end - begin <= limit:
+                member = _read_range(path, begin, end - begin)
+                total_read += len(member)
+                commit_verified = sha256_bytes(member) == committed.get("member_sha256")
+                if commit_verified:
+                    rows = decode_member(member)
+            if size == end:
+                tail_state = "ends_at_committed_boundary"
+            elif size - end > limit:
+                # Not decoded: a read cut at the limit would look torn when it is not.
+                tail_state = "uncommitted_beyond_tail_limit"
+            else:
+                after = _read_range(path, end, size - end)
+                total_read += len(after)
+                extra, torn = decode_prefix(after)
+                rows.extend(extra)
+                if extra:
+                    last_raw_id = extra[-1].get("raw_id")
+                if torn is not None:
+                    torn_offset = end + torn
+                    tail_state = "torn_after_commit"
+                else:
+                    tail_state = "uncommitted_whole_members"
+        else:
+            source = "journal_range_invalid"
+            tail_state = "commit_outside_file"
+    if source == "none":
+        if start == 0:
+            source = "file_start"
+            boundary = 0
+        else:
+            found = _scan_boundary(tail)
+            if found is not None:
+                source = "scan"
+                boundary = start + found
+        if boundary is not None:
+            rows, torn = decode_prefix(tail[boundary - start :])
+            if torn is not None:
+                torn_offset = boundary + torn
+                tail_state = "torn"
+            else:
+                tail_state = "whole_members_to_end"
     _size2, start2, tail2 = _read_tail(path, limit)
     if size != _size2 or start != start2 or tail != tail2:
         raise RuntimeError("inspect changed the file")
-    torn_offset = None if torn is None else start + torn
+    last_record = rows[-1] if rows else None
+    if last_raw_id is None and last_record:
+        last_raw_id = last_record.get("raw_id")
     return {
         "bytes": size,
         "sha256": digest,
         "sha256_scope": "file" if start == 0 else "tail",
         "bytes_read": len(tail),
+        "bytes_read_total": total_read,
         "tail_limit": limit,
         "decodable_records": len(rows),
-        "last_record": rows[-1] if rows else None,
+        "last_record": last_record,
+        "last_raw_id": last_raw_id,
+        "boundary_source": source,
+        "boundary_offset": boundary,
+        "committed_end_offset": end,
+        "commit_verified": commit_verified,
+        "tail_state": tail_state,
         "torn_offset": torn_offset,
         "durable": False,
         "copied": False,
@@ -777,7 +954,12 @@ def append_startup_gap(root: Path, segment_path: Path, report: dict) -> Path:
             "segment_sha256_observed": before,
             "decodable_records": report["decodable_records"],
             "torn_offset": report["torn_offset"],
-            "last_raw_id": None if not report["last_record"] else report["last_record"].get("raw_id"),
+            "tail_state": report.get("tail_state"),
+            "boundary_source": report.get("boundary_source"),
+            "committed_end_offset": report.get("committed_end_offset"),
+            "last_raw_id": report.get("last_raw_id")
+            if report.get("last_raw_id") is not None
+            else (None if not report["last_record"] else report["last_record"].get("raw_id")),
             "durable": False,
             "lost_uncommitted_tail": True,
         }

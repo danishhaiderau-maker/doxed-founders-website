@@ -368,7 +368,31 @@ class CaptureSafetyTests(unittest.TestCase):
         self.assertNotEqual(YIELD_SLEEP_S, 0)
         sleep_values = [item[1] for item in order if isinstance(item, tuple) and item[0] == "sleep"]
         self.assertEqual(sleep_values, [YIELD_SLEEP_S])
-        killed("yield-removed", lambda: self.assertEqual(sleep_values, [0]))
+        # Real mutation: run again with the yield sleep set to 0 and show the check sees it.
+        import public_market_collector.public_run as public_run
+
+        saved_yield = public_run.YIELD_SLEEP_S
+        mutated_sleeps = []
+        public_run.YIELD_SLEEP_S = 0
+        try:
+            run_forever(
+                self.base / "yield-mutant",
+                resume=False,
+                repo_root=None,
+                allow_root=self.base,
+                connect=lambda: _Transport([_js([7, "hb"]) for _ in range(YIELD_EVERY)]),
+                sleep=mutated_sleeps.append,
+                clock_ns=lambda: 100,
+                mono_ns=lambda: 101,
+                deprioritize=lambda: "posix_nice_10",
+                disk_free_probe=self._probe,
+                max_messages=YIELD_EVERY,
+                max_connects=1,
+            )
+        finally:
+            public_run.YIELD_SLEEP_S = saved_yield
+        self.assertNotEqual(mutated_sleeps, [YIELD_SLEEP_S])
+        killed("yield-removed", lambda: self.assertEqual(mutated_sleeps, [YIELD_SLEEP_S]))
         sent = [json.loads(item) for item in transport.sent]
         self.assertEqual(sent[1]["len"], "250")
         self.assertEqual(sent[1]["channel"], "book")
@@ -512,8 +536,8 @@ class CaptureSafetyTests(unittest.TestCase):
             matched = False
         finally:
             market.canon_number = original
+        # The broken stringifier is a real mutation: it cannot checksum this book.
         self.assertFalse(matched)
-        killed("broken-canon-accepted-fraction", lambda: self.assertTrue(matched))
         self.assertEqual(book.checksum()[1], 1379275826)
         root = self._root()
         session = self._open(root, resume=False)
@@ -580,14 +604,22 @@ class CaptureSafetyTests(unittest.TestCase):
             self.assertEqual(sleeps, [1.0])
 
     def test_healthy_connection_resets_backoff(self):
+        # The real transport never returns None: EOF and close frames raise ConnectionError.
         sleeps = []
         phase = {"n": 0}
 
+        class _Closing(_Transport):
+            def recv_text(self):
+                self.events.append("recv")
+                if not self.messages:
+                    raise ConnectionError("closed")
+                return self.messages.pop(0)
+
         def connect():
             phase["n"] += 1
-            if phase["n"] == 1:
-                return _Transport([_js([7, "hb"])])
-            raise socket.timeout("timed out")
+            if phase["n"] in (1, 2):
+                raise socket.timeout("timed out")
+            return _Closing([_js([7, "hb"])])
 
         run_forever(
             self.base / "reset-backoff",
@@ -600,9 +632,10 @@ class CaptureSafetyTests(unittest.TestCase):
             mono_ns=lambda: 21,
             deprioritize=lambda: "posix_nice_10",
             disk_free_probe=self._probe,
-            max_connects=2,
+            max_connects=5,
         )
-        self.assertEqual(sleeps[0], 1.0)
+        # Two failed connects grow the delay; each connection that carried a message resets it.
+        self.assertEqual(sleeps, [1.0, 2.0, 1.0, 1.0, 1.0])
 
     def test_liveness_info_codes_and_disk_watch(self):
         session = self._open(self.base / "liveness", resume=False)
@@ -635,7 +668,9 @@ class CaptureSafetyTests(unittest.TestCase):
         )
         pump(info, sent, sleep=lambda _s: None, clock_ns=lambda: 100, mono_ns=lambda: 101, max_messages=2)
         self.assertFalse(info.maintenance_pause)
-        self.assertGreaterEqual(len(sent.sent), 6)
+        # 3 initial payloads, then (no channel confirmed yet, so no unsubscribe) book + trades.
+        after = [json.loads(item) for item in sent.sent[3:]]
+        self.assertEqual([item.get("channel") for item in after], ["book", "trades"])
         info.release()
         pause = self._open(self.base / "info-20051", resume=False)
         with self.assertRaises(Reconnect) as caught:
@@ -731,6 +766,7 @@ class CaptureSafetyTests(unittest.TestCase):
             session.release()
         self.assertEqual(walks["n"], 0)
         self.assertEqual(session.durable_raw, [])
+        self.assertLessEqual(len(session.trace), session.trace.maxlen)
         self.assertGreaterEqual(len(times), 100)
         early = sum(times[:20]) / 20
         late = sum(times[-20:]) / 20

@@ -54,11 +54,43 @@ def output_refusal(
             return "FORBIDDEN_OUTPUT:inside-checkout"
     if allow_root is None:
         return "ALLOW_ROOT_REQUIRED"
+    allow_reason = allow_root_refusal(Path(allow_root), repo_root=repo_root)
+    if allow_reason:
+        return allow_reason
     allow = Path(allow_root).resolve()
     if resolved == allow or allow not in resolved.parents:
         return "OUTPUT_OUTSIDE_ALLOW_ROOT" if resolved != allow else "OUTPUT_IS_ALLOW_ROOT"
     if not resume and path.exists():
         return "OUTPUT_EXISTS"
+    return None
+
+
+def allow_root_refusal(allow_root: Path, *, repo_root: Path | None) -> str | None:
+    """--allow-root must be an existing, dedicated directory: not a filesystem root,
+    not the home directory, not a protected data tree, not inside the checkout."""
+    if not allow_root.is_absolute():
+        return "ALLOW_ROOT_NOT_ABSOLUTE"
+    allow = allow_root.resolve()
+    if allow == Path(allow.anchor) or allow.parent == allow:
+        return "ALLOW_ROOT_IS_FILESYSTEM_ROOT"
+    if not allow.is_dir():
+        return "ALLOW_ROOT_MISSING"
+    try:
+        home = Path.home().resolve()
+    except (KeyError, RuntimeError, OSError):
+        home = None
+    if home is not None and allow == home:
+        return "ALLOW_ROOT_IS_HOME"
+    for part in allow.parts:
+        hit = _forbidden_component(part)
+        if hit:
+            return f"FORBIDDEN_ALLOW_ROOT:{hit}"
+    if allow == APP_TREE or APP_TREE in allow.parents:
+        return "FORBIDDEN_ALLOW_ROOT:app-tree"
+    if repo_root is not None:
+        repo = repo_root.resolve()
+        if allow == repo or repo in allow.parents:
+            return "FORBIDDEN_ALLOW_ROOT:checkout"
     return None
 
 

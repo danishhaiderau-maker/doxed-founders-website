@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import zlib
+from collections import deque
 from dataclasses import dataclass, field
 
 from . import bitfinex_docs as docs
@@ -34,15 +35,24 @@ def signed_crc32(text: str) -> int:
 
 # Bitfinex checksum strings use JavaScript Number.toString (ES ToString), not Python str().
 # Trade ids are not a contiguous sequence, so a missing id is not proof a trade was lost.
+# Duplicate detection remembers the last TRADE_ID_WINDOW distinct ids by count
+# (insertion order), not an id-space range.
 TRADE_ID_WINDOW = 100_000
+# Gap causes after which the book is resubscribed.
+RESUBSCRIBE_CAUSES = frozenset({"checksum_fail", "book_malformed"})
 
 
 def js_number_string(value: float) -> str:
-    """JavaScript Number.toString for a finite float. Pinned against node in tests."""
+    """JavaScript Number.toString for a finite float.
+
+    Tests hard-code node String() vectors, and compare a deterministic sample
+    against a local `node` binary when one is on PATH (skipped otherwise).
+    """
     if value != value or math.isinf(value):
         raise ValueError("checksum number")
     if value == 0.0:
-        return "-0" if math.copysign(1.0, value) < 0 else "0"
+        # JS String(-0) is "0".
+        return "0"
     sign = "-" if value < 0 else ""
     mag = abs(float(value))
     text = None
@@ -265,6 +275,7 @@ class FeedState:
     last_conn_seq: int | None = None
     last_chan_seq: dict = field(default_factory=dict)
     seen_trade_ids: set = field(default_factory=set)
+    seen_trade_order: deque = field(default_factory=deque)
     max_trade_id: int | None = None
 
     def __post_init__(self) -> None:
@@ -306,6 +317,7 @@ def _copy_state(state: FeedState) -> FeedState:
     copied.last_conn_seq = state.last_conn_seq
     copied.last_chan_seq = dict(state.last_chan_seq)
     copied.seen_trade_ids = set(state.seen_trade_ids)
+    copied.seen_trade_order = deque(state.seen_trade_order)
     copied.max_trade_id = state.max_trade_id
     return copied
 
@@ -419,8 +431,14 @@ def _trade_rows(rec: dict, seq_layout: str | None) -> list[tuple[str, list]]:
     return []
 
 
-def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
-    state = _copy_state(state)
+def step(state: FeedState, rec: dict, *, seq_layout: str | None, inplace: bool = False) -> Step:
+    """Advance `state` by one record.
+
+    By default the input state is copied first. The capture session passes
+    inplace=True for its own states so no book or trade-id set is copied per record.
+    """
+    if not inplace:
+        state = _copy_state(state)
     channel = rec.get("channel")
     followup = None
     norms: list[dict] = []
@@ -433,29 +451,41 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
         state.valid = False
         _accept_seq(state, rec)
     if channel == "book_snapshot":
+        applied = False
         if not jumped:
-            entries = _book_entries(rec, seq_layout)
-            _apply_book_entries(state, entries, True)
-            state.valid = True
-            interval = f"iv-{rec.get('raw_id')}"
-            state.interval_id = interval
+            try:
+                entries = _book_entries(rec, seq_layout)
+                _apply_book_entries(state, entries, True)
+                applied = True
+            except (ValueError, TypeError, IndexError, KeyError):
+                state.valid = False
+                followup = _gap_from(rec, "book_malformed", _last_seq(state, rec), rec.get("venue_seq"))
+            if applied:
+                state.valid = True
+                interval = f"iv-{rec.get('raw_id')}"
+                state.interval_id = interval
             _accept_seq(state, rec)
         norms.append(
             _base(
                 rec,
                 channel="book_snapshot",
-                applied=not jumped,
-                book_valid=bool(state.valid) and not jumped,
-                validity_interval_id=state.interval_id if not jumped else None,
-                interval_event="open" if not jumped else None,
-                counted=not jumped,
+                applied=applied,
+                book_valid=bool(state.valid) and applied,
+                validity_interval_id=state.interval_id if applied else None,
+                interval_event="open" if applied else None,
+                counted=applied,
             )
         )
     elif channel == "book_delta":
         applied = False
         if not jumped and state.valid:
-            _apply_book_entries(state, _book_entries(rec, seq_layout), False)
-            applied = True
+            try:
+                _apply_book_entries(state, _book_entries(rec, seq_layout), False)
+                applied = True
+            except (ValueError, TypeError, IndexError, KeyError):
+                # Recorded and skipped: the book is invalid until a new snapshot.
+                state.valid = False
+                followup = _gap_from(rec, "book_malformed", _last_seq(state, rec), rec.get("venue_seq"))
             _accept_seq(state, rec)
         elif not jumped:
             _accept_seq(state, rec)
@@ -470,6 +500,7 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
         )
     elif channel == "checksum":
         checksum_ok = False
+        was_valid = bool(state.valid)
         if not jumped and state.valid:
             try:
                 _text, local = state.book.checksum()
@@ -479,7 +510,9 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
                 checksum_ok = False
         if not checksum_ok:
             state.valid = False
-            if followup is None:
+            # Only a mismatch on a valid book is a new failure. A `cs` that arrives
+            # while the book is already invalid adds no gap and no resubscribe.
+            if followup is None and was_valid:
                 followup = _gap_from(rec, "checksum_fail", _last_seq(state, rec), rec.get("venue_seq"))
         if not jumped:
             _accept_seq(state, rec)
@@ -496,7 +529,17 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
     elif channel == "trade":
         if not jumped:
             _accept_seq(state, rec)
-        for ordinal, (kind, trade) in enumerate(_trade_rows(rec, seq_layout)):
+        try:
+            trade_rows = _trade_rows(rec, seq_layout)
+        except (ValueError, TypeError, IndexError, KeyError):
+            trade_rows = []
+            followup = followup or _gap_from(rec, "trade_malformed", _last_seq(state, rec), rec.get("venue_seq"))
+        for ordinal, (kind, trade) in enumerate(trade_rows):
+            if not isinstance(trade, list) or (trade and not _is_int(trade[0])):
+                if followup is None:
+                    followup = _gap_from(rec, "trade_malformed", _last_seq(state, rec), rec.get("venue_seq"))
+                norms.append(_base(rec, channel="trade", applied=False, counted=False, norm_ordinal=ordinal))
+                continue
             trade_id = trade[0] if trade else None
             mts = trade[1] if trade and len(trade) > 1 and _is_int(trade[1]) else None
             amount = trade[2] if trade and len(trade) > 2 else None
@@ -510,10 +553,10 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
             )
             if trade_id is not None and not duplicate:
                 state.seen_trade_ids.add(int(trade_id))
+                state.seen_trade_order.append(int(trade_id))
                 state.max_trade_id = int(trade_id) if state.max_trade_id is None else max(int(state.max_trade_id), int(trade_id))
-                if len(state.seen_trade_ids) > TRADE_ID_WINDOW:
-                    floor_id = int(state.max_trade_id) - TRADE_ID_WINDOW
-                    state.seen_trade_ids = {item for item in state.seen_trade_ids if int(item) >= floor_id}
+                while len(state.seen_trade_order) > TRADE_ID_WINDOW:
+                    state.seen_trade_ids.discard(state.seen_trade_order.popleft())
             side = None
             if isinstance(amount, (int, float)) and not isinstance(amount, bool):
                 if amount > 0:
@@ -554,11 +597,11 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None) -> Step:
         cause = payload.get("cause")
         interval_event = None
         interval_id = None
-        if cause in {"checksum_fail", "seq_jump", "disconnect", "maintenance"} and state.interval_id:
+        if cause in {"checksum_fail", "book_malformed", "seq_jump", "disconnect", "maintenance"} and state.interval_id:
             interval_event = "close"
             interval_id = state.interval_id
             state.interval_id = None
-        if cause in {"checksum_fail", "seq_jump", "disconnect", "write_fail", "startup", "maintenance"}:
+        if cause in {"checksum_fail", "book_malformed", "seq_jump", "disconnect", "write_fail", "startup", "maintenance"}:
             state.valid = False
         if cause == "disconnect":
             state.last_conn_seq = None

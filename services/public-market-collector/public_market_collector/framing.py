@@ -216,7 +216,7 @@ def _write_all(fd: int, blob: bytes) -> None:
 
 
 class AppendJournal:
-    def __init__(self, path: Path, trace: list[str], *, exclusive: bool = True):
+    def __init__(self, path: Path, trace, *, exclusive: bool = True):
         self.path = path
         self.trace = trace
         flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
@@ -244,7 +244,7 @@ class AppendJournal:
 
 
 class SegmentFile:
-    def __init__(self, path: Path, trace: list[str]):
+    def __init__(self, path: Path, trace):
         self.path = path
         self.trace = trace
         self.fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_WRONLY, 0o644)
@@ -299,6 +299,10 @@ class SegmentFile:
             record, label=f"{label}:checksummed_commit", fault_torn=(fault == "torn_journal")
         )
         return record
+
+    def prefix_sha256(self) -> str:
+        """sha256 of every byte this object wrote. The file was created O_EXCL, so that is the file."""
+        return self._prefix.hexdigest()
 
     def mark_closed(self) -> None:
         self.closed = True

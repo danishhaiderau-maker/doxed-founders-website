@@ -114,7 +114,7 @@ CITATIONS = (
 UNKNOWNS = (
     "SEQ_ALL array index is not specified on ws-general. Scope (connection-wide versus per channel) is not specified. Extraction stays off unless a synthetic test passes seq_layout='index_1_unverified', which is not an official layout.",
     "TIMESTAMP flag does not document the array index. Book and heartbeat records keep ts_exchange_ms null. Only a trade MTS inside the documented trade array is copied.",
-    "Public reconnect rate limit is not stated on ws-general. The authenticated 5/15s limit is a different host and is not applied. Backoff inputs stay unset.",
+    "Public reconnect rate limit is not stated on ws-general. The authenticated 5/15s limit is a different host and is not applied. Synthetic OPERATIONAL_VALUES backoff inputs stay unset. Public capture pins 1 s initial, 30 s cap, 0 s jitter, and resets to 1 s after a connection that delivered at least one message.",
     "Checksum numbers use JavaScript Number.toString. The integer blog vector and a fractional vector are pinned. Values that are not finite numbers still fail closed.",
     "Trade ids are not contiguous. A missing id is not treated as a lost trade. Loss is visible only as a reconnect or maintenance gap.",
     "Receive timestamps use the host clock. They are not NTP-disciplined. event_lag_ms and clock gaps include that skew.",

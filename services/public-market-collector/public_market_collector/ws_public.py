@@ -32,6 +32,20 @@ class FrameTooLarge(Exception):
     pass
 
 
+class HandshakeRejected(ConnectionError):
+    """The server answered the upgrade with a status other than 101 (for example 503
+    or 429 during maintenance). Retryable: the caller backs off and reconnects.
+    A 101 with a wrong Sec-WebSocket-Accept is still StartRefused."""
+
+
+class BadFrame:
+    """A complete text message that is not valid UTF-8. Recorded and skipped."""
+
+    def __init__(self, kind: str, size: int):
+        self.kind = kind
+        self.size = size
+
+
 def public_endpoint() -> tuple[str, str]:
     prefix = "wss://"
     if not DOCUMENTED_PUBLIC_WS.startswith(prefix):
@@ -189,6 +203,7 @@ class PublicConnection:
         self._pending: list[str] = []
         self._fragments = b""
         self._fragment_opcode: int | None = None
+        self._close_seen = False
         self._handshake()
 
     def _handshake(self) -> None:
@@ -200,6 +215,9 @@ class PublicConnection:
             self._buf += _recv_some(self.sock, 4096)
         marker = self._buf.index(b"\r\n\r\n") + 4
         head, self._buf = self._buf[:marker], self._buf[marker:]
+        first = head.split(b"\r\n", 1)[0].decode("iso-8859-1", errors="replace")
+        if " 101 " not in f" {first} ":
+            raise HandshakeRejected(f"WS_HANDSHAKE_STATUS:{first[:64]}")
         if not accept_matches(key, head):
             raise StartRefused("WS_HANDSHAKE")
 
@@ -207,10 +225,23 @@ class PublicConnection:
         mask = secrets.token_bytes(4)
         self.sock.sendall(encode_client_frame(0x1, text.encode("utf-8"), mask))
 
-    def recv_text(self) -> str | None:
+    def close(self) -> None:
+        """Close the socket. Errors on close are ignored; nothing is written to disk."""
+        sock, self.sock = self.sock, None
+        if sock is None:
+            return
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def recv_text(self) -> "str | BadFrame":
         while True:
             if self._pending:
                 return self._pending.pop(0)
+            if self._close_seen:
+                # Messages that arrived before the close frame were returned first.
+                raise ConnectionError("close")
             frames, self._buf = parse_server_frames(self._buf, self.max_bytes)
             if not frames:
                 self._buf += _recv_some(self.sock, 65536)
@@ -221,6 +252,8 @@ class PublicConnection:
                 text = self._consume(fin, opcode, payload)
                 if text is not None:
                     self._pending.append(text)
+                if self._close_seen:
+                    break
 
     def _consume(self, fin: int, opcode: int, payload: bytes) -> str | None:
         if opcode == 0x9:
@@ -228,7 +261,8 @@ class PublicConnection:
             self.sock.sendall(encode_client_frame(0xA, payload, mask))
             return None
         if opcode == 0x8:
-            raise ConnectionError("close")
+            self._close_seen = True
+            return None
         if opcode == 0xA:
             return None
         if opcode in (0x1, 0x0):
@@ -243,10 +277,13 @@ class PublicConnection:
                 raise FrameTooLarge(len(self._fragments))
             if not fin:
                 return None
-            text = self._fragments.decode("utf-8")
+            blob = self._fragments
             self._fragments = b""
             self._fragment_opcode = None
-            return text
+            try:
+                return blob.decode("utf-8")
+            except UnicodeDecodeError:
+                return BadFrame("bad_utf8", len(blob))
         raise StartRefused("WS_OPCODE")
 
 
@@ -257,6 +294,13 @@ def resubscribe_book_messages(subs: dict) -> list[dict]:
         if isinstance(sub, dict) and sub.get("channel") == "book":
             messages.append({"event": "unsubscribe", "chanId": chan_id})
     messages.append(subscribe_payloads()[1])
+    return messages
+
+
+def resubscribe_all_messages(subs: dict) -> list[dict]:
+    """After 20061: unsubscribe every current channel, then subscribe book and trades again."""
+    messages = [{"event": "unsubscribe", "chanId": chan_id} for chan_id in subs]
+    messages.extend(subscribe_payloads()[1:])
     return messages
 
 

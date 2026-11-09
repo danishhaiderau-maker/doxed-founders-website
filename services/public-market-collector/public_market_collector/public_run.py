@@ -10,6 +10,20 @@ write is not aborted mid-syscall.
 The process asks for below-normal priority and sleeps 5 ms every 20 messages.
 Commit work is incremental: only the new rows are normalised, and segment
 hashes and byte totals are running counters.
+
+Error domains:
+- transport (connect, send, recv): an OSError, including ConnectionError on EOF
+  or a close frame and a non-101 handshake, is a disconnect. It is journalled as
+  a gap, then the process sleeps the backoff and reconnects. The backoff resets
+  to the initial delay after a connection that delivered at least one message.
+- disk (segment, journal, health writes): an OSError is a clean stop,
+  `CAPTURE_STOP cause=write_fail detail=io_error`, exit 75. It is never treated
+  as a network disconnect.
+
+Segments roll at the first commit after they reach SEGMENT_MAX_BYTES or
+SEGMENT_MAX_AGE_S. The size cap is a roll threshold: a segment can exceed it by
+at most one member. A `close` record with the running whole-segment sha256 is
+journalled at each roll.
 """
 
 from __future__ import annotations
@@ -22,18 +36,21 @@ from pathlib import Path
 
 from .config import CaptureStopped, StartRefused
 from .output_policy import disk_free_bytes, foreign_entries, output_refusal
-from .session import Session, append_startup_gap, inspect_torn_tail
+from .session import Session, append_startup_gap, inspect_torn_tail, last_commits_by_segment
 from .ws_public import (
     BOOK_FREQ,
     BOOK_LEN,
     BOOK_PREC,
     SYMBOL,
+    BadFrame,
     FrameTooLarge,
     deprioritize_process,
     open_public_socket,
+    resubscribe_all_messages,
     resubscribe_book_messages,
     subscribe_payloads,
 )
+from .session import RESUBSCRIBE_DEADLINE_S
 
 # Same 512 MiB floor the local paper runtime uses before it writes.
 FREE_DISK_FLOOR_BYTES = 512 * 1024 * 1024
@@ -47,6 +64,8 @@ BACKOFF_INITIAL_S = 1
 BACKOFF_CAP_S = 30
 BACKOFF_JITTER_S = 0
 MAX_BACKOFF_ATTEMPT = 16
+# 20060 says maintenance takes up to 120 s. Liveness waits this long while paused.
+MAINTENANCE_LIVENESS_S = 180
 SEGMENT_MAX_BYTES = 64 * 1024 * 1024
 SEGMENT_MAX_AGE_S = 3600
 CLOCK_WARN_MS = 250
@@ -80,10 +99,14 @@ class DiskWatch:
             self.thread.join(timeout=2)
 
     def _run(self) -> None:
-        while not self._stop.wait(self.interval_s):
-            reason = self.session._floor_block(1)
-            if reason:
-                self.session.watch_reason = reason
+        try:
+            while not self._stop.wait(self.interval_s):
+                reason = self.session._floor_block(1)
+                if reason:
+                    self.session.watch_reason = reason
+        except BaseException as exc:  # noqa: BLE001 - a dead watcher must stop the writer
+            # The writer sees watch_reason and stops with a journalled record.
+            self.session.watch_reason = f'disk_watch_failed:{type(exc).__name__}'
 
 
 class _Config:
@@ -198,21 +221,51 @@ def open_session(
 def cite_prior_segments(session: Session) -> None:
     """Read existing segments and append a startup gap. Does not rewrite them."""
     root = session.root
+    journal, _stopped = session.journal_records()
+    commits = last_commits_by_segment(journal)
     for relative in ("raw/book", "raw/trades", "norm/book", "norm/trades"):
         directory = root / relative
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.gz")):
-            report = inspect_torn_tail(path)
+            committed = commits.get(f"{relative}/{path.name}")
+            report = inspect_torn_tail(path, committed=committed)
             append_startup_gap(root, path, report)
 
 
 def _send_json(transport, payload: dict) -> None:
-    transport.send_text(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    try:
+        transport.send_text(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    except OSError as exc:
+        raise Reconnect("disconnect", already=False) from exc
+
+
+def _disk(session: Session, fn, *args, **kwargs):
+    """Run a session write. A disk OSError is a clean stop, not a disconnect."""
+    try:
+        return fn(*args, **kwargs)
+    except OSError:
+        session._stop("write_fail", "io_error")
+
+
+def _liveness_lapsed(session: Session, now: int) -> bool:
+    if session.maintenance_pause and session.last_liveness is not None:
+        if now - int(session.last_liveness) <= MAINTENANCE_LIVENESS_S * 1_000_000_000:
+            return False
+    return _disk(session, session.poll_liveness, now)
+
+
+def _resubscribe_expired(session: Session, now: int) -> bool:
+    deadline = session.resubscribe_deadline_ns
+    return deadline is not None and now > int(deadline) and not session.shadow.valid
 
 
 def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages: int | None = None) -> int:
     """Read public text messages. Yields every YIELD_EVERY so the paper engine runs."""
+    # A new connection: channel ids from an earlier connection are stale.
+    session.subs.clear()
+    session.pending_resubscribe = False
+    session.resubscribe_deadline_ns = None
     for payload in subscribe_payloads():
         _send_json(transport, payload)
     if session.last_liveness is None:
@@ -229,51 +282,79 @@ def pump(session: Session, transport, *, sleep, clock_ns, mono_ns, max_messages:
             session._stop("write_fail", "ws_frame_cap")
         except TimeoutError:
             now = int(clock_ns())
-            if session.poll_liveness(now):
-                raise Reconnect("liveness", already=True)
+            if _liveness_lapsed(session, now):
+                raise Reconnect("liveness", already=True, healthy=count > 0)
+            if _resubscribe_expired(session, now):
+                raise Reconnect("resubscribe_timeout", already=False, healthy=count > 0)
             continue
+        except OSError as exc:
+            # EOF and close frames arrive here as ConnectionError.
+            raise Reconnect("disconnect", already=False, healthy=count > 0) from exc
         if text is None:
             raise Reconnect("closed", already=False, healthy=count > 0)
         now = int(clock_ns())
         mono = int(mono_ns())
+        if isinstance(text, BadFrame):
+            _disk(session, session.note_bad_json, now, mono, kind=text.kind)
+            count += 1
+            continue
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            session.note_bad_json(now, mono)
+            _disk(session, session.note_bad_json, now, mono)
+            count += 1
             continue
         code = parsed.get("code") if isinstance(parsed, dict) and parsed.get("event") == "info" else None
-        session.handle(text, recv_utc_ns=now, recv_mono_ns=mono)
+        _disk(session, session.handle, text, recv_utc_ns=now, recv_mono_ns=mono)
         count += 1
         if code == 20060:
             session.maintenance_pause = True
-            session.mark_maintenance(now, mono)
+            _disk(session, session.mark_maintenance, now, mono)
         elif code == 20061:
             session.maintenance_pause = False
-            for payload in subscribe_payloads():
+            # Documented advice: unsubscribe and subscribe all channels again.
+            session.pending_resubscribe = False
+            session.resubscribe_deadline_ns = now + RESUBSCRIBE_DEADLINE_S * 1_000_000_000
+            session.resubscribe_count += 1
+            for payload in resubscribe_all_messages(session.subs):
                 _send_json(transport, payload)
         elif code == 20051:
-            raise Reconnect("info_20051", already=False)
+            raise Reconnect("info_20051", already=False, healthy=True)
         if session.pending_resubscribe:
             session.pending_resubscribe = False
+            session.resubscribe_deadline_ns = now + RESUBSCRIBE_DEADLINE_S * 1_000_000_000
+            session.resubscribe_count += 1
             for payload in resubscribe_book_messages(session.subs):
                 _send_json(transport, payload)
-        if session.poll_liveness(now):
-            raise Reconnect("liveness", already=True)
+        if _liveness_lapsed(session, now):
+            raise Reconnect("liveness", already=True, healthy=True)
+        if _resubscribe_expired(session, now):
+            raise Reconnect("resubscribe_timeout", already=False, healthy=True)
         if session.uncommitted_received >= YIELD_EVERY:
-            session.commit()
+            _disk(session, session.commit)
             session.cfg.free_disk_bytes = _probe_free(session.root, session.cfg.disk_free_probe)
             if session._floor_block(200):
                 session._stop("write_fail", "disk_floor")
-            session.write_health(now)
+            _disk(session, session.write_health, now)
             sleep(YIELD_SLEEP_S)
-    session.commit()
+    _disk(session, session.commit)
     return count
 
 
 def _recover(session: Session, clocks, monos, *, already: bool, cause: str) -> None:
     if not already:
-        session.disconnect(recv_utc_ns=int(clocks()), recv_mono_ns=int(monos()), cause=cause)
-    session.commit()
+        _disk(session, session.disconnect, recv_utc_ns=int(clocks()), recv_mono_ns=int(monos()), cause=cause)
+    _disk(session, session.commit)
+
+
+def _close_transport(transport) -> None:
+    closer = getattr(transport, "close", None)
+    if closer is None:
+        return
+    try:
+        closer()
+    except OSError:
+        pass
 
 
 def run_forever(
@@ -318,28 +399,38 @@ def run_forever(
         opener = connect or open_public_socket
         while max_connects is None or connects < max_connects:
             connects += 1
+            transport = None
+            cause = None
+            already = False
             try:
-                transport = opener()
-                pump(
-                    session,
-                    transport,
-                    sleep=sleeper,
-                    clock_ns=clocks,
-                    mono_ns=monos,
-                    max_messages=max_messages,
-                )
-                attempt = 1
-                if max_messages is not None:
-                    break
-            except Reconnect as exc:
-                if exc.healthy:
-                    attempt = 1
-                _recover(session, clocks, monos, already=exc.already, cause=exc.cause)
-                delay = session.plan_reconnect(attempt)
-                attempt = min(attempt + 1, MAX_BACKOFF_ATTEMPT)
-                sleeper(delay)
-            except OSError:
-                _recover(session, clocks, monos, already=False, cause="disconnect")
+                try:
+                    transport = opener()
+                except OSError:
+                    # Connect, TLS, DNS, timeout, or a non-101 handshake (HandshakeRejected).
+                    cause = "disconnect"
+                if transport is not None:
+                    try:
+                        pump(
+                            session,
+                            transport,
+                            sleep=sleeper,
+                            clock_ns=clocks,
+                            mono_ns=monos,
+                            max_messages=max_messages,
+                        )
+                        attempt = 1
+                        if max_messages is not None:
+                            break
+                    except Reconnect as exc:
+                        cause = exc.cause
+                        already = exc.already
+                        if exc.healthy:
+                            # The closed connection carried at least one message.
+                            attempt = 1
+            finally:
+                _close_transport(transport)
+            if cause is not None:
+                _recover(session, clocks, monos, already=already, cause=cause)
                 delay = session.plan_reconnect(attempt)
                 attempt = min(attempt + 1, MAX_BACKOFF_ATTEMPT)
                 sleeper(delay)
