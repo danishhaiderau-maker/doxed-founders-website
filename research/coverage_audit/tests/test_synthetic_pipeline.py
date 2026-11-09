@@ -48,6 +48,9 @@ _ALLOWED = {
     "tests/test_redaction_and_guards.py",
     "tests/test_synthetic_formats.py",
     "tests/test_synthetic_pipeline.py",
+    "real_access_cli.py",
+    "real_file_reader.py",
+    "tests/test_real_access_boundary.py",
 }
 
 
