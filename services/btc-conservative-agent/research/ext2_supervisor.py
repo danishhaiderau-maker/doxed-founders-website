@@ -136,7 +136,19 @@ def windows_child_start_order() -> tuple[str, ...]:
     return WINDOWS_CHILD_START
 
 
+_STRUCTS: list = []
+
+
 def _job_structs():
+    """Built once and cached: ctypes argtypes compare struct classes by identity
+    (a fresh class per call broke Thread32First on Windows CI at c45e9e22)."""
+    if _STRUCTS:
+        return _STRUCTS[0]
+    _STRUCTS.append(_build_job_structs())
+    return _STRUCTS[0]
+
+
+def _build_job_structs():
     import ctypes
 
     class IoCounters(ctypes.Structure):
