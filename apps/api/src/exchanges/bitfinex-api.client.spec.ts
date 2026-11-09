@@ -75,9 +75,13 @@ test('Bitfinex nonce uses ms×10000 scale and catches up after poisoned high-wat
     mutations: [],
     reads: [],
   };
+  // Capture the clock BEFORE allocation. Reading Date.now() after allocMonotonicNonce
+  // races a 1 ms tick (master 55defc5b unit-tests 42673052829 / test 25): recovered is
+  // floor(tb)*scale while the assert re-reads tc>tb and fails with no production fault.
+  const before = BigInt(Date.now());
   const recovered = BigInt(allocMonotonicNonce(poisonedLane));
   assert.ok(recovered > poisonedHighWater - 5n);
-  assert.ok(recovered >= BigInt(Date.now()) * BITFINEX_NONCE_MS_SCALE);
+  assert.ok(recovered >= before * BITFINEX_NONCE_MS_SCALE);
 });
 
 const testCreds = {
