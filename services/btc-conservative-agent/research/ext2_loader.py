@@ -1,19 +1,24 @@
 """Stream Bitfinex daily *.jsonl.gz files for the EXT2 screen.
 
-The root is an argument. Files are line-delimited JSON objects. The 182-file
+The root is an argument. Files are line-delimited JSON arrays. The 182-file
 allowlist and the aggregate manifest sha are checked before any row is parsed.
 A RED gap anywhere in the continuous series stops the load. Bars are a full
-UTC minute grid built from trades. Candle files are a cross-check only.
+UTC minute grid built from trades (A4): empty minutes after the first trade
+carry the previous close for features only and are never prints or fills.
+Candle files are a cross-check only.
 """
 from __future__ import annotations
 
 import gzip
 import hashlib
 import json
+import math
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from research.ext2_costs import Ext2Stop, dates_inclusive
 
@@ -147,105 +152,157 @@ def day_start_ms(day: date) -> int:
     return int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() * 1000)
 
 
+def _continuity_arrays(ids: np.ndarray, mts: np.ndarray, days: Sequence[date]) -> None:
+    """Vectorised RED check on (id, mts) already sorted by (mts, id)."""
+    if mts.size and int(mts.max()) >= FORBIDDEN_MTS:
+        raise Ext2Stop("STOP_MTS")
+    if mts.size > 1:
+        if np.any(np.diff(mts) < 0):
+            raise Ext2Stop("STOP_DATA")
+        if np.any(np.diff(ids) <= 0):
+            raise Ext2Stop("STOP_DATA")
+        if np.any(np.diff(mts) > MAX_GAP_MS):
+            raise Ext2Stop("STOP_RED_GAP")
+    starts = np.asarray([day_start_ms(day) for day in days], dtype=np.int64)
+    if mts.size == 0:
+        raise Ext2Stop("STOP_RED_GAP")
+    slot = np.searchsorted(starts, mts, side="right") - 1
+    if np.any(slot < 0) or np.any(mts >= starts[-1] + DAY_MS):
+        raise Ext2Stop("STOP_RED_GAP")
+    if np.any(mts - starts[slot] >= DAY_MS):
+        raise Ext2Stop("STOP_RED_GAP")
+    first = np.searchsorted(slot, np.arange(len(days)), side="left")
+    after = np.searchsorted(slot, np.arange(len(days)), side="right")
+    if np.any(after <= first):
+        raise Ext2Stop("STOP_RED_GAP")
+    if np.any(mts[first] - starts > MAX_GAP_MS):
+        raise Ext2Stop("STOP_RED_GAP")
+    if len(days) > 1:
+        prev_end = mts[after[:-1] - 1]
+        if np.any(mts[first[1:]] - prev_end > MAX_GAP_MS):
+            raise Ext2Stop("STOP_RED_GAP")
+
+
 def assert_trade_continuity(rows: Sequence[tuple[int, int, float, float]], days: Sequence[date]) -> None:
     """RED if any gap exceeds 60 minutes, including midnight edges and foreign rows."""
-    allowed = set(days)
-    by_day: dict[date, list[int]] = {day: [] for day in days}
-    last_id = None
-    last_mts = None
     ordered = sorted(rows, key=lambda item: (item[1], item[0]))
-    for trade_id, mts, _amount, _price in ordered:
-        if mts >= FORBIDDEN_MTS:
+    ids = np.asarray([row[0] for row in ordered], dtype=np.int64)
+    mts = np.asarray([row[1] for row in ordered], dtype=np.int64)
+    allowed = set(days)
+    for stamp in mts.tolist():
+        if stamp >= FORBIDDEN_MTS:
             raise Ext2Stop("STOP_MTS")
-        if last_mts is not None and mts < last_mts:
-            raise Ext2Stop("STOP_DATA")
-        if last_id is not None and trade_id <= last_id:
-            raise Ext2Stop("STOP_DATA")
-        if last_mts is not None and mts - last_mts > MAX_GAP_MS:
+        if datetime.fromtimestamp(stamp / 1000.0, timezone.utc).date() not in allowed:
             raise Ext2Stop("STOP_RED_GAP")
-        day = datetime.fromtimestamp(mts / 1000.0, timezone.utc).date()
-        if day not in allowed:
-            raise Ext2Stop("STOP_RED_GAP")
-        start = day_start_ms(day)
-        if mts < start or mts >= start + DAY_MS:
-            raise Ext2Stop("STOP_RED_GAP")
-        by_day[day].append(mts)
-        last_id, last_mts = trade_id, mts
-    for index, day in enumerate(days):
-        start = day_start_ms(day)
-        end = start + DAY_MS
-        stamps = by_day[day]
-        if not stamps:
-            raise Ext2Stop("STOP_RED_GAP")
-        if stamps[0] - start > MAX_GAP_MS:
-            raise Ext2Stop("STOP_RED_GAP")
-        if index:
-            prev_end = by_day[days[index - 1]][-1]
-            if stamps[0] - prev_end > MAX_GAP_MS:
-                raise Ext2Stop("STOP_RED_GAP")
+    _continuity_arrays(ids, mts, sorted(days))
+
+
+def trades_to_arrays(rows: Sequence[tuple[int, int, float, float]]) -> dict[str, np.ndarray]:
+    ordered = sorted(rows, key=lambda item: (item[1], item[0]))
+    return {
+        "id": np.asarray([row[0] for row in ordered], dtype=np.int64),
+        "mts": np.asarray([row[1] for row in ordered], dtype=np.int64),
+        "amount": np.asarray([row[2] for row in ordered], dtype=np.float64),
+        "price": np.asarray([row[3] for row in ordered], dtype=np.float64),
+    }
+
+
+def build_grid(trades: Mapping[str, np.ndarray], days: Sequence[date]) -> dict[str, np.ndarray]:
+    """A4 full UTC minute grid from trades sorted by (mts, id).
+
+    Trade-present bar: OHLC from prints, volume, buy, sell, count, vwap.
+    Empty bar after the first trade: open=high=low=close = previous close
+    (carry-forward for features only), count 0, vwap undefined, empty=True.
+    Empty bars are never prints and never fill. Bars before the first trade
+    of the series are undefined (NaN close).
+    """
+    mts = np.asarray(trades["mts"], dtype=np.int64)
+    amount = np.asarray(trades["amount"], dtype=np.float64)
+    price = np.asarray(trades["price"], dtype=np.float64)
+    if mts.size == 0:
+        raise Ext2Stop("STOP_RED_GAP")
+    if mts.size > 1 and np.any(np.diff(mts) < 0):
+        raise Ext2Stop("STOP_DATA")
+    origin = day_start_ms(days[0])
+    end = day_start_ms(days[-1]) + DAY_MS
+    if int(mts[0]) < origin or int(mts[-1]) >= end:
+        raise Ext2Stop("STOP_BAR")
+    n = int((end - origin) // MINUTE_MS)
+    minute = ((mts - origin) // MINUTE_MS).astype(np.int64)
+    count = np.bincount(minute, minlength=n).astype(np.int64)
+    size = np.abs(amount)
+    volume = np.bincount(minute, weights=size, minlength=n)
+    notional = np.bincount(minute, weights=size * price, minlength=n)
+    buy = np.bincount(minute, weights=np.where(amount > 0.0, amount, 0.0), minlength=n)
+    sell = np.bincount(minute, weights=np.where(amount < 0.0, -amount, 0.0), minlength=n)
+    start_idx = np.searchsorted(minute, np.arange(n), side="left").astype(np.int64)
+    end_idx = np.searchsorted(minute, np.arange(n), side="right").astype(np.int64)
+    present = count > 0
+    raw_open = np.full(n, np.nan)
+    raw_close = np.full(n, np.nan)
+    raw_high = np.full(n, np.nan)
+    raw_low = np.full(n, np.nan)
+    raw_open[present] = price[start_idx[present]]
+    raw_close[present] = price[end_idx[present] - 1]
+    if np.any(present):
+        firsts = start_idx[present]
+        raw_high[present] = np.maximum.reduceat(price, firsts)
+        raw_low[present] = np.minimum.reduceat(price, firsts)
+    last = np.where(present, np.arange(n), -1)
+    np.maximum.accumulate(last, out=last)
+    defined = last >= 0
+    close = np.full(n, np.nan)
+    close[defined] = raw_close[last[defined]]
+    carried = defined & ~present
+    open_ = np.where(present, raw_open, close)
+    high = np.where(present, raw_high, close)
+    low = np.where(present, raw_low, close)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        vwap = np.where(present & (volume > 0.0), notional / np.where(volume > 0.0, volume, 1.0), np.nan)
+    open_mts = origin + np.arange(n, dtype=np.int64) * MINUTE_MS
+    return {
+        "source": "trades",
+        "origin_mts": origin,
+        "open_mts": open_mts,
+        "close_mts": open_mts + MINUTE_MS,
+        "open": open_, "high": high, "low": low, "close": close,
+        "trade_count": count, "buy_amount": buy, "sell_amount": sell,
+        "volume": volume, "notional": notional, "vwap": vwap,
+        "empty": ~present, "carried": carried, "defined": defined,
+        "print_start": start_idx, "print_end": end_idx,
+    }
 
 
 def minute_grid(rows: Sequence[tuple[int, int, float, float]], days: Sequence[date]) -> list[dict[str, Any]]:
-    """One bar per UTC minute. Empty minutes keep the previous close and zero volume."""
-    buckets: dict[int, dict[str, Any]] = {}
-    for _trade_id, mts, amount, price in sorted(rows, key=lambda item: item[1]):
-        minute = mts // MINUTE_MS * MINUTE_MS
-        if mts >= minute + MINUTE_MS:
-            raise Ext2Stop("STOP_BAR")
-        bar = buckets.get(minute)
-        if bar is None:
-            bar = {
-                "source": "trades",
-                "open_mts": minute,
-                "close_mts": minute + MINUTE_MS,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "trade_count": 0,
-                "buy_amount": 0.0,
-                "sell_amount": 0.0,
-                "volume": 0.0,
-                "vwap_notional": 0.0,
-                "empty": False,
-            }
-            buckets[minute] = bar
-        bar["high"] = max(bar["high"], price)
-        bar["low"] = min(bar["low"], price)
-        bar["close"] = price
-        bar["trade_count"] += 1
-        size = abs(amount)
-        bar["volume"] += size
-        bar["vwap_notional"] += size * price
-        if amount > 0.0:
-            bar["buy_amount"] += amount
-        elif amount < 0.0:
-            bar["sell_amount"] += -amount
-    if not buckets:
+    """One bar per UTC minute, as dicts. Empty minutes after the first trade
+    carry the previous close for features only; they are never prints."""
+    if not rows:
         raise Ext2Stop("STOP_RED_GAP")
-    first_minute = min(buckets)
-    last_close = None
+    arrays = trades_to_arrays(rows)
+    grid = build_grid(arrays, days)
     bars = []
-    cursor = day_start_ms(days[0])
-    end = day_start_ms(days[-1]) + DAY_MS
-    while cursor < end:
-        found = buckets.get(cursor)
-        if found is None:
-            found = {
-                "source": "trades", "open_mts": cursor, "close_mts": cursor + MINUTE_MS,
-                "open": None, "high": None, "low": None, "close": None, "vwap": None,
-                "last_print_price": last_close,
-                "trade_count": 0, "buy_amount": 0.0, "sell_amount": 0.0, "volume": 0.0,
-                "empty": True, "defined": False,
-            }
-        else:
-            found["vwap"] = found["vwap_notional"] / found["volume"] if found["volume"] else found["close"]
-            found["defined"] = True
-            found["last_print_price"] = float(found["close"])
-            last_close = float(found["close"])
-        found.pop("vwap_notional", None)
-        bars.append(found)
-        cursor += MINUTE_MS
+    for i in range(grid["open_mts"].size):
+        empty = bool(grid["empty"][i])
+        defined = bool(grid["defined"][i])
+
+        def val(key: str) -> float | None:
+            value = float(grid[key][i])
+            return value if math.isfinite(value) else None
+        bars.append({
+            "source": "trades",
+            "open_mts": int(grid["open_mts"][i]),
+            "close_mts": int(grid["close_mts"][i]),
+            "open": val("open"), "high": val("high"), "low": val("low"), "close": val("close"),
+            "vwap": val("vwap"),
+            "last_print_price": val("close"),
+            "trade_count": int(grid["trade_count"][i]),
+            "buy_amount": float(grid["buy_amount"][i]),
+            "sell_amount": float(grid["sell_amount"][i]),
+            "volume": float(grid["volume"][i]),
+            "empty": empty,
+            "carried": bool(grid["carried"][i]),
+            "defined": defined,
+        })
     return bars
 
 
@@ -254,7 +311,7 @@ def empty_bar_count(bars: Sequence[Mapping[str, Any]]) -> int:
 
 
 def bar_ohlc_usable_as_print(bar: Mapping[str, Any]) -> bool:
-    """Empty minutes are not prints and cannot fill."""
+    """Empty minutes are not prints and cannot fill, even when carried."""
     return not bar.get("empty") and bar.get("trade_count", 0) > 0 and bar.get("close") is not None
 
 
@@ -285,6 +342,8 @@ def _stream_trades(instrument: Path, day: date) -> list[tuple[int, int, float, f
     start = day_start_ms(day)
     for obj in iter_jsonl_gz(path):
         trade_id, mts, amount, price = _trade_tuple(obj)
+        if mts >= FORBIDDEN_MTS:
+            raise Ext2Stop("STOP_MTS")
         if mts < start or mts >= start + DAY_MS:
             raise Ext2Stop("STOP_RED_GAP")
         rows.append((trade_id, mts, amount, price))
@@ -297,30 +356,44 @@ def _stream_candle_minutes(instrument: Path, day: date) -> list[int]:
 
 
 def load_bitfinex(root: Path | str, manifest: Mapping[str, str]) -> dict[str, Any]:
+    """A1-A4: allowlist + aggregate + per-file sha, stream, RED check, grid."""
     assert_manifest_complete(manifest)
     instrument = _instrument_dir(Path(root))
     verify_manifest_shas(Path(root), manifest)
     days = default_allowlist_dates()
-    trades: list[tuple[int, int, float, float]] = []
-    candle_minutes: list[int] = []
+    parts: list[tuple[np.ndarray, ...]] = []
+    candle_minutes: set[int] = set()
     for day in days:
-        trades.extend(_stream_trades(instrument, day))
-        candle_minutes.extend(_stream_candle_minutes(instrument, day))
-    assert_trade_continuity(trades, days)
-    bars = minute_grid(trades, days)
-    trade_minutes = [bar["open_mts"] for bar in bars if not bar["empty"]]
-    holes = sorted(set(trade_minutes) - set(candle_minutes))
+        rows = _stream_trades(instrument, day)
+        parts.append((
+            np.asarray([row[0] for row in rows], dtype=np.int64),
+            np.asarray([row[1] for row in rows], dtype=np.int64),
+            np.asarray([row[2] for row in rows], dtype=np.float64),
+            np.asarray([row[3] for row in rows], dtype=np.float64),
+        ))
+        candle_minutes.update(_stream_candle_minutes(instrument, day))
+    ids = np.concatenate([part[0] for part in parts])
+    mts = np.concatenate([part[1] for part in parts])
+    amount = np.concatenate([part[2] for part in parts])
+    price = np.concatenate([part[3] for part in parts])
+    order = np.lexsort((ids, mts))
+    trades = {"id": ids[order], "mts": mts[order], "amount": amount[order], "price": price[order]}
+    _continuity_arrays(trades["id"], trades["mts"], days)
+    grid = build_grid(trades, days)
+    trade_minutes = set(grid["open_mts"][~grid["empty"]].tolist())
+    holes = sorted(trade_minutes - candle_minutes)
     return {
-        "schema": "ext2_load_v1",
+        "schema": "ext2_load_v2",
         "series": "EXT2-EXTERNAL",
         "live": False,
         "paper_only": True,
-        "bars": bars,
+        "days": days,
+        "grid": grid,
         "trades": trades,
         "candle_cross_check": {
-            "trade_minutes": len(set(trade_minutes)),
-            "candle_minutes": len(set(candle_minutes)),
-            "candle_holes": holes,
+            "trade_minutes": len(trade_minutes),
+            "candle_minutes": len(candle_minutes),
+            "candle_holes": len(holes),
         },
         "files_hashed": len(manifest),
         "red_gap": False,

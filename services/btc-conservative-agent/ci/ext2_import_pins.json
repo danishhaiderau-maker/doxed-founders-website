@@ -1,12 +1,15 @@
 {
   "schema": "ext2_import_pins_v1",
   "files": {
+    "research/ext2_calendar.py": "d6fd4111d87e9661e4415905a0135da9bb9c49691631587aa80e5faa7899414f",
     "research/ext2_costs.py": "cf97312151a828c0274305100df33cb9227451421508d48867c0c3d35e5be1a4",
-    "research/ext2_loader.py": "e10225c1e399934bd0912e11ebd718e57be43111b4331137f70b4f9bfabc09d1",
-    "research/ext2_search.py": "4f1262a96ec0cbff1dea3bd0d26d2d5326cd2e53bb8cfa01a64863f6970982b2",
-    "research/ext2_supervisor.py": "6fd4b30d953778970df9fa5ef88894c823a39913a7a2d15487f0b17857376f70",
-    "research/ext2_runner.py": "6e3fab546d958272d2e6a6815b521dafb3080d288e4ef9b2146fdec633b0ff10",
-    "research/ext2_rules.py": "c2ad6e677544e0182fc0c6e69a36031d0bcc04ce4f58ac74253763fd3fcbe61b",
-    "research/ext2_features.py": "c5251813876d7d7067c52dee2dd0517db1370e82f51cacffe64f0761674f6c0f"
+    "research/ext2_features.py": "52ffd1248eedd9509584ccaa616cc045348259bb2cc6335124fbce50497bb913",
+    "research/ext2_lattice.py": "0ecc21c43cb209271b95ee8debb5d0fc6b4ddb3839781bf15cf74c5fe17af758",
+    "research/ext2_loader.py": "d696ec61a0b3a80dcafa915d7b36b099c19dbf4b2b683cc89fad74ba51c159de",
+    "research/ext2_pipeline.py": "fa8a1c2a6c1051572060a31bc7a1ee6285ffd44ce289a71ceb15ecadae9aa167",
+    "research/ext2_rules.py": "35d3f0f7662b47f04290fb9060284fd105784eb84ea0192ae5b61d72176e35bf",
+    "research/ext2_runner.py": "d3ac0bfacce07ab32105e797edb97cef95a78fc0f736ab89a9d14e1db6b45e03",
+    "research/ext2_search.py": "5f14186a87aefb917c6f96eb5e070ef09a234bf7806b3588ed5d2071033c5ec7",
+    "research/ext2_supervisor.py": "c21bcf3081ab02d95c44e839ab0c460cf009d0197ce7a8f8017f215f2f447ec6"
   }
 }
