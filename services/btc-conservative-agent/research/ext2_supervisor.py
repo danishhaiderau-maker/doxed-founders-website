@@ -266,7 +266,10 @@ class SystemProbe:
                         "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")]
             status = MemoryStatusEx()
             status.dwLength = ctypes.sizeof(MemoryStatusEx)
-            if not ctypes.WinDLL("kernel32").GlobalMemoryStatusEx(ctypes.byref(status)):
+            k = ctypes.WinDLL("kernel32", use_last_error=True)
+            k.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MemoryStatusEx)]
+            k.GlobalMemoryStatusEx.restype = ctypes.c_int
+            if not k.GlobalMemoryStatusEx(ctypes.byref(status)):
                 return None
             return int(status.ullAvailPhys)
         try:
@@ -296,9 +299,16 @@ class SystemProbe:
     def set_below_normal(self, proc: Any) -> dict[str, Any]:
         if os.name == "nt":
             import ctypes
-            ok = bool(ctypes.WinDLL("kernel32").SetPriorityClass(int(proc._handle), BELOW_NORMAL_PRIORITY_CLASS))
-            return {"kind": "windows_priority_class", "requested": "BELOW_NORMAL", "ok": ok,
-                    "job_priority_class_limit": True}
+            from ctypes import wintypes
+            k = ctypes.WinDLL("kernel32", use_last_error=True)
+            k.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            k.SetPriorityClass.restype = wintypes.BOOL
+            k.GetPriorityClass.argtypes = [wintypes.HANDLE]
+            k.GetPriorityClass.restype = wintypes.DWORD
+            ok = bool(k.SetPriorityClass(int(proc._handle), BELOW_NORMAL_PRIORITY_CLASS))
+            measured = int(k.GetPriorityClass(int(proc._handle)))
+            return {"kind": "windows_priority_class", "requested": "BELOW_NORMAL", "measured": measured,
+                    "ok": ok and measured == BELOW_NORMAL_PRIORITY_CLASS, "job_priority_class_limit": True}
         os.setpriority(os.PRIO_PROCESS, proc.pid, POSIX_NICE)
         measured = os.getpriority(os.PRIO_PROCESS, proc.pid)
         return {"kind": "posix_nice", "requested": POSIX_NICE, "measured": measured,
