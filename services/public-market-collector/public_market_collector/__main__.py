@@ -56,6 +56,17 @@ def _parse_capture_args(args: list[str]) -> tuple[str, str, bool] | None:
 
 def main(argv: list[str] | None = None, runner=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["daily"]:
+        from .daily import default_root, execute_daily
+        root = default_root()
+        if len(args) == 3 and args[1] == "--root":
+            root = args[2]
+        elif len(args) != 1:
+            root = None
+        if not root:
+            sys.stderr.write("REFUSED daily: explicit --root required on non-Windows; no other flags accepted\n")
+            return 78
+        return execute_daily(root, repo_root=_REPO, runner=runner)
     if args[:1] != ["capture"]:
         sys.stderr.write(REFUSAL + "\n")
         return 78

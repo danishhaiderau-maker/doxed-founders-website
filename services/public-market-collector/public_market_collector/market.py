@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from . import bitfinex_docs as docs
 from .framing import NORM_KEYS, dumps
+from .vocabulary import CURRENT_VOCAB, ReviewedVocabMapping, VocabularyError, pool_records, record_vocab_version
 
 CHANNELS = (
     "book_snapshot",
@@ -277,6 +278,8 @@ class FeedState:
     seen_trade_ids: set = field(default_factory=set)
     seen_trade_order: deque = field(default_factory=deque)
     max_trade_id: int | None = None
+    # One semantic series per incremental state; None means no record read yet.
+    record_vocab_v: str | None = None
 
     def __post_init__(self) -> None:
         self.book.prec = self.prec
@@ -292,6 +295,7 @@ class Step:
 def blank_norm(**overrides) -> dict:
     row = {key: None for key in NORM_KEYS}
     row["norm_schema_v"] = "pmc_norm_v1"
+    row["record_vocab_v"] = CURRENT_VOCAB
     row["queue_position"] = None
     row["duplicate"] = False
     row["out_of_order"] = False
@@ -319,11 +323,13 @@ def _copy_state(state: FeedState) -> FeedState:
     copied.seen_trade_ids = set(state.seen_trade_ids)
     copied.seen_trade_order = deque(state.seen_trade_order)
     copied.max_trade_id = state.max_trade_id
+    copied.record_vocab_v = state.record_vocab_v
     return copied
 
 
 def _base(rec: dict, **overrides) -> dict:
     fields = {
+        "record_vocab_v": record_vocab_version(rec),
         "raw_id": rec.get("raw_id"),
         "segment_id": rec.get("segment_id"),
         "stream": rec.get("stream"),
@@ -431,14 +437,32 @@ def _trade_rows(rec: dict, seq_layout: str | None) -> list[tuple[str, list]]:
     return []
 
 
-def step(state: FeedState, rec: dict, *, seq_layout: str | None, inplace: bool = False) -> Step:
+def step(state: FeedState, rec: dict, *, seq_layout: str | None, inplace: bool = False,
+         reviewed_mapping: ReviewedVocabMapping | None = None) -> Step:
     """Advance `state` by one record.
 
     By default the input state is copied first. The capture session passes
     inplace=True for its own states so no book or trade-id set is copied per record.
+
+    Bind the first accepted record's vocabulary; compare before copying, binding
+    or any semantic mutation. Missing means v1, unknown versions refuse. An
+    explicit reviewed mapping converts the incoming row through the same guarded
+    API as batch readers. To combine a legacy stream with v2, map legacy records
+    from the first record (or replay into a fresh state). A populated v1 state
+    cannot be retroactively relabeled: the mapping cannot replay its history.
     """
+    if reviewed_mapping is not None:
+        rec = pool_records([rec], reviewed_mapping=reviewed_mapping)[0]
+    incoming_vocab = record_vocab_version(rec)
+    first_record = state.record_vocab_v is None
+    if not first_record:
+        bound_vocab = record_vocab_version({"record_vocab_v": state.record_vocab_v})
+        if incoming_vocab != bound_vocab:
+            raise VocabularyError("INCREMENTAL_RECORD_VOCAB_MISMATCH_REPLAY_REQUIRED")
     if not inplace:
         state = _copy_state(state)
+    if first_record:
+        state.record_vocab_v = incoming_vocab
     channel = rec.get("channel")
     followup = None
     norms: list[dict] = []
@@ -621,18 +645,18 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None, inplace: bool =
     return Step(state, norms, followup)
 
 
-def normalize_raw_records(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None) -> list[dict]:
+def normalize_raw_records(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None, reviewed_mapping=None) -> list[dict]:
     state = FeedState(prec=prec, seq_scope=seq_scope)
     norms: list[dict] = []
-    for rec in records:
+    for rec in pool_records(records, reviewed_mapping=reviewed_mapping):
         result = step(state, rec, seq_layout=seq_layout)
         state = result.state
         norms.extend(result.norms)
     return norms
 
 
-def canonical_norms(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None) -> bytes:
-    rows = normalize_raw_records(records, prec=prec, seq_scope=seq_scope, seq_layout=seq_layout)
+def canonical_norms(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None, reviewed_mapping=None) -> bytes:
+    rows = normalize_raw_records(records, prec=prec, seq_scope=seq_scope, seq_layout=seq_layout, reviewed_mapping=reviewed_mapping)
     return "\n".join(dumps(row) for row in rows).encode("utf-8")
 
 

@@ -28,9 +28,11 @@ from .framing import (
     decode_prefix,
     dumps,
     read_journal,
+    record_line,
     sha256_bytes,
 )
 from .market import RESUBSCRIBE_CAUSES, FeedState, classify_message, step
+from .vocabulary import CURRENT_VOCAB, VocabularyError, require_current_series
 
 STREAMS = ("raw-book", "raw-trades")
 NORM_STREAM = {"raw-book": "norm-book", "raw-trades": "norm-trades"}
@@ -55,10 +57,15 @@ def _root_size(root: Path) -> int:
     return total
 
 
-def _journal_intact(path: Path) -> None:
+def _journal_intact(path: Path) -> list[dict]:
     _records, stopped = read_journal(path)
     if stopped:
         raise StartRefused("RESTART_TORN_JOURNAL")
+    try:
+        require_current_series(_records)
+    except VocabularyError as exc:
+        raise StartRefused("VOCAB_CLOSED_SERIES_NEW_ROOT_REQUIRED") from exc
+    return _records
 
 
 class Session:
@@ -104,8 +111,10 @@ class Session:
                 raise StartRefused("HEALTH_JOURNAL_EXISTS")
             if not journal.exists() or not health.exists():
                 raise StartRefused("RESUME_PARTIAL_JOURNAL")
-            _journal_intact(journal)
+            prior = _journal_intact(journal)
             _journal_intact(health)
+            if not prior and any(root.glob("*/*/*.gz")):
+                raise StartRefused("VOCAB_UNCERTAIN_CLOSED_SERIES")
             if foreign_entries(root):
                 raise StartRefused("FOREIGN_OUTPUT")
             exclusive = False
@@ -150,6 +159,8 @@ class Session:
         self.pending_resubscribe = False
         self.resubscribe_deadline_ns = None
         self.resubscribe_count = 0
+        # What started the in-flight resubscribe: "info_20061" or "book_gap".
+        self.resubscribe_trigger = None
         self.clock_class = "ok"
         self.clock_nonok_count = 0
         self.bad_frame_count = 0
@@ -171,6 +182,7 @@ class Session:
         self.last_trade_id = None
         self.latency_analytics_valid = True
         self.gap_count = 0
+        self.checksum_fail_count = 0
         self.last_health_ns = None
         self.header_open = {stream: False for stream in STREAMS}
         for stream in STREAMS:
@@ -194,6 +206,7 @@ class Session:
         self.seq_local += 1
         self.ingest_order += 1
         rec = {
+            "record_vocab_v": CURRENT_VOCAB,
             "schema_v": "pmc_raw_v1",
             "venue": "bitfinex",
             "symbol": self.cfg.symbol,
@@ -261,6 +274,7 @@ class Session:
             self._stop("write_fail", "queue_full", rejected=message_text)
         parsed = json.loads(message_text)
         sub = None
+        unsubscribed_book = None
         if isinstance(parsed, dict) and parsed.get("event") == "subscribed":
             if parsed.get("symbol") not in (None, self.cfg.symbol):
                 raise StartRefused("INSTRUMENT_MISMATCH")
@@ -272,7 +286,9 @@ class Session:
             self.subs[chan_id] = parsed
             sub = parsed
         elif isinstance(parsed, dict) and parsed.get("event") == "unsubscribed":
-            self.subs.pop(parsed.get("chanId"), None)
+            dropped = self.subs.pop(parsed.get("chanId"), None)
+            if isinstance(dropped, dict) and dropped.get("channel") == "book":
+                unsubscribed_book = parsed.get("chanId")
         elif isinstance(parsed, list) and parsed:
             sub = self.subs.get(parsed[0])
         classified = classify_message(parsed, sub, self.cfg.seq_layout)
@@ -310,11 +326,44 @@ class Session:
             self.last_exchange = classified["ts_exchange_ms"]
             self.last_trade_recv = recv_utc_ns
         self._follow(rec)
+        if unsubscribed_book is not None and self.shadow.valid:
+            self._invalidate_unsubscribed_book(rec, unsubscribed_book)
+
+    def _invalidate_unsubscribed_book(self, rec: dict, chan_id) -> None:
+        """F1: a book whose channel is unsubscribed is not live. It stays invalid
+        until a resubscribe delivers a fresh snapshot. Recorded as a `maintenance`
+        gap (an existing book-invalidating cause) with `maintenance_event`."""
+        after_20061 = self.resubscribe_trigger == "info_20061" and self.resubscribe_deadline_ns is not None
+        payload = {
+            "gap_start_recv": rec["ts_recv_utc_ns"],
+            "gap_end_recv": rec["ts_recv_utc_ns"],
+            "cause": "maintenance",
+            "maintenance_event": "book_unsubscribed_after_20061" if after_20061 else "book_unsubscribed",
+            "unsubscribed_chan_id": chan_id,
+            "conn_epoch_before": self.epoch,
+            "conn_epoch_after": self.epoch,
+            "venue_seq_before": self.shadow.last_conn_seq,
+            "venue_seq_after": self.shadow.last_conn_seq,
+        }
+        gap = self._stamp_common(
+            "gap", payload, None, rec["ts_recv_utc_ns"], rec["ts_recv_mono_ns"], None, None, "raw-book"
+        )
+        self.buffer["raw-book"].append(gap)
+        self.gap_count += 1
+        self._follow(gap)
+        if self.resubscribe_deadline_ns is None:
+            # No resubscribe in flight: start the snapshot deadline so a book that is
+            # never re-snapshotted ends in a reconnect, not a silent stall.
+            self.resubscribe_trigger = "book_unsubscribed"
+            self.pending_resubscribe = True
+            self.resubscribe_deadline_ns = int(rec["ts_recv_utc_ns"]) + RESUBSCRIBE_DEADLINE_S * 1_000_000_000
 
     def _follow(self, rec: dict) -> None:
         result = step(self.shadow, rec, seq_layout=self.cfg.seq_layout, inplace=True)
         self.shadow = result.state
         cause = (result.followup or {}).get("payload", {}).get("cause") if result.followup else None
+        if cause == "checksum_fail":
+            self.checksum_fail_count += 1
         if cause in RESUBSCRIBE_CAUSES and self.resubscribe_deadline_ns is None:
             # One resubscribe in flight. Later `cs` on the invalid book does not add another.
             self.pending_resubscribe = True
@@ -414,6 +463,7 @@ class Session:
         self.seq_local = 0
         self.pending_resubscribe = False
         self.resubscribe_deadline_ns = None
+        self.resubscribe_trigger = None
         start = self.last_recv if self.last_recv is not None else recv_utc_ns
         for stream in STREAMS:
             payload = {
@@ -451,11 +501,12 @@ class Session:
         self.uncommitted_received += 1
         self.received += 1
 
-    def mark_maintenance(self, recv_utc_ns: int, recv_mono_ns: int) -> None:
+    def mark_maintenance(self, recv_utc_ns: int, recv_mono_ns: int, *, event: str = "info_20060") -> None:
         payload = {
             "gap_start_recv": recv_utc_ns,
             "gap_end_recv": recv_utc_ns,
             "cause": "maintenance",
+            "maintenance_event": event,
             "conn_epoch_before": self.epoch,
             "conn_epoch_after": self.epoch,
             "venue_seq_before": self.shadow.last_conn_seq,
@@ -582,7 +633,7 @@ class Session:
         }
         if self.stopped or self.watch_reason:
             return
-        encoded = len(dumps(record)) + 80
+        encoded = len(record_line(record))
         if self.accounted_bytes + encoded > int(self.cfg.disk_cap_bytes) or self._floor_block(encoded):
             # No stop here: the member write that follows runs the same checks and stops cleanly.
             return
@@ -746,6 +797,9 @@ class Session:
             "bad_frame_count": self.bad_frame_count,
             "clock_source": "local_receive_not_ntp",
         }
+        blocked = self._floor_block(len(record_line(record)))
+        if blocked:
+            self._stop("write_fail", blocked)
         self.accounted_bytes += self.health.append_obj(record, label="health")
         self.last_health_ns = now_ns
         return record
@@ -784,7 +838,7 @@ class Session:
             "rejected_sha256": None if rejected is None else sha256_bytes(rejected.encode("utf-8")),
         }
         try:
-            encoded = len(dumps(line)) + 80
+            encoded = len(record_line(line))
             if self._floor_block(encoded):
                 stderr += "STOP_RECORD_BELOW_FLOOR\n"
             elif self.accounted_bytes + encoded <= int(self.cfg.disk_cap_bytes):
@@ -966,8 +1020,8 @@ def append_startup_gap(root: Path, segment_path: Path, report: dict) -> Path:
         raise StartRefused("JOURNAL_IS_SEGMENT")
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+    _journal_intact(journal_path)
     fd = os.open(journal_path, flags, 0o644)
-    from .framing import record_line
 
     line = record_line(
         {

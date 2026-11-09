@@ -26,6 +26,13 @@ FORBIDDEN_IMPORT_ROOTS = {
     "asyncio",
     "_socket",
     "importlib",
+    "openai",
+    "anthropic",
+    "litellm",
+    "langchain",
+    "groq",
+    "ccxt",
+    "bfxapi",
 }
 
 FORBIDDEN_CALLS = {
@@ -44,13 +51,21 @@ FORBIDDEN_CALLS = {
     "copy",
     "copy2",
     "copyfile",
+    "create_order",
+    "place_order",
+    "submit_order",
+    "new_order",
+    "cancel_order",
+    "order_submit",
+    "completion",
+    "acompletion",
 }
 
 # The public socket lives in one module. Every other file stays network-free.
 _SOCKET_MODULES = frozenset({"socket", "ssl"})
 _SOCKET_FILE = "ws_public.py"
 
-FORBIDDEN_ATTRS = {"environ"}
+FORBIDDEN_ATTRS = {"environ", "api_key", "api_secret", "apiKey", "secret_key", "access_token"}
 
 
 def _import_forbidden(filename: str, base: str) -> bool:

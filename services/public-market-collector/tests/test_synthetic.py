@@ -44,6 +44,7 @@ from public_market_collector.framing import (
     dumps,
     gzip_member,
     jsonl_bytes,
+    record_line,
     read_journal,
     sha256_bytes,
     verify_segment,
@@ -712,7 +713,7 @@ class SyntheticTests(unittest.TestCase):
             "rejected_counted": False,
             "rejected_sha256": None,
         }
-        slack = len(dumps(predicted)) + 80
+        slack = len(record_line(predicted))
         estimate = 80 + sum(len(dumps(row)) for row in session.buffer["raw-book"])
         self.assertGreater(estimate, slack)
         session.cfg.disk_cap_bytes = _directory_size(root) + slack
@@ -959,7 +960,7 @@ class CDFaultMatrixTests(unittest.TestCase):
             "rejected_counted": False,
             "rejected_sha256": None,
         }
-        slack = len(dumps(predicted)) + 80
+        slack = len(record_line(predicted))
         estimate = 80 + sum(len(dumps(row)) for row in session.buffer["raw-book"])
         self.assertGreater(estimate, slack)
         cap = _directory_size(Path(session.root)) + slack
