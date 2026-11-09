@@ -163,9 +163,8 @@ def test_smoke_run_completes_with_every_output_and_key(smoke):
         assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest
 
 
-def test_supervised_smoke_worker_end_to_end(tmp_path):
-    data, out = _roots(tmp_path)
-    script = (
+def _smoke_worker_script(data: Path) -> str:
+    return (
         "import sys; sys.path.insert(0, %r)\n"
         "from research.ext2_supervisor import install_network_audit_hook, HeartbeatThread\n"
         "install_network_audit_hook()\n"
@@ -179,13 +178,41 @@ def test_supervised_smoke_worker_end_to_end(tmp_path):
         "hb.stop()\n"
         "sys.exit(0 if r['status'] == 'COMPLETED' else 3)\n" % (str(HERE), str(data))
     )
-    receipt = S.supervise([sys.executable, "-c", script], data_root=data, output_root=out,
-                          disk_free=lambda: S.DISK_FLOOR_BYTES + 1, hard_stop_sec=600, heartbeat_stall_sec=120)
+
+
+class _RamProbe:
+    """Test-only RAM/priority probe (same shape as SystemProbe). Production caps unchanged."""
+
+    def __init__(self, free_bytes: int, rss_bytes: int = 1 << 30):
+        self.free_bytes = int(free_bytes)
+        self.rss_bytes = int(rss_bytes)
+
+    def available_bytes(self):
+        return self.free_bytes
+
+    def tree_rss_bytes(self, pid, pgid, job=None):
+        return self.rss_bytes
+
+    def set_below_normal(self, proc):
+        return {"kind": "test", "ok": True}
+
+
+def test_supervised_smoke_worker_end_to_end(tmp_path):
+    # CI runners (ubuntu-latest ~7 GiB) sit under RAM_PAUSE_FREE_BYTES (8 GiB), so the real
+    # SystemProbe would pause forever and hit hard_stop_sec with STOP_HARD_STOP. Inject an
+    # ample free-RAM probe through the existing supervise(probe=...) hook; do not loosen caps.
+    data, out = _roots(tmp_path)
+    ample = _RamProbe(free_bytes=64 * 1024 ** 3)
+    receipt = S.supervise([sys.executable, "-c", _smoke_worker_script(data)], data_root=data, output_root=out,
+                          disk_free=lambda: S.DISK_FLOOR_BYTES + 1, hard_stop_sec=600, heartbeat_stall_sec=120,
+                          probe=ample)
     assert receipt["status"] == "COMPLETED", (receipt["reason"], receipt.get("worker_stop_reason"))
     assert receipt["worker_run_nonce_ok"] is True
     assert receipt["completion_marker_ok"] is True
     names = [u["name"] for u in receipt["units"]]
     assert "features" in names and len(names) >= 3  # units observed on the parent's clock
+    assert "ram_pause" not in names
+    assert receipt["resource_limits"]["pause_events"] == 0
     seqs = [u["seq"] for u in receipt["units"]]
     assert seqs == sorted(seqs)
     _keys_present(receipt)
@@ -194,6 +221,23 @@ def test_supervised_smoke_worker_end_to_end(tmp_path):
     assert receipt["worker_thread_limits"]["ok"] is True
     assert set(receipt["worker_thread_limits"]["thread_env"].values()) == {"8"}
     assert receipt["resource_limits"]["applied"] is True and receipt["resource_limits"]["priority"]["ok"] is True
+
+
+def test_supervised_smoke_low_ram_ci_runner_hits_hard_stop(tmp_path):
+    """Regression for CI unit-tests run 42655922041: ubuntu-latest MemAvailable < 8 GiB
+    pauses the smoke worker (ram_pause) until hard_stop_sec fires STOP_HARD_STOP with
+    worker_stop_reason None. Short hard_stop keeps the repro fast; production caps unchanged."""
+    data, out = _roots(tmp_path)
+    low = _RamProbe(free_bytes=7 * 1024 ** 3)  # mirrors a 7 GiB CI runner under the 8 GiB pause floor
+    receipt = S.supervise([sys.executable, "-c", _smoke_worker_script(data)], data_root=data, output_root=out,
+                          disk_free=lambda: S.DISK_FLOOR_BYTES + 1, hard_stop_sec=2.0,
+                          heartbeat_stall_sec=120, probe=low, ram_stop_sec=30.0, poll_sec=0.05)
+    assert receipt["status"] == "STOP"
+    assert receipt["reason"] == "STOP_HARD_STOP"
+    assert receipt.get("worker_stop_reason") is None
+    assert receipt["resource_limits"]["pause_events"] >= 1
+    assert any(u.get("name") == "ram_pause" for u in receipt["units"])
+    assert receipt["completion_marker_ok"] is False
 
 
 class _FakeCudaBackend(NumpyBackend):
