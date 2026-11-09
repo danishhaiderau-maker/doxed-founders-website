@@ -28,9 +28,11 @@ from .framing import (
     decode_prefix,
     dumps,
     read_journal,
+    record_line,
     sha256_bytes,
 )
 from .market import RESUBSCRIBE_CAUSES, FeedState, classify_message, step
+from .vocabulary import CURRENT_VOCAB, VocabularyError, require_current_series
 
 STREAMS = ("raw-book", "raw-trades")
 NORM_STREAM = {"raw-book": "norm-book", "raw-trades": "norm-trades"}
@@ -55,10 +57,15 @@ def _root_size(root: Path) -> int:
     return total
 
 
-def _journal_intact(path: Path) -> None:
+def _journal_intact(path: Path) -> list[dict]:
     _records, stopped = read_journal(path)
     if stopped:
         raise StartRefused("RESTART_TORN_JOURNAL")
+    try:
+        require_current_series(_records)
+    except VocabularyError as exc:
+        raise StartRefused("VOCAB_CLOSED_SERIES_NEW_ROOT_REQUIRED") from exc
+    return _records
 
 
 class Session:
@@ -104,8 +111,10 @@ class Session:
                 raise StartRefused("HEALTH_JOURNAL_EXISTS")
             if not journal.exists() or not health.exists():
                 raise StartRefused("RESUME_PARTIAL_JOURNAL")
-            _journal_intact(journal)
+            prior = _journal_intact(journal)
             _journal_intact(health)
+            if not prior and any(root.glob("*/*/*.gz")):
+                raise StartRefused("VOCAB_UNCERTAIN_CLOSED_SERIES")
             if foreign_entries(root):
                 raise StartRefused("FOREIGN_OUTPUT")
             exclusive = False
@@ -197,6 +206,7 @@ class Session:
         self.seq_local += 1
         self.ingest_order += 1
         rec = {
+            "record_vocab_v": CURRENT_VOCAB,
             "schema_v": "pmc_raw_v1",
             "venue": "bitfinex",
             "symbol": self.cfg.symbol,
@@ -623,7 +633,7 @@ class Session:
         }
         if self.stopped or self.watch_reason:
             return
-        encoded = len(dumps(record)) + 80
+        encoded = len(record_line(record))
         if self.accounted_bytes + encoded > int(self.cfg.disk_cap_bytes) or self._floor_block(encoded):
             # No stop here: the member write that follows runs the same checks and stops cleanly.
             return
@@ -787,7 +797,7 @@ class Session:
             "bad_frame_count": self.bad_frame_count,
             "clock_source": "local_receive_not_ntp",
         }
-        blocked = self._floor_block(len(dumps(record)) + 80)
+        blocked = self._floor_block(len(record_line(record)))
         if blocked:
             self._stop("write_fail", blocked)
         self.accounted_bytes += self.health.append_obj(record, label="health")
@@ -828,7 +838,7 @@ class Session:
             "rejected_sha256": None if rejected is None else sha256_bytes(rejected.encode("utf-8")),
         }
         try:
-            encoded = len(dumps(line)) + 80
+            encoded = len(record_line(line))
             if self._floor_block(encoded):
                 stderr += "STOP_RECORD_BELOW_FLOOR\n"
             elif self.accounted_bytes + encoded <= int(self.cfg.disk_cap_bytes):
@@ -1010,8 +1020,8 @@ def append_startup_gap(root: Path, segment_path: Path, report: dict) -> Path:
         raise StartRefused("JOURNAL_IS_SEGMENT")
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+    _journal_intact(journal_path)
     fd = os.open(journal_path, flags, 0o644)
-    from .framing import record_line
 
     line = record_line(
         {

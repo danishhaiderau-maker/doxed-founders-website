@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from . import bitfinex_docs as docs
 from .framing import NORM_KEYS, dumps
+from .vocabulary import CURRENT_VOCAB, pool_records, record_vocab_version
 
 CHANNELS = (
     "book_snapshot",
@@ -292,6 +293,7 @@ class Step:
 def blank_norm(**overrides) -> dict:
     row = {key: None for key in NORM_KEYS}
     row["norm_schema_v"] = "pmc_norm_v1"
+    row["record_vocab_v"] = CURRENT_VOCAB
     row["queue_position"] = None
     row["duplicate"] = False
     row["out_of_order"] = False
@@ -324,6 +326,7 @@ def _copy_state(state: FeedState) -> FeedState:
 
 def _base(rec: dict, **overrides) -> dict:
     fields = {
+        "record_vocab_v": record_vocab_version(rec),
         "raw_id": rec.get("raw_id"),
         "segment_id": rec.get("segment_id"),
         "stream": rec.get("stream"),
@@ -621,18 +624,18 @@ def step(state: FeedState, rec: dict, *, seq_layout: str | None, inplace: bool =
     return Step(state, norms, followup)
 
 
-def normalize_raw_records(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None) -> list[dict]:
+def normalize_raw_records(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None, reviewed_mapping=None) -> list[dict]:
     state = FeedState(prec=prec, seq_scope=seq_scope)
     norms: list[dict] = []
-    for rec in records:
+    for rec in pool_records(records, reviewed_mapping=reviewed_mapping):
         result = step(state, rec, seq_layout=seq_layout)
         state = result.state
         norms.extend(result.norms)
     return norms
 
 
-def canonical_norms(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None) -> bytes:
-    rows = normalize_raw_records(records, prec=prec, seq_scope=seq_scope, seq_layout=seq_layout)
+def canonical_norms(records: list[dict], *, prec: str, seq_scope: str | None, seq_layout: str | None, reviewed_mapping=None) -> bytes:
+    rows = normalize_raw_records(records, prec=prec, seq_scope=seq_scope, seq_layout=seq_layout, reviewed_mapping=reviewed_mapping)
     return "\n".join(dumps(row) for row in rows).encode("utf-8")
 
 

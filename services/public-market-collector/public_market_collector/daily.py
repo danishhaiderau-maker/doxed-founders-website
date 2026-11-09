@@ -23,6 +23,7 @@ from .market import classify_message
 from .output_policy import allow_root_refusal, disk_free_bytes
 from .public_run import FREE_DISK_FLOOR_BYTES, ConnectPacer, run_forever
 from .relaunch import LaunchJournal, supervise
+from .vocabulary import VocabularyError, require_current_series
 
 WINDOWS_ROOT = r"C:\DoxxedCrypto\data\collector"
 STATUS_INTERVAL_NS = 30_000_000_000
@@ -244,6 +245,10 @@ def execute_daily(root: str, *, repo_root=None, stop_event=None, runner=None,
         _rows, torn = read_journal(path / "runtime.journal")
         if torn:
             raise StartRefused("RUNTIME_JOURNAL_TORN")
+        try:
+            require_current_series(_rows)
+        except VocabularyError as exc:
+            raise StartRefused("VOCAB_CLOSED_SERIES_NEW_ROOT_REQUIRED") from exc
         if threading.current_thread() is threading.main_thread():
             for sig in (signal.SIGINT, signal.SIGTERM):
                 previous[sig] = signal.getsignal(sig)

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import StartRefused
 from .framing import AppendJournal, read_journal
+from .vocabulary import VocabularyError, require_current_series
 
 RELAUNCH_MIN_INTERVAL_S = 6.0
 TERMINAL_EXIT_CODES = frozenset({0, 75, 78})
@@ -41,6 +42,10 @@ class LaunchJournal:
         rows, torn = read_journal(self.path)
         if torn:
             raise StartRefused("RELAUNCH_JOURNAL_TORN")
+        try:
+            require_current_series(rows)
+        except VocabularyError as exc:
+            raise StartRefused("VOCAB_CLOSED_SERIES_NEW_ROOT_REQUIRED") from exc
         if not rows:
             return 0.0
         last = rows[-1]

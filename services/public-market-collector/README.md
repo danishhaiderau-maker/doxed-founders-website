@@ -109,3 +109,42 @@ checks, not a universal security proof.
 24 h reliability/volume or 99% coverage, real Windows/Task Scheduler, Windows lock
 behavior, real full-disk/power-loss scenarios, external supervisors and consumers.
 Nothing is launched by this PR.
+
+## PR997 vocabulary boundary (RK condition 1)
+
+**Every newly written top-level record now carries
+`record_vocab_v: "pmc_vocab_v2"`.** The field is added before gzip serialization
+and before journal checksum computation, including raw headers/messages/gaps,
+normalized records, index commit/close/startup/stop records, health records,
+launch records and runtime day/heartbeat/coverage records. The existing structural
+`schema_v` / `norm_schema_v` values remain unchanged; the common field is the
+explicit semantic boundary rather than separately renumbering every family.
+Raw and norm strict key lists include the field. Journal byte budgets include
+the actual stamped/checksummed size.
+
+**PR988-vocabulary captures are separate, CLOSED series.** A missing stamp means
+`pmc_vocab_v1`; an explicit v1 stamp has the same meaning. Read them separately;
+never relabel or append v2 records to those capture directories. New writers
+refuse legacy/mixed/unknown journals on resume, and refuse uncommitted segments
+without journal vocabulary proof. Use a new, separately approved root/series.
+The reviewed reader mapping below is not a writer-resume override. Do not alter,
+delete or rewrite historical files to bypass the boundary.
+
+Reader/analysis code must use `vocabulary.pool_records(records)` before combining
+series. The normalizer (`normalize_raw_records` and `canonical_norms`) enforces
+that guard too. Homogeneous v1 or v2 inputs can be read separately; mixed versions
+raise `VocabularyError`. Unknown/null/invalid explicit versions always refuse.
+`decode_prefix` / `read_journal` are forensic byte/checksum primitives, not pooling
+APIs or a declaration that two series are semantically compatible.
+
+The only cross-boundary path is an explicitly supplied `ReviewedVocabMapping`
+with a pinned HM review receipt SHA256 and an actual v1-to-v2 converter. The
+converter must return v2 records; there is no `allow_mixed=True` or silent
+identity fallback. Source objects are not mutated. Converted records retain the
+source vocab and HM review reference, and stale journal checksums are removed.
+Keep that mapping/receipt with analysis provenance. The API validates the supplied
+review reference's shape; it cannot authenticate HM approval. **No production
+mapping is shipped or approved by this PR** (tests use synthetic references).
+Existing v1 meanings are preserved, including maintenance = 20060; any mapping's
+semantic treatment needs HM review, not just a changed label. HM R2 must review
+the version change at the new exact head; any push voids RK's earlier-head PASS.

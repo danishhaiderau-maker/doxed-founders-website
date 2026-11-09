@@ -9,9 +9,11 @@ import os
 import zlib
 from pathlib import Path
 
-from .config import CrashFault
+from .config import CrashFault, StartRefused
+from .vocabulary import VocabularyError, require_current_series, stamp_current
 
 RAW_KEYS = (
+    "record_vocab_v",
     "schema_v",
     "venue",
     "symbol",
@@ -32,6 +34,7 @@ RAW_KEYS = (
 )
 
 NORM_KEYS = (
+    "record_vocab_v",
     "norm_schema_v",
     "raw_id",
     "segment_id",
@@ -72,7 +75,7 @@ def sha256_bytes(blob: bytes) -> str:
 
 
 def record_line(obj: dict) -> bytes:
-    body = {k: v for k, v in obj.items() if k != "record_checksum"}
+    body = stamp_current({k: v for k, v in obj.items() if k != "record_checksum"})
     digest = sha256_bytes(dumps(body).encode("utf-8"))
     full = {**body, "record_checksum": digest}
     return (dumps(full) + "\n").encode("utf-8")
@@ -164,7 +167,7 @@ def decode_prefix(blob: bytes) -> tuple[list[dict], int | None]:
 
 
 def jsonl_bytes(rows: list[dict]) -> bytes:
-    return b"".join((dumps(row) + "\n").encode("utf-8") for row in rows)
+    return b"".join((dumps(stamp_current(row)) + "\n").encode("utf-8") for row in rows)
 
 
 def confine(root: Path, relative: str) -> Path:
@@ -219,6 +222,14 @@ class AppendJournal:
     def __init__(self, path: Path, trace, *, exclusive: bool = True):
         self.path = path
         self.trace = trace
+        if not exclusive and path.exists():
+            records, torn = read_journal(path)
+            if torn:
+                raise StartRefused("RESTART_TORN_JOURNAL")
+            try:
+                require_current_series(records)
+            except VocabularyError as exc:
+                raise StartRefused("VOCAB_CLOSED_SERIES_NEW_ROOT_REQUIRED") from exc
         flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
         if exclusive:
             flags |= os.O_EXCL
