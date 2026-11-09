@@ -148,3 +148,22 @@ mapping is shipped or approved by this PR** (tests use synthetic references).
 Existing v1 meanings are preserved, including maintenance = 20060; any mapping's
 semantic treatment needs HM review, not just a changed label. HM R2 must review
 the version change at the new exact head; any push voids RK's earlier-head PASS.
+
+### Incremental reader state (HM B1)
+
+`market.step` now enforces the same semantic boundary, not just batch/replay
+readers. `FeedState.record_vocab_v` is unbound until the first accepted record;
+missing stamp binds v1. Every later call validates the incoming version against
+that binding **before copying or mutating any state**. `_copy_state` preserves
+the binding, so using the default copy path cannot erase history. Both copy and
+in-place mismatches raise `VocabularyError`; unknown versions also refuse before
+state changes. Even an initial header/info record binds the series.
+
+`step(..., reviewed_mapping=...)` passes incoming rows through the same explicit
+`ReviewedVocabMapping` used by batch readers. For a mixed legacy/current stream,
+apply the reviewed conversion **from the first record**, so all derived state is
+bound to v2. An incoming legacy row may be converted into an already-v2 state.
+A mapping supplied late cannot retroactively convert an already populated v1
+state: replay all contributing records into a fresh mapped state. The reader
+retains no unbounded raw history and never just relabels old book/dedup/sequence
+state as current. No production mapping or approval is introduced here.

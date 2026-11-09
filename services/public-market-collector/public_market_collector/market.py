@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from . import bitfinex_docs as docs
 from .framing import NORM_KEYS, dumps
-from .vocabulary import CURRENT_VOCAB, pool_records, record_vocab_version
+from .vocabulary import CURRENT_VOCAB, ReviewedVocabMapping, VocabularyError, pool_records, record_vocab_version
 
 CHANNELS = (
     "book_snapshot",
@@ -278,6 +278,8 @@ class FeedState:
     seen_trade_ids: set = field(default_factory=set)
     seen_trade_order: deque = field(default_factory=deque)
     max_trade_id: int | None = None
+    # One semantic series per incremental state; None means no record read yet.
+    record_vocab_v: str | None = None
 
     def __post_init__(self) -> None:
         self.book.prec = self.prec
@@ -321,6 +323,7 @@ def _copy_state(state: FeedState) -> FeedState:
     copied.seen_trade_ids = set(state.seen_trade_ids)
     copied.seen_trade_order = deque(state.seen_trade_order)
     copied.max_trade_id = state.max_trade_id
+    copied.record_vocab_v = state.record_vocab_v
     return copied
 
 
@@ -434,14 +437,32 @@ def _trade_rows(rec: dict, seq_layout: str | None) -> list[tuple[str, list]]:
     return []
 
 
-def step(state: FeedState, rec: dict, *, seq_layout: str | None, inplace: bool = False) -> Step:
+def step(state: FeedState, rec: dict, *, seq_layout: str | None, inplace: bool = False,
+         reviewed_mapping: ReviewedVocabMapping | None = None) -> Step:
     """Advance `state` by one record.
 
     By default the input state is copied first. The capture session passes
     inplace=True for its own states so no book or trade-id set is copied per record.
+
+    Bind the first accepted record's vocabulary; compare before copying, binding
+    or any semantic mutation. Missing means v1, unknown versions refuse. An
+    explicit reviewed mapping converts the incoming row through the same guarded
+    API as batch readers. To combine a legacy stream with v2, map legacy records
+    from the first record (or replay into a fresh state). A populated v1 state
+    cannot be retroactively relabeled: the mapping cannot replay its history.
     """
+    if reviewed_mapping is not None:
+        rec = pool_records([rec], reviewed_mapping=reviewed_mapping)[0]
+    incoming_vocab = record_vocab_version(rec)
+    first_record = state.record_vocab_v is None
+    if not first_record:
+        bound_vocab = record_vocab_version({"record_vocab_v": state.record_vocab_v})
+        if incoming_vocab != bound_vocab:
+            raise VocabularyError("INCREMENTAL_RECORD_VOCAB_MISMATCH_REPLAY_REQUIRED")
     if not inplace:
         state = _copy_state(state)
+    if first_record:
+        state.record_vocab_v = incoming_vocab
     channel = rec.get("channel")
     followup = None
     norms: list[dict] = []
