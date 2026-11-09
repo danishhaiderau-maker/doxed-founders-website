@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from research import ext2_loader as loader
-from research.ext2_search import features_from_trade_bars
 
 
 def _ms(day: str, minute: int = 0) -> int:
@@ -35,14 +34,16 @@ def test_streams_jsonl_arrays_and_empty_minutes_are_not_prints(tmp_path):
     assert parsed == rows
     bars = loader.minute_grid(rows, [day])
     assert loader.empty_bar_count(bars) > 0
-    empty = next(bar for bar in bars if bar["empty"])
-    assert empty["trade_count"] == 0
-    assert empty["open"] is None and empty["close"] is None
-    assert loader.bar_ohlc_usable_as_print(empty) is False
-    filled = next(bar for bar in bars if not bar["empty"])
-    assert filled["close"] == 100.0
+    before = bars[0]
+    assert before["empty"] and before["close"] is None and not before["defined"]
+    carried = bars[2]
+    assert carried["empty"] and carried["carried"] and carried["trade_count"] == 0
+    assert carried["close"] == 100.0  # Boss ruling: causal as-of close for features only
+    assert carried["vwap"] is None
+    assert loader.bar_ohlc_usable_as_print(carried) is False
+    filled = bars[1]
+    assert filled["close"] == 100.0 and loader.bar_ohlc_usable_as_print(filled) is True
     assert "candle" not in json.dumps(bars).lower()
-    assert features_from_trade_bars([filled])[0]["close"] == 100.0
 
 
 def test_bad_jsonl_line_is_ext2stop(tmp_path):
@@ -113,4 +114,17 @@ def test_allowlist_names_are_jsonl_and_the_source_has_no_machine_path():
 
 def test_feature_function_does_not_mention_candles():
     import inspect
-    assert "candle" not in inspect.getsource(features_from_trade_bars).lower()
+    from research import ext2_features
+    assert "candle" not in inspect.getsource(ext2_features.feature_matrix).lower()
+
+
+def test_an_h1_row_inside_the_last_w1_file_stops_on_mts(tmp_path):  # N8 / M19
+    day = date(2025, 1, 28)
+    inst = tmp_path / "external-data" / "bitfinex" / "tBTCF0USTF0"
+    path = inst / "trades" / "2025-01-28.jsonl.gz"
+    ok = loader.day_start_ms(day) + 1_000
+    h1 = loader.FORBIDDEN_MTS + 5
+    _jsonl(path, [[1, ok, 0.1, 100.0], [2, h1, 0.1, 100.0]])
+    with pytest.raises(loader.Ext2Stop, match="STOP_MTS"):
+        loader._stream_trades(inst, day)
+    assert loader.FORBIDDEN_MTS == loader.day_start_ms(date(2025, 1, 29))

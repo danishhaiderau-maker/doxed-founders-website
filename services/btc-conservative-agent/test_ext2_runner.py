@@ -1,59 +1,168 @@
-"""Real-run entry point. Synthetic roots only. No GPU on this machine."""
+"""Runner: A19 order, STOP receipts carry every A18 key, nonce marker, pins, CUDA
+pre-start, exclusive root, and a synthetic smoke run (push 3). No real data."""
 import hashlib
 import json
+import sys
 from pathlib import Path
 
-from research.ext2_runner import PIN_PATH, SERVICE_ROOT, run_ext2
+import numpy as np
+import pytest
+
+from ext2_test_data import small_calendar, synth_trades
+from research import ext2_runner as R
+from research import ext2_supervisor as S
+from research.ext2_lattice import NumpyBackend
+
+HERE = Path(__file__).resolve().parent
 
 
-def _roots(tmp_path: Path):
-    data = tmp_path / "data"
-    output = tmp_path / "out"
-    data.mkdir()
-    output.mkdir()
-    return data, output
+def _roots(tmp_path):
+    data = tmp_path / "external-data" / "bitfinex"
+    data.mkdir(parents=True)
+    return data, tmp_path / "runs" / "r1"
 
 
-def test_run_entry_stops_without_a_gpu_and_rejects_the_cpu_flag(tmp_path):
-    data, output = _roots(tmp_path)
-    refused = run_ext2(data_root=data, output_root=output, allow_cpu_fallback=True)
-    assert refused["reason"] == "STOP_CPU_FALLBACK_FORBIDDEN"
-    assert refused["status"] == "STOP"
-    stopped = run_ext2(
-        data_root=data, output_root=output, allow_cpu_fallback=False,
-        forbidden_substrings=("super-secret-value",),
-    )
-    assert stopped["reason"] == "STOP_GPU_MISSING"
-    assert stopped["combos_searched"] == 181442
-    assert stopped["fallback"] is False
-    lattice = [stage for stage in stopped["devices"] if stage["stage"] == "exit_lattice"]
-    assert lattice[-1]["device"] is None
-    assert lattice[-1]["fallback"] is False
-    text = json.dumps(stopped)
-    assert "super-secret-value" not in text
-    assert "environ" not in stopped
+def _keys_present(receipt):
+    missing = [k for k in S.RECEIPT_REQUIRED_KEYS if k not in receipt]
+    assert not missing, missing
 
 
-def test_import_pins_match_the_shipped_files_and_a_mismatch_stops(tmp_path):
-    document = json.loads(PIN_PATH.read_text(encoding="utf-8"))
-    for rel, expected in document["files"].items():
-        digest = hashlib.sha256((SERVICE_ROOT / rel).read_bytes()).hexdigest()
-        assert digest == expected
-    document["files"]["research/ext2_costs.py"] = "0" * 64
+def test_real_mode_without_a_gpu_stops_and_still_writes_every_key(tmp_path):
+    data, out = _roots(tmp_path)
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n1", cuda_check=lambda: False)
+    assert r["status"] == "STOP" and r["stop_reason"] == "STOP_GPU_MISSING"
+    _keys_present(r)
+    on_disk = json.loads((out / "run_receipt.json").read_text())
+    assert on_disk["stop_reason"] == "STOP_GPU_MISSING" and on_disk["label"] == R.rules.LABEL
+    assert on_disk["p_min_attainable_computed"]["by_T"]["20"]["reachable"] is True
+    assert on_disk["fee_bp"] == 0
+    assert not (out / "COMPLETE").exists()
+
+
+def test_cpu_fallback_flag_and_non_frozen_calendar_are_refused(tmp_path):
+    data, out = _roots(tmp_path)
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", allow_cpu_fallback=True)
+    assert r["stop_reason"] == "STOP_CPU_FALLBACK_FORBIDDEN"
+    data, out = _roots(tmp_path / "b")
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", calendar=small_calendar(),
+                   cuda_check=lambda: True)
+    assert r["stop_reason"] == "STOP_CALENDAR"
+
+
+def test_shipped_import_pins_match_and_a_mismatch_stops(tmp_path):
+    S.verify_import_pins(R.PIN_PATH, R.SERVICE_ROOT)
+    pinned = set(json.loads(R.PIN_PATH.read_text())["files"])
+    assert pinned == {f"research/{name}" for name in R.SOURCE_FILES}
     bad = tmp_path / "pins.json"
-    bad.write_text(json.dumps(document), encoding="utf-8")
-    data, output = _roots(tmp_path)
-    receipt = run_ext2(data_root=data, output_root=output, pin_path=bad)
-    assert receipt["reason"] == "STOP_IMPORT_PIN"
-    assert receipt["status"] == "STOP"
+    bad.write_text(json.dumps({"files": {"research/ext2_rules.py": "0" * 64}}))
+    data, out = _roots(tmp_path)
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", pin_path=bad)
+    assert r["stop_reason"] == "STOP_IMPORT_PIN"
 
 
-def test_a_bad_data_file_sha_stops_at_the_start(tmp_path):
-    data, output = _roots(tmp_path)
-    target = data / "trades"
-    target.mkdir()
-    blob = target / "2024-11-01.json.gz"
-    blob.write_bytes(b"not-the-real-bytes")
-    manifest = {"trades/2024-11-01.json.gz": "ab" * 32}
-    receipt = run_ext2(data_root=data, output_root=output, manifest=manifest, allowlist=list(manifest))
-    assert receipt["reason"] == "STOP_ALLOWLIST"
+def test_root_reuse_stale_complete_and_missing_nonce_stop(tmp_path, monkeypatch):
+    data, out = _roots(tmp_path)
+    out.mkdir(parents=True)
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n")
+    assert r["stop_reason"] == "STOP_RUN_ROOT_EXISTS"
+    assert not (out / "run_receipt.json").exists()
+    (out / "COMPLETE").write_text("{}")
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", supervised=True)
+    assert r["stop_reason"] == "STOP_STALE_COMPLETE"
+    assert (out / "COMPLETE").read_text() == "{}"
+    monkeypatch.delenv(S.NONCE_ENV, raising=False)
+    data2, out2 = _roots(tmp_path / "c")
+    r = R.run_ext2(data_root=data2, output_root=out2)
+    assert r["stop_reason"] == "STOP_NO_RUN_NONCE"
+
+
+def test_cuda_prestart_fails_closed(tmp_path):
+    class Proc:
+        stdout = "Quadro P1000, 4096 MiB, 550.00"
+    pre = R.cuda_prestart(NumpyBackend(), run_cmd=lambda *a, **k: Proc())
+    assert pre["ok"] is False and pre["fail"] == "nvidia_smi_not_t2000"
+    data, out = _roots(tmp_path)
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", cuda_check=lambda: True,
+                   backend=NumpyBackend(), prestart=lambda b: {"ok": False, "fail": "parity"})
+    assert r["stop_reason"] == "STOP_CUDA_PRESTART"
+    assert r["cuda_prestart"]["fail"] == "parity"
+
+
+def test_real_mode_refuses_a_cpu_lattice_even_after_prestart(tmp_path, monkeypatch):
+    seal = tmp_path / "h1.seal"
+    seal.write_text("seal")
+    monkeypatch.setattr(R, "H1_SEAL_SHA", hashlib.sha256(b"seal").hexdigest())
+    data, out = _roots(tmp_path)
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", cuda_check=lambda: True,
+                   backend=NumpyBackend(), prestart=lambda b: {"ok": True}, h1_seal_path=seal)
+    assert r["stop_reason"] == "STOP_GPU_FALLBACK"
+    data, out = _roots(tmp_path / "noseal")
+    r = R.run_ext2(data_root=data, output_root=out, run_nonce="n", cuda_check=lambda: True,
+                   backend=NumpyBackend(), prestart=lambda b: {"ok": True})
+    assert r["stop_reason"] == "STOP_H1_SEAL"
+
+
+def test_lattice_parity_check_passes_on_numpy_and_torch_cpu():
+    assert R.lattice_parity(NumpyBackend())["pass"] is True
+    torch = pytest.importorskip("torch")
+    from research.ext2_lattice import make_backend
+    res = R.lattice_parity(make_backend("torch", "cpu"))
+    assert res["pass"] is True and res["dtype"] == "float64" and torch is not None
+
+
+@pytest.fixture(scope="module")
+def smoke(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("smoke")
+    cal = small_calendar()
+    tr = synth_trades(cal.days(), seed=7)
+    data, out = _roots(tmp)
+    r = R.run_ext2(data_root=data, output_root=out, mode="smoke", calendar=cal, trades=tr, run_nonce="nonce-1")
+    return r, out
+
+
+def test_smoke_run_completes_with_every_output_and_key(smoke):
+    r, out = smoke
+    assert r["status"] == "COMPLETED", r["stop_reason"]
+    _keys_present(r)
+    assert r["label"] == R.SMOKE_LABEL and r["allowlist_sha"] == "SMOKE-synthetic"
+    for name in ("cells.npz", "leads.json", "fixtures.json", "canary.json", "notes_not_tested.md",
+                 "dry_check.json", "run_receipt.json", "COMPLETE"):
+        assert (out / name).is_file(), name
+    marker = json.loads((out / "COMPLETE").read_text())
+    assert marker == {"run_nonce": "nonce-1", "card_sha12": S.CARD_SHA_V3[:12],
+                      "finished_aedt": marker["finished_aedt"]}
+    cells = np.load(out / "cells.npz")["cells"]
+    assert cells.shape == (181442,)
+    assert r["lattice"]["dtype"] == "float64" and r["fixtures"] == {"C3b": True, "C3c": True, "canary": True}
+    assert r["dual_c2_projection_hours"] > 0 and r["projection"]["lattice_measured_fp64_on_device"] is False
+    for name, digest in r["outputs"].items():
+        assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest
+
+
+def test_supervised_smoke_worker_end_to_end(tmp_path):
+    data, out = _roots(tmp_path)
+    script = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from research.ext2_supervisor import install_network_audit_hook, HeartbeatThread\n"
+        "install_network_audit_hook()\n"
+        "import pathlib\n"
+        "from ext2_test_data import small_calendar, synth_trades\n"
+        "from research.ext2_runner import run_ext2\n"
+        "cal = small_calendar()\n"
+        "hb = HeartbeatThread(pathlib.Path.cwd() / 'heartbeat', 1.0); hb.start()\n"
+        "r = run_ext2(data_root=pathlib.Path(%r), output_root=pathlib.Path.cwd(), mode='smoke', calendar=cal,\n"
+        "             trades=synth_trades(cal.days(), seed=3), supervised=True)\n"
+        "hb.stop()\n"
+        "sys.exit(0 if r['status'] == 'COMPLETED' else 3)\n" % (str(HERE), str(data))
+    )
+    receipt = S.supervise([sys.executable, "-c", script], data_root=data, output_root=out,
+                          disk_free=lambda: S.DISK_FLOOR_BYTES + 1, hard_stop_sec=600, heartbeat_stall_sec=120)
+    assert receipt["status"] == "COMPLETED", (receipt["reason"], receipt.get("worker_stop_reason"))
+    assert receipt["worker_run_nonce_ok"] is True
+    assert receipt["completion_marker_ok"] is True
+    names = [u["name"] for u in receipt["units"]]
+    assert "features" in names and len(names) >= 3  # units observed on the parent's clock
+    seqs = [u["seq"] for u in receipt["units"]]
+    assert seqs == sorted(seqs)
+    _keys_present(receipt)
+    assert receipt["label"] == R.SMOKE_LABEL

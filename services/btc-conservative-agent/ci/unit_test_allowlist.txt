@@ -227,7 +227,9 @@ test_experimental_tile_contract.py
 test_expired_order_dashboard_contract.py
 test_expired_orders_boot_rebuild.py
 test_ext2_costs.py
+test_ext2_features.py
 test_ext2_loader.py
+test_ext2_pipeline.py
 test_ext2_runner.py
 test_ext2_rules.py
 test_ext2_search.py

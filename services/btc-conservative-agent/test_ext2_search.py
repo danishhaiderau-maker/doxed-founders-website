@@ -1,178 +1,135 @@
-"""Exit lattice, censor list, liquidation-before-stop, and undefined trailing stats."""
-import inspect
-import math
+"""Grammar count, censor boundaries and the batched exit lattice (HM B12).
+
+The batched first-passage lattice is checked against the per-print reference
+scan on random paths; the torch backend is checked on CPU when torch is
+installed (GPU is NOT tested here)."""
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from research import ext2_lattice as LT
 from research import ext2_search as search
-
-
-def _event(prices, mts, *, entry=100.0, entry_mts=0, side=1.0, thesis=None):
-    return {
-        "entry_price": entry,
-        "entry_mts": entry_mts,
-        "side": side,
-        "print_mts": list(mts),
-        "print_price": list(prices),
-        "thesis_cross": [False] * len(prices) if thesis is None else list(thesis),
-    }
+from research.ext2_costs import Ext2Stop
 
 
 def test_closed_form_and_enumeration_are_181442():
     assert search.count_combos_closed_form() == 181442
     assert search.count_combos_enumerated() == 181442
     assert search.count_combos() == 181442
-    assert search.EXIT_GRID_N == 54
-    assert len(search._exit_table()[0]) == 54
 
 
-def test_cpu_fallback_is_off_by_default_and_stops_without_a_gpu():
-    flag = inspect.signature(search.evaluate_exit_lattice).parameters["allow_cpu_fallback"]
-    assert flag.default is False
-    with pytest.raises(search.Ext2Stop, match="STOP_GPU_MISSING"):
-        search.evaluate_exit_lattice([_event([100.0], [1_000])])
+def test_censor_boundaries_are_the_fold_test_ends():
+    from research.ext2_calendar import FROZEN
+    assert search.default_censor_boundaries_ms() == tuple(f.test_censor_ms() for f in FROZEN.folds)
+    b = search.default_censor_boundaries_ms()
+    assert search.active_censor_mts(b[0] - 1, b) == b[0]
+    assert search.active_censor_mts(b[0], b) == b[1]
 
 
-def test_numpy_and_torch_kernels_match_within_1e_9_bp():
-    torch = pytest.importorskip("torch")
-    assert torch.cuda.is_available() is False
-    event = _event([100.1, 100.4, 99.0, 101.0], [2_000, 80_000, 200_000, 400_000], thesis=[False, False, True, False])
-    boundaries = [10 ** 15]
-    numpy_result = search.evaluate_exit_lattice(
-        [event], allow_cpu_fallback=True, kernel="numpy", censor_boundaries=boundaries,
-    )
-    torch_result = search.evaluate_exit_lattice(
-        [event], allow_cpu_fallback=True, kernel="torch", censor_boundaries=boundaries,
-    )
-    assert numpy_result["combos_searched"] == torch_result["combos_searched"] == 181442
-    assert numpy_result["fallback"] is True and numpy_result["parity_test"] is True
-    assert numpy_result["cells"][0]["reasons"] == torch_result["cells"][0]["reasons"]
-    assert numpy_result["liquidation_count"] == torch_result["liquidation_count"]
-    for left, right in zip(numpy_result["cells"][0]["net_bp"], torch_result["cells"][0]["net_bp"]):
-        if left is None:
-            assert right is None
-        else:
-            assert right == pytest.approx(left, abs=search.PARITY_ATOL)
+def _random_case(seed, n=3000, events=150):
+    rng = np.random.default_rng(seed)
+    mts = np.cumsum(rng.integers(1, 9_000, n)).astype(np.int64)
+    price = 60000.0 * np.exp(np.cumsum(rng.standard_t(3, n) * 4e-4))
+    pick = rng.integers(0, n - 50, events)
+    ev = {"mts": mts[pick] + 1, "price": price[pick] * (1 + rng.normal(0, 1e-4, events)),
+          "side": rng.choice([-1.0, 1.0], events)}
+    bnd = np.where(rng.random(events) < 0.5, mts[np.minimum(pick + rng.integers(5, 2000, events), n - 1)],
+                   mts[-1] + 10**9)
+    ev["boundary"] = bnd.astype(np.int64)
+    thesis_idx = np.minimum(pick + rng.integers(1, 3000, events), n)
+    return mts, price, ev, thesis_idx
 
 
-def test_liquidation_gap_is_booked_from_the_print_before_the_stop_and_stays_in_the_fold():
-    boundaries = [10 ** 15]
-    result = search.evaluate_exit_lattice(
-        [_event([99.0], [1_000])], allow_cpu_fallback=True, kernel="numpy", censor_boundaries=boundaries,
-    )
-    cell = result["cells"][0]
-    assert cell["reasons"] == ["LIQUIDATION"] * 54
-    assert cell["exit_price"] == [99.0] * 54
-    assert cell["exit_price"][0] != pytest.approx(99.5)
-    assert cell["exit_price"][0] != pytest.approx(99.6)
-    assert cell["net_bp"][0] == pytest.approx(-102.0)
-    assert result["liquidation_count"] == 54
-    assert result["costs"]["fee_bp"] == 0.0
-    assert result["costs"]["funding"] == "set_aside"
-    fold = search.fold_gate_inputs(
-        [{"reason": "LIQUIDATION", "net_bp": cell["net_bp"][0]}, {"reason": "TAKE_PROFIT", "net_bp": 10.0}]
-    )
-    assert fold["liquidations_excluded"] is False
-    assert fold["liquidation_count"] == 1
-    assert fold["trades"] == 2
-    assert fold["net_bp"] == pytest.approx(-92.0)
-    assert fold["passes_net_gate"] is False
+def _check_parity(backend, seed):
+    mts, price, ev, th = _random_case(seed)
+    base = LT.compute_base(LT.PrintPath(mts, price, backend), ev["mts"], ev["price"], ev["side"], ev["boundary"],
+                           chunk=64)
+    n = mts.size
+    bad = 0
+    for e in range(ev["mts"].size):
+        thesis = np.zeros(n, dtype=bool)
+        thesis[th[e]:] = True
+        ref = LT.reference_scan(mts, price, thesis, entry_price=float(ev["price"][e]), entry_mts=int(ev["mts"][e]),
+                                side=float(ev["side"][e]), boundary=int(ev["boundary"][e]))
+        x = np.arange(54)
+        res = LT.resolve(base, np.full(54, e), x, np.full(54, th[e]), mts, price, np.full(54, ev["mts"][e]),
+                         np.full(54, ev["price"][e]), np.full(54, ev["side"][e]))
+        bad += int(np.sum(res["code"] != ref["code"]))
+        ok = ref["code"] != 7
+        bad += int(np.sum(res["exit_idx"][ok] != ref["exit_idx"][ok]))
+        assert np.allclose(res["gross_bp"][ok], ref["gross_bp"][ok], atol=1e-9, rtol=0)
+    assert bad == 0
+    return base
 
 
-def test_a_wick_inside_the_bar_liquidates_even_when_the_later_print_recovers():
-    boundaries = [10 ** 15]
-    result = search.evaluate_exit_lattice(
-        [_event([99.0, 100.0], [1_000, 2_000])],
-        allow_cpu_fallback=True, kernel="numpy", censor_boundaries=boundaries,
-    )
-    assert result["cells"][0]["exit_price"] == [99.0] * 54
-    assert result["cells"][0]["reasons"] == ["LIQUIDATION"] * 54
-    assert result["liquidation_count"] == 54
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_numpy_lattice_matches_the_per_print_reference(seed):
+    base = _check_parity(LT.NumpyBackend(), seed)
+    assert base["dtype"] == "float64" and base["chunks"] >= 2
 
 
-def test_a_mild_print_hits_the_stop_and_not_liquidation():
-    boundaries = [10 ** 15]
-    result = search.evaluate_exit_lattice(
-        [_event([99.7], [1_000])], allow_cpu_fallback=True, kernel="numpy", censor_boundaries=boundaries,
-    )
-    reasons = result["cells"][0]["reasons"]
-    assert "LIQUIDATION" not in reasons
-    assert reasons.count("HARD_STOP") == 36
-    assert result["liquidation_count"] == 0
+def test_torch_cpu_lattice_matches_numpy_bitwise_on_indices():
+    pytest.importorskip("torch")
+    backend = LT.make_backend("torch", "cpu")
+    base = _check_parity(backend, 4)
+    assert base["kernel"] == "torch" and base["dtype"] == "float64"
 
 
-def test_censor_boundaries_are_per_fold_end_and_later_prints_are_not_used():
-    assert search.FOLD_CENSOR_ISO == (
-        "2024-12-28T00:00:00Z",
-        "2025-01-08T00:00:00Z",
-        "2025-01-19T00:00:00Z",
-        "2025-01-29T00:00:00Z",
-    )
-    boundaries = search.default_censor_boundaries_ms()
-    assert len(boundaries) == 4
-    assert search.active_censor_mts(search.utc_ms("2024-12-27T23:00:00Z"), boundaries) == search.utc_ms("2024-12-28T00:00:00Z")
-    assert search.active_censor_mts(search.utc_ms("2024-12-28T00:00:00Z"), boundaries) == search.utc_ms("2025-01-08T00:00:00Z")
-    assert search.active_censor_mts(search.utc_ms("2025-01-19T00:00:00Z"), boundaries) == search.utc_ms("2025-01-29T00:00:00Z")
-    custom = [3_000, 9_000]
-    early = _event([100.2, 1.0, 1.0], [1_000, 4_000, 9_500], entry_mts=0)
-    later = _event([100.2, 1.0, 50.0], [1_000, 4_000, 9_500], entry_mts=3_500)
-    result = search.evaluate_exit_lattice(
-        [early, later], allow_cpu_fallback=True, kernel="numpy", censor_boundaries=custom, embargo_mode="force_close",
-    )
-    assert result["cells"][0]["print_mts_read_max"] == 1_000
-    assert 1.0 not in result["cells"][0]["exit_price"]
-    assert result["cells"][1]["print_mts_read_max"] == 4_000
-    assert result["cells"][1]["boundary_mts"] == 9_000
-    assert 50.0 not in result["cells"][1]["exit_price"]
-    kept_mts, _, _ = search.censor_prints(
-        np.array([1_000, 3_000, 4_000]), np.array([1.0, 2.0, 3.0]), np.array([False, False, False]),
-        entry_mts=0, boundary=3_000,
-    )
-    assert kept_mts.tolist() == [1_000]
+def test_gap_through_liquidation_books_the_worse_print():
+    mts = np.array([1_000, 2_000, 3_000], dtype=np.int64)
+    price = np.array([100.0, 99.0, 100.5])
+    thesis = np.zeros(3, dtype=bool)
+    ref = LT.reference_scan(mts, price, thesis, entry_price=100.0, entry_mts=500, side=1.0, boundary=None)
+    assert (ref["code"] == 5).all()
+    assert np.allclose(ref["exit_price"], 99.0)
+    base = LT.compute_base(LT.PrintPath(mts, price, LT.NumpyBackend()), np.array([500]), np.array([100.0]),
+                           np.array([1.0]), np.array([10**15]))
+    res = LT.resolve(base, np.zeros(54, dtype=int), np.arange(54), np.full(54, 3), mts, price,
+                     np.full(54, 500), np.full(54, 100.0), np.full(54, 1.0))
+    assert (res["code"] == 5).all() and np.allclose(res["exit_price"], 99.0)
+    mild = np.array([100.0, 99.8, 100.5])
+    base = LT.compute_base(LT.PrintPath(mts, mild, LT.NumpyBackend()), np.array([500]), np.array([100.0]),
+                           np.array([1.0]), np.array([10**15]))
+    res = LT.resolve(base, np.zeros(54, dtype=int), np.arange(54), np.full(54, 3), mts, mild,
+                     np.full(54, 500), np.full(54, 100.0), np.full(54, 1.0))
+    assert set(res["code"].tolist()) <= {4, 3, 6}
+    assert 5 not in res["code"]
 
 
-def test_drop_mode_counts_the_open_trade_and_does_not_use_the_post_boundary_print():
-    result = search.evaluate_exit_lattice(
-        [_event([100.05, 50.0], [1_000, 5_000])],
-        allow_cpu_fallback=True, kernel="numpy", censor_boundaries=[3_000], embargo_mode="drop",
-    )
-    assert result["dropped_count"] == 54
-    assert result["liquidation_count"] == 0
-    assert result["cells"][0]["net_bp"] == [None] * 54
-    assert result["cells"][0]["print_mts_read_max"] == 1_000
+def test_censor_closes_at_the_last_print_before_the_boundary_and_never_reads_past_it():
+    mts = np.array([1_000, 2_000, 3_000, 4_000], dtype=np.int64)
+    price = np.array([100.0, 100.01, 100.02, 50.0])
+    base = LT.compute_base(LT.PrintPath(mts, price, LT.NumpyBackend()), np.array([500]), np.array([100.0]),
+                           np.array([1.0]), np.array([3_500]))
+    res = LT.resolve(base, np.zeros(54, dtype=int), np.arange(54), np.full(54, 4), mts, price,
+                     np.full(54, 500), np.full(54, 100.0), np.full(54, 1.0))
+    assert (res["code"] == 6).all() and (res["exit_idx"] == 2).all()
+    unbounded = LT.resolve(base, np.zeros(54, dtype=int), np.arange(54), np.full(54, 4), mts, price,
+                           np.full(54, 500), np.full(54, 100.0), np.full(54, 1.0),
+                           has_boundary=np.zeros(54, dtype=bool))
+    assert (unbounded["code"] == 8).all()
+    dropped = LT.compute_base(LT.PrintPath(mts, price, LT.NumpyBackend()), np.array([3_200]),
+                              np.array([100.0]), np.array([1.0]), np.array([3_500]))
+    res = LT.resolve(dropped, np.zeros(54, dtype=int), np.arange(54), np.full(54, 4), mts, price,
+                     np.full(54, 3_200), np.full(54, 100.0), np.full(54, 1.0))
+    assert (res["code"] == 7).all()
 
 
-def test_undefined_trailing_stats_take_no_entry_and_the_lookback_is_not_shortened():
-    closes = [100.0] * 301
-    closes[100] = 200.0
-    closes[240] = 110.0
-    assert search.feature_log_ret_bp(closes, 100, 240) is None
-    assert search.feature_log_ret_bp(closes, 240, 240) == pytest.approx(math.log(110.0 / 100.0) * 10000.0)
-    screened = search.screen_entries(closes)
-    assert screened["bars"] == 301
-    assert screened["entries"] == 0
-    assert screened["undefined_stat_bars"] == 301
-    assert search.history_undefined(239) is True
-    assert search.history_undefined(240) is True
-    assert search.first_eligible_bar() == 240 + 30 * 1440
-    assert search.history_undefined(search.first_eligible_bar() - 1) is True
-    assert search.history_undefined(search.first_eligible_bar()) is False
-    assert search.undefined_stat_bar_count(100) == 100
-    assert search.undefined_stat_bar_count(search.first_eligible_bar() + 5) == search.first_eligible_bar()
-    required_hours = 29 * 24
-    assert search.trailing_sigma([0.1] * (required_hours - 1), required_hours) is None
-    assert search.trailing_sigma([0.0] * required_hours, required_hours) == pytest.approx(0.0)
-    need = 30 * 1440
-    assert search.trailing_percentile([1.0] * (need - 1), need, 90.0) is None
-    assert search.trailing_percentile(list(range(need)), need, 90.0) is not None
-    assert search.bar_takes_entry(feature_bp=1.0, sigma=None, percentile=1.0) is False
-    assert search.bar_takes_entry(feature_bp=None, sigma=1.0, percentile=1.0) is False
+def test_chunk_over_the_cap_stops():
+    mts, price, ev, _ = _random_case(5)
+    with pytest.raises(Ext2Stop, match="STOP_GPU_CHUNK_CAP"):
+        LT.compute_base(LT.PrintPath(mts, price, LT.NumpyBackend()), ev["mts"], ev["price"], ev["side"],
+                        ev["boundary"], chunk=64, chunk_cap_sec=0.0)
 
 
-def test_bot_does_not_reference_the_screen():
-    from pathlib import Path
+def test_numpy_backend_refuses_a_gpu_device_and_bad_kernels_stop():
+    with pytest.raises(Ext2Stop, match="STOP_KERNEL"):
+        LT.make_backend("numpy", "cuda")
+    with pytest.raises(Ext2Stop, match="STOP_KERNEL"):
+        LT.make_backend("jax", "cpu")
+
+
+def test_bot_does_not_import_ext2():
     text = (Path(__file__).parent / "bot.py").read_text(encoding="utf-8", errors="ignore")
-    assert "ext2_search" not in text
-    assert "ext2_loader" not in text
-    assert "ext2_runner" not in text
+    assert "ext2" not in text.lower()
