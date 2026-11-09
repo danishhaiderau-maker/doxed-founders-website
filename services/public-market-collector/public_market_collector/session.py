@@ -15,6 +15,7 @@ from .config import (
     classify_clock_offset,
     require_set,
 )
+from .output_policy import disk_free_bytes, foreign_entries, output_refusal
 from .framing import (
     RAW_KEYS,
     AppendJournal,
@@ -45,12 +46,23 @@ def _root_size(root: Path) -> int:
     return total
 
 
+def _journal_intact(path: Path) -> None:
+    _records, stopped = read_journal(path)
+    if stopped:
+        raise StartRefused("RESTART_TORN_JOURNAL")
+
+
 class Session:
     def __init__(self, cfg):
-        if getattr(cfg, "test_only", None) is not True:
-            raise StartRefused("TEST_ONLY_REQUIRED")
-        if getattr(cfg, "ops_approved", False):
-            raise StartRefused("OPS_NOT_APPROVED")
+        public = getattr(cfg, "public_capture", False) is True
+        if public:
+            if getattr(cfg, "test_only", False) is True:
+                raise StartRefused("PUBLIC_CAPTURE_IS_NOT_A_SYNTHETIC_SESSION")
+        else:
+            if getattr(cfg, "test_only", None) is not True:
+                raise StartRefused("TEST_ONLY_REQUIRED")
+            if getattr(cfg, "ops_approved", False):
+                raise StartRefused("OPS_NOT_APPROVED")
         check_instrument(cfg.frozen_symbol, cfg.symbol)
         for name in ("prec", "freq", "length", "depth_n", "queue_cap", "disk_cap_bytes", "output_root"):
             require_set(name, getattr(cfg, name))
@@ -63,20 +75,37 @@ class Session:
         root = Path(cfg.output_root)
         if not root.is_absolute():
             raise StartRefused("ROOT_NOT_ABSOLUTE")
+        if public:
+            reason = output_refusal(root, repo_root=getattr(cfg, "repo_root", None))
+            if reason:
+                raise StartRefused(reason)
         journal = root / "index.journal"
-        if journal.exists():
-            raise StartRefused("JOURNAL_EXISTS")
         health = root / "health.journal"
-        if health.exists():
-            raise StartRefused("HEALTH_JOURNAL_EXISTS")
+        resume = public and getattr(cfg, "resume", False) is True
+        exclusive = True
+        if journal.exists() or health.exists():
+            if not resume:
+                if journal.exists():
+                    raise StartRefused("JOURNAL_EXISTS")
+                raise StartRefused("HEALTH_JOURNAL_EXISTS")
+            if not journal.exists() or not health.exists():
+                raise StartRefused("RESUME_PARTIAL_JOURNAL")
+            _journal_intact(journal)
+            _journal_intact(health)
+            if foreign_entries(root):
+                raise StartRefused("FOREIGN_OUTPUT")
+            exclusive = False
+        elif public and root.exists() and foreign_entries(root):
+            raise StartRefused("FOREIGN_OUTPUT")
         root.mkdir(parents=True, exist_ok=True)
         for stream in (*STREAMS, *NORM_STREAM.values()):
             confine(root, REL_DIR[stream]).mkdir(parents=True, exist_ok=True)
         self.cfg = cfg
         self.root = root.resolve()
+        self._released = False
         self.trace: list[str] = []
-        self.index = AppendJournal(confine(self.root, "index.journal"), self.trace)
-        self.health = AppendJournal(confine(self.root, "health.journal"), self.trace)
+        self.index = AppendJournal(confine(self.root, "index.journal"), self.trace, exclusive=exclusive)
+        self.health = AppendJournal(confine(self.root, "health.journal"), self.trace, exclusive=exclusive)
         self.files: dict[str, SegmentFile] = {}
         self.segment_id = {
             "raw-book": cfg.segment_id_book,
@@ -172,6 +201,11 @@ class Session:
             "seq_layout_official": False,
             "stream": stream,
         }
+        if getattr(self.cfg, "public_capture", False) is True:
+            payload["public_forward_capture"] = True
+            payload["clock_source"] = "local_receive_not_ntp"
+            payload["free_disk_floor_bytes"] = getattr(self.cfg, "free_disk_floor_bytes", None)
+            payload["paper_priority"] = "below_normal_yield"
         return self._stamp_common("info", payload, None, 0, 0, None, None, stream)
 
     def handle(self, message_text: str, *, recv_utc_ns: int, recv_mono_ns: int) -> None:
@@ -297,7 +331,10 @@ class Session:
         before = self.epoch
         self.epoch_pos += 1
         if self.epoch_pos >= len(self.epoch_ids):
-            raise ConfigUnset("epoch_ids")
+            if getattr(self.cfg, "public_capture", False) is True:
+                self.epoch_ids = [*self.epoch_ids, f"public-epoch-{self.epoch_pos + 1}"]
+            else:
+                raise ConfigUnset("epoch_ids")
         after = self.epoch_ids[self.epoch_pos]
         self.epoch = after
         self.seq_local = 0
@@ -333,6 +370,11 @@ class Session:
                 if from_stop:
                     return
                 self._stop("write_fail", "disk_full")
+            blocked = self._floor_block(80 + sum(len(dumps(row)) for row in rows))
+            if blocked:
+                if from_stop:
+                    return
+                self._stop("write_fail", blocked)
             self._write_rows(stream, rows)
             self.buffer[stream] = []
             produced.extend(rows)
@@ -359,6 +401,11 @@ class Session:
                 if from_stop:
                     return
                 self._stop("write_fail", "disk_full")
+            blocked = self._floor_block(80 + sum(len(dumps(row)) for row in rows))
+            if blocked:
+                if from_stop:
+                    return
+                self._stop("write_fail", blocked)
             self._write_rows(stream, rows)
         self.durable = len(self.durable_raw)
         self.uncommitted_received = 0
@@ -376,6 +423,33 @@ class Session:
     def _fits(self, rows: list[dict], stream: str) -> bool:
         estimate = 80 + sum(len(dumps(row)) for row in rows)
         return _root_size(self.root) + estimate <= int(self.cfg.disk_cap_bytes)
+
+    def _floor_block(self, estimate: int) -> str | None:
+        """Free-space floor. Independent of `_fits`, which tests are allowed to weaken."""
+        floor = getattr(self.cfg, "free_disk_floor_bytes", None)
+        if floor is None:
+            return None
+        probe = getattr(self.cfg, "disk_free_probe", None)
+        if probe is None:
+            free = disk_free_bytes(self.root)
+        else:
+            free = probe(self.root)
+        if free is None:
+            return "disk_free_unmeasurable"
+        if int(free) - int(estimate) < int(floor):
+            return "disk_floor"
+        return None
+
+    def release(self) -> None:
+        """Close descriptors. Does not truncate, rename, or delete."""
+        if self._released:
+            return
+        self._released = True
+        for segment in list(self.files.values()):
+            if not segment.closed:
+                segment.mark_closed()
+        self.index.close()
+        self.health.close()
 
     def _segment(self, stream: str) -> SegmentFile:
         if stream not in self.files:
@@ -495,7 +569,9 @@ class Session:
         }
         try:
             encoded = len(dumps(line)) + 80
-            if _root_size(self.root) + encoded <= int(self.cfg.disk_cap_bytes):
+            if self._floor_block(encoded):
+                stderr += "STOP_RECORD_BELOW_FLOOR\n"
+            elif _root_size(self.root) + encoded <= int(self.cfg.disk_cap_bytes):
                 self.index.append_obj(line, label="capture_stop")
             else:
                 stderr += "STOP_RECORD_OVER_CAP\n"

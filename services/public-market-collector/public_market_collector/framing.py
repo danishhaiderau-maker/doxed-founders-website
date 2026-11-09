@@ -216,10 +216,13 @@ def _write_all(fd: int, blob: bytes) -> None:
 
 
 class AppendJournal:
-    def __init__(self, path: Path, trace: list[str]):
+    def __init__(self, path: Path, trace: list[str], *, exclusive: bool = True):
         self.path = path
         self.trace = trace
-        self.fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_WRONLY, 0o644)
+        flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+        if exclusive:
+            flags |= os.O_EXCL
+        self.fd = os.open(path, flags, 0o644)
 
     def append_obj(self, obj: dict, *, label: str, fault_torn: bool = False) -> None:
         line = record_line(obj)

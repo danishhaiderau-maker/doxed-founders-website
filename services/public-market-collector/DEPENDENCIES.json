@@ -5,5 +5,5 @@
   "third_party": [],
   "install": [],
   "network_imports": [],
-  "note": "Synthetic tests use the Python standard library only. This build has no runtime dependency pin beyond that."
+  "note": "Synthetic tests and public capture use the Python standard library only. Public capture opens a socket only from ws_public.py to the documented public host. No third-party packages and no API keys."
 }

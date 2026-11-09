@@ -171,3 +171,14 @@ jobs:
           echo "context files: $(find /tmp/bot-image-ctx -type f | wc -l)"
       - name: Every module bot.py (and each entrypoint process) imports is in the image context and imports
         run: python ci_image_import_check.py --src . --ctx /tmp/bot-image-ctx
+
+  public-market-collector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Synthetic suite and public-capture safety tests
+        run: python -m unittest discover -s services/public-market-collector/tests -p 'test_*.py'

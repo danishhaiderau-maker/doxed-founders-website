@@ -1,8 +1,9 @@
 """Public keyless Bitfinex book and raw-trade collector.
 
-This package is isolated from the paper and AI engine. Real start is refused
-until a future board freeze and a separate ops gate. Synthetic sessions never
-open a socket.
+This package is isolated from the paper engine. With no arguments the process
+refuses to start. `capture --output` writes the public perpetual book and
+trades into a new directory. It does not read API keys and it does not arm
+live trading.
 """
 
 SCHEMA_V = "pmc_raw_v1"

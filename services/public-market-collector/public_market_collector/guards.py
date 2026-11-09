@@ -39,9 +39,24 @@ FORBIDDEN_CALLS = {
     "system",
     "popen",
     "__import__",
+    "rmtree",
+    "move",
+    "copy",
+    "copy2",
+    "copyfile",
 }
 
+# The public socket lives in one module. Every other file stays network-free.
+_SOCKET_MODULES = frozenset({"socket", "ssl"})
+_SOCKET_FILE = "ws_public.py"
+
 FORBIDDEN_ATTRS = {"environ"}
+
+
+def _import_forbidden(filename: str, base: str) -> bool:
+    if filename == _SOCKET_FILE and base in _SOCKET_MODULES:
+        return False
+    return base in FORBIDDEN_IMPORT_ROOTS
 
 
 def _package_dir() -> Path:
@@ -64,11 +79,11 @@ def scan_package(package: Path | None = None) -> list[str]:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     base = alias.name.split(".", 1)[0]
-                    if base in FORBIDDEN_IMPORT_ROOTS:
+                    if _import_forbidden(path.name, base):
                         findings.append(f"{path.name}: import {alias.name}")
             elif isinstance(node, ast.ImportFrom) and node.module:
                 base = node.module.split(".", 1)[0]
-                if base in FORBIDDEN_IMPORT_ROOTS:
+                if _import_forbidden(path.name, base):
                     findings.append(f"{path.name}: from {node.module}")
             elif isinstance(node, ast.Call):
                 name = None
