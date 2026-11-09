@@ -32,4 +32,5 @@ jobs:
             research.coverage_audit.tests.test_cadence_semantics \
             research.coverage_audit.tests.test_redaction_and_guards \
             research.coverage_audit.tests.test_limits_and_integrity \
-            research.coverage_audit.tests.test_synthetic_pipeline
+            research.coverage_audit.tests.test_synthetic_pipeline \
+            research.coverage_audit.tests.test_real_access_boundary
