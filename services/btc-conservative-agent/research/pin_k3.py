@@ -4,8 +4,8 @@ The batch finality contract is explicit: aggregate by original intent ordinal
 before prefix evaluation. It is not a live asynchronous finality adapter.
 """
 # PROVISIONAL, pre-freeze, non-evidential. Live OFF. No runtime integration.
-PIN7_SPEC_SHA256 = "3b5dba29fdfffe916fef9d209c6095db5ca45fc1a998a9682ea6acc383584fc1"
-P8_SPEC_SHA256 = "ca77dbaeed9cf55ac1f14d6e4ecd525c21ccacc4987c64c112c7e1fb5f5d581a"
+PIN7_SPEC_SHA256 = "dc0cc45f24f5afee9a69718fcc120fc27450f80b6e35de1058f0ed0e68eedf79"
+P8_SPEC_SHA256 = "28315aeb4423e88d4e3dadcf3e42005b29ddbba1f2e054467aeab7827135641e"
 CT_TABLE_SHA256 = "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0"
 RULES_SHA256 = "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2"
 RK_PROVISIONAL_RULING = "72c250a0eb82"
@@ -15,16 +15,21 @@ import json
 import math
 from collections import Counter
 from fractions import Fraction
+from pathlib import Path
 
 LOOKS = {30: 12, 60: 20, 100: 30, 200: 54}
 
 
-def score_k3(data):
+def score_k3(data, *, run_root=None):
     seen_events, intents, ordinals = {}, {}, {}
     for index, event in enumerate(data["events"]):
         if index in data.get("restart_after", []):
             # Persist the unfinished batch accumulator; no invented finality or fresh look budget.
-            checkpoint = json.loads(json.dumps(dict(events=seen_events, intents=intents, ordinals=ordinals), allow_nan=False))
+            if run_root is None:
+                raise ValueError("RUNROOT_REQUIRED_FOR_K3_CHECKPOINT")
+            path = Path(run_root) / "k3-batch-checkpoint.json"
+            path.write_text(json.dumps(dict(events=seen_events, intents=intents, ordinals=ordinals), allow_nan=False))
+            checkpoint = json.loads(path.read_text())
             seen_events, intents = checkpoint["events"], checkpoint["intents"]
             ordinals = {int(k): v for k, v in checkpoint["ordinals"].items()}
         key = event["event_id"]

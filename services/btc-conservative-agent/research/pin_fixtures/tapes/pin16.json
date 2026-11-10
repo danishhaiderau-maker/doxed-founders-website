@@ -19,7 +19,7 @@
       "decision": "ELIGIBLE_UNIT_ONLY"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -41,7 +41,7 @@
       "slippage_bp": 0
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -64,7 +64,7 @@
       "decision": "ELIGIBLE_UNIT_ONLY"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -87,7 +87,7 @@
       "slippage_bp": 11
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -110,7 +110,7 @@
       "risk_record": "i"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -132,7 +132,7 @@
       "decision": "FAIL"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -155,7 +155,7 @@
       "paper_confident": false
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -177,7 +177,7 @@
       "decision": "FAIL"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -200,7 +200,7 @@
       "decision": "ELIGIBLE_UNIT_ONLY"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -222,7 +222,7 @@
       "decision": "FAIL"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   },
   {
@@ -244,7 +244,7 @@
       "decision": "HOLD"
     },
     "family": "Pin16",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
   }
 ]

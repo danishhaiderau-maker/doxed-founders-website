@@ -322,7 +322,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -648,7 +648,7 @@
       "status": "KILL"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -1280,7 +1280,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -1912,7 +1912,7 @@
       "status": "KILL"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -2950,7 +2950,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -3988,7 +3988,7 @@
       "status": "KILL"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -6032,7 +6032,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -8076,7 +8076,7 @@
       "status": "KILL"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -8123,7 +8123,7 @@
       "unknown": 0
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -8541,7 +8541,7 @@
       "conditional": 0.5
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -8579,7 +8579,7 @@
       "qualifying": 1
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -8619,7 +8619,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Annotated finality/exclusion oracle only. No L2 reconstruction, transport clock or executable-MTM engine adapter is available."
   },
   {
@@ -8659,7 +8659,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Annotated finality/exclusion oracle only. No L2 reconstruction, transport clock or executable-MTM engine adapter is available."
   },
   {
@@ -8699,7 +8699,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Annotated finality/exclusion oracle only. No L2 reconstruction, transport clock or executable-MTM engine adapter is available."
   },
   {
@@ -8739,7 +8739,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Annotated finality/exclusion oracle only. No L2 reconstruction, transport clock or executable-MTM engine adapter is available."
   },
   {
@@ -8779,7 +8779,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Annotated finality/exclusion oracle only. No L2 reconstruction, transport clock or executable-MTM engine adapter is available."
   },
   {
@@ -8819,7 +8819,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Annotated finality/exclusion oracle only. No L2 reconstruction, transport clock or executable-MTM engine adapter is available."
   },
   {
@@ -8849,7 +8849,7 @@
       "conditional": null
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -9198,7 +9198,7 @@
       ]
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -11245,7 +11245,7 @@
       ]
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -11279,7 +11279,7 @@
       "status": "STOP_CONFLICT"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -11291,7 +11291,7 @@
       "scope": "iid p=.20, four looks, one pick only"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -11599,7 +11599,7 @@
       "status": "CONTINUE_NO_PASS"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -11648,7 +11648,7 @@
       "record": "i"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Qty fits L1. Long liquidates at BID, not midpoint. Synthetic age limit is NOT a frozen production threshold."
   },
   {
@@ -11697,7 +11697,7 @@
       "record": "i"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -11744,7 +11744,7 @@
       "reason": "CLOCK"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Independent synthetic annotation/admissibility oracle. Full P12 clock/depth/MTM adapter remains NOT TESTED."
   },
   {
@@ -11791,7 +11791,7 @@
       "reason": "SEQ"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Independent synthetic annotation/admissibility oracle. Full P12 clock/depth/MTM adapter remains NOT TESTED."
   },
   {
@@ -11838,7 +11838,7 @@
       "reason": "DEPTH"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Independent synthetic annotation/admissibility oracle. Full P12 clock/depth/MTM adapter remains NOT TESTED."
   },
   {
@@ -11885,7 +11885,7 @@
       "reason": "MISSING_MTM"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Independent synthetic annotation/admissibility oracle. Full P12 clock/depth/MTM adapter remains NOT TESTED."
   },
   {
@@ -11932,7 +11932,7 @@
       "reason": "STALE_BBO"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Independent synthetic annotation/admissibility oracle. Full P12 clock/depth/MTM adapter remains NOT TESTED."
   },
   {
@@ -11979,7 +11979,7 @@
       "reason": "OPEN_TAIL"
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Independent synthetic annotation/admissibility oracle. Full P12 clock/depth/MTM adapter remains NOT TESTED."
   },
   {
@@ -12324,7 +12324,7 @@
       ]
     },
     "family": "K3/F274",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "First-created intent finalizes last. Final-arrival ordering would miss the exact n30 kill; only first-seen intent order is correct for this completed batch oracle."
   }
 ]

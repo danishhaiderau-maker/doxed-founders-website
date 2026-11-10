@@ -4,8 +4,8 @@ Record-i confidence and risk are caller supplied. Backtest record-ii is gross;
 no fee, funding, spread or slippage allowance is deducted here.
 """
 # PROVISIONAL, pre-freeze, non-evidential. Live OFF. No runtime integration.
-PIN7_SPEC_SHA256 = "3b5dba29fdfffe916fef9d209c6095db5ca45fc1a998a9682ea6acc383584fc1"
-P8_SPEC_SHA256 = "ca77dbaeed9cf55ac1f14d6e4ecd525c21ccacc4987c64c112c7e1fb5f5d581a"
+PIN7_SPEC_SHA256 = "dc0cc45f24f5afee9a69718fcc120fc27450f80b6e35de1058f0ed0e68eedf79"
+P8_SPEC_SHA256 = "28315aeb4423e88d4e3dadcf3e42005b29ddbba1f2e054467aeab7827135641e"
 CT_TABLE_SHA256 = "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0"
 RULES_SHA256 = "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2"
 RK_PROVISIONAL_RULING = "72c250a0eb82"
@@ -156,3 +156,15 @@ def branch_ledger(closed):
         total_i += row["i"]
         total_ii += row["ii"]
     return dict(branch_i=branches, combined_i=total_i, combined_ii=total_ii, risk_record="i", duplicate_close=False)
+
+
+def utc_days(seconds):
+    days = sorted({math.floor(t / 86400) for t in seconds})
+    return dict(days=days, count=len(days))
+
+
+def dual_from_pvalue(data):
+    """Use a supplied synthetic p-value; this is not a bootstrap estimator."""
+    confidence = 0 <= data["p_value"] <= .05 / data["N"]
+    return dual_record(i=data["i"], ii=data["ii"], backtest=data["backtest"], N=data["N"], confidence_ok=confidence,
+                       risk_ok=bool(data["dd_ok"] and not data["k3_kill"]), signal_id=data["signal_id"], entry_time=data["entry_time"], exit_time=data["exit_time"])

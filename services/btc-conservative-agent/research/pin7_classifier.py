@@ -4,8 +4,8 @@ All input timestamps are explicit close labels in seconds. Historical close
 availability is an assumption, not a reconstruction of receipt evidence.
 """
 # PROVISIONAL, pre-freeze, non-evidential. Live OFF. No runtime integration.
-PIN7_SPEC_SHA256 = "3b5dba29fdfffe916fef9d209c6095db5ca45fc1a998a9682ea6acc383584fc1"
-P8_SPEC_SHA256 = "ca77dbaeed9cf55ac1f14d6e4ecd525c21ccacc4987c64c112c7e1fb5f5d581a"
+PIN7_SPEC_SHA256 = "dc0cc45f24f5afee9a69718fcc120fc27450f80b6e35de1058f0ed0e68eedf79"
+P8_SPEC_SHA256 = "28315aeb4423e88d4e3dadcf3e42005b29ddbba1f2e054467aeab7827135641e"
 CT_TABLE_SHA256 = "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0"
 RULES_SHA256 = "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2"
 RK_PROVISIONAL_RULING = "72c250a0eb82"
@@ -219,7 +219,7 @@ def step(state, event, thresholds):
     return s, trace
 
 
-def replay(data, thresholds):
+def replay(data, thresholds, *, run_root=None):
     s = copy.deepcopy(data["state"])
     try:
         validate_state(s)
@@ -228,7 +228,11 @@ def replay(data, thresholds):
     trace = []
     for i, event in enumerate(data["events"]):
         if i in data.get("restart_at", []):
-            s = json.loads(json.dumps(s, allow_nan=False))
+            if run_root is None:
+                raise ValueError("RUNROOT_REQUIRED_FOR_STATE_CHECKPOINT")
+            journal = StateJournal(run_root, {"thresholds": canonical_sha(thresholds)}, {"unit": "seconds", "synthetic": True})
+            journal.append(s, input_sha256=canonical_sha(data["events"][:i]), version="synthetic-v1", source_sequence=i)
+            s, _, _ = journal.load()
         s, item = step(s, event, thresholds)
         trace.append(item)
         if item.get("status", "").startswith("STOP"):
@@ -346,3 +350,16 @@ def ordered_close_intents(*, position_intent_id, safety_exit, accepted_flip, exp
         return []
     return [dict(position_intent_id=position_intent_id, action="REQUEST_CLOSE", reasons=reasons,
                  priority="SAFETY" if safety_exit else "REGIME_FLIP", actual_flat=False)]
+
+
+def safety_admission(data):
+    """Safety requests never wait; this helper does not claim a completed exit."""
+    return dict(exit_now=True, entry=bool(data["otherwise_entry"] and not data["residual"] and data["label"] != "SHOCK" and data["latch"] == "NONE"), label=data["label"], flip_count=data["flip_count"])
+
+
+def observe(data, thresholds, *, run_root=None):
+    prefix = dict(data, events=[event for event in data["events"] if event["h"] <= data["query"]])
+    result = replay(prefix, thresholds, run_root=run_root)
+    if result.get("status", "").startswith("STOP"):
+        return result
+    return result.get("state", data["state"])

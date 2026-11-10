@@ -46,7 +46,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -96,7 +96,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -146,7 +146,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -196,7 +196,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -246,7 +246,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -278,13 +278,14 @@
       "trace": [
         {
           "status": "STOP_SUFFIX",
-          "read_allowed": false
+          "read_allowed": false,
+          "latched": true
         }
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
-    "notes": "f72r4 does not expressly require a latch for lower-bound breach; unit model latches conservatively. GS clarification needed before treating that latch value as golden."
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
   },
   {
     "id": "P8R4-12-STOP-UPPER-ROW7",
@@ -323,7 +324,7 @@
       "latched": true
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -363,7 +364,7 @@
       "latched": true
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -429,7 +430,7 @@
       "latched": true
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -468,7 +469,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -507,7 +508,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -546,7 +547,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -584,7 +585,7 @@
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -614,14 +615,19 @@
     "expected": {
       "trace": [
         {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
           "read_allowed": false,
-          "adjudication": "FAIL"
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
         }
-      ]
+      ],
+      "latched": true
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
-    "notes": "r4 requires fixtureFAIL for absent logging; exact runtime STOP/alarm contract is not pinned here."
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
   },
   {
     "id": "P8R4-12-MISSING-LOG-row_range",
@@ -647,14 +653,19 @@
     "expected": {
       "trace": [
         {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
           "read_allowed": false,
-          "adjudication": "FAIL"
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
         }
-      ]
+      ],
+      "latched": true
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
-    "notes": "r4 requires fixtureFAIL for absent logging; exact runtime STOP/alarm contract is not pinned here."
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
   },
   {
     "id": "P8R4-12-MISSING-LOG-sha256",
@@ -683,13 +694,323 @@
     "expected": {
       "trace": [
         {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
           "read_allowed": false,
-          "adjudication": "FAIL"
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-STOP-NO-LOG-MISSING",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": null
+        }
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE"
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-STOP-NO-LOG-UNREADABLE",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "f86b42e350d90238bb966d375b59fb6e58a468007ded849c6206161315a7c1d1"
+          },
+          "log_readable": false
+        }
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE"
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-STOP-NO-LOG-HASH-MISMATCH",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        }
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE"
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-ARTEFACT-B2_FILL",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "B2_FILL",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_OUTCOME_ARTEFACT",
+          "read_allowed": false,
+          "alarm": true,
+          "entries": false
         }
       ]
     },
     "family": "B3-suffix",
-    "evidence_status": "ORACLE_SELF_CHECK",
-    "notes": "r4 requires fixtureFAIL for absent logging; exact runtime STOP/alarm contract is not pinned here."
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R10-12-ARTEFACT-B2_RANKING",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "B2_RANKING",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_OUTCOME_ARTEFACT",
+          "read_allowed": false,
+          "alarm": true,
+          "entries": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R10-12-NOLOG-TERMINAL-NO-AUTORESUME",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          },
+          "auto_restart_requested": true
+        },
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          },
+          "score_B3_requested": true
+        }
+      ],
+      "restart_at": [
+        1
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE",
+      "new_dated_card_CLEAR": false,
+      "launch_ask_CLEAR": false
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        },
+        {
+          "status": "STOP_LATCHED",
+          "latched": true,
+          "read_allowed": false,
+          "entries": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        },
+        {
+          "status": "STOP_LATCHED",
+          "latched": true,
+          "read_allowed": false,
+          "entries": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true,
+      "auto_resume": false,
+      "B3_scored": false
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "RKf66a708a39bf C1 / finalr10: terminal NOLOG latch survives restart/validlog; no auto-resume/rescore without NEW dated card or launchaskCLEAR."
   }
 ]

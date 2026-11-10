@@ -20190,7 +20190,7 @@
       "B": 0
     },
     "family": "Classifier02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -40384,7 +40384,7 @@
       "B": 0.2631081090764072
     },
     "family": "Classifier02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -60560,7 +60560,7 @@
       "reason": "COUNT"
     },
     "family": "Classifier01/02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -80764,7 +80764,7 @@
       "reason": "COUNT"
     },
     "family": "Classifier01/02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -100953,7 +100953,7 @@
       "status": "VETO"
     },
     "family": "Classifier01/02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -121143,7 +121143,7 @@
       "reason": "OHLC"
     },
     "family": "Classifier01/02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -141333,7 +141333,7 @@
       "reason": "OHLC"
     },
     "family": "Classifier01/02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -161523,7 +161523,7 @@
       "reason": "AVAILABILITY"
     },
     "family": "Classifier01/02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -181713,7 +181713,7 @@
       "reason": "AVAILABILITY"
     },
     "family": "Classifier01/02",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -201921,7 +201921,7 @@
       "B": 0.2631081090764072
     },
     "family": "Classifier01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -204819,7 +204819,7 @@
       "e75": 0.75
     },
     "family": "Classifier03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -207715,7 +207715,7 @@
       "v95": 2.05
     },
     "family": "Classifier03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -210605,7 +210605,7 @@
       "status": "HOLD"
     },
     "family": "Classifier03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -213499,7 +213499,7 @@
       "status": "HOLD"
     },
     "family": "Classifier03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -216394,7 +216394,7 @@
       "status": "HOLD"
     },
     "family": "Classifier03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219289,7 +219289,7 @@
       "status": "HOLD"
     },
     "family": "Classifier03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219303,7 +219303,7 @@
     },
     "expected": "SHOCK",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219317,7 +219317,7 @@
     },
     "expected": "SHOCK",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219331,7 +219331,7 @@
     },
     "expected": "UP",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219345,7 +219345,7 @@
     },
     "expected": "UP",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219359,7 +219359,7 @@
     },
     "expected": "DOWN",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219373,7 +219373,7 @@
     },
     "expected": "UP",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219387,7 +219387,7 @@
     },
     "expected": "DOWN",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219401,7 +219401,7 @@
     },
     "expected": "RANGE",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219416,7 +219416,7 @@
     },
     "expected": "RANGE",
     "family": "Classifier04",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219477,7 +219477,7 @@
       ]
     },
     "family": "Classifier04/05/06/07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219565,7 +219565,7 @@
       ]
     },
     "family": "Classifier04/05/06/07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219637,7 +219637,7 @@
       ]
     },
     "family": "Classifier04/05/06/07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219815,7 +219815,7 @@
       ]
     },
     "family": "Classifier04/05/06/07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -219894,7 +219894,7 @@
       ]
     },
     "family": "Classifier04/05/06/07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220207,7 +220207,7 @@
       ]
     },
     "family": "Classifier04/05/06/07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220224,7 +220224,7 @@
       "allowed": false
     },
     "family": "Classifier05/T4",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220241,7 +220241,7 @@
       "allowed": true
     },
     "family": "Classifier05/T4",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220258,7 +220258,7 @@
       "allowed": true
     },
     "family": "Classifier05/T4",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220275,7 +220275,7 @@
       "allowed": false
     },
     "family": "Classifier05/T4",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220292,7 +220292,7 @@
       "allowed": true
     },
     "family": "Classifier05/T4",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220309,7 +220309,7 @@
       "allowed": true
     },
     "family": "Classifier05/T4",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220343,7 +220343,7 @@
       "trace": []
     },
     "family": "Classifier06/T4",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220374,7 +220374,7 @@
       "status": "STOP_CORRUPT"
     },
     "family": "Classifier06",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220393,7 +220393,7 @@
       "flip_count": 0
     },
     "family": "Classifier05",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Supplied independently computed timer admission; safety never delays. Actual clock adapter NOT TESTED."
   },
   {
@@ -220412,7 +220412,7 @@
       "flip_count": 0
     },
     "family": "Classifier05",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Supplied independently computed timer admission; safety never delays. Actual clock adapter NOT TESTED."
   },
   {
@@ -220432,7 +220432,7 @@
       "flip_count": 1
     },
     "family": "Classifier07/T5",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -220444,7 +220444,7 @@
       "N": 836
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220458,7 +220458,7 @@
       "N": 853
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220472,7 +220472,7 @@
       "N": 837
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220485,7 +220485,7 @@
       "status": "STOP"
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220498,7 +220498,7 @@
       "status": "STOP"
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220511,7 +220511,7 @@
       "status": "STOP"
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220524,7 +220524,7 @@
       "status": "STOP"
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220537,7 +220537,7 @@
       "status": "STOP"
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220550,7 +220550,7 @@
       "status": "STOP"
     },
     "family": "Classifier08/10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Synthetic catalog/seal flags; real U/D/Q/A ids, numeric seal and full N remain unbound."
   },
   {
@@ -220590,7 +220590,7 @@
       "risk_record": "i"
     },
     "family": "Classifier08/T5",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Same close key intentionally delivered by safety and switch handler; accounting idempotence oracle, not an engine close."
   },
   {
@@ -221268,7 +221268,7 @@
       "pnl_clock_splice": false
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -221952,7 +221952,7 @@
       "pnl_clock_splice": false
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -222636,7 +222636,7 @@
       "pnl_clock_splice": false
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -223326,7 +223326,7 @@
       "action": "FLAT"
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -224009,7 +224009,7 @@
       }
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -224507,7 +224507,7 @@
       "action": "FLAT"
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -225179,7 +225179,7 @@
       "action": "A_ONLY_INDEPENDENT"
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -225857,7 +225857,7 @@
       "action": "FLAT"
     },
     "family": "Classifier09",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -225877,7 +225877,7 @@
       "count": 2
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -225896,7 +225896,7 @@
       "count": 1
     },
     "family": "Classifier09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -225937,7 +225937,7 @@
       ]
     },
     "family": "Classifier04/05/06/07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -225982,7 +225982,7 @@
       "flips": []
     },
     "family": "Classifier04/T1",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -226029,7 +226029,7 @@
       ]
     },
     "family": "Classifier04/T1",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -226076,7 +226076,7 @@
       ]
     },
     "family": "Classifier04/T1",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -226185,7 +226185,7 @@
       ]
     },
     "family": "Classifier05/T2",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -226295,7 +226295,7 @@
       ]
     },
     "family": "Classifier05/T2",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -226405,7 +226405,7 @@
       ]
     },
     "family": "Classifier05/T2",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -230083,7 +230083,7 @@
       "state_checkpoint": "SYNTHETIC-CHECKPOINT-1"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -233738,7 +233738,7 @@
       "state_checkpoint": "SYNTHETIC-CHECKPOINT-1"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -237421,7 +237421,7 @@
       "state_checkpoint": "SYNTHETIC-CHECKPOINT-1"
     },
     "family": "ClassifierR2-03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -241069,7 +241069,7 @@
       "status": "HOLD_CALIBRATION"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -244727,7 +244727,7 @@
       "status": "HOLD_CALIBRATION"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -248381,7 +248381,7 @@
       "status": "HOLD_CALIBRATION"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -252035,7 +252035,7 @@
       "status": "HOLD_BRIDGE"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -255689,7 +255689,7 @@
       "status": "HOLD_BRIDGE"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -259342,7 +259342,7 @@
       "status": "HOLD_PRIOR_ONLY"
     },
     "family": "ClassifierR2-02/03/T6",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -279533,7 +279533,7 @@
       "reason": "SYMBOL"
     },
     "family": "ClassifierR2-01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -299722,7 +299722,7 @@
       "reason": "FORWARD_METADATA"
     },
     "family": "ClassifierR2-01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -319916,7 +319916,7 @@
       "B": 0
     },
     "family": "ClassifierR2-01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Availability at close is historical assumption, NOT reconstructed receipt/version parity."
   },
   {
@@ -340106,7 +340106,7 @@
       "reason": "VERSION"
     },
     "family": "ClassifierR2-03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -340227,7 +340227,7 @@
       "rankings_used": false
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -340346,20 +340346,13 @@
       ]
     },
     "expected": {
-      "status": "SYNTHETIC_IDS_ONLY",
-      "IDs": {
-        "U": 2,
-        "D": 3,
-        "Q": 1,
-        "A": 1
-      },
-      "missing": [],
-      "reserved_variants": 4,
-      "rankings_used": false
+      "status": "STOP",
+      "alarm": true,
+      "IDs": null
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
-    "notes": ""
+    "evidence_status": "NOT_TESTED",
+    "notes": "P8r10/Pin7r7 WHOLE-input rejection: no polluted table/auxiliary ranking can be sanitized or used to salvageIDs; exact signed rules verified."
   },
   {
     "id": "R2-08-GRAMMAR-ORDER-IGNORED",
@@ -340479,7 +340472,7 @@
       "rankings_used": false
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -340589,11 +340582,13 @@
       ]
     },
     "expected": {
-      "status": "STOP_UNAPPROVED_COLUMNS"
+      "status": "STOP",
+      "alarm": true,
+      "IDs": null
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
-    "notes": ""
+    "evidence_status": "NOT_TESTED",
+    "notes": "P8r10/Pin7r7 WHOLE-input rejection: no polluted table/auxiliary ranking can be sanitized or used to salvageIDs; exact signed rules verified."
   },
   {
     "id": "R2-08-EMPTY-UNBOUND",
@@ -340612,7 +340607,7 @@
       "A_available": false
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -340744,7 +340739,7 @@
       "status": "HOLD_GRAMMAR"
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -340807,7 +340802,7 @@
       "rankings_used": false
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -340948,7 +340943,7 @@
       "rankings_used": false
     },
     "family": "ClassifierR2-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -341560,7 +341555,7 @@
       "action": "FLAT"
     },
     "family": "ClassifierR2-09",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342178,7 +342173,7 @@
       "action": "COVERAGE_ONLY_NOT_PASS"
     },
     "family": "ClassifierR2-09",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342241,7 +342236,7 @@
       "empty_fold_in_denominator": true
     },
     "family": "ClassifierR2-03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342283,7 +342278,7 @@
       "F": 16
     },
     "family": "ClassifierR2-03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342325,7 +342320,7 @@
       "F": 16
     },
     "family": "ClassifierR2-03",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342354,7 +342349,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342385,7 +342380,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342416,7 +342411,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342447,7 +342442,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342478,7 +342473,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342509,7 +342504,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342540,7 +342535,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342571,7 +342566,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342602,7 +342597,7 @@
       "extra_PASS": false
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342629,7 +342624,7 @@
       "reason": "CODE_HASH"
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342656,7 +342651,7 @@
       "reason": "TABLE_HASH"
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342683,7 +342678,7 @@
       "reason": "STATE_HASH"
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342711,7 +342706,7 @@
       "reason": "REFIT"
     },
     "family": "ClassifierR2-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342736,7 +342731,7 @@
       "count": 2
     },
     "family": "ClassifierR2-09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342760,7 +342755,7 @@
       "count": 1
     },
     "family": "ClassifierR2-09/T7",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -342812,7 +342807,7 @@
       }
     },
     "family": "ClassifierR2-05/T2",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -343096,7 +343091,7 @@
       ]
     },
     "family": "ClassifierR2-07/T5",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Position already flat from independently probed safety close at5h30; h12 flip must not request a second effective close."
   },
   {
@@ -361852,7 +361847,7 @@
       "receipt_time": null
     },
     "family": "ClassifierP8r4-06",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -382062,7 +382057,7 @@
       "last_selected_version": "synthetic-v1"
     },
     "family": "ClassifierP8r4-06",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -385717,7 +385712,7 @@
       "status": "HOLD_IMMUTABLE_C0"
     },
     "family": "ClassifierP8r4-07",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -385765,7 +385760,7 @@
       "count": 1
     },
     "family": "ClassifierP8r4-01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -385813,7 +385808,7 @@
       "count": 2
     },
     "family": "ClassifierP8r4-01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -385861,7 +385856,7 @@
       "count": 2
     },
     "family": "ClassifierP8r4-01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -385910,7 +385905,7 @@
       }
     },
     "family": "ClassifierP8r4-01",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -386067,331 +386062,8 @@
       "rankings_used": false
     },
     "family": "ClassifierP8r4-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
-  },
-  {
-    "id": "P8R4-08B-READING-REFUSE-INPUT",
-    "operation": "grammar_policy",
-    "input": {
-      "grammar": [
-        {
-          "tuple_id": 12,
-          "family": "H01",
-          "mode": "FOLLOW",
-          "sides": [
-            "LONG"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 15,
-          "family": "H01",
-          "mode": "FOLLOW",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": 99
-        },
-        {
-          "tuple_id": 4,
-          "family": "H05",
-          "mode": "FOLLOW",
-          "sides": [
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 8,
-          "family": "H03",
-          "mode": "FADE",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 20,
-          "family": "H03",
-          "mode": "FADE",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 3,
-          "family": "H12",
-          "mode": "FADE",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 1,
-          "family": "H01",
-          "mode": "FOLLOW",
-          "sides": [],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": false,
-          "Sharpe": -99
-        }
-      ],
-      "policy": "refuse_input"
-    },
-    "expected": {
-      "status": "STOP_UNAPPROVED_COLUMNS"
-    },
-    "family": "ClassifierP8r4-08",
-    "evidence_status": "AMBIGUOUS_PENDING_GS",
-    "notes": "r4L144 says reject columns AND IDs unchanged; unclear whether reject entire input or strip columns then returnIDs. No production oracle chosen."
-  },
-  {
-    "id": "P8R4-08B-READING-REJECT-COLUMNS",
-    "operation": "grammar_policy",
-    "input": {
-      "grammar": [
-        {
-          "tuple_id": 12,
-          "family": "H01",
-          "mode": "FOLLOW",
-          "sides": [
-            "LONG"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 15,
-          "family": "H01",
-          "mode": "FOLLOW",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": 99
-        },
-        {
-          "tuple_id": 4,
-          "family": "H05",
-          "mode": "FOLLOW",
-          "sides": [
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 8,
-          "family": "H03",
-          "mode": "FADE",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 20,
-          "family": "H03",
-          "mode": "FADE",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 3,
-          "family": "H12",
-          "mode": "FADE",
-          "sides": [
-            "LONG",
-            "SHORT"
-          ],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": true,
-          "Sharpe": -99
-        },
-        {
-          "tuple_id": 1,
-          "family": "H01",
-          "mode": "FOLLOW",
-          "sides": [],
-          "base_regime": "NONE",
-          "entry": {
-            "spec": "synthetic"
-          },
-          "exit": {
-            "spec": "synthetic"
-          },
-          "risk": {
-            "spec": "synthetic"
-          },
-          "complete": false,
-          "Sharpe": -99
-        }
-      ],
-      "policy": "reject_columns"
-    },
-    "expected": {
-      "status": "SYNTHETIC_IDS_ONLY",
-      "IDs": {
-        "U": 12,
-        "D": 4,
-        "Q": 3,
-        "A": 3
-      },
-      "reserved_variants": 4,
-      "rankings_used": false,
-      "columns_rejected_without_ranking": true
-    },
-    "family": "ClassifierP8r4-08",
-    "evidence_status": "AMBIGUOUS_PENDING_GS",
-    "notes": "Conditional alternative only, not approval to sanitize input; GS must choose08B refusal contract."
   },
   {
     "id": "P8R4-08C-U-EMPTY",
@@ -386509,7 +386181,7 @@
       ]
     },
     "family": "ClassifierP8r4-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -386533,7 +386205,7 @@
       "status": "STOP_FROZEN_IDS"
     },
     "family": "ClassifierP8r4-08",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -386547,7 +386219,797 @@
     },
     "expected": "RANGE",
     "family": "ClassifierP8r4-10",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
+  },
+  {
+    "id": "P8R10-08B-WHOLE-INPUT-PNL",
+    "operation": "grammar_select",
+    "input": {
+      "grammar": [
+        {
+          "tuple_id": 12,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "PnL": null
+        },
+        {
+          "tuple_id": 15,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "PnL": null
+        },
+        {
+          "tuple_id": 4,
+          "family": "H05",
+          "mode": "FOLLOW",
+          "sides": [
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "PnL": null
+        },
+        {
+          "tuple_id": 8,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "PnL": null
+        },
+        {
+          "tuple_id": 20,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "PnL": null
+        },
+        {
+          "tuple_id": 3,
+          "family": "H12",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "PnL": null
+        },
+        {
+          "tuple_id": 1,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": false,
+          "PnL": null
+        }
+      ]
+    },
+    "expected": {
+      "status": "STOP",
+      "alarm": true,
+      "IDs": null
+    },
+    "family": "ClassifierP8r10-08B",
+    "evidence_status": "NOT_TESTED",
+    "notes": "P8r10/Pin7r7 WHOLE-input rejection: no polluted table/auxiliary ranking can be sanitized or used to salvageIDs; exact signed rules verified."
+  },
+  {
+    "id": "P8R10-08B-WHOLE-INPUT-PNL-LITERAL",
+    "operation": "grammar_select",
+    "input": {
+      "grammar": [
+        {
+          "tuple_id": 12,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "P&L": null
+        },
+        {
+          "tuple_id": 15,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "P&L": null
+        },
+        {
+          "tuple_id": 4,
+          "family": "H05",
+          "mode": "FOLLOW",
+          "sides": [
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "P&L": null
+        },
+        {
+          "tuple_id": 8,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "P&L": null
+        },
+        {
+          "tuple_id": 20,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "P&L": null
+        },
+        {
+          "tuple_id": 3,
+          "family": "H12",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "P&L": null
+        },
+        {
+          "tuple_id": 1,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": false,
+          "P&L": null
+        }
+      ]
+    },
+    "expected": {
+      "status": "STOP",
+      "alarm": true,
+      "IDs": null
+    },
+    "family": "ClassifierP8r10-08B",
+    "evidence_status": "NOT_TESTED",
+    "notes": "P8r10/Pin7r7 WHOLE-input rejection: no polluted table/auxiliary ranking can be sanitized or used to salvageIDs; exact signed rules verified."
+  },
+  {
+    "id": "P8R10-08B-WHOLE-INPUT-SHARPE",
+    "operation": "grammar_select",
+    "input": {
+      "grammar": [
+        {
+          "tuple_id": 12,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "Sharpe": null
+        },
+        {
+          "tuple_id": 15,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "Sharpe": null
+        },
+        {
+          "tuple_id": 4,
+          "family": "H05",
+          "mode": "FOLLOW",
+          "sides": [
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "Sharpe": null
+        },
+        {
+          "tuple_id": 8,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "Sharpe": null
+        },
+        {
+          "tuple_id": 20,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "Sharpe": null
+        },
+        {
+          "tuple_id": 3,
+          "family": "H12",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "Sharpe": null
+        },
+        {
+          "tuple_id": 1,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": false,
+          "Sharpe": null
+        }
+      ]
+    },
+    "expected": {
+      "status": "STOP",
+      "alarm": true,
+      "IDs": null
+    },
+    "family": "ClassifierP8r10-08B",
+    "evidence_status": "NOT_TESTED",
+    "notes": "P8r10/Pin7r7 WHOLE-input rejection: no polluted table/auxiliary ranking can be sanitized or used to salvageIDs; exact signed rules verified."
+  },
+  {
+    "id": "P8R10-08B-WHOLE-INPUT-RETURN",
+    "operation": "grammar_select",
+    "input": {
+      "grammar": [
+        {
+          "tuple_id": 12,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "return": null
+        },
+        {
+          "tuple_id": 15,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "return": null
+        },
+        {
+          "tuple_id": 4,
+          "family": "H05",
+          "mode": "FOLLOW",
+          "sides": [
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "return": null
+        },
+        {
+          "tuple_id": 8,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "return": null
+        },
+        {
+          "tuple_id": 20,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "return": null
+        },
+        {
+          "tuple_id": 3,
+          "family": "H12",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "return": null
+        },
+        {
+          "tuple_id": 1,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": false,
+          "return": null
+        }
+      ]
+    },
+    "expected": {
+      "status": "STOP",
+      "alarm": true,
+      "IDs": null
+    },
+    "family": "ClassifierP8r10-08B",
+    "evidence_status": "NOT_TESTED",
+    "notes": "P8r10/Pin7r7 WHOLE-input rejection: no polluted table/auxiliary ranking can be sanitized or used to salvageIDs; exact signed rules verified."
+  },
+  {
+    "id": "P8R10-08B-WHOLE-INPUT-SCORE",
+    "operation": "grammar_select",
+    "input": {
+      "grammar": [
+        {
+          "tuple_id": 12,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "score": null
+        },
+        {
+          "tuple_id": 15,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "score": null
+        },
+        {
+          "tuple_id": 4,
+          "family": "H05",
+          "mode": "FOLLOW",
+          "sides": [
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "score": null
+        },
+        {
+          "tuple_id": 8,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "score": null
+        },
+        {
+          "tuple_id": 20,
+          "family": "H03",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "score": null
+        },
+        {
+          "tuple_id": 3,
+          "family": "H12",
+          "mode": "FADE",
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": true,
+          "score": null
+        },
+        {
+          "tuple_id": 1,
+          "family": "H01",
+          "mode": "FOLLOW",
+          "sides": [],
+          "base_regime": "NONE",
+          "entry": {
+            "spec": "synthetic"
+          },
+          "exit": {
+            "spec": "synthetic"
+          },
+          "risk": {
+            "spec": "synthetic"
+          },
+          "complete": false,
+          "score": null
+        }
+      ]
+    },
+    "expected": {
+      "status": "STOP",
+      "alarm": true,
+      "IDs": null
+    },
+    "family": "ClassifierP8r10-08B",
+    "evidence_status": "NOT_TESTED",
+    "notes": "P8r10/Pin7r7 WHOLE-input rejection: no polluted table/auxiliary ranking can be sanitized or used to salvageIDs; exact signed rules verified."
   }
 ]

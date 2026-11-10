@@ -54,7 +54,7 @@
       "capture": 1
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -110,7 +110,7 @@
       "win": false
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -167,7 +167,7 @@
       "win": false
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -224,7 +224,7 @@
       "win": false
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -274,7 +274,7 @@
       "category": "UNPRICED_WORST"
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": "Conditioned on a separately known filled position/basis 100; fallback selection is tested, not an invented missing entry fill."
   },
   {
@@ -324,7 +324,7 @@
       "category": "UNPRICED_WORST"
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -382,7 +382,7 @@
       "category": "PRICED"
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -6405,7 +6405,7 @@
       }
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -12428,7 +12428,7 @@
       }
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -18451,7 +18451,7 @@
       }
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -18574,7 +18574,7 @@
       }
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -18607,7 +18607,7 @@
       }
     },
     "family": "Pin15",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   }
 ]

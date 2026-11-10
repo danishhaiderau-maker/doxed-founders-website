@@ -1,7 +1,7 @@
 """Provisional 5b synthetic regressions; no market/laptop/acceptance run."""
 # PROVISIONAL, pre-freeze, non-evidential. Live OFF. No runtime integration.
-PIN7_SPEC_SHA256 = "3b5dba29fdfffe916fef9d209c6095db5ca45fc1a998a9682ea6acc383584fc1"
-P8_SPEC_SHA256 = "ca77dbaeed9cf55ac1f14d6e4ecd525c21ccacc4987c64c112c7e1fb5f5d581a"
+PIN7_SPEC_SHA256 = "dc0cc45f24f5afee9a69718fcc120fc27450f80b6e35de1058f0ed0e68eedf79"
+P8_SPEC_SHA256 = "28315aeb4423e88d4e3dadcf3e42005b29ddbba1f2e054467aeab7827135641e"
 CT_TABLE_SHA256 = "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0"
 RULES_SHA256 = "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2"
 RK_PROVISIONAL_RULING = "72c250a0eb82"
@@ -20,7 +20,13 @@ from research import pin_k3
 CASES = harness.load_cases()
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda case: case["id"])
+@pytest.fixture(autouse=True)
+def synthetic_runroot(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNROOT", str(tmp_path))
+
+
+
+@pytest.mark.parametrize("case", [case for case in CASES if case["operation"] != "candidate"], ids=lambda case: case["id"])
 def test_hm_tape(case):
     reason = harness.pending_reason(case)
     if reason:
@@ -29,15 +35,17 @@ def test_hm_tape(case):
     assert not harness.subset_errors(case["expected"], actual)
 
 
-@pytest.mark.parametrize("case", json.loads((harness.ROOT / "field9.json").read_text())["fixtures"], ids=lambda case: case["id"])
-def test_field9_model_regression_not_historical_gate(case):
-    actual = harness.field9_actual(case)
-    gold = {"residual_mapped_minus_realistic": -3, "pass_never_cheaper": False} if case["kind"] == "rule_negative" else case["expected_realistic"]
-    assert not harness.subset_errors(gold, actual)
+@pytest.mark.parametrize("case", [case for case in CASES if case["operation"] == "candidate"], ids=lambda case: case["id"])
+def test_candidate_primitive_not_adapter_contract_acceptance(case):
+    x = case["input"]
+    assert c.candidate(x["V"], x["E"], x["z"], x["current"], harness.THRESHOLDS) == case["expected"]
+    # Deliberate contract HOLD: JSON-object adapter cannot equal HM's string.
+    assert harness.dispatch("candidate", x) == {"candidate": case["expected"]}
+    assert harness.subset_errors(case["expected"], harness.dispatch("candidate", x))
 
 
 def test_source_and_full_manifest_pins():
-    assert len(CASES) == 209
+    assert len(CASES) == 233
     assert harness.verify_fixture_hashes()["manifest_sha256"] == harness.HM_MANIFEST_SHA256
     assert contracts.PRIMARY_N == 836
     assert contracts.RULES_SHA256 == RULES_SHA256
@@ -266,6 +274,13 @@ def test_fixture_assertions_detect_semantic_mutants(case_id, change):
     case = next(case for case in CASES if case["id"] == case_id)
     inputs = copy.deepcopy(case["input"])
     actual = harness.dispatch(case["operation"], inputs)
+    gold = {"candidate": case["expected"]} if case["operation"] == "candidate" else case["expected"]
+    # Each mutant asserts its own semantic field, not unrelated wire-number types.
+    if change == "wrong_exit_side":
+        gold = {"exit": case["expected"]["exit"]}
+    elif change == "gross_rescue":
+        gold = {"decision": case["expected"]["decision"]}
+    assert not harness.subset_errors(gold, actual)
     if change == "wrong_exit_side":
         inputs["side"] = "SHORT"
         actual = harness.dispatch(case["operation"], inputs)
@@ -278,7 +293,7 @@ def test_fixture_assertions_detect_semantic_mutants(case_id, change):
         actual["S/F"]["flag"] = True
     else:
         actual["allowed"] = False
-    assert harness.subset_errors(case["expected"], actual)
+    assert harness.subset_errors(gold, actual)
 
 
 @pytest.mark.parametrize("change", [dict(last_flip=7200), dict(count=7), dict(first=7200)])
@@ -303,4 +318,62 @@ def test_nested_performance_fields_cannot_enter_id_selector():
     case = next(case for case in CASES if case["id"] == "R2-08-GRAMMAR-MIN-NUMERIC-ID")
     grammar = copy.deepcopy(case["input"]["grammar"])
     grammar[0]["entry"]["PnL"] = 100
-    assert contracts.select_ids(grammar)["status"] == "STOP_UNAPPROVED_COLUMNS"
+    assert contracts.select_ids(grammar)["status"] == "STOP"
+
+
+
+def test_adapter_map_exact_frozen_operations_and_real_functions():
+    from research import p8_fixture_adapter as adapter
+    assert set(adapter.OPERATION_MAP) == {case["operation"] for case in CASES}
+    assert len(adapter.OPERATION_MAP) == 27
+    assert all(function.__module__.startswith("research.") and "fixture" not in function.__module__ for function in adapter.OPERATION_MAP.values())
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
+def test_adapter_rejects_nonfinite_inputs_and_outputs(number, monkeypatch):
+    from research import p8_fixture_adapter as adapter
+    with pytest.raises(ValueError):
+        adapter.evaluate("utc_days", {"seconds": [number]})
+    monkeypatch.setitem(adapter.OPERATION_MAP, "safety", lambda data: {"decision": number})
+    with pytest.raises(ValueError):
+        adapter.evaluate("safety", {})
+
+
+def test_checkpoint_adapter_requires_RUNROOT_and_contains_all_temp_writes(monkeypatch, tmp_path):
+    from research import p8_fixture_adapter as adapter
+    case = next(case for case in CASES if case["id"] == "P8R10-12-NOLOG-TERMINAL-NO-AUTORESUME")
+    monkeypatch.delenv("RUNROOT")
+    with pytest.raises(ValueError, match="RUNROOT"):
+        adapter.evaluate(case["operation"], case["input"])
+    writes = []
+    original = Path.write_text
+    def tracked(path, *args, **kwargs):
+        assert path.resolve().is_relative_to(tmp_path.resolve())
+        writes.append(path)
+        return original(path, *args, **kwargs)
+    monkeypatch.setenv("RUNROOT", str(tmp_path))
+    monkeypatch.setattr(Path, "write_text", tracked)
+    actual = adapter.evaluate(case["operation"], case["input"])
+    assert writes and all(not path.exists() for path in writes)
+    assert actual["latched"] and not actual["auto_resume"] and not actual["B3_scored"]
+    assert all(row["warmup_state"] == "DISCARDED" and not row["read_allowed"] for row in actual["trace"])
+
+
+@pytest.mark.parametrize("column", ["P&L", "pnl_usd", "Sharpe_ratio", "return_bp", "score", "ranking"])
+def test_whole_input_pollution_never_salvages_ids(column):
+    from research import p8_fixture_adapter as adapter
+    case = next(case for case in CASES if case["id"] == "P8R4-08A-EXACT-12-4-3-3")
+    data = copy.deepcopy(case["input"])
+    data["auxiliary"] = {column: None}
+    actual = adapter.evaluate("grammar_select", data)
+    assert actual == {"status": "STOP", "alarm": True, "IDs": None}
+
+
+
+def test_adapter_boundary_does_not_access_envelopes_or_oracles():
+    import ast
+    from research import p8_fixture_adapter as adapter
+    tree = ast.parse(Path(adapter.__file__).read_text())
+    strings = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    assert not {"expected", "case_id", "id"} & strings
+    assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) and "oracle" in ast.unparse(node) for node in ast.walk(tree))

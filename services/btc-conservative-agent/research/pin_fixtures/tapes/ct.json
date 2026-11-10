@@ -15,7 +15,7 @@
       "c_T": null
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -34,7 +34,7 @@
       "c_T": 9.872004125428
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -53,7 +53,7 @@
       "c_T": 9.872004125428
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -72,7 +72,7 @@
       "c_T": 10.800027656888
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -91,7 +91,7 @@
       "c_T": 22.94285092409
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -110,7 +110,7 @@
       "c_T": 22.958
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -129,7 +129,7 @@
       "c_T": 22.958
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -146,7 +146,7 @@
       "status": "STOP_TABLE_SHA"
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -163,7 +163,7 @@
       "status": "STOP_TABLE_SHA"
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -180,7 +180,7 @@
       "status": "STOP_TABLE_SHA"
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -199,7 +199,7 @@
       "c_T": 15.769199292029
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -216,7 +216,7 @@
       "status": "STOP_CODE_SHA"
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   },
   {
@@ -233,7 +233,7 @@
       "status": "STOP_CODE_SHA"
     },
     "family": "CT-runtime",
-    "evidence_status": "ORACLE_SELF_CHECK",
+    "evidence_status": "NOT_TESTED",
     "notes": ""
   }
 ]
