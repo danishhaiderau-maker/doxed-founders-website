@@ -18,8 +18,10 @@ SUMMARY = {
 
 @pytest.fixture(autouse=True)
 def fresh_cache(monkeypatch):
+    from strategy_lab.bounded_refresh import BoundedRefresh
     monkeypatch.setattr(dashboard, "_SELF_AWARE_CACHE", {"at": 0.0, "value": None})
     monkeypatch.setattr(dashboard, "_API_RESPONSE_CACHE", {})
+    monkeypatch.setattr(dashboard, "_DATA_HEALTH_REFRESH", BoundedRefresh(ttl=30))
     monkeypatch.setattr(dashboard, "_data_health_payload", lambda: ({}, {}, {}))
     monkeypatch.setattr(dashboard, "_archive_payload", lambda: ({"status": "UNAVAILABLE", "data": None}, {}))
 
@@ -50,17 +52,26 @@ def fake_self_aware():
 
 
 def test_data_health_page_summarises_and_links_self_aware(monkeypatch, fake_self_aware):
+    # Hang fix: Data Health render stays offline (no :9021 probe). The page still
+    # keeps a separately opened view link; the dedicated API still probes.
     monkeypatch.setattr(dashboard, "SELF_AWARE_URL", fake_self_aware)
+    probes = []
+    real = dashboard._self_aware_data
+    monkeypatch.setattr(dashboard, "_self_aware_data", lambda: probes.append(1) or real())
     client = dashboard.app.test_client()
     page = client.get("/data-health").get_data(as_text=True)
     section = page.split("<h2>Self-aware data awareness</h2>", 1)[1]
+    assert probes == []
     assert f"href='{fake_self_aware}/data'" in section
-    assert "100 streams (27 catalogued)" in section and "dead fields: 399" in section
-    assert "tape filled 24h: 99.302% with 12 gaps" in section
-    assert "context.delta_change=DEAD_ZERO" in section
-    assert "<script>" not in section and "&lt;script&gt;" in section
+    assert "UNAVAILABLE" in section and "NOT CHECKED: offline Data Health view" in section
+    assert "100 streams" not in section
     api = client.get("/api/streams/self-aware-data").get_json()
     assert api["status"] == "OK" and api["data"]["streams"] == 100
+    assert probes == [1]
+    assert "context.delta_change=DEAD_ZERO" in str(api["data"]["watch_alarms"])
+    # Escaping of probed HTML remains the helper's job; exercise it directly.
+    html = dashboard._self_aware_section(api)
+    assert "<script>" not in html and "&lt;script&gt;" in html
 
 
 def test_unreachable_self_aware_never_breaks_the_page(monkeypatch):
