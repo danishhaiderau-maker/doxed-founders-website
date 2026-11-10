@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DoxxedLaptopSupervisor approved config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "disk_floor_card_sha256",
+    "disk_floor_terminate_enabled",
+    "genesis_sha256",
+    "human_clear_public_key_sha256",
+    "human_clear_receipt_sha256",
+    "implementation_sha256",
+    "installation_id",
+    "python_sha256",
+    "reconciled_owners_receipt_sha256",
+    "schema",
+    "source_sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "installation_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9-]{16,80}$"
+    },
+    "genesis_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "implementation_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "python_sha256": {
+      "const": "5f7b89a612c9b8af1d6456cdfcd1dbe5ca630849e79aebced9bee9a6694952ec"
+    },
+    "reconciled_owners_receipt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "human_clear_public_key_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "disk_floor_terminate_enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "disk_floor_card_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "human_clear_receipt_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_sha256": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 10000,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "disk_floor_terminate_enabled": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "disk_floor_card_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  ]
+}
