@@ -41386,9 +41386,9 @@ DASHBOARD_JS = """(function () {
             + (stats.approvals_known === false ? ' · EV/appr n/a (approvals not counted for the whole epoch)' : '')
             + '</div>';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
-            + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
-            + statRow('Pending', laneNow.pending || 0)
-            + statRow('Open', laneNow.open || 0)
+            + statRow('Status', window.DASHBOARD_VIEW_ONLY === true ? 'SAVED ONLY' : (on ? '🟢 ON' : '🔴 OFF'), on ? '#3fb950' : '#f85149')
+            + statRow('Pending', window.DASHBOARD_VIEW_ONLY === true ? '—' : (laneNow.pending || 0))
+            + statRow('Open', window.DASHBOARD_VIEW_ONLY === true ? '—' : (laneNow.open || 0))
             + statRow('Closed', headlineClosed)
             + statRow('PnL', '$' + headlinePnl.toFixed(2), headlinePnlCol)
             + statRow('EV/appr', headlineEvLabel)
@@ -41565,13 +41565,14 @@ DASHBOARD_JS = """(function () {
             + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">'
             + '<div' + titleTip + '><div><strong style="color:' + border + ';font-size:1.02em;">Tile ' + (spec.tile_number || '') + ' · ' + cardEsc(tileShort) + '</strong>' + badge + '</div>'
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
-            + toggleHtml + '</div>'
+            + (window.DASHBOARD_VIEW_ONLY === true ? '' : toggleHtml) + '</div>'
             + orderBanner
-            + liveSwitchBlock
+            + (window.DASHBOARD_VIEW_ONLY === true ? '' : liveSwitchBlock)
             + cardSections
             + (xvlLane ? xvlShadow : chaseTruth)
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
-            + statsGrid
+            + (window.DASHBOARD_VIEW_ONLY === true && !spec.session_stats
+              ? '<p class="viewer-missing-stats">Saved statistics unavailable; no zero PnL or PASS is inferred.</p>' : statsGrid)
             + (function () {
               const result = spec.hypothesis_result || {};
               if (!result.status) return '';
@@ -41617,7 +41618,7 @@ DASHBOARD_JS = """(function () {
               if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
               return html + '</div>';
             })()
-            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Clean-epoch headline: n=' + (stats.approvals_known === false ? 'n/a' : headlineApprovals) + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>'
+            + (window.DASHBOARD_VIEW_ONLY === true ? '' : '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Clean-epoch headline: n=' + (stats.approvals_known === false ? 'n/a' : headlineApprovals) + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>')
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
@@ -42049,6 +42050,8 @@ DASHBOARD_JS = """(function () {
     }
 
     async function refresh() {
+      // Standalone viewer reuses the tile renderer, never the engine controls.
+      if (typeof window !== 'undefined' && window.DASHBOARD_VIEW_ONLY === true) return window.refreshDashboardViewer(renderPathwayLab);
       if (refreshInFlight) return;
       refreshInFlight = true;
       let refreshStage = 'fetch';
@@ -42947,6 +42950,10 @@ DASHBOARD_JS = """(function () {
       }
     }
     document.addEventListener('DOMContentLoaded', () => {
+      if (window.DASHBOARD_VIEW_ONLY === true) {
+        window.initDashboardViewer(refresh);
+        return;
+      }
       const dropdowns = {
         'leverage': '/api/set_leverage',
         'maxConcurrentPositions': '/api/set_max_active_signals'
