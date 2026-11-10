@@ -26,15 +26,24 @@ credential/control names (including `GH_TOKEN`, `DATABASE_URL`, `BOT_ADMIN_TOKEN
 refuse startup. Presence is sufficient: **even `BITFINEX_LIVE_ENABLED=0` or an
 empty key refuses**. Do not import a vault/cloud environment or use the old
 paper-bot launcher. Diagnostics never print environment values. The check also
-runs before requests. Enabled/uncertain saved arm state, non-paper lifecycle,
-invalid/oversize JSON and paths escaping the data root fail closed. CLI refusal
+runs before requests. Every recognized saved arm field must be the literal JSON boolean `false`,
+not null, zero, text, an object or a list. The canonical
+`live_copy_output_state.json` is REQUIRED with schema `fly_live_copy_output_v1`
+and `state.enabled` explicitly `false`; absent file/schema/state/enabled refuses.
+A present lifecycle additionally requires `paper_only: true` and `live_armed: false`.
+Enabled/uncertain saved arm state, non-paper lifecycle, invalid/oversize JSON and
+paths escaping the data root fail closed. CLI refusal
 exits 78; request-time refusal returns 503. No automatic restart is added.
 
 The browser adapter selects only the existing tile view, labels it saved/read-only,
 hides controls, bypasses browser setting reconciliation, and blocks fetches
 except same-origin GET `/api/state` and `/health`. CSP blocks external connects,
 forms and frames. The server remains read-only even with JavaScript disabled or
-by direct HTTP. Evidence strings are escaped before the legacy innerHTML renderer.
+by direct HTTP. Saved lane output uses an explicit, recursively typed allowlist of display fields
+and statistics; unknown fields at every nesting depth are dropped, not
+secret-name-blacklisted. Evidence strings are escaped before the legacy
+innerHTML renderer. Counts must be nonnegative integers and numeric statistics
+finite; incomplete valid statistics remain unavailable.
 
 ## Proposed laptop command — NOT EXECUTED
 
@@ -58,6 +67,10 @@ Nothing in this PR restarts the exit-75 bot or starts anything on the laptop.
 
 ## Precisely what is read
 
+The root must be approved and protected from untrusted concurrent writers.
+Resolve/containment and open are separate operations: this is NOT a defense
+against a malicious concurrent symlink/junction swap (HM N1; Windows untested).
+
 Under the explicit existing `--data-dir` (the proposed local-fresh-data above),
 read-only binary opens, maximum **8 MiB per JSON file per request**:
 
@@ -65,14 +78,23 @@ read-only binary opens, maximum **8 MiB per JSON file per request**:
   the JSON member from a previously approved debug export); only its saved tile
   specs/statistics and revision are projected, not arbitrary engine/control data.
 - `pathway_lane_specs.json`: existing static/saved tile specs fallback.
-- `paper_lifecycle_v1.json`: safety validation (`paper_only` must be true and
-  arming off) and saved-at timestamp only; no recovery/replay or trading occurs.
+- `paper_lifecycle_v1.json`: optional safety validation (`paper_only` must be true
+  and `live_armed` explicitly false) and saved-at timestamp only; no recovery/replay
+  or trading occurs.
+- `live_copy_output_state.json`: REQUIRED safety-only record, schema
+  `fly_live_copy_output_v1` with current `state.enabled` explicitly boolean false.
+  Historical `state.history[*].enabled` records are not the current switch and are
+  not output. No sidecar metadata/credentials are projected. Missing or malformed
+  records refuse; the viewer never creates, resets or edits an arm record. Do not
+  manufacture a false record just to launch the viewer; an authoritative existing
+  disarmed record or separately reviewed evidence/start policy is necessary.
 
 The code also reads `bot.py` literals and `dashboard_viewer.js` in its own service
 folder. It opens **no SQLite, Neon, other DB or raw collector evidence** and never
 calls a live bot to obtain state. No new producer/snapshot writer is introduced.
 File availability and age are displayed explicitly; saved files are NOT a current
-heartbeat. No snapshot is required to view the registry/policy cards, but absent
+heartbeat. No statistics snapshot is required to view the registry/policy cards after the
+mandatory disarmed-sidecar check, but absent
 or incomplete saved statistics show UNAVAILABLE, not fabricated zero PnL. Pending
 and open-position counts are not inferred. This UI grants no PASS, promotion,
 forward-paper evidence or arm permission. A separately approved producer/adapter
@@ -106,7 +128,7 @@ checks there are no active tile buttons or external/mutating requests, and
 closes the server. Import/create-app tests also assert no local runtime modules
 or threads are loaded, and HTTP tests prove file bytes/mtimes remain unchanged.
 
-### Results (10 Nov 2026, AEDT; box only)
+### Initial-head results (eb85cc3a; 10 Nov 2026, AEDT; box only)
 
 - Linux CPython 3.11.18, Flask 3.1.2, pytest 9.2.0, Playwright 1.65.0:
   **129 passed**, including 100 viewer tests and 29 existing presentation tests.
@@ -115,3 +137,18 @@ or threads are loaded, and HTTP tests prove file bytes/mtimes remain unchanged.
   **52 passed** across 11 dashboard/showcase regression suites (overlaps above).
 - `node --check dashboard_viewer.js` and `git diff --check`: passed.
 - Existing embedded-JS invalid-escape warnings remain; no Windows result claimed.
+
+### B1/B2 revised-head results (10 Nov 2026, AEDT; box only)
+
+- Linux Python 3.11: **251 viewer tests passed**; combined viewer/presentation
+  command from the PR body: **280 passed**, 53 existing JS escape warnings.
+- Linux Python 3.13 legacy dashboard/showcase regressions: **52 passed**,
+  6 existing escape warnings (overlapping tests).
+- B1 covers null, object, list, strings, numeric false-lookalikes and missing
+  switch/file/schema/state; only boolean false passes. No live-control module
+  is imported and no arm record is created/reset/changed.
+- B2 tests apiKey, privateKey, credentials.key, unknown fields at supported
+  nested object/list levels, and wrong-shaped known metadata fields. All are
+  absent from /api/state while known fixture display/statistics still render.
+- `node --check dashboard_viewer.js` and `git diff --check`: passed.
+- Windows/Python 3.11 NOT TESTED; exact-head CI and a new HM/RK review remain gates.

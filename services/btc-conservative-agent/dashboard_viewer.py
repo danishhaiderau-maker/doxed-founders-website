@@ -6,6 +6,7 @@ import argparse
 import ast
 import html
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -23,7 +24,9 @@ from combo_pathway_config import ACTIVE_TILE_REGISTRY, ACTIVE_TILE_ORDER, tile_c
 SERVICE = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
 MAX_JSON_BYTES = 8 * 1024 * 1024
-READ_FILES = ("debug_state_snapshot.json", "pathway_lane_specs.json", "paper_lifecycle_v1.json")
+ARM_FILE = "live_copy_output_state.json"
+ARM_SCHEMA = "fly_live_copy_output_v1"  # Data contract only; never import live_copy_control.
+READ_FILES = ("debug_state_snapshot.json", "pathway_lane_specs.json", "paper_lifecycle_v1.json", ARM_FILE)
 CONTROL_NAME = re.compile(r"(^|_)(LIVE|ARM|ARMED)(_|$)", re.I)
 CREDENTIAL_NAMES = frozenset({
     "DATABASE_URL", "NEON_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "FLY_API_TOKEN",
@@ -70,7 +73,8 @@ def load_frontend():
 
 def _read_json(root, name):
     path = root / name
-    # Resolve again on EVERY read; never follow a link outside the approved root.
+    # Recheck ordinary containment on every read. This is not link-swap atomic;
+    # the approved data root must not have untrusted concurrent writers.
     try:
         path.resolve().relative_to(root)
         with path.open("rb") as handle:
@@ -81,10 +85,18 @@ def _read_json(root, name):
         if not isinstance(value, dict):
             raise ViewerRefused("Viewer refused: saved JSON must be an object.")
         _check_disarmed(value)
-        if name == "paper_lifecycle_v1.json" and value.get("paper_only") is not True:
-            raise ViewerRefused("Viewer refused: lifecycle is not explicitly paper-only.")
+        if name == ARM_FILE:
+            state = value.get("state")
+            if (value.get("schema") != ARM_SCHEMA or not isinstance(state, dict)
+                    or state.get("enabled") is not False):
+                raise ViewerRefused("Viewer refused: live-copy sidecar requires its known schema and state.enabled boolean false.")
+        if name == "paper_lifecycle_v1.json":
+            if value.get("paper_only") is not True or value.get("live_armed") is not False:
+                raise ViewerRefused("Viewer refused: lifecycle must be paper-only with live_armed boolean false.")
         return value, path.stat().st_mtime
     except FileNotFoundError:
+        if name == ARM_FILE:
+            raise ViewerRefused("Viewer refused: required live-copy arm sidecar is missing.") from None
         return None, None
     except (OSError, ValueError, RecursionError) as exc:
         if isinstance(exc, ViewerRefused):
@@ -101,7 +113,7 @@ def _check_disarmed(value):
                 "live_copy_output_enabled", "live_copy_source_enabled", "live_tiles_on",
                 "bitfinex_live_on", "live_tiles_requested",
             }
-            if control and child not in (False, None, 0, "", "0", "false", {}, []):
+            if control and child is not False:
                 raise ViewerRefused("Viewer refused: saved live/arm state is enabled or uncertain.")
             _check_disarmed(child)
     elif isinstance(value, list):
@@ -109,16 +121,54 @@ def _check_disarmed(value):
             _check_disarmed(child)
 
 
-def _safe_text(value):
-    # Legacy tile renderer uses innerHTML; evidence strings must remain text.
-    if isinstance(value, str):
-        return html.escape(value, quote=True)
-    if isinstance(value, dict):
-        return {key: _safe_text(child) for key, child in value.items()
-                if not any(word in str(key).lower() for word in ("secret", "token", "password", "api_key"))}
-    if isinstance(value, list):
-        return [_safe_text(child) for child in value]
-    return value
+# Explicit display schemas, including EVERY nested object. Unknown fields and
+# wrong-shaped known fields are dropped, not copied and later secret-blacklisted.
+STATS_SCHEMA = {
+    "real_fills": int, "net_pnl_real": float, "wins": int, "losses": int,
+    "approves": int, "per_approve_ev": float, "approvals_known": bool,
+    "scope": str, "epoch_id": str, "epoch_cutoff_utc": str,
+    "pnl_breakdown": {"forced_closes": int, "strategy_net_usd": float,
+        "strategy_closes": int, "forced_net_usd": float,
+        "deploy_flatten_closes": int, "deploy_flatten_net_usd": float},
+}
+LANE_DISPLAY_SCHEMA = {
+    "lane": str, "label": str, "tile_number": int, "status": str,
+    "subtitle": str, "badge": str, "evidence_badge": str, "filter_chips": [str],
+    "hypothesis": str, "research_question": str, "strategy_detail": [str],
+    "promotion_criteria": str, "kill_criteria": str,
+    "card_sections": {"entry": [str], "exit": {"order": str, "live": [str], "shadow": [str]}, "risk": [str]},
+    "entry": {"trigger": str, "ai_cadence": str, "chase_detail": str, "margin_usd": float,
+        "filters": {"ai_probability_bucket": str, "directional_spread_bucket": str, "entry_mode": str}},
+    "exit": {"profile": str, "ladder": str},
+    "chase_timing": {"global_submit_label": str, "template_reprice_label": str, "contract": str},
+    "hypothesis_result": {"status": str, "hypothesis_id": str, "in_sample": str,
+        "expected_live": str, "model": str, "oos_episodes": int, "touches": int,
+        "wins": int, "losses": int, "oos_net_usd": float},
+    "session_stats": STATS_SCHEMA,
+}
+
+
+def _display_projection(value, schema):
+    """Allow only reviewed keys/types recursively; escape display text, not keys."""
+    if schema is str:
+        return html.escape(value, quote=True) if isinstance(value, str) else None
+    if schema is bool:
+        return value if type(value) is bool else None
+    if schema is int:
+        return value if type(value) is int and value >= 0 else None
+    if schema is float:
+        return value if type(value) in (int, float) and math.isfinite(value) else None
+    if isinstance(schema, dict) and isinstance(value, dict):
+        result = {}
+        for key, child_schema in schema.items():
+            if key in value:
+                child = _display_projection(value[key], child_schema)
+                if child is not None:
+                    result[key] = child
+        return result
+    if isinstance(schema, list) and isinstance(value, list):
+        return [child for item in value if (child := _display_projection(item, schema[0])) is not None]
+    return None
 
 
 def read_snapshot(root):
@@ -142,28 +192,25 @@ def read_snapshot(root):
     # The CURRENT registry owns the roster. Old B1/B2 evidence cannot resurrect tiles.
     for number, lane in enumerate(ACTIVE_TILE_ORDER, 1):
         registry = ACTIVE_TILE_REGISTRY[lane]
-        row = dict(existing.get(lane) or {})
+        row = _display_projection(existing.get(lane) or {}, LANE_DISPLAY_SCHEMA)
         row.update({"lane": lane, "label": registry["label"], "tile_number": number,
                     "status": "PAPER_ONLY", "toggle_key": None, "default_enabled": False})
-        row.setdefault("subtitle", registry.get("subtitle", ""))
-        row.setdefault("card_sections", combo_tile_card_sections(lane))
-        if "session_stats" in row and not isinstance(row["session_stats"], dict):
-            raise ViewerRefused("Viewer refused: invalid saved tile statistics.")
+        row.setdefault("subtitle", _display_projection(registry.get("subtitle", ""), str))
+        row.setdefault("card_sections", _display_projection(combo_tile_card_sections(lane), LANE_DISPLAY_SCHEMA["card_sections"]))
         stats = row.get("session_stats") or {}
-        if not all(isinstance(stats.get(key), (int, float)) and not isinstance(stats[key], bool)
-                   for key in ("real_fills", "net_pnl_real", "wins", "losses", "approves")):
+        if not all(key in stats for key in ("real_fills", "net_pnl_real", "wins", "losses", "approves")):
             row.pop("session_stats", None)
         lanes.append(row)
     # Deliberately do not forward arbitrary saved /api/state: it may contain
     # credentials, live controls or stale claims of liveness. No PnL is recomputed.
-    return _safe_text({
+    return {
         "pathway_lane_specs": {"lanes": lanes, "retired_tiles_note":
             "Saved evidence only. Current code roster; no strategy PASS or promotion is granted."},
         "viewer": {"mode": "READ_ONLY", "live": "OFF", "sources": sources,
-                   "snapshot_revision": snapshot.get("git_rev") or snapshot.get("source_git_rev"),
-                   "lifecycle_saved_at": (saved["paper_lifecycle_v1.json"] or {}).get("saved_at"),
+                   "snapshot_revision": _display_projection(snapshot.get("git_rev") or snapshot.get("source_git_rev"), str),
+                   "lifecycle_saved_at": _display_projection((saved["paper_lifecycle_v1.json"] or {}).get("saved_at"), str),
                    "warning": "HISTORICAL / UNKNOWN freshness: this viewer starts no engine, collector or writers."},
-    })
+    }
 
 
 def create_app(data_dir, *, port=7002):
