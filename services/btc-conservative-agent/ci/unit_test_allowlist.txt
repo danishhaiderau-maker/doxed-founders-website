@@ -151,6 +151,8 @@ test_dashboard_storage_receipt.py
 test_dashboard_visual_truth_v4.py
 test_data_epoch.py
 test_data_gaps_20261012.py
+test_data_health_bounded.py
+test_data_health_hm_probes.py
 test_data_quality_fixes_20261002.py
 test_data_size_endpoint.py
 test_ddollar_gate_fail_closed.py

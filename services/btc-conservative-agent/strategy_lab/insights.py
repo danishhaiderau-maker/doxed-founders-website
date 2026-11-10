@@ -532,11 +532,11 @@ def _retention_state() -> dict:
     return {"configured_mode": mode.get("mode") or "dry_run", **{k: last.get(k) for k in keys}}
 
 
-def archive_component(now: float, days: int = 30) -> dict:
+def _archive_component_uncached(now: float, days: int = 30, *, root: str) -> dict:
     """Long-horizon archive: snapshot freshness, schema compat, per-tile daily rollups, retention."""
     client = _load_client()
     since = datetime.fromtimestamp(now - days * 86400, timezone.utc).date().isoformat()
-    archive = client.load_archive(since=since)
+    archive = client.load_archive(since=since, root=root, verify=True)
     snaps, compat, daily = archive["snapshots"], archive["compat"], archive["daily"]
     if len(snaps) == 0:
         return _component(UNAVAILABLE, reason="analysis archive has no verified snapshot", source=archive.root,
@@ -572,6 +572,45 @@ def archive_component(now: float, days: int = 30) -> dict:
     }
     return _fresh(data, as_of=_ts(latest.get("written_at")), max_age=ARCHIVE_MAX_AGE_SEC, source=archive.root,
                   now=now, what="latest archive snapshot")
+
+
+# 60s avoids repeatedly hashing the full archive; 2s caps callers, including
+# lock wait. A day boundary, root, window, schema policy or retention root change
+# is a distinct input key. Verification is always True; no integrity bypass.
+from strategy_lab.bounded_refresh import BoundedRefresh
+_ARCHIVE_REFRESH = BoundedRefresh(ttl=60.0, retry=5.0)
+ARCHIVE_DEADLINE_SEC = 2.0
+
+
+def archive_component(now: float, days: int = 30, *, root: str | None = None,
+                      timeout: float = ARCHIVE_DEADLINE_SEC) -> dict:
+    # Default root follows the client's DEFAULT_ARCHIVE so patches and standalone
+    # copies stay in contract. This is a module-level string, not archive I/O;
+    # load_archive still runs only in the worker.
+    root = root or _load_client().DEFAULT_ARCHIVE
+    days = int(days)
+    if not 1 <= days <= 3660:
+        raise ValueError("archive window days out of range")
+    since = datetime.fromtimestamp(now-days*86400, timezone.utc).date().isoformat()
+    key = (os.path.normcase(os.path.abspath(root)), days, since, True,
+           "archive-schema-policy-v1", os.path.abspath(RETENTION_DIR))
+    result = _ARCHIVE_REFRESH.get(key, lambda: _archive_component_uncached(now, days, root=root),
+                                  timeout=min(max(float(timeout), 0.0), ARCHIVE_DEADLINE_SEC))
+    cache, value = result["cache"], result["value"]
+    if cache["partial"] or value is None:
+        # Preserve the insights refusal contract: old/unchecked data is not current data.
+        # Never treat a FRESH/CACHED reply with a missing value as a usable component.
+        reason = cache["reason"] or "refresh returned no value"
+        status = cache["status"] if cache["partial"] else "ERROR"
+        return {**_component(UNAVAILABLE, now=now, source=root, reason=reason),
+                "refresh_status": status, "cache": cache, "partial": True}
+    value = dict(value)
+    as_of = _ts(value.get("as_of"))
+    value["age_sec"] = round(now-as_of, 1) if as_of is not None else None
+    if as_of is not None and now-as_of > ARCHIVE_MAX_AGE_SEC:
+        value.update(status=STALE, data=None, reason="latest archive snapshot exceeds freshness bound")
+    value.update(cache=cache, refresh_status=cache["status"], partial=False)
+    return value
 
 
 # --------------------------------------------------------------------------- snapshot
