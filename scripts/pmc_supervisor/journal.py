@@ -34,6 +34,8 @@ def empty_role():
 def envelope(seq, previous, run_id, role, reason, wall, config_hash, code_hash, state, human=None):
     obj = {"schema": SCHEMA, "seq": seq, "previous_hash": previous, "run_id": run_id,
            "role": role, "reason": reason, "wall": wall, "sydney": local_time(wall),
+           "schema_hash": digest({"schema": SCHEMA, "role_fields": sorted(empty_role()),
+                                  "envelope": ["seq", "previous_hash", "hash", "run_id", "role", "reason", "wall", "sydney", "config_hash", "code_hash", "state", "human"]}),
            "config_hash": config_hash, "code_hash": code_hash, "state": copy.deepcopy(state), "human": human}
     return {**obj, "hash": digest(obj)}
 
@@ -91,7 +93,7 @@ class Journal:
                 try:
                     row = json.loads(line)
                     body = {k: v for k, v in row.items() if k != "hash"}
-                    if (row["schema"] != SCHEMA or row["seq"] != seq or row["previous_hash"] != previous
+                    if (row["schema"] != SCHEMA or row.get("schema_hash") != envelope(0,"","",None,"GENESIS",row["wall"],"","",{})["schema_hash"] or row["seq"] != seq or row["previous_hash"] != previous
                             or digest(body) != row["hash"] or row["reason"] not in REASONS
                             or row["role"] not in (*ROLES, None)
                             or (last_wall is not None and row["wall"] < last_wall)):

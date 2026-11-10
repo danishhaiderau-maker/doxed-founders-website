@@ -146,7 +146,7 @@ class LogDrain:
         self.thread.start()
 
     def run(self):
-        previous = b""
+        previous, fly_seen = b"", False
         try:
             no_reparse(self.destination)
             fd = os.open(self.destination, os.O_APPEND | os.O_WRONLY | getattr(os, "O_BINARY", 0))
@@ -159,7 +159,8 @@ class LogDrain:
                     scan = (previous + chunk).lower()
                     if any(x in scan for x in (b"importerror", b"modulenotfounderror", b"syntaxerror", b"dll load failed", b"fatal python error")):
                         self.flags.add("STARTUP_IMPORT_FAILURE")
-                    if b"fly" in scan and any(x in scan for x in (b"error", b"timeout", b"timed out", b"failed", b"exception")):
+                    fly_seen = fly_seen or b"fly" in scan
+                    if fly_seen and any(x in scan for x in (b"error", b"timeout", b"timed out", b"failed", b"exception")):
                         self.flags.add("FLY_SIDE_PATH_FAILURE")
                     if b"foreign_runtime_root" in scan:
                         self.flags.add("FOREIGN_RUNTIME_ROOT")
