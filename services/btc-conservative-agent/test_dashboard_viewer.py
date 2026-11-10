@@ -222,7 +222,8 @@ def test_python_311_syntax():
 
 
 def test_tile_page_renders_in_browser_from_saved_fixture(data_root):
-    from playwright.sync_api import sync_playwright
+    sync_playwright = pytest.importorskip("playwright.sync_api",
+        reason="Optional Chromium dependency; the box verification installs it").sync_playwright
     app = app_for(data_root)
     app.config["VIEWER_PORT"] = 0
     server = viewer.make_viewer_server(app)

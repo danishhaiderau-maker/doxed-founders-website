@@ -141,7 +141,7 @@ or threads are loaded, and HTTP tests prove file bytes/mtimes remain unchanged.
 ### B1/B2 revised-head results (10 Nov 2026, AEDT; box only)
 
 - Linux Python 3.11: **251 viewer tests passed**; combined viewer/presentation
-  command from the PR body: **280 passed**, 53 existing JS escape warnings.
+  command from the PR body plus CI inventory: **288 passed**, 53 existing JS escape warnings.
 - Linux Python 3.13 legacy dashboard/showcase regressions: **52 passed**,
   6 existing escape warnings (overlapping tests).
 - B1 covers null, object, list, strings, numeric false-lookalikes and missing
@@ -152,3 +152,11 @@ or threads are loaded, and HTTP tests prove file bytes/mtimes remain unchanged.
   absent from /api/state while known fixture display/statistics still render.
 - `node --check dashboard_viewer.js` and `git diff --check`: passed.
 - Windows/Python 3.11 NOT TESTED; exact-head CI and a new HM/RK review remain gates.
+
+CI registration: `ci/unit_test_allowlist.txt` now includes `test_dashboard_viewer.py`.
+The inventory guard initially caught that omission; all eight inventory tests now
+pass. All 250 non-browser viewer regressions, including every B1/B2 case, are
+required in unit-tests. The single Chromium test uses `pytest.importorskip` only
+when its optional Playwright package is absent; the package is not added to
+trading/runtime dependencies. Locally Playwright WAS installed and that browser
+test ran and passed (288 passed, zero skips). No workflow or known-red list changes.
