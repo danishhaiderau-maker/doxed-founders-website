@@ -133,7 +133,7 @@ def test_reset_only_healthy_owned_30_minutes(setup):
     clock, cfg, path, journal = setup
     s, _ = controller(setup)
     s.start("pmc", restart=True)
-    s.collector_sample = {"status": "GREEN"}
+    s.collector_sample = {"status": "GREEN", "runtime": {"run_start_ns": int(clock.t * 1e9)}}
     s.sample_mono = clock.m
     s.tick()
     clock.advance(1799); s.sample_mono = clock.m; s.tick()
@@ -401,7 +401,8 @@ def test_signed_human_clear_records_who_why_and_is_idempotent(tmp_path):
     receipt={"body":body,"signature":sig};rp=tmp_path/"human-clear.json";rp.write_bytes(P.packed(receipt))
     cfg["human_clear_receipt_sha256"]=P.file_hash(rp)
     j=Journal(path,cfg,wall=clock.wall)
-    assert j.state["pmc"]["phase"]=="NEVER_STARTED"
+    assert j.state["pmc"]["phase"]=="NEVER_STARTED" and j.just_cleared
+    recovery,launches=controller((clock,cfg,path,j));recovery.tick();assert not launches
     assert j.last["reason"]=="HUMAN_CLEAR" and j.last["human"]["who"]=="Human operator"
     # Recovery evidence remains replay-valid after subsequent transitions.
     j.latch("pmc","SUPERVISOR_SHUTDOWN");after=path.read_bytes();j.close()
@@ -419,3 +420,16 @@ def test_external_state_mutation_blocks_before_next_spawn(setup):
     s,launched=controller(setup)
     with pytest.raises(P.Hold,match="DURABILITY_FAILURE"):s.start("pmc")
     assert not launched and journal.broken
+
+
+def test_old_generation_health_cannot_ready_replacement(setup):
+    clock,_,_,journal=setup;s,_=controller(setup);s.start("pmc");s.start("analyzer_viewer")
+    s.sample_mono=clock.m
+    s.collector_sample={"status":"GREEN","runtime":{"run_start_ns":int((clock.t-100)*1e9)}}
+    s.viewer_sample={"ready":True,"expected_pid":111}
+    assert not s.ready("pmc") and not s.ready("analyzer_viewer")
+    s.collector_sample["runtime"]["run_start_ns"]=int(clock.t*1e9)
+    s.viewer_sample["expected_pid"]=s.processes["analyzer_viewer"].identity["pid"]
+    assert s.ready("pmc") and s.ready("analyzer_viewer")
+    s.sample_mono=clock.m-1
+    assert not s.ready("pmc") and not s.ready("analyzer_viewer")

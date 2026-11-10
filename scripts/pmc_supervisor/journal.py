@@ -90,6 +90,7 @@ class Journal:
             raise Hold("UNCERTAIN_PREVIOUS_RUN")
         previous, last_wall = "0" * 64, None
         self.applied_receipts = set()
+        self.just_cleared = False
         last = None
         with self.path.open("rb") as f:
             for seq, line in enumerate(f):
@@ -225,6 +226,7 @@ class Journal:
         self.write(role, "HUMAN_CLEAR", state, human={"who": body["who"], "why": body["why"],
                    "remediation": body["remediation"], "receipt_sha256": receipt_pin, "receipt": receipt}, terminal=True)
         self.applied_receipts.add(receipt_pin)
+        self.just_cleared = True
 
     def close(self):
         if self.fd is not None:

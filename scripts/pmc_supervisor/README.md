@@ -98,6 +98,8 @@ exact receipt fields. Validation appends `HUMAN_CLEAR`, preserving who/why,
 remediation, original signature and old latch evidence; replay verifies signatures
 and cannot reuse a clear for a later latch. A new authorized invocation is a
 distinct operation. PMC's own refusal/latch/vocabulary gates remain independent.
+**The clear invocation returns HOLD without starting either role.** A later
+authorized start is a separate invocation/card, not an automatic clear-and-run.
 If no human public key was provisioned at genesis, this clear mechanism remains
 unavailable; do not create a new genesis to evade it. Key rotation/archival needs
 its own future approved migration, not this PR.
@@ -120,7 +122,9 @@ is not coverage proof. No first verified snapshot => UNKNOWN. No gap fill.
 
 Viewer probe is only `127.0.0.1:9001/api/health` (one-second timeout, 64 KiB cap,
 no redirects/proxy); PID/roots/report-current/readiness are checked separately
-from liveness. Startup grace is at most 120s. A bad probe or stale report never
+from liveness. Cached readiness is bound to the new owned PID and sample time;
+PMC requires a runtime receipt from the current launch, not a prior live-looking
+file. Startup grace is at most 120s. A bad probe or stale report never
 kills/relaunches a live viewer. Any observed Fly-linked error/timeout persists
 **FLY_SIDE_PATH_FAILURE / HOLD** even if rc=1. **No viewer UI change** is made.
 Unchanged full-browser `/api/system-health` Fly side paths remain a separate HOLD;

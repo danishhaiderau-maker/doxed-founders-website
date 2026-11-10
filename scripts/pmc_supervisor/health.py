@@ -32,7 +32,7 @@ def reserve_port(port):
 
 def probe_viewer(expected_pid):
     result = {"alive": False, "ready": False, "owner_pid_match": False, "roots_match": False,
-              "report_current": False, "reason": "NOT_READY", "fly_failure": False}
+              "report_current": False, "reason": "NOT_READY", "fly_failure": False, "expected_pid": expected_pid}
     conn = http.client.HTTPConnection("127.0.0.1", 9001, timeout=1.0)
     try:
         conn.request("GET", "/api/health", headers={"Host": "127.0.0.1:9001", "Connection": "close"})
@@ -177,7 +177,7 @@ class CollectorSample:
             row = runtime["last"]
             result["runtime_status"] = runtime["status"]
             if row and row.get("schema_v") == "pmc_runtime_v1":
-                result["runtime"] = {k: row.get(k) for k in ("utc_ns", "book_valid", "received_count", "durable_count", "gaps", "checksum_faults")}
+                result["runtime"] = {k: row.get(k) for k in ("utc_ns", "run_start_ns", "book_valid", "received_count", "durable_count", "gaps", "checksum_faults")}
                 # Strict types: arbitrary payloads never enter cached health.
                 if (type(row.get("utc_ns")) is not int or type(row.get("book_valid")) is not bool or
                     any(type(row.get(k)) is not int for k in ("received_count", "durable_count", "gaps", "checksum_faults"))):

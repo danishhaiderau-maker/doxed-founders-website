@@ -28,6 +28,7 @@ class Supervisor:
         self.stop_event = threading.Event()
         self.failure = None
         self.ownership = {}
+        self.pending_wall = {}
 
     def transition(self, role, reason, **changes):
         state = copy.deepcopy(self.journal.state)
@@ -39,6 +40,8 @@ class Supervisor:
 
     def start(self, role, restart=False):
         row = self.journal.state[role]
+        if self.journal.just_cleared:
+            return  # clear and start are distinct authorized operations/invocations
         if row["phase"] == "LATCHED":
             return
         now = self.wall()
@@ -68,6 +71,7 @@ class Supervisor:
         # Reservation and pending intent are one durable record BEFORE process creation.
         self.transition(role, "START_PENDING", phase="START_PENDING", reservations=reservations,
                         attempt=row["attempt"] + (1 if restart else 0), deadline=None, identity=None)
+        self.pending_wall[role] = now
         try:
             proc = self.spawn(role)
             self.processes[role] = proc
@@ -108,6 +112,15 @@ class Supervisor:
             self.transition(role, "BACKOFF", phase="BACKOFF", deadline=now + delay)
             self.deadlines[role] = self.mono() + delay
 
+    def ready(self, role):
+        if role not in self.processes or self.sample_mono is None or self.sample_mono < self.started.get(role, float("inf")):
+            return False
+        if role == "analyzer_viewer":
+            return bool(self.viewer_sample.get("ready") and self.viewer_sample.get("expected_pid") == self.processes[role].identity["pid"])
+        receipt = self.collector_sample.get("runtime") or {}
+        start = receipt.get("run_start_ns")
+        return bool(self.collector_sample.get("status") == "GREEN" and type(start) is int and start / 1e9 >= self.pending_wall.get(role, float("inf")))
+
     def tick(self):
         now, mono = self.wall(), self.mono()
         if now < self.journal.last["wall"]:
@@ -135,12 +148,12 @@ class Supervisor:
                     self.healthy_since.pop(role, None)
                     continue
                 if (role == "analyzer_viewer" and self.journal.state[role]["phase"] == "RUNNING"
-                        and mono - self.started[role] >= 120 and not self.viewer_sample.get("ready")):
+                        and mono - self.started[role] >= 120 and not self.ready(role)):
                     self.latch(role, "STARTUP_NOT_READY")  # do not stop/relaunch the still-live viewer
                 if self.viewer_sample.get("fly_failure") and role == "analyzer_viewer":
                     self.latch(role, "FLY_SIDE_PATH_FAILURE")
                 fresh = self.sample_mono is not None and 0 <= mono - self.sample_mono <= 30
-                good = (self.viewer_sample.get("ready") is True if role == "analyzer_viewer" else self.collector_sample.get("status") == "GREEN")
+                good = self.ready(role)
                 if fresh and good and self.journal.state[role]["phase"] == "RUNNING":
                     since = self.healthy_since.setdefault(role, mono)
                     if mono - since >= 1800 and self.journal.state[role]["attempt"] > 0:
@@ -175,7 +188,7 @@ class Supervisor:
             row["owned"] = role in self.processes and self.ownership.get(role, False)
             row["restart_window_count"] = sum(t > self.wall() - 1800 for t in row["reservations"])
             row["restart_budget"] = 3
-            row["ready"] = (self.viewer_sample.get("ready", False) if role == "analyzer_viewer" else self.collector_sample.get("status") == "GREEN")
+            row["ready"] = self.ready(role)
             roles[role] = row
         latched = any(row["phase"] == "LATCHED" for row in roles.values())
         ready = all(row["phase"] == "RUNNING" and row["ready"] for row in roles.values())
@@ -261,6 +274,8 @@ def run(config_path):
             if P.file_hash(card) != cfg["disk_floor_card_sha256"]:
                 raise P.Hold("IDENTITY_MISMATCH")
         journal = Journal(Path(P.STATE) / "supervisor-state.jsonl", cfg)
+        if journal.just_cleared:
+            return 78  # durable HUMAN_CLEAR only; no start in the recovery invocation
         viewer_port = None
         # Occupancy is a per-role preflight refusal; health remains up for latches.
         def preflight(role):
