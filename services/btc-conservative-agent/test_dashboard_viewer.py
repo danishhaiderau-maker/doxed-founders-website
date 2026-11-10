@@ -361,3 +361,54 @@ def test_display_allowlist_drops_nonfinite_or_invalid_trade_counts(data_root, va
     path.write_text(json.dumps(data))
     lane = next(row for row in viewer.read_snapshot(data_root)["pathway_lane_specs"]["lanes"] if row["lane"] == LANE)
     assert "session_stats" not in lane
+
+
+# HM N2: numeric evidence must remain finite/precise through Python and JS JSON.
+@pytest.mark.parametrize("field", ["net_pnl_real", "per_approve_ev"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 10**400, -(10**400), True],
+    ids=["nan", "infinity", "negative-infinity", "oversized-int", "oversized-negative-int", "bool"])
+def test_n2_invalid_pnl_values_never_cause_500_or_nonfinite_json(data_root, field, value):
+    path = data_root / "debug_state_snapshot.json"
+    data = json.loads(path.read_text())
+    data["pathway_lane_specs"]["lanes"][0]["session_stats"][field] = value
+    path.write_text(json.dumps(data))
+    with app_for(data_root).test_client() as client:
+        response = client.get("/api/state", base_url=BASE)
+        assert response.status_code == 200
+        output = response.get_json()
+        # Strict serialization proves every returned scalar is JSON-finite.
+        json.dumps(output, allow_nan=False)
+        lane = next(row for row in output["pathway_lane_specs"]["lanes"] if row["lane"] == LANE)
+        assert field not in lane.get("session_stats", {})
+        if field == "net_pnl_real":
+            assert "session_stats" not in lane
+
+
+@pytest.mark.parametrize("field", ["real_fills", "wins", "losses", "approves"])
+@pytest.mark.parametrize("value", [-1, 1.5, True, float("nan"), float("inf"), 10**400, 2**53],
+    ids=["negative", "fractional", "bool", "nan", "infinity", "oversized-int", "unsafe-int"])
+def test_n2_invalid_counts_cannot_be_reported_as_exact_evidence(data_root, field, value):
+    path = data_root / "debug_state_snapshot.json"
+    data = json.loads(path.read_text())
+    data["pathway_lane_specs"]["lanes"][0]["session_stats"][field] = value
+    path.write_text(json.dumps(data))
+    with app_for(data_root).test_client() as client:
+        response = client.get("/api/state", base_url=BASE)
+        assert response.status_code == 200
+        lane = next(row for row in response.get_json()["pathway_lane_specs"]["lanes"] if row["lane"] == LANE)
+        assert "session_stats" not in lane
+
+
+def test_n2_valid_negative_pnl_and_max_safe_count_preserve_evidence(data_root):
+    path = data_root / "debug_state_snapshot.json"
+    data = json.loads(path.read_text())
+    data["pathway_lane_specs"]["lanes"][0]["session_stats"].update(
+        {"real_fills": 2**53 - 1, "net_pnl_real": -12.5, "per_approve_ev": -3.125})
+    path.write_text(json.dumps(data))
+    with app_for(data_root).test_client() as client:
+        response = client.get("/api/state", base_url=BASE)
+        assert response.status_code == 200
+        lane = next(row for row in response.get_json()["pathway_lane_specs"]["lanes"] if row["lane"] == LANE)
+        assert lane["session_stats"]["real_fills"] == 2**53 - 1
+        assert lane["session_stats"]["net_pnl_real"] == -12.5
+        assert lane["session_stats"]["per_approve_ev"] == -3.125

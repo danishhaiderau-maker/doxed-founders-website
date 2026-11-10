@@ -24,6 +24,7 @@ from combo_pathway_config import ACTIVE_TILE_REGISTRY, ACTIVE_TILE_ORDER, tile_c
 SERVICE = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_SAFE_COUNT = (1 << 53) - 1  # Exact integer evidence in the browser JSON consumer.
 ARM_FILE = "live_copy_output_state.json"
 ARM_SCHEMA = "fly_live_copy_output_v1"  # Data contract only; never import live_copy_control.
 READ_FILES = ("debug_state_snapshot.json", "pathway_lane_specs.json", "paper_lifecycle_v1.json", ARM_FILE)
@@ -155,9 +156,15 @@ def _display_projection(value, schema):
     if schema is bool:
         return value if type(value) is bool else None
     if schema is int:
-        return value if type(value) is int and value >= 0 else None
+        return value if type(value) is int and 0 <= value <= MAX_SAFE_COUNT else None
     if schema is float:
-        return value if type(value) in (int, float) and math.isfinite(value) else None
+        if type(value) not in (int, float):
+            return None
+        try:
+            return value if math.isfinite(value) else None
+        except OverflowError:
+            # JSON integers can exceed float range; never crash or emit Infinity.
+            return None
     if isinstance(schema, dict) and isinstance(value, dict):
         result = {}
         for key, child_schema in schema.items():

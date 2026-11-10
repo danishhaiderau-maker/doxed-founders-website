@@ -43,7 +43,9 @@ by direct HTTP. Saved lane output uses an explicit, recursively typed allowlist 
 and statistics; unknown fields at every nesting depth are dropped, not
 secret-name-blacklisted. Evidence strings are escaped before the legacy
 innerHTML renderer. Counts must be nonnegative integers and numeric statistics
-finite; incomplete valid statistics remain unavailable.
+finite; counts above JavaScript's exact integer limit (2^53 - 1) are unavailable,
+not rounded. Oversized integer PnL values are rejected without a server error.
+Incomplete valid statistics remain unavailable.
 
 ## Proposed laptop command — NOT EXECUTED
 
@@ -160,3 +162,29 @@ required in unit-tests. The single Chromium test uses `pytest.importorskip` only
 when its optional Playwright package is absent; the package is not added to
 trading/runtime dependencies. Locally Playwright WAS installed and that browser
 test ran and passed (288 passed, zero skips). No workflow or known-red list changes.
+
+
+### Coder follow-up — HM N2 / rules 6df325522b68
+
+The interrupted fix rejected float NaN/Infinity but `math.isfinite` raised
+`OverflowError` on syntactically valid JSON integers outside float range. Such
+PnL now becomes unavailable instead of breaking startup/state refresh. Counts
+are restricted to nonnegative browser-safe integers (0 through 2^53 - 1), so
+Python cannot report an exact count that JavaScript silently rounds or overflows.
+Negative finite PnL remains valid; no PnL is recalculated. Regression cases cover
+all mandatory count fields, required/optional PnL, booleans, fractions, negative
+counts, nonfinite numbers, oversized integers and the safe-count boundary.
+
+HM N1 still requires an approved root protected from concurrent untrusted
+writers; no filesystem/security changes are authorized by this PR. HM N3
+Windows interrupt, sharing, junction and bind ownership remain NOT TESTED.
+HM N4 integrated-revision deployment and HM N5 producer/liveness are separate
+gates, not claims established by these fixture tests. Live OFF; no laptop action.
+
+Follow-up Linux fixture evidence: 329 passed (292 viewer, 37 presentation/CI
+inventory), zero skips. The 41 added numeric cases first produced 12 failures
+and 29 passes against f5f1499c, then all passed with the fix. A broader 35-file
+dashboard/tile suite produced 167 passed, 4 failed, 1 skipped; the identical
+4 failures and skip reproduce on untouched master 08c2b3762cc1. All four
+failures are in `test_dashboard_v31_truthfulness.py`; the skip is the existing
+script-style timestamp-suite collection guard. No known-red/skip list was changed.
