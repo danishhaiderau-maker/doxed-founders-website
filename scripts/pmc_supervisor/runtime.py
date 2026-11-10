@@ -66,12 +66,25 @@ class Supervisor:
         except Exception:
             self.latch(role, "PREFLIGHT_REFUSED")
             return
+        # Preflight can be slow. Count at the durable reservation time, not the
+        # earlier hash/disk check time; otherwise slow preflights free budget early.
+        reserved_at = self.wall()
+        if reserved_at < now or reserved_at < self.journal.last["wall"]:
+            self.latch(role, "CLOCK_UNCERTAIN")
+            return
+        reservations = [t for t in row["reservations"] if t > reserved_at - 1800]
+        if any(t > reserved_at for t in reservations):
+            self.latch(role, "CLOCK_UNCERTAIN")
+            return
+        if restart and len(reservations) >= 3:
+            self.latch(role, "RESTART_BUDGET_EXHAUSTED")
+            return
         if restart:
-            reservations.append(now)
+            reservations.append(reserved_at)
         # Reservation and pending intent are one durable record BEFORE process creation.
         self.transition(role, "START_PENDING", phase="START_PENDING", reservations=reservations,
                         attempt=row["attempt"] + (1 if restart else 0), deadline=None, identity=None)
-        self.pending_wall[role] = now
+        self.pending_wall[role] = reserved_at
         try:
             proc = self.spawn(role)
             self.processes[role] = proc

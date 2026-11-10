@@ -433,3 +433,12 @@ def test_old_generation_health_cannot_ready_replacement(setup):
     assert s.ready("pmc") and s.ready("analyzer_viewer")
     s.sample_mono=clock.m-1
     assert not s.ready("pmc") and not s.ready("analyzer_viewer")
+
+
+def test_slow_preflight_reservation_uses_actual_durable_time(setup):
+    clock,_,_,journal=setup
+    start=clock.t
+    s,_=controller(setup,preflight=lambda role:clock.advance(120))
+    s.start("pmc",restart=True)
+    assert journal.state["pmc"]["reservations"]==[start+120]
+    assert s.pending_wall["pmc"]==start+120
