@@ -228,7 +228,8 @@ def execute_daily(root: str, *, repo_root=None, stop_event=None, runner=None,
             if runner is not None:
                 return int(runner(path, event))
             return run_daily(path, repo_root=repo_root, stop=event.is_set, sleep=event.wait)
-        except StartRefused:
+        except StartRefused as exc:
+            sys.stderr.write(f"REFUSED daily: {exc.reason}\n")
             return 78
         except (CaptureStopped, OSError):
             return 75
