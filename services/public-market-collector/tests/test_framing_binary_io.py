@@ -84,7 +84,14 @@ class FramingBinaryIOTests(unittest.TestCase):
         }
         with patch.object(session_mod, "record_line", return_value=self.payload):
             journal_path = session_mod.append_startup_gap(root, segment, report)
-        self.assertEqual(journal_path, root / "index.journal")
+        expected = root / "index.journal"
+        # append_startup_gap resolves the root; Windows TemporaryDirectory may
+        # be an 8.3 short path (e.g. RUNNER~1) while resolve() is the long form.
+        self.assertEqual(
+            os.path.normcase(os.path.realpath(journal_path)),
+            os.path.normcase(os.path.realpath(expected)),
+        )
+        self.assertTrue(os.path.samefile(journal_path, expected))
         self.assertEqual(os.path.getsize(journal_path), 256)
         stored = journal_path.read_bytes()
         self.assertEqual(len(stored), 256)
@@ -97,23 +104,40 @@ class FramingBinaryIOTests(unittest.TestCase):
         path = self.base / "runtime.lock"
         first = RuntimeLock(path)
         try:
+            size_after_first = os.path.getsize(path)
             if os.name == "nt":
-                self.assertEqual(os.path.getsize(path), 1)
-                self.assertEqual(path.read_bytes(), b"\0")
+                self.assertEqual(size_after_first, 1)
+                # Windows mandatory byte-range lock: another handle cannot
+                # read the locked region until it is released.
+                with self.assertRaises(PermissionError):
+                    path.read_bytes()
             else:
                 # POSIX flock path does not write the Windows lock byte.
-                self.assertEqual(os.path.getsize(path), 0)
-            size_after_first = os.path.getsize(path)
+                self.assertEqual(size_after_first, 0)
         finally:
             first.close()
+        # Exact contents are checked only after the lock is released.
+        if os.name == "nt":
+            self.assertEqual(os.path.getsize(path), 1)
+            self.assertEqual(path.read_bytes(), b"\0")
+        else:
+            self.assertEqual(os.path.getsize(path), 0)
+            self.assertEqual(path.read_bytes(), b"")
         second = RuntimeLock(path)
         try:
             self.assertEqual(os.path.getsize(path), size_after_first)
             if os.name == "nt":
                 self.assertEqual(os.path.getsize(path), 1)
-                self.assertEqual(path.read_bytes(), b"\0")
+                with self.assertRaises(PermissionError):
+                    path.read_bytes()
         finally:
             second.close()
+        if os.name == "nt":
+            self.assertEqual(os.path.getsize(path), 1)
+            self.assertEqual(path.read_bytes(), b"\0")
+        else:
+            self.assertEqual(os.path.getsize(path), 0)
+            self.assertEqual(path.read_bytes(), b"")
 
 
 if __name__ == "__main__":
