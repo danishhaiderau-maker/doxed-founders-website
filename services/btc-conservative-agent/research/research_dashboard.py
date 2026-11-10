@@ -10164,7 +10164,7 @@ def _data_health_page_uncached():
     # This health page is offline: keep the separate self-aware endpoint/link,
     # but never wait for or initiate a network probe while rendering it.
     offline = _self_aware_section({"status": "UNAVAILABLE", "data": None,
-        "view": "/api/streams/self-aware-data", "reason": "NOT CHECKED: offline Data Health view"})
+        "view": f"{SELF_AWARE_URL}/data", "reason": "NOT CHECKED: offline Data Health view"})
     page = page.replace("</body></html>", compat + offline + "</body></html>", 1)
     return page
 
@@ -10192,7 +10192,10 @@ def data_health_page():
     meta = result["cache"]
     # Timeout/error never serves a last-good page as current health. Report an
     # honest partial result, retaining only the dated cache metadata.
-    if meta["partial"]:
+    if meta["partial"] or result["value"] is None:
+        if result["value"] is None and not meta["partial"]:
+            meta = {**meta, "status": "ERROR", "partial": True,
+                    "reason": meta.get("reason") or "fresh result missing value"}
         page = ("<!doctype html><html><head><title>Data Health — partial</title></head><body>"
                 "<h1>Data Health</h1><p>Live OFF · read-only</p>"
                 f"<p>PARTIAL / {escape(meta['status'])}: health data UNKNOWN. "

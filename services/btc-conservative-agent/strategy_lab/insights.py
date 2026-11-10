@@ -584,9 +584,10 @@ ARCHIVE_DEADLINE_SEC = 2.0
 
 def archive_component(now: float, days: int = 30, *, root: str | None = None,
                       timeout: float = ARCHIVE_DEADLINE_SEC) -> dict:
-    # Do not stat/resolve/import the archive client on the request thread:
-    # even these can block on an unavailable disk/share. The loader does I/O.
-    root = root or os.environ.get("DOXXED_ANALYSIS_ARCHIVE_DIR") or r"C:\DoxxedCrypto\analysis-archive"
+    # Default root follows the client's DEFAULT_ARCHIVE so patches and standalone
+    # copies stay in contract. This is a module-level string, not archive I/O;
+    # load_archive still runs only in the worker.
+    root = root or _load_client().DEFAULT_ARCHIVE
     days = int(days)
     if not 1 <= days <= 3660:
         raise ValueError("archive window days out of range")
@@ -596,10 +597,13 @@ def archive_component(now: float, days: int = 30, *, root: str | None = None,
     result = _ARCHIVE_REFRESH.get(key, lambda: _archive_component_uncached(now, days, root=root),
                                   timeout=min(max(float(timeout), 0.0), ARCHIVE_DEADLINE_SEC))
     cache, value = result["cache"], result["value"]
-    if cache["partial"]:
+    if cache["partial"] or value is None:
         # Preserve the insights refusal contract: old/unchecked data is not current data.
-        return {**_component(UNAVAILABLE, now=now, source=root, reason=cache["reason"]),
-                "refresh_status": cache["status"], "cache": cache, "partial": True}
+        # Never treat a FRESH/CACHED reply with a missing value as a usable component.
+        reason = cache["reason"] or "refresh returned no value"
+        status = cache["status"] if cache["partial"] else "ERROR"
+        return {**_component(UNAVAILABLE, now=now, source=root, reason=reason),
+                "refresh_status": status, "cache": cache, "partial": True}
     value = dict(value)
     as_of = _ts(value.get("as_of"))
     value["age_sec"] = round(now-as_of, 1) if as_of is not None else None

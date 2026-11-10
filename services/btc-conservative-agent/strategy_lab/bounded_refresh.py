@@ -20,8 +20,14 @@ class BoundedRefresh:
         self._good = None
         self._failure = None
 
-    def _reply(self, key, status, reason=None):
-        good = self._good if self._good is not None and self._good[0] == key else None
+    def _reply(self, key, status, reason=None, *, bound=None):
+        # Last-good of this key, unless a flight-bound result is supplied.
+        # FRESH is only honest when bound to this key's own completed result.
+        good = bound if bound is not None else (
+            self._good if self._good is not None and self._good[0] == key else None
+        )
+        if status == "FRESH" and (good is None or good[0] != key):
+            status, reason, good = "ERROR", reason or "fresh result missing matching identity", None
         age = max(0.0, self.clock()-good[1]) if good else None
         return {"value": good[3] if good else None, "cache": {
             "status": status, "partial": status not in ("FRESH", "CACHED"),
@@ -45,9 +51,18 @@ class BoundedRefresh:
             if self._failure and self._failure[0] == key and self.clock() < self._failure[1]:
                 return self._reply(key, "ERROR", self._failure[2])
             if self._flight is None:
-                flight = {"key": key, "event": threading.Event(), "error": None}
-                self._flight = flight
-                threading.Thread(target=self._run, args=(flight, loader), name="bounded-read-refresh", daemon=True).start()
+                flight = {"key": key, "event": threading.Event(), "error": None, "result": None}
+                try:
+                    thread = threading.Thread(target=self._run, args=(flight, loader),
+                                              name="bounded-read-refresh", daemon=True)
+                    self._flight = flight
+                    thread.start()
+                except Exception:
+                    # Unstarted flights must not occupy the slot. Re-raise so the
+                    # caller sees the start error; later calls can start a worker.
+                    if self._flight is flight:
+                        self._flight = None
+                    raise
             else:
                 flight = self._flight
                 if flight["key"] != key:
@@ -62,7 +77,12 @@ class BoundedRefresh:
         try:
             if not finished:
                 return self._reply(key, "TIMEOUT", "refresh deadline; single worker retained, no replacement spawned")
-            return self._reply(key, "ERROR" if flight["error"] else "FRESH", flight["error"])
+            if flight["error"]:
+                return self._reply(key, "ERROR", flight["error"])
+            bound = flight.get("result")
+            if bound is None or bound[0] != key:
+                return self._reply(key, "ERROR", "refresh result identity superseded")
+            return self._reply(key, "FRESH", bound=bound)
         finally:
             self._lock.release()
 
@@ -75,7 +95,9 @@ class BoundedRefresh:
         finally:
             with self._lock:
                 if error is None:
-                    self._good = (flight["key"], self.clock(), self.wall(), value)
+                    result = (flight["key"], self.clock(), self.wall(), value)
+                    flight["result"] = result
+                    self._good = result
                     self._failure = None
                 else:
                     self._failure = (flight["key"], self.clock()+self.retry, error)
