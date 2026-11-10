@@ -47,3 +47,6 @@ jobs:
         run: >-
           python -B -m pytest services/public-market-collector/tests/test_daily_followup.py
           services/public-market-collector/tests/test_windows_priority.py -q -p no:cacheprovider
+      - name: Diagnose existing collector descriptor on Windows failure (not a waiver)
+        if: failure()
+        run: python -B scripts/pmc_supervisor_tests/diagnose_windows_collector_io.py

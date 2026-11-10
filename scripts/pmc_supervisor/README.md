@@ -175,3 +175,14 @@ The required separate physical/session/Task prototype card remains outstanding.
 
 Keep this PR DRAFT. HM/RK source/prototype review, exact-head CI, merge,
 installation, first-run and recovery gates are separate. Live stays OFF.
+
+### Observed Windows CI integration HOLD (10 Nov 2026)
+
+At head `9780e5518`, the exact-head real Windows supervisor suite passed all
+119 tests. The subsequent unchanged collector injected-transport/PR999 step
+failed five durable-record assertions (29 passed, 3 subtests passed). This is
+NOT waived or xfailed. A CI-only synthetic-byte descriptor diagnostic is added
+to distinguish existing collector binary/text I/O behavior without changing the
+producer. Production collector fixes, if required, need their own reviewed scope;
+this supervisor PR does not patch the collector, bypass checks or claim Windows
+capture is operational. The Windows integration job remains acceptance-critical.
