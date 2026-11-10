@@ -11,9 +11,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Assert exact checked-out PR head
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python -c "import os,subprocess; actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(); assert actual==os.environ['EXPECTED_SHA']; print('checked_out_head='+actual)"
       - run: python -m pip install pytest tzdata cryptography
       - name: Deterministic supervisor and prototype mutation inventory
         run: python -B -m pytest scripts/pmc_supervisor_tests -q -p no:cacheprovider
@@ -22,10 +29,17 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           architecture: x64
+      - name: Assert exact checked-out PR head
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python -c "import os,subprocess; actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(); assert actual==os.environ['EXPECTED_SHA']; print('checked_out_head='+actual)"
       - run: python -m pip install pytest tzdata cryptography pyarrow
       - name: Real Windows Jobs, handles, declared-prototype mutations, Python311 and Arrow
         run: python -B -m pytest scripts/pmc_supervisor_tests -q -p no:cacheprovider
