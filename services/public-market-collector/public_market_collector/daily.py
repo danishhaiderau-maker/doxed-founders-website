@@ -63,7 +63,7 @@ class RuntimeLock:
     Windows uses a nonblocking byte lock; POSIX uses flock.
     """
     def __init__(self, path: Path):
-        self.fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND, 0o600)
+        self.fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
         self.windows = os.name == "nt"
         try:
             if self.windows:

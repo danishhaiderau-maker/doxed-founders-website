@@ -10277,18 +10277,62 @@ def archive_history_page():
     return resp
 
 
-@app.route("/data-health")
-def data_health_page():
+def _data_health_page_uncached():
     report, study, evidence = _data_health_payload()
     archive, _long_horizon = _archive_payload()
     page = _data_health_view.render_data_health_html(
         report, study, evidence=evidence, nav_links=DECISION_NAV_LINKS)
+    from html import escape
     compat = ("<h2>Archive schema compatibility</h2>"
-              f"<p class='sub'>Archive {archive.get('status')}; details on <a href='/history'>History &amp; "
-              "retention</a>.</p>" + _archive_history_view.compat_section(archive.get("data")))
-    page = page.replace("</body></html>", compat + _self_aware_section(_self_aware_data()) + "</body></html>", 1)
-    resp = make_response(page)
+              f"<p class='sub'>Archive {archive.get('status')} / {archive.get('refresh_status', 'UNKNOWN')}; details on <a href='/history'>History &amp; "
+              "retention</a>.</p>" + "<pre>" + escape(json.dumps(archive.get("cache"))) + "</pre>" + _archive_history_view.compat_section(archive.get("data")))
+    # This health page is offline: keep the separate self-aware endpoint/link,
+    # but never wait for or initiate a network probe while rendering it.
+    offline = _self_aware_section({"status": "UNAVAILABLE", "data": None,
+        "view": f"{SELF_AWARE_URL}/data", "reason": "NOT CHECKED: offline Data Health view"})
+    page = page.replace("</body></html>", compat + offline + "</body></html>", 1)
+    return page
+
+
+# Whole-page I/O is in one bounded refresh: report files, archive hashes and the
+# optional self-aware request cannot extend the HTTP caller beyond this wait.
+from strategy_lab.bounded_refresh import BoundedRefresh as _BoundedRefresh
+_DATA_HEALTH_REFRESH = _BoundedRefresh(ttl=30.0, retry=5.0)
+DATA_HEALTH_DEADLINE_SEC = 2.5
+
+
+def _data_health_cache_key():
+    # Pure string inputs only, no unbounded disk stat / generation-token reads.
+    day = datetime.now(timezone.utc).date().isoformat()
+    return (str(ROOT), str(DATA_ROOT), str(HISTORY_ROOT), str(SEGMENT_SHADOW_ROOT),
+            str(LAPTOP_CHAIN_STATE_DIR), SELF_AWARE_URL, day, 30, True,
+            os.environ.get("DOXXED_ANALYSIS_ARCHIVE_DIR"), os.environ.get("DOXXED_BOT_DATA_RETENTION_DIR"))
+
+
+@app.route("/data-health")
+def data_health_page():
+    from html import escape
+    result = _DATA_HEALTH_REFRESH.get(_data_health_cache_key(), _data_health_page_uncached,
+                                      timeout=DATA_HEALTH_DEADLINE_SEC)
+    meta = result["cache"]
+    # Timeout/error never serves a last-good page as current health. Report an
+    # honest partial result, retaining only the dated cache metadata.
+    if meta["partial"] or result["value"] is None:
+        if result["value"] is None and not meta["partial"]:
+            meta = {**meta, "status": "ERROR", "partial": True,
+                    "reason": meta.get("reason") or "fresh result missing value"}
+        page = ("<!doctype html><html><head><title>Data Health — partial</title></head><body>"
+                "<h1>Data Health</h1><p>Live OFF · read-only</p>"
+                f"<p>PARTIAL / {escape(meta['status'])}: health data UNKNOWN. "
+                f"{escape(str(meta['reason']))}</p><a href='/details'>Details</a></body></html>")
+    else:
+        page = result["value"]
+    notice = ("<section id='data-health-refresh'><h2>Read cache / deadline</h2><pre>"
+              + escape(json.dumps(meta, sort_keys=True))+"</pre></section>")
+    page = page.replace("</body>", notice+"</body>", 1)
+    resp = make_response(page, 503 if meta["partial"] else 200)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["X-Data-Health-Refresh"] = meta["status"]
     return resp
 
 
