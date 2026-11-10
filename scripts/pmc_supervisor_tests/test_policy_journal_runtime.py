@@ -410,3 +410,12 @@ def test_signed_human_clear_records_who_why_and_is_idempotent(tmp_path):
     fresh.close()
     # A different signing key cannot be installed via ordinary config drift.
     with pytest.raises(P.Hold):Journal(path,{**cfg,"human_clear_public_key_sha256":"f"*64},wall=clock.wall)
+
+
+def test_external_state_mutation_blocks_before_next_spawn(setup):
+    clock,cfg,path,journal=setup
+    # Another writer ignoring our OS lock cannot silently splice a new decision.
+    with path.open("ab") as f:f.write(b"foreign mutation\n")
+    s,launched=controller(setup)
+    with pytest.raises(P.Hold,match="DURABILITY_FAILURE"):s.start("pmc")
+    assert not launched and journal.broken

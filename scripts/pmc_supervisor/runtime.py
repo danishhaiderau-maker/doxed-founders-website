@@ -154,10 +154,10 @@ class Supervisor:
                         # RK bb1b36ebe306: default DISABLED; enabling needs a separate card.
                         if self.journal.cfg.get("disk_floor_terminate_enabled", False) and role not in self.disk_stops:
                             proc.graceful_stop()
-                            self.disk_stops[role] = mono
-                    if role in self.disk_stops and mono - self.disk_stops[role] >= 10:
+                            self.disk_stops[role] = {"requested": mono, "terminated": False}
+                    if role in self.disk_stops and not self.disk_stops[role]["terminated"] and mono - self.disk_stops[role]["requested"] >= 10:
                         proc.terminate()  # actual exit is subsequently observed, never forged as 75
-                        del self.disk_stops[role]
+                        self.disk_stops[role]["terminated"] = True
                 continue
             row = self.journal.state[role]
             if row["phase"] == "NEVER_STARTED":

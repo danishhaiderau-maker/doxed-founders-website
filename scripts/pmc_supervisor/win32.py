@@ -255,6 +255,14 @@ class OwnedProcess:
             api.close(self.thread)
             self.thread = None
         except BaseException:
+            # A failed membership/priority proof must not strand a suspended
+            # child. hProcess came directly from OUR CreateProcessW; never open
+            # a PID/name/port here or adopt a preexisting owner.
+            if self.process:
+                ok = api.call("TerminateProcess", self.process, 0xE0000002)
+                if not ok:
+                    api.last_error = C.get_last_error()
+                api.call("WaitForSingleObject", self.process, 1000)
             self.close()  # closes only our Job/handles, never by name/port/PID
             raise
         finally:

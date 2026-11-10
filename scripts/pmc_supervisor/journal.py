@@ -82,6 +82,7 @@ class Journal:
         self.run_id = uuid.uuid4().hex
         self.fd = None
         self.broken = False
+        self.expected_size = None
         self.config_hash, self.code_hash = config_identity(cfg), cfg["implementation_sha256"]
         no_reparse(self.path)
         size = self.path.stat().st_size
@@ -130,6 +131,11 @@ class Journal:
             raise Hold("UNCERTAIN_PREVIOUS_RUN")
         self.last, self.state = last, copy.deepcopy(last["state"])
         self.fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
+        self.expected_size = size
+        opened, named = os.fstat(self.fd), self.path.stat()
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (named.st_dev, named.st_ino, size):
+            self.close()
+            raise Hold("UNCERTAIN_PREVIOUS_RUN")
         try:
             if last["config_hash"] != self.config_hash or last["code_hash"] != self.code_hash:
                 # Only a pinned, independently signed human receipt can move identities.
@@ -152,6 +158,14 @@ class Journal:
     def write(self, role, reason, state=None, *, human=None, terminal=False):
         if self.broken or reason not in REASONS or self.wall() < self.last["wall"]:
             raise Hold("DURABILITY_FAILURE")
+        try:
+            no_reparse(self.path)
+            opened, named = os.fstat(self.fd), self.path.stat()
+            if (opened.st_dev, opened.st_ino, opened.st_size) != (named.st_dev, named.st_ino, self.expected_size):
+                raise OSError()
+        except (OSError, Hold):
+            self.broken = True
+            raise Hold("DURABILITY_FAILURE") from None
         row = envelope(self.last["seq"] + 1, self.last["hash"], self.run_id, role, reason,
                        self.wall(), self.config_hash, self.code_hash, self.state if state is None else state, human)
         validate_state(row["state"])
@@ -170,6 +184,7 @@ class Journal:
         except BaseException:
             self.broken = True
             raise Hold("DURABILITY_FAILURE") from None
+        self.expected_size += len(line)
         self.last, self.state = row, copy.deepcopy(row["state"])
         return row
 
