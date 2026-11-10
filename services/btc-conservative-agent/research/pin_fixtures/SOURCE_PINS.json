@@ -1,0 +1,40 @@
+{
+  "pin7": {
+    "source": "/workspace/grok-strategist/reports/PIN-CARD-P7-REGIME-CLASSIFIER-20261110-DRAFT.md.bak-3b5dba29fdff",
+    "sha256": "3b5dba29fdfffe916fef9d209c6095db5ca45fc1a998a9682ea6acc383584fc1"
+  },
+  "p8": {
+    "source": "/workspace/grok-strategist/reports/PIN-CARD-P8-K3-F274-FIXTURES-20261110-DRAFT.md.bak-ca77dbaeed9c",
+    "sha256": "ca77dbaeed9cf55ac1f14d6e4ecd525c21ccacc4987c64c112c7e1fb5f5d581a"
+  },
+  "ct": {
+    "source": "/workspace/boss-reviewed-cards/b2-cT-table-20261110.csv",
+    "sha256": "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0"
+  },
+  "rules": {
+    "source": "/workspace/rules-keeper/RULES-R0-R61-20261110.md",
+    "sha256": "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2"
+  },
+  "hm_manifest": {
+    "sha256": "a023c98ca3811dd07953d7bd869ec18a58c41628b27acf3b87b90c18228507db",
+    "source": "/workspace/boss-reviewed-cards/hm-p8-tapes-20261110/MANIFEST.sha256",
+    "all_source_entries_verified": true
+  },
+  "copied_files": {
+    "CONVENTIONS.json": "09b33598a6bd9b8a2e170b954a6d129fc96120bdba05827f48793b011d1898f2",
+    "MANIFEST.sha256": "a023c98ca3811dd07953d7bd869ec18a58c41628b27acf3b87b90c18228507db",
+    "PROTOCOL.md": "4f9273187b544f3c2f2f442e9c5b13239a1dbcfe43261a6b2f84a1c6a107d76a",
+    "TAPES.schema.json": "c938dc6230a506bcbd3f6b5dcafe40ac5d4fefd6af1cdec73f075d75b19b5a2c",
+    "field9.json": "39a9e5efe92e3cea97658ab445673cfc9928f8adda8fb2ec80c5afeaa97f1bd2",
+    "inputs/ct_compute_code.py": "73f6a1b27987fa754189cc5f865003df06658f0a9112b39ac57d1e8860ac0f3d",
+    "inputs/ct_table.csv": "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0",
+    "tapes/b3-source.csv": "008d6c2818dd6fef0a82b892d7bff1006a61aa099df5a311a4cebc3360590c02",
+    "tapes/b3.json": "2d812065eeccc4f46f7d005c13a5600f5945a120d1a5de54346c5b916b1314cf",
+    "tapes/classifier.json": "87eccba2cf67e7bb3f3e98414c6678a04d71c9cbef1ca726736a3d5769941c44",
+    "tapes/ct.json": "ce0275ceefb3d1d7960b9ad6a57da1adf83584d1616a5299296473b23bac6430",
+    "tapes/index.json": "951a155a6078b44c83a3ad742d9d85159c1860ab52f81ea2a47e17f32ffa516c",
+    "tapes/k3.json": "ca0067d7f656bb0c33b962bb8d4fa0723778bbf514ffd8e8993ef813b82a8505",
+    "tapes/pin15.json": "8ef6712bdd5d710b62d12d797afe5605520f4a4979b0da2bbb2b84a55f3f0ec3",
+    "tapes/pin16.json": "30fe2d42e5995545eca40104df33fb75c4784760dd7032ea974372cd0cb55504"
+  }
+}

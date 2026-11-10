@@ -1,0 +1,250 @@
+[
+  {
+    "id": "P16-POS-COST",
+    "operation": "dual",
+    "input": {
+      "i": 7.0,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "slippage_bp": 3,
+      "decision": "ELIGIBLE_UNIT_ONLY"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-ZERO-COST",
+    "operation": "dual",
+    "input": {
+      "i": 10,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "slippage_bp": 0
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-NEG-COST",
+    "operation": "dual",
+    "input": {
+      "i": 12,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "slippage_bp": -2,
+      "decision": "ELIGIBLE_UNIT_ONLY"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-II-CANNOT-RESCUE-LOSS",
+    "operation": "dual",
+    "input": {
+      "i": -1,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "decision": "FAIL",
+      "slippage_bp": 11
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-II-CANNOT-RESCUE-DD",
+    "operation": "dual",
+    "input": {
+      "i": 7.0,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": false,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "decision": "FAIL",
+      "risk_record": "i"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-II-CANNOT-RESCUE-K3",
+    "operation": "dual",
+    "input": {
+      "i": 7.0,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": true,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "decision": "FAIL"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-CONFIDENCE-FAIL",
+    "operation": "dual",
+    "input": {
+      "i": 7.0,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 0.001,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "decision": "FAIL",
+      "paper_confident": false
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-ZERO-I-FAIL",
+    "operation": "dual",
+    "input": {
+      "i": 0,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "decision": "FAIL"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-RATIO-EXACT-50",
+    "operation": "dual",
+    "input": {
+      "i": 7.0,
+      "ii": 10.0,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "ratio": 0.5,
+      "decision": "ELIGIBLE_UNIT_ONLY"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-RATIO-BELOW-50",
+    "operation": "dual",
+    "input": {
+      "i": 7.0,
+      "ii": 9.999,
+      "backtest": 20.0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "decision": "FAIL"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  },
+  {
+    "id": "P16-BAD-BACKTEST",
+    "operation": "dual",
+    "input": {
+      "i": 7.0,
+      "ii": 10.0,
+      "backtest": 0,
+      "N": 836,
+      "p_value": 1e-06,
+      "dd_ok": true,
+      "k3_kill": false,
+      "signal_id": "synthetic-1",
+      "entry_time": 0,
+      "exit_time": 11
+    },
+    "expected": {
+      "decision": "HOLD"
+    },
+    "family": "Pin16",
+    "evidence_status": "ORACLE_SELF_CHECK",
+    "notes": "Confidence admission supplied as synthetic p-value, NOT a bootstrap coverage test. Same signal/times for (i)/(ii)."
+  }
+]

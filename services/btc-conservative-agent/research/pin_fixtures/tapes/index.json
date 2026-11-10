@@ -1,0 +1,18 @@
+{
+  "format": "HM-P8-synthetic-v1",
+  "count": 209,
+  "files": [
+    "pin15.json",
+    "pin16.json",
+    "k3.json",
+    "classifier.json",
+    "ct.json",
+    "b3.json"
+  ],
+  "goldens": "Independent closed-form/manual fields; recursive subset comparison; unspecified actual fields are NOT asserted",
+  "production_reference": "NOT_TESTED",
+  "P8_authority": "f72c1b0e7367bf3f3d7592d3925260d4cfc5385f40c5d80d235738690700df8d",
+  "classifier_authority": "3b5dba29fdfffe916fef9d209c6095db5ca45fc1a998a9682ea6acc383584fc1",
+  "confirmation": "elapsed>=2h / 3 closes ONLY",
+  "calibration": "ONE prior-only720h C0; reused thresholds; C0.end calibration-only"
+}
