@@ -377,3 +377,88 @@ def test_adapter_boundary_does_not_access_envelopes_or_oracles():
     strings = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
     assert not {"expected", "case_id", "id"} & strings
     assert not any(isinstance(node, (ast.Import, ast.ImportFrom)) and "oracle" in ast.unparse(node) for node in ast.walk(tree))
+
+
+# r3 additions only: synthetic inputs, never frozen tape evaluations.
+@pytest.mark.parametrize("side,entry,exit_px,want,kind", [
+    ("LONG", 100, 98, -200, int), ("SHORT", 100, 103, -300, int),
+    ("LONG", .3, .30003, 1, int), ("SHORT", .3, .30003, -1, int),
+    ("LONG", 3, 4, 10000/3, float), ("SHORT", 3, 4, -10000/3, float),
+    ("LONG", 100, 100.00000000000001, 1e-12, float),
+])
+def test_r3_pin15_exact_decimal_bp(side, entry, exit_px, want, kind):
+    result = s.score_pin15(side=side, entry=entry, exit_quote=exit_px,
+                          entry_fresh=True, exit_fresh=True, exit_request_s=10)
+    assert type(result["pnl_bp"]) is kind
+    assert result["pnl_bp"] == want
+    assert result["win"] is (want > 0)
+
+
+@pytest.mark.parametrize("side,prices,want_mfe,want_final,kind", [
+    ("LONG", [100.2, 99.5], 20, -50, int),
+    ("SHORT", [99.8, 101], 20, -100, int),
+    ("LONG", [.30003, .29997], 1, -1, int),
+    ("LONG", [4, 2], 10000/3, -10000/3, float),
+])
+def test_r3_f274_exact_selection_and_bp(side, prices, want_mfe, want_final, kind):
+    entry = .3 if prices[0] < 1 else (3 if prices[0] == 4 else 100)
+    rows = [dict(bid=p, ask=p, bid_size=1, ask_size=1, decision_ms=i,
+                 event_ms=i, sequence=i) for i, p in enumerate(prices)]
+    result = pin_k3.executable_l1_mtm(dict(final=True, l1=rows, side=side, entry=entry,
+                                         qty=1, synthetic_age_limit_ms=1))
+    assert result["mfe_bp"] == want_mfe and result["final_bp"] == want_final
+    assert type(result["mfe_bp"]) is kind and type(result["final_bp"]) is kind
+
+
+def _r3_synthetic_bars():
+    return [dict(end=i*60, open=100., high=100., low=100., close=100., complete=True)
+            for i in range(1441)]
+
+
+@pytest.mark.parametrize("logs,want,kind", [
+    ([0., -0.] * 12, 0, int),
+    ([0., .001, -0.] * 8, 1, int),
+    ([-.001, 0., -0.] * 8, 1, int),
+    ([1., -1e-30] + [0.] * 22, 1.0, float),
+    ([.5, -.25] + [0.] * 22, 1/3, float),
+    ([1., -1.] + [0.] * 22, 0.0, float),
+])
+def test_r3_e_identity_branches_common_terms(logs, want, kind, monkeypatch):
+    import math
+    # Fault-inject the hourly FLOAT TERMS after upstream checks. Minute returns
+    # are separate calls; exactly 24 hourly calls follow their 1440 calls.
+    calls = []
+    values = iter([0.] * 1440 + logs)
+    def log(_):
+        calls.append(1)
+        return next(values)
+    monkeypatch.setattr(c.math, "log", log)
+    result = c.candle_features(_r3_synthetic_bars(), 86400, availability_mode="historical_final")
+    assert len(calls) == 1464
+    assert type(result["E"]) is kind and result["E"] == want
+    assert result["R"] == math.fsum(logs)
+    assert all(type(result[k]) is float for k in ("V", "R", "z", "B"))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_r3_nonfinite_hourly_terms_raise(bad, monkeypatch):
+    values = iter([0.] * 1440 + [bad] + [0.] * 23)
+    monkeypatch.setattr(c.math, "log", lambda _: next(values))
+    with pytest.raises(ValueError, match="STOP_NONFINITE_HOURLY_LOG"):
+        c.candle_features(_r3_synthetic_bars(), 86400, availability_mode="historical_final")
+
+
+def test_r3_real_synthetic_hourly_logs_and_vetoes():
+    import math
+    bars = _r3_synthetic_bars()
+    for i, b in enumerate(bars):
+        p = 100 * math.exp(.0001*i)
+        b.update(open=p, high=p, low=p, close=p)
+    actual = c.candle_features(bars, 86400, availability_mode="historical_final")
+    hourly = [b["close"] for b in bars[::60]]
+    R = math.fsum(math.log(b/a) for a,b in zip(hourly, hourly[1:]))
+    assert type(actual["E"]) is int and actual["E"] == 1
+    assert actual["R"] == R and actual["z"] == R / actual["V"]
+    assert c.candle_features(bars[:-1], 86400, availability_mode="historical_final")["reason"] == "COUNT"
+    bars[-1]["close"] = 0
+    assert c.candle_features(bars, 86400, availability_mode="historical_final")["reason"] == "OHLC"

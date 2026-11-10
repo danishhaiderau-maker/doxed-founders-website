@@ -106,6 +106,7 @@ def executable_l1_mtm(data):
     quote, size = ("bid", "bid_size") if side == "LONG" else ("ask", "ask_size")
     previous_sequence = None
     marks = []
+    basis = Fraction(str(data["entry"]))
     for row in rows:
         age = row["decision_ms"] - row["event_ms"]
         if age < 0:
@@ -119,5 +120,9 @@ def executable_l1_mtm(data):
             return dict(known=False, reason="MISSING_MTM")
         if age > data["synthetic_age_limit_ms"]:
             return dict(known=False, reason="STALE_BBO")
-        marks.append((1 if side == "LONG" else -1) * (row[quote] / data["entry"] - 1) * 10000)
-    return dict(known=True, record="i", mfe_bp=max([0, *marks]), final_bp=marks[-1], scope="L1_UNIT_ONLY")
+        marks.append((1 if side == "LONG" else -1) * (Fraction(str(row[quote])) - basis) / basis * 10000)
+    # Preserve exact rationals through selection; serialize only the declared bp fields.
+    mfe, final = max([Fraction(0), *marks]), marks[-1]
+    return dict(known=True, record="i",
+                mfe_bp=mfe.numerator if mfe.denominator == 1 else float(mfe),
+                final_bp=final.numerator if final.denominator == 1 else float(final), scope="L1_UNIT_ONLY")

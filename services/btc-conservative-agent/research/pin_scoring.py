@@ -12,6 +12,7 @@ RK_PROVISIONAL_RULING = "72c250a0eb82"
 
 import math
 from collections import Counter, defaultdict
+from fractions import Fraction
 from .fill_model import taker_fill_rows
 
 
@@ -67,7 +68,9 @@ def score_pin15(*, side, entry, entry_fresh, exit_fresh, exit_quote=None, exit_r
         return dict(category="UNPRICED_WORST", filled=True, capture=1, win=False, pnl_bp=None, exit=None, status="HOLD_NO_EXTREME")
     if not math.isfinite(px) or px <= 0:
         raise ValueError("INVALID_EXIT")
-    pnl = direction * (px / entry - 1) * 10000
+    basis = Fraction(str(entry))
+    exact_bp = direction * (Fraction(str(px)) - basis) / basis * 10000
+    pnl = exact_bp.numerator if exact_bp.denominator == 1 else float(exact_bp)
     return dict(category=category, filled=True, capture=1, exit=px, pnl_bp=pnl, win=pnl > 0)
 
 

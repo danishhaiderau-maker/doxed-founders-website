@@ -71,9 +71,21 @@ def candle_features(bars, decision, *, availability_mode="forward", symbol=SYMBO
     minute_returns = [math.log(b / a) for a, b in zip(closes, closes[1:])]
     V = math.sqrt(math.fsum(r * r for r in minute_returns))
     hourly = closes[::60]
-    R = math.log(hourly[-1] / hourly[0])
-    denominator = math.fsum(abs(math.log(b / a)) for a, b in zip(hourly, hourly[1:]))
-    E = abs(R) / denominator if denominator else 0.0
+    # Pin 7 r7 §3 (dc0cc45f24f5), GS Q2/Q1d: common hourly float terms,
+    # not exact real logs. R is computed once and reused by E and z; no clamp.
+    hourly_returns = [math.log(b / a) for a, b in zip(hourly, hourly[1:])]
+    if any(not math.isfinite(r) for r in hourly_returns):
+        raise ValueError("STOP_NONFINITE_HOURLY_LOG")
+    R = math.fsum(hourly_returns)
+    denominator = math.fsum(abs(r) for r in hourly_returns)
+    if all(r == 0 for r in hourly_returns):
+        E = 0
+    elif all(r >= 0 for r in hourly_returns) or all(r <= 0 for r in hourly_returns):
+        E = 1
+    else:
+        E = abs(R) / denominator
+    if not math.isfinite(E) or not 0 <= E <= 1:
+        raise ValueError("STOP_E_RANGE")
     # Minute end labels: the first close is the previous-day anchor, not in the 24h OHLC bars.
     span24 = max(b["high"] for b in rows[1:]) - min(b["low"] for b in rows[1:])
     last6 = rows[-360:]
