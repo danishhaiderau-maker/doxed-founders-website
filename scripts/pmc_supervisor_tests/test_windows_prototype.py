@@ -25,7 +25,7 @@ def wait_exit(child, timeout=20):
 
 def start(tmp_path, code, *, hidden=True):
     # Explicit injected test seam. These commands are not reachable via config/CLI.
-    script=tmp_path/"fixture.py";script.write_text(code)
+    script=tmp_path/"fixture.py";script.write_text(code,encoding="utf-8")
     stdout,stderr=tmp_path/"out.log",tmp_path/"err.log";stdout.touch();stderr.touch()
     env={"SYSTEMROOT":os.environ["SYSTEMROOT"],"WINDIR":os.environ["SYSTEMROOT"],
          "PYTHONDONTWRITEBYTECODE":"1","PYTHONUNBUFFERED":"1","PYTHONIOENCODING":"utf-8",
