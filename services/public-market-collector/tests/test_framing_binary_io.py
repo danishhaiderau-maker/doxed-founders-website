@@ -4,6 +4,7 @@ Run 42734717686 stored 257 bytes for a 256-byte write because the collector
 descriptors were opened without O_BINARY, so the CRT translated LF. This
 test writes every byte value, including LF and a CRLF pair, through the
 classes' real open and write paths and checks physical length and contents.
+append_startup_gap's journal os.open is covered the same way.
 """
 from __future__ import annotations
 
@@ -12,9 +13,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from public_market_collector.framing import AppendJournal, SegmentFile, _write_all
+from public_market_collector import session as session_mod
 
 
 def all_byte_values_with_crlf() -> bytes:
@@ -61,6 +64,32 @@ class FramingBinaryIOTests(unittest.TestCase):
         stored = path.read_bytes()
         self.assertEqual(len(stored), 256)
         self.assertEqual(stored, self.payload)
+
+    def test_append_startup_gap_journal_stores_exactly_256_bytes_and_round_trips(self):
+        """Reach session.append_startup_gap's journal os.open; write a controlled 256-byte payload."""
+        segment = self.base / "torn.gz"
+        segment.write_bytes(b"synthetic-segment")
+        root = self.base / "journal-root"
+        report = {
+            "decodable_records": 0,
+            "torn_offset": None,
+            "sha256": "00" * 32,
+            "tail_limit": 1024,
+            "tail_state": "unknown",
+            "boundary_source": "none",
+            "committed_end_offset": None,
+            "last_raw_id": None,
+            "last_record": None,
+        }
+        with patch.object(session_mod, "record_line", return_value=self.payload):
+            journal_path = session_mod.append_startup_gap(root, segment, report)
+        self.assertEqual(journal_path, root / "index.journal")
+        self.assertEqual(os.path.getsize(journal_path), 256)
+        stored = journal_path.read_bytes()
+        self.assertEqual(len(stored), 256)
+        self.assertEqual(stored, self.payload)
+        self.assertEqual(segment.read_bytes(), b"synthetic-segment")
+
 
 
 if __name__ == "__main__":
