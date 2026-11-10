@@ -60,8 +60,12 @@ identity, all copied files, and their original HM manifest entries before replay
 
 ## Reproduction (from services/btc-conservative-agent)
 
+Use a fresh unique directory on EVERY run; substitute the placeholder below.
+After recording results, remove only that exact run directory. Never use `/tmp`
+or a shared default pytest base.
+
 ```sh
-python3 -B -m pytest test_pin_research_provisional.py test_fill_model.py -q -p no:cacheprovider --basetemp=/dev/shm/pr5b-private-unit-tmp
+python3 -B -m pytest test_pin_research_provisional.py test_fill_model.py -q -p no:cacheprovider --basetemp=/workspace/coder/pytest-tmp/5b-<fresh-unique-id>
 ```
 
 Own pytest only, not HM's driver/card. Latest: **330 passed, 20 failed**, no
@@ -121,6 +125,9 @@ The earlier 714-file broad suite used 25-file, 3GiB, 90s bounded shards. It
 terminated before all 29 shards completed on shared-box inode exhaustion
 (ENOSPC despite free bytes); there were also timeouts and baseline failures.
 No broad-green claim. Only this task's generated Pin pytest temp directories
-were cleaned to release inodes; no other agent files were touched. The latest
-small private suite used tmpfs. Shared CI inventory still requires its own
+were cleaned manually to release inodes. Earlier pytest default shared-temp
+retention was not instrumented. One subsequent private run used tmpfs before
+the hygiene steering. The final run used a fresh `/workspace/coder/pytest-tmp/5b-*`
+directory and removed only that exact directory afterwards. Shared CI inventory
+still requires its own
 serial authorized change and fails because this new test is not allowlisted.
