@@ -26,13 +26,41 @@ def synthetic_runroot(tmp_path, monkeypatch):
 
 
 
+@pytest.fixture(scope="module")
+def hash_verified_b_policy():
+    import os
+    from research import pin_fixture_b_judge as judge
+    path = Path(os.environ["PIN_B_SUPPLEMENT"]).resolve(strict=True)
+    data = judge._json(judge._read(path.parent, path.name,
+        "7d843fbc7348f95aaa1bd1b6597505a773900f35ee0d783c1a7e0b8e085fa75e"))
+    pairs = data["numeric_policy"]["cross_type_allowed_only_at"]
+    slots = frozenset((p["case_id"], p["path"]) for p in pairs)
+    candidate_ids = data["scalar_policy"]["case_ids"]
+    candidates = frozenset(candidate_ids)
+    assert len(pairs) == len(slots) == 30
+    assert len(candidate_ids) == len(candidates) == 10
+    return slots, candidates
+
+
+@pytest.fixture
+def approved_b_policy(case, request):
+    # Field9/Part A never requests or reads the B supplement.
+    if case["operation"] in {"field9_fill_model", "field9_historical_control"}:
+        return None
+    return request.getfixturevalue("hash_verified_b_policy")
+
+
 @pytest.mark.parametrize("case", [case for case in CASES if case["operation"] != "candidate"], ids=lambda case: case["id"])
-def test_hm_tape(case):
+def test_hm_tape(case, approved_b_policy):
     reason = harness.pending_reason(case)
     if reason:
         pytest.skip(reason)
     actual = harness.dispatch(case["operation"], case["input"])
-    assert not harness.subset_errors(case["expected"], actual)
+    if case["operation"] in {"field9_fill_model", "field9_historical_control"}:
+        assert not harness.subset_errors(case["expected"], actual)
+    else:
+        from research import pin_fixture_b_judge as judge
+        judge.compare_case(case, actual, *approved_b_policy)
 
 
 @pytest.mark.parametrize("case", [case for case in CASES if case["operation"] == "candidate"], ids=lambda case: case["id"])

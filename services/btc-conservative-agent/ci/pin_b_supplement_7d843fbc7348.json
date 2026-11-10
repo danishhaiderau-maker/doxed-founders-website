@@ -1,0 +1,191 @@
+{
+  "status": "DOCUMENTARY_REBIND_EXECUTION_HOLD",
+  "part": "B",
+  "Live": "OFF",
+  "PR_URL": "https://github.com/danishhaiderau-maker/doxed-founders-website/pull/1005",
+  "PR_HEAD_SHA": "c82c252e3e71ab7a937716015a0c4e4e4dd41ee7",
+  "base_sha": "08c2b3762cc166bbc9dd91f45a13edb3a0cfd876",
+  "adapter_path": "services/btc-conservative-agent/research/p8_fixture_adapter.py",
+  "adapter_sha256": "2a075e38aafa56cc47d475ee919695e3b4f6f6be6f2680407f6b0a0d60b579c5",
+  "operation_map_path": "/workspace/hm-pr1005-5b/operation-map.json",
+  "operation_map_sha256": "5986635ab1791b6cab12d359b2faea04fceaaba13ba60459299451e797c83e7c",
+  "operation_map_document_repo_path": "services/btc-conservative-agent/research/P8_FIXTURE_ADAPTER.md",
+  "operation_map_document_sha256": "633140e97544d5907197cde4cd78fd390a8ec3fbc2ff70ea1577c4b568400ffb",
+  "rules_sha256": "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2",
+  "P8_r10_sha256": "28315aeb4423e88d4e3dadcf3e42005b29ddbba1f2e054467aeab7827135641e",
+  "Pin7_r7_sha256": "dc0cc45f24f5afee9a69718fcc120fc27450f80b6e35de1058f0ed0e68eedf79",
+  "tape_root": "/workspace/boss-reviewed-cards/hm-5b-tapes-20261110",
+  "manifest_sha256": "fbdfd1ca2b6c69cf977b176f11ad1b1e9fad2f7782aaa01c30a69f159ec04c3e",
+  "manifest_entries": 71,
+  "original_card_sha256": "1dc08d9a36bc5feb433bd50e6e222157df1cf0cc0c7ffafec99859c9a24571dd",
+  "dispositions_path": "/workspace/hm-pr1005-5b/contract-dispositions-with-lines.json",
+  "dispositions_sha256": "cf80675fe65ce5df7387f9d7e712d897b22d2a852bc5448c9136fd4ff39cc507",
+  "numeric_policy": {
+    "cross_type_allowed_only_at": [
+      {
+        "case_id": "P16-POS-COST",
+        "path": "/slippage_bp"
+      },
+      {
+        "case_id": "P16-ZERO-COST",
+        "path": "/slippage_bp"
+      },
+      {
+        "case_id": "P16-NEG-COST",
+        "path": "/slippage_bp"
+      },
+      {
+        "case_id": "P16-II-CANNOT-RESCUE-LOSS",
+        "path": "/slippage_bp"
+      },
+      {
+        "case_id": "C02-GOLDEN-FLAT",
+        "path": "/V"
+      },
+      {
+        "case_id": "C02-GOLDEN-FLAT",
+        "path": "/R"
+      },
+      {
+        "case_id": "C02-GOLDEN-FLAT",
+        "path": "/E"
+      },
+      {
+        "case_id": "C02-GOLDEN-FLAT",
+        "path": "/z"
+      },
+      {
+        "case_id": "C02-GOLDEN-FLAT",
+        "path": "/B"
+      },
+      {
+        "case_id": "R2-02-T6-PRIOR-C0-FIRST-JOB",
+        "path": "/calendar_days"
+      },
+      {
+        "case_id": "R2-02-T6-PRIOR-C0-FIRST-JOB",
+        "path": "/OOS_days"
+      },
+      {
+        "case_id": "R2-02-T6-SECOND-JOB-NO-REFIT",
+        "path": "/calendar_days"
+      },
+      {
+        "case_id": "R2-02-T6-SECOND-JOB-NO-REFIT",
+        "path": "/OOS_days"
+      },
+      {
+        "case_id": "R2-03-T6-FUTURE-C0-MUTATION",
+        "path": "/calendar_days"
+      },
+      {
+        "case_id": "R2-03-T6-FUTURE-C0-MUTATION",
+        "path": "/OOS_days"
+      },
+      {
+        "case_id": "R2-01-HISTORICAL-FINAL-VERSION-LIMITATION",
+        "path": "/V"
+      },
+      {
+        "case_id": "R2-01-HISTORICAL-FINAL-VERSION-LIMITATION",
+        "path": "/R"
+      },
+      {
+        "case_id": "R2-01-HISTORICAL-FINAL-VERSION-LIMITATION",
+        "path": "/E"
+      },
+      {
+        "case_id": "R2-01-HISTORICAL-FINAL-VERSION-LIMITATION",
+        "path": "/z"
+      },
+      {
+        "case_id": "R2-01-HISTORICAL-FINAL-VERSION-LIMITATION",
+        "path": "/B"
+      },
+      {
+        "case_id": "P8R4-06A-NO-FABRICATED-RECEIPT",
+        "path": "/V"
+      },
+      {
+        "case_id": "P8R4-06A-NO-FABRICATED-RECEIPT",
+        "path": "/R"
+      },
+      {
+        "case_id": "P8R4-06A-NO-FABRICATED-RECEIPT",
+        "path": "/E"
+      },
+      {
+        "case_id": "P8R4-06A-NO-FABRICATED-RECEIPT",
+        "path": "/z"
+      },
+      {
+        "case_id": "P8R4-06A-NO-FABRICATED-RECEIPT",
+        "path": "/B"
+      },
+      {
+        "case_id": "P8R4-06B-LATE-V2-PREFIX-IMMUTABLE",
+        "path": "/V"
+      },
+      {
+        "case_id": "P8R4-06B-LATE-V2-PREFIX-IMMUTABLE",
+        "path": "/R"
+      },
+      {
+        "case_id": "P8R4-06B-LATE-V2-PREFIX-IMMUTABLE",
+        "path": "/E"
+      },
+      {
+        "case_id": "P8R4-06B-LATE-V2-PREFIX-IMMUTABLE",
+        "path": "/z"
+      },
+      {
+        "case_id": "P8R4-06B-LATE-V2-PREFIX-IMMUTABLE",
+        "path": "/B"
+      }
+    ],
+    "cross_type_test": "type(actual) is float AND finite(actual) AND actual.is_integer() AND actual == expected; expected is int, never bool; no rounding/casting/tolerance",
+    "other_integer_fields": "exact int type and value",
+    "preexisting_float_tolerance": "unchanged: max(1e-10,1e-9*abs(expected)); only originally-float continuous leaves; no tolerance on any originally-int leaf",
+    "nonfinite": "reject globally, including unasserted diagnostics",
+    "risk_decisions": "literal SUT values, never tolerance-rescued"
+  },
+  "scalar_policy": {
+    "operation": "candidate",
+    "case_ids": [
+      "C04-SHOCK-EQUALITY",
+      "C04-SHOCK-RETAIN",
+      "C04-SHOCK-RELEASE-EQUAL",
+      "C04-UP-RETAIN-EQUAL",
+      "C04-DOWN-RETAIN-EQUAL",
+      "C04-UP-NEW-EQUAL",
+      "C04-DOWN-NEW-EQUAL",
+      "C04-DEADBAND",
+      "C04-B-NO-SELECTOR",
+      "P8R4-10D-RANGE-NOT-RETAINED-UP"
+    ],
+    "object_keys_exact": [
+      "candidate"
+    ],
+    "value_type_exact": "str",
+    "comparison": "actual[\"candidate\"] == original scalar expected; unwrap ONLY at top level of these candidate cases; no other wrapper accepted"
+  },
+  "counts": {
+    "a": 11,
+    "b": 9,
+    "c": 0
+  },
+  "blocker_case_ids": [
+    "P15-B-LONG-1S",
+    "P15-B-SHORT-1S",
+    "P15-C-LONG-HOLDING",
+    "P15-C-SHORT-HOLDING",
+    "P15-PRICED-POSITIVE",
+    "F274-L1-EXECUTABLE-LONG",
+    "F274-L1-EXECUTABLE-SHORT",
+    "C02-GOLDEN-EXP-HOUR24",
+    "C01-FUTURE-MUTATION-PREFIX"
+  ],
+  "driver_sha256": "PENDING_REVIEWED_PART_B_DRIVER",
+  "approvals": "PENDING_GS_AGREE_RK_PASS_BOSS_CLEAR_ON_EXACT_NEW_BYTES",
+  "PartA": "UNCHANGED; not authorized or rerun by this packet"
+}
