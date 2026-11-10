@@ -4,7 +4,7 @@ Run 42734717686 stored 257 bytes for a 256-byte write because the collector
 descriptors were opened without O_BINARY, so the CRT translated LF. This
 test writes every byte value, including LF and a CRLF pair, through the
 classes' real open and write paths and checks physical length and contents.
-append_startup_gap's journal os.open is covered the same way.
+append_startup_gap's journal os.open and RuntimeLock's os.open are covered the same way.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from public_market_collector.framing import AppendJournal, SegmentFile, _write_all
 from public_market_collector import session as session_mod
+from public_market_collector.daily import RuntimeLock
 
 
 def all_byte_values_with_crlf() -> bytes:
@@ -90,6 +91,29 @@ class FramingBinaryIOTests(unittest.TestCase):
         self.assertEqual(stored, self.payload)
         self.assertEqual(segment.read_bytes(), b"synthetic-segment")
 
+
+    def test_runtime_lock_file_is_one_nul_byte_and_does_not_grow_on_reacquire(self):
+        """Windows RuntimeLock writes exactly one NUL and must not grow on re-acquire."""
+        path = self.base / "runtime.lock"
+        first = RuntimeLock(path)
+        try:
+            if os.name == "nt":
+                self.assertEqual(os.path.getsize(path), 1)
+                self.assertEqual(path.read_bytes(), b"\0")
+            else:
+                # POSIX flock path does not write the Windows lock byte.
+                self.assertEqual(os.path.getsize(path), 0)
+            size_after_first = os.path.getsize(path)
+        finally:
+            first.close()
+        second = RuntimeLock(path)
+        try:
+            self.assertEqual(os.path.getsize(path), size_after_first)
+            if os.name == "nt":
+                self.assertEqual(os.path.getsize(path), 1)
+                self.assertEqual(path.read_bytes(), b"\0")
+        finally:
+            second.close()
 
 
 if __name__ == "__main__":
