@@ -1019,7 +1019,7 @@ def append_startup_gap(root: Path, segment_path: Path, report: dict) -> Path:
     if journal_path.resolve() == segment:
         raise StartRefused("JOURNAL_IS_SEGMENT")
     journal_path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+    flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     _journal_intact(journal_path)
     fd = os.open(journal_path, flags, 0o644)
 
