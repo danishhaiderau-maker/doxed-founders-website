@@ -29,6 +29,9 @@ class Supervisor:
         self.failure = None
         self.ownership = {}
         self.pending_wall = {}
+        self.anchor_wall, self.anchor_mono = wall(), mono()
+        self.reservation_clocks = {r: [(t, self.anchor_mono - (self.anchor_wall - t))
+                                      for t in journal.state[r]["reservations"]] for r in P.ROLES}
 
     def transition(self, role, reason, **changes):
         state = copy.deepcopy(self.journal.state)
@@ -38,6 +41,13 @@ class Supervisor:
     def latch(self, role, reason):
         self.journal.latch(role, reason)
 
+    def active_reservations(self, role):
+        # Monotonic within an invocation: a wall-clock step must not free slots.
+        return [(wall, mono) for wall, mono in self.reservation_clocks[role] if mono > self.mono() - 1800]
+
+    def clock_uncertain(self):
+        return abs((self.wall() - self.anchor_wall) - (self.mono() - self.anchor_mono)) > 5
+
     def start(self, role, restart=False):
         row = self.journal.state[role]
         if self.journal.just_cleared:
@@ -45,10 +55,10 @@ class Supervisor:
         if row["phase"] == "LATCHED":
             return
         now = self.wall()
-        if now < self.journal.last["wall"]:
+        if now < self.journal.last["wall"] or self.clock_uncertain():
             self.latch(role, "CLOCK_UNCERTAIN")
             return
-        reservations = [t for t in row["reservations"] if t > now - 1800]
+        reservations = [t for t, _ in self.active_reservations(role)]
         if any(t > now for t in reservations):
             self.latch(role, "CLOCK_UNCERTAIN")
             return
@@ -69,10 +79,11 @@ class Supervisor:
         # Preflight can be slow. Count at the durable reservation time, not the
         # earlier hash/disk check time; otherwise slow preflights free budget early.
         reserved_at = self.wall()
-        if reserved_at < now or reserved_at < self.journal.last["wall"]:
+        if reserved_at < now or reserved_at < self.journal.last["wall"] or self.clock_uncertain():
             self.latch(role, "CLOCK_UNCERTAIN")
             return
-        reservations = [t for t in row["reservations"] if t > reserved_at - 1800]
+        active = self.active_reservations(role)
+        reservations = [t for t, _ in active]
         if any(t > reserved_at for t in reservations):
             self.latch(role, "CLOCK_UNCERTAIN")
             return
@@ -84,6 +95,7 @@ class Supervisor:
         # Reservation and pending intent are one durable record BEFORE process creation.
         self.transition(role, "START_PENDING", phase="START_PENDING", reservations=reservations,
                         attempt=row["attempt"] + (1 if restart else 0), deadline=None, identity=None)
+        self.reservation_clocks[role] = active + ([(reserved_at, self.mono())] if restart else [])
         self.pending_wall[role] = reserved_at
         try:
             proc = self.spawn(role)
@@ -116,9 +128,9 @@ class Supervisor:
             self.latch(role, "FOREIGN_RUNTIME_ROOT" if code == 78 and "FOREIGN_RUNTIME_ROOT" in flags else reason)
             return
         now, row = self.wall(), self.journal.state[role]
-        if any(t > now for t in row["reservations"]) or now < self.journal.last["wall"]:
+        if any(t > now for t in row["reservations"]) or now < self.journal.last["wall"] or self.clock_uncertain():
             self.latch(role, "CLOCK_UNCERTAIN")
-        elif len([t for t in row["reservations"] if t > now - 1800]) >= 3:
+        elif len(self.active_reservations(role)) >= 3:
             self.latch(role, "RESTART_BUDGET_EXHAUSTED")
         else:
             delay = P.backoff(row["attempt"])
@@ -136,7 +148,7 @@ class Supervisor:
 
     def tick(self):
         now, mono = self.wall(), self.mono()
-        if now < self.journal.last["wall"]:
+        if now < self.journal.last["wall"] or self.clock_uncertain():
             # In-memory HOLD plus durable old unresolved intent; never award a reset.
             self.failure = "CLOCK_UNCERTAIN"
             self.stop_event.set()
@@ -199,7 +211,7 @@ class Supervisor:
             row = copy.deepcopy(self.journal.state[role])
             row["alive"] = role in self.processes
             row["owned"] = role in self.processes and self.ownership.get(role, False)
-            row["restart_window_count"] = sum(t > self.wall() - 1800 for t in row["reservations"])
+            row["restart_window_count"] = len(self.active_reservations(role))
             row["restart_budget"] = 3
             row["ready"] = self.ready(role)
             roles[role] = row

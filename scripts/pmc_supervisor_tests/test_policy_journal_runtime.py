@@ -114,9 +114,7 @@ def test_wall_forward_not_early_mono_retry(setup):
     clock.t += 3600
     s.tick()
     assert journal.state["pmc"]["phase"] == "BACKOFF"
-    clock.m += 6
-    s.tick()
-    assert journal.state["pmc"]["phase"] == "RUNNING"
+    assert s.stop_event.is_set() and s.failure == "CLOCK_UNCERTAIN"
 
 
 def test_rolling_window_exact_boundary(setup):
@@ -124,6 +122,7 @@ def test_rolling_window_exact_boundary(setup):
     s, _ = controller(setup)
     journal.state["pmc"]["reservations"] = [clock.t-1800, clock.t-1799, clock.t-10]
     journal.state["pmc"]["phase"] = "BACKOFF"
+    s.reservation_clocks["pmc"] = [(t,clock.m-(clock.t-t)) for t in journal.state["pmc"]["reservations"]]
     s.start("pmc", restart=True)
     assert len(journal.state["pmc"]["reservations"]) == 3
     assert journal.state["pmc"]["phase"] == "RUNNING"
@@ -442,3 +441,12 @@ def test_slow_preflight_reservation_uses_actual_durable_time(setup):
     s.start("pmc",restart=True)
     assert journal.state["pmc"]["reservations"]==[start+120]
     assert s.pending_wall["pmc"]==start+120
+
+
+def test_small_wall_step_cannot_free_restart_budget_early(setup):
+    clock,_,_,journal=setup;s,_=controller(setup)
+    journal.state["pmc"]["reservations"]=[clock.t,clock.t+1,clock.t+2]
+    s.reservation_clocks["pmc"]=[(clock.t+i,clock.m+i) for i in (0,1,2)]
+    clock.advance(1799);clock.t+=3
+    s.start("pmc",restart=True)
+    assert journal.state["pmc"]["reason"]=="RESTART_BUDGET_EXHAUSTED"

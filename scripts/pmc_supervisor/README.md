@@ -59,7 +59,8 @@ UTC YYYY-MM-DD directories. A foreign root entry latches without cleanup.
 * Backoff is 6,12,24,48,96,192,300 seconds capped, no jitter, monotonic within a
   run. Maximum three reservations per role/rolling 1800 seconds; fourth latches.
   Exponential index resets only after 1800 uninterrupted healthy owned seconds,
-  not on invocation/reboot. Reservations persist and are never reset by time
+  not on invocation/reboot. Budget expiry also uses monotonic ages within a run;
+  wall-vs-monotonic divergence over 5s is CLOCK_UNCERTAIN/HOLD. Reservations persist and are never reset by time
   expiry of a latch or by a human clear.
 * **Collector exit 0 ALWAYS latches `TERMINAL_EXIT_0`, across invocations.**
   This is the stricter outer rule, explicitly reconciled with S3: normal PMC
