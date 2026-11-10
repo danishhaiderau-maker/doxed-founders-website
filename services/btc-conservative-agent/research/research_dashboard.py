@@ -36,6 +36,7 @@ from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
 from research import ai_challenger_view as _ai_challenger_view
 from research import data_health_view as _data_health_view
+from research import twoyear_batch_view as _twoyear_view
 from research import archive_history_view as _archive_history_view
 from research import dashboard_sections as _dashboard_sections
 from research import research_api_cache as _research_cache
@@ -321,28 +322,32 @@ HISTORY_ROOT = (
     or (ROOT if (ROOT / ARCHIVE_DIR).is_dir() else (_parent if (_parent / ARCHIVE_DIR).is_dir() else ROOT))
 )
 
-# Four primary groups (Visual QA / simplification acceptance). Historical and
-# forensic report sections stay reachable under Diagnostics — never deleted.
+# AMEND6 navigation. All legacy section ids remain reachable; no reports retired.
 REPORT_NAV_GROUPS = (
     ("overview", "Overview", (
         ("summary", "Overview", None),
         ("evidence-coverage", "Evidence Coverage", EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE),
         ("lanes", "Current Lanes", "benchmark_vs_lanes_report.json"),
     )),
-    ("lanes-group", "Strategy Research", (
+    ("twoyear", "Partial Two-Year Batch Study", (
+        ("twoyear-batch", "Partial Two-Year Batch Study", None),
+    )),
+    ("strategy-findings-group", "Strategy Findings", (
+        ("strategy-findings", "Strategy Findings", None),
         ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
         ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
         ("indicator-edge", "Indicator Edge", None),
         ("research-design", "Entry & Regime Evidence", POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE),
     )),
-    ("trading-group", "Execution", (
+    ("data-health", "Data Health", (
+        ("data-health", "Data Health", None),
+    )),
+    ("archive", "Archive & Diagnostics", (
         ("chase", "Attribution", "chase_attribution_report.json"),
         ("chase-policy-lab", "Chase Policy Lab", "chase_policy_lab_report.json"),
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
-    )),
-    ("deep-group", "Diagnostics & Historical", (
         ("explorer", "Report Explorer", None),
         ("download", "Downloads", None),
         ("runtime-incidents", "Runtime Incidents", None),
@@ -376,6 +381,112 @@ BUNDLE_FILES = (
 )
 
 app = Flask("research_dashboard")
+TWOYEAR_DATA_ROOT = Path(os.getenv("RESEARCH_TWOYEAR_DATA_ROOT") or (DATA_ROOT / "runs"))
+_STUDY_ROUTES = frozenset({"/twoyear-batch", "/strategy-findings", "/api/research/twoyear/summary",
+    "/api/research/twoyear/leaderboard", "/api/research/twoyear/distribution", "/api/research/findings", "/api/research/twoyear/findings",
+    "/api/research/findings/ledger", "/api/research/inventory"})
+
+
+@app.before_request
+def _offline_study_guard():
+    """Standalone is a local saved-study viewer, not an embedded analyzer runtime.
+
+    Legacy report pages/ids remain inspectable via /details, but their unsafe
+    downloads/aggregators are intentionally not enabled in this standalone mode.
+    """
+    if not app.config.get("RESEARCH_OFFLINE_VIEWER"):
+        return None
+    if request.remote_addr not in ("127.0.0.1", "::1"):
+        abort(403)
+    if request.method not in ("GET", "HEAD"):
+        abort(405)
+    if request.path == "/":
+        from flask import redirect
+        return redirect("/twoyear-batch")
+    if request.path == "/data-health":
+        body,status,kind=_twoyear_view.empty_response("Data Health KNOWN GAP: offline viewer performs no archive/network probe",html=True)
+        response=make_response(body,status)
+        response.headers["Content-Type"]=kind
+        return response
+    cell = re.fullmatch(r"/api/research/twoyear/cell/[a-zA-Z0-9_.-]+", request.path)
+    if request.path not in _STUDY_ROUTES and not cell and request.path not in ("/details", "/favicon.ico"):
+        abort(403)
+    return None
+
+
+def _study_response(key, html=False):
+    body,status,kind = _twoyear_view.STORE.response(key,html=html)
+    response=make_response(body,status)
+    response.headers["Content-Type"]=kind
+    response.headers["Cache-Control"]="no-store"
+    return response
+
+
+def _study_k():
+    try:
+        k=int(request.args.get("k","40"))
+        if k not in (30,40,50):
+            raise ValueError()
+        return k
+    except ValueError:
+        abort(400,"k must be 30, 40 or 50")
+
+
+@app.route("/twoyear-batch")
+def twoyear_batch_page():
+    k=_study_k()
+    cid=request.args.get("cell")
+    if cid is not None and (len(cid)>64 or not re.fullmatch(r"[a-zA-Z0-9_.-]+",cid)):
+        abort(400,"invalid precomputed strategy id")
+    return _study_response("detail:"+cid if cid is not None else "html:"+str(k),html=True)
+
+
+@app.route("/strategy-findings")
+def strategy_findings_page():
+    return _study_response("findings_html",html=True)
+
+
+@app.route("/api/research/twoyear/summary")
+def api_twoyear_summary():
+    return _study_response("summary")
+
+
+@app.route("/api/research/twoyear/leaderboard")
+def api_twoyear_leaderboard():
+    return _study_response("board:"+str(_study_k()))
+
+
+@app.route("/api/research/twoyear/cell/<cell_id>")
+def api_twoyear_cell(cell_id):
+    return _study_response("cell:"+cell_id)
+
+
+@app.route("/api/research/twoyear/distribution")
+def api_twoyear_distribution():
+    _study_k()
+    return _study_response("distribution:"+request.args.get("batch",""))
+
+
+@app.route("/api/research/findings")
+@app.route("/api/research/twoyear/findings")
+@app.route("/api/research/findings/ledger")
+@app.route("/api/research/inventory")
+def api_strategy_findings():
+    return _study_response("findings")
+
+
+def _study_error(error):
+    if app.config.get("RESEARCH_OFFLINE_VIEWER") or request.path in _STUDY_ROUTES or request.path.startswith("/api/research/twoyear/"):
+        body,status,kind=_twoyear_view.empty_response(str(error),html=not request.path.startswith("/api/"),status=error.code)
+        response=make_response(body,status)
+        response.headers["Content-Type"]=kind
+        return response
+    return error
+
+
+for _code in (400,403,404,405,503):
+    app.register_error_handler(_code,_study_error)
+
 
 # Report JSON is immutable between analyzer writes, but several payload builders
 # aggregate large historical ledgers. A short server-side cache keeps tab
@@ -426,7 +537,7 @@ _UNCACHED_API_PATHS = (
 def _serve_cached_read_api():
     if request.method != "GET" or not request.path.startswith("/api/"):
         return None
-    if request.path in _UNCACHED_API_PATHS:
+    if request.path in _UNCACHED_API_PATHS or request.path in _STUDY_ROUTES or request.path.startswith("/api/research/twoyear/cell/"):
         return None
     key = _read_api_cache_key()
     now = time.monotonic()
@@ -7126,6 +7237,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <nav id="nav"></nav>
 <nav id="subnav" class="subnav" style="display:none"></nav>
 <main>
+  <section id="sec-twoyear-batch"><h2>Partial Two-Year Batch Study</h2><p>Live OFF · PAPER ONLY · LIMITED SCOPE · R24 NOT TESTED · SCREEN-LEVEL · INVALID-for-fills</p><a href="/twoyear-batch">Open two-year batches, ranking and visuals</a></section>
+  <section id="sec-strategy-findings"><h2>Strategy Findings</h2><p>Read-only, no promotion gate or tile creation.</p><a href="/strategy-findings">Open Strategy Findings</a></section>
+  <section id="sec-data-health"><h2>Data Health</h2><a href="/data-health">Open Data Health</a><p>Read-only; no collector start. Inventory/disk status UNKNOWN unless supplied by producer.</p></section>
   <section id="sec-summary" class="active">
     <h2>Executive Summary</h2>
     <div class="empty-state" id="collection-status">
@@ -9839,6 +9953,15 @@ setInterval(refreshActiveSection, 180000);
 
 @app.route("/details")
 def index():
+    if app.config.get("RESEARCH_OFFLINE_VIEWER"):
+        # Do not execute the legacy heavy template, AJAX callbacks or downloads.
+        page=_twoyear_view.shell("Overview / saved research", "<p>Live OFF; writer UNKNOWN until certified producer/cache binding. Data Health KNOWN GAP. Unsafe exports unavailable.</p>")
+        for gid,label,items in REPORT_NAV_GROUPS:
+            page.add("<h2>"+label+"</h2>")
+            for sid,name,_ in items:
+                page.add('<section id="sec-'+sid+'"><h3>'+name+'</h3><p>Historical scope preserved; no lazy source lookup/export.</p></section>')
+        page.add("</body></html>")
+        return make_response(page.finish())
     nav_groups_json = json.dumps([
         {"id": gid, "label": glabel, "items": [[a, b] for a, b, _ in items]}
         for gid, glabel, items in REPORT_NAV_GROUPS
@@ -9869,6 +9992,8 @@ RELAY_STATUS_SNAPSHOT_FILE = LAPTOP_CHAIN_STATE_DIR / "relay_status_snapshot_v1.
 DECISION_NAV_LINKS = (
     ("Alerts", "/alerts"),
     ("Details (full report)", "/details"),
+    ("Partial Two-Year Batch Study", "/twoyear-batch"),
+    ("Strategy Findings", "/strategy-findings"),
     ("Safe Policy Genome V3.1", "/safe-policy-genome-v3.1"),
     ("Static policies", "/static-policies"),
     ("Dynamic policies", "/dynamic-policies"),
@@ -10402,6 +10527,20 @@ def favicon():
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Read-only offline saved-study viewer")
+    parser.add_argument("--standalone", action="store_true")
+    parser.add_argument("--data-root", required=True, help="Explicit saved run DataRoot; never written")
+    args = parser.parse_args()
+    if os.getenv("FORCE_PAPER_MODE","1").strip().lower() not in ("1","true","on") or app.config.get("RESEARCH_LIVE_ENABLED"):
+        raise ValueError("Live OFF / paper-only constraint required")
+    if BIND_HOST != "127.0.0.1" or BIND_PORT != 9001:
+        raise ValueError("Standalone study viewer must bind 127.0.0.1:9001 only")
+    global TWOYEAR_DATA_ROOT
+    TWOYEAR_DATA_ROOT = Path(args.data_root).expanduser().resolve(strict=True)
+    if not TWOYEAR_DATA_ROOT.is_dir():
+        raise ValueError("DataRoot must be a directory")
+    app.config["RESEARCH_OFFLINE_VIEWER"] = True
     print("=" * 60)
     print(f"Research Dashboard {RESEARCH_DASHBOARD_VERSION} — READ-ONLY")
     print(f"  Bot sync:     {EXPECTED_BOT_VERSION}")
@@ -10409,15 +10548,23 @@ def main():
     print(f"  Benchmark:    {BENCHMARK_LANE}")
     print(f"  Root:   {ROOT}")
     print(f"  Listen: http://{BIND_HOST}:{BIND_PORT}/")
-    print(f"  LAN:    {PUBLIC_URL}/")
-    print("  Download: /download/reports")
+    print("  Live OFF · PAPER ONLY · real-data refresh HOLD / writer UNKNOWN")
+    print("  Unsafe legacy routes and downloads: UNAVAILABLE")
     print("=" * 60)
-    app.run(host=BIND_HOST, port=BIND_PORT, debug=False, threaded=True, use_reloader=False)
+    # No engine, loader child or :9021 is started here. The approved external
+    # supervisor must own/cache-load data; absent it, the read-only shell stays empty.
+    from research.study_http_server import StudyHTTPServer
+    server=StudyHTTPServer((BIND_HOST,BIND_PORT),app)
+    try:
+        server.serve_forever(poll_interval=.01)
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
+    if "--standalone" in sys.argv:
+        main()
+        raise SystemExit(0)
     print("Research dashboard is embedded in analyzer_research_engine_v62.py")
     print("Run:  python analyzer_research_engine_v62.py")
     print("Or:   .\\start_stack.ps1")
-    if "--standalone" in sys.argv:
-        main()
