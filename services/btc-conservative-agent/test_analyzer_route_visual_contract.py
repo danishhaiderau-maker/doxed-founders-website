@@ -115,9 +115,18 @@ def test_every_dashboard_navigation_item_has_renderable_section_scope_and_loader
     source = dashboard.DASHBOARD_HTML
     loader_block = source.split("const SECTION_LOADERS = {", 1)[1].split("};", 1)[0]
     scope_block = source.split("const EVIDENCE_SCOPES = {", 1)[1].split("};", 1)[0]
+    # AMEND6 L200: twoyear-batch HTML and strategy-findings HTML use §6.2–6.3,
+    # "not an old heavy template loader." AMEND6 L44–L45 introduce those
+    # panels as their own pages. AMEND6 L46 and L257: /data-health must not
+    # be lazy-requested; PR B is separate. These three keep a sec- node
+    # (AMEND6 L40) but are not in-page SECTION_LOADERS / EVIDENCE_SCOPES
+    # subtabs.
+    link_out_sections = frozenset({"twoyear-batch", "strategy-findings", "data-health"})
 
     for section_id, _label, _report in dashboard.REPORT_NAV:
         assert f'id="sec-{section_id}"' in source, section_id
+        if section_id in link_out_sections:
+            continue
         assert re.search(rf"(?:^|\s|')({re.escape(section_id)})'?\s*:", scope_block, re.MULTILINE), section_id
         assert re.search(rf"(?:^|\s|')({re.escape(section_id)})'?\s*:", loader_block, re.MULTILINE), section_id
 

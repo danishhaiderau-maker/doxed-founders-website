@@ -44,16 +44,22 @@ class _DetailsParser(HTMLParser):
             self.stack.pop()
 
 
-def test_analyzer_keeps_four_primary_groups_and_fences_machine_json():
+def test_analyzer_keeps_five_primary_groups_and_fences_machine_json():
     groups = dashboard.REPORT_NAV_GROUPS
-    assert len(groups) == 4
+    # AMEND6 L40: "Five proposed groups". AMEND6 L43–L47 bind the group IDs
+    # (overview, twoyear, strategy-findings-group, data-health, archive) and
+    # the Archive & Diagnostics label. This replaces the old four-group
+    # contract (lanes-group, trading-group, deep-group / "Diagnostics &
+    # Historical"). Old section IDs stay reachable (AMEND6 L40, L47).
+    assert len(groups) == 5
     assert [gid for gid, _, _ in groups] == [
         "overview",
-        "lanes-group",
-        "trading-group",
-        "deep-group",
+        "twoyear",
+        "strategy-findings-group",
+        "data-health",
+        "archive",
     ]
-    assert groups[-1][1] == "Diagnostics & Historical"
+    assert groups[-1][1] == "Archive & Diagnostics"
     # All historical/forensic section ids remain reachable (not deleted).
     deep_ids = {sid for sid, _, _ in groups[-1][2]}
     for sid in ("findings", "regime", "ai", "archives", "horizon", "explorer", "download"):
