@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "installation_id": "REQUIRES-APPROVED-INSTALL-CARD",
+  "genesis_sha256": "REQUIRES_PIN",
+  "implementation_sha256": "REQUIRES_PIN",
+  "source_sha256": {
+    "C:\\DoxxedCrypto\\v2c\\scripts\\pmc_analyzer_supervisor.py": "REQUIRES_FULL_FIRST_PARTY_MANIFEST"
+  },
+  "reconciled_owners_receipt_sha256": "REQUIRES_PIN",
+  "python_sha256": "5f7b89a612c9b8af1d6456cdfcd1dbe5ca630849e79aebced9bee9a6694952ec",
+  "disk_floor_terminate_enabled": false,
+  "disk_floor_card_sha256": null,
+  "human_clear_receipt_sha256": null,
+  "human_clear_public_key_sha256": "REQUIRES_HUMAN_PUBLIC_KEY_PIN"
+}
