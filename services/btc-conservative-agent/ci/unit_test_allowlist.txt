@@ -148,6 +148,7 @@ test_dashboard_simplified_disclosure.py
 test_dashboard_snapshot_failure.py
 test_dashboard_state_projection_runtime.py
 test_dashboard_storage_receipt.py
+test_dashboard_viewer.py
 test_dashboard_visual_truth_v4.py
 test_data_epoch.py
 test_data_gaps_20261012.py
