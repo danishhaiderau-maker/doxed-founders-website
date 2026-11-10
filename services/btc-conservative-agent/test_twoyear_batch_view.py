@@ -123,6 +123,7 @@ def test_k_slices_precomputed_without_changing_n_or_denominator(store):
         data=json.loads(cache.response("board:"+str(k))[0])
         assert len(data["rows"])==k
         assert all(r["scope_batches"]==1 for r in data["rows"])
+    assert b"Strategy 49" in cache.response("detail:49",html=True)[0]
     summary=json.loads(cache.response("summary")[0])
     assert (summary["n_selection"],summary["variants_tried"],summary["n_grammar"])==(840,8,181442)
     assert D.app.test_client().get('/api/research/twoyear/leaderboard?k=31').status_code==400

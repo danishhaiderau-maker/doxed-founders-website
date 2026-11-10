@@ -196,7 +196,7 @@ def validate(raw):
     seen=set()
     for row in rows:
         cid=str(row.get("strategy_id",""))
-        if not cid or cid in seen or len(row.get("per_batch",[]))>11 or len(row.get("folds",[]))>20:
+        if not cid or len(cid)>64 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for ch in cid) or cid in seen or len(row.get("per_batch",[]))>11 or len(row.get("folds",[]))>20:
             raise ValueError("strategy/detail/fold shape")
         seen.add(cid)
         if row.get("scope_batches")!=len(ranked) or not isinstance(row.get("gross_positive_batches"),int) or not 0<=row["gross_positive_batches"]<=len(ranked):
@@ -381,7 +381,7 @@ def _render(data,k=40,findings=False,detail=None,stale=False):
                     if isinstance(width,(int,float)) and 0<=width<=100:
                         out.add("<div style='height:8px;background:"+color+";width:"+str(width)+"%'></div>")
         out.add("</section>")
-    details=data.get("findings",[]) if findings else ([r for r in rows if str(r["strategy_id"])==str(detail)] if detail is not None else rows[:1])
+    details=data.get("findings",[]) if findings else ([r for r in data.get("ranking",[]) if str(r["strategy_id"])==str(detail)] if detail is not None else rows[:1])
     if not details:
         out.add("<p>nothing found yet — no verified Findings summary available</p>" if findings else "<p>no completed batches yet — no verified completed-batch summary available</p>")
     for row in details:
