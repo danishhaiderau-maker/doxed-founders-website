@@ -230,7 +230,7 @@ class AppendJournal:
                 require_current_series(records)
             except VocabularyError as exc:
                 raise StartRefused("VOCAB_CLOSED_SERIES_NEW_ROOT_REQUIRED") from exc
-        flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+        flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_BINARY", 0)
         if exclusive:
             flags |= os.O_EXCL
         self.fd = os.open(path, flags, 0o644)
@@ -258,7 +258,7 @@ class SegmentFile:
     def __init__(self, path: Path, trace):
         self.path = path
         self.trace = trace
-        self.fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_WRONLY, 0o644)
+        self.fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o644)
         self.size = 0
         self.closed = False
         self._prefix = hashlib.sha256()
