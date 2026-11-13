@@ -1,7 +1,23 @@
 """P3 (HM 19 Oct): flatten closes carry exit_trigger_ts (close-request time); latency stats never treat missing as 0."""
 import inspect
+import signal
+
+import pytest
+
+# bot.py installs shutdown_handler on SIGINT/SIGTERM at import and never restores
+# (HM c3b9f820cfe9, RK dfdd73862d40, HM C5). Save first, restore after this module's tests.
+_PREV_SIGINT = signal.getsignal(signal.SIGINT)
+_PREV_SIGTERM = signal.getsignal(signal.SIGTERM)
+
 import bot
 import exit_latency_slo as els
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_signal_handlers_after_bot_import():
+    yield
+    signal.signal(signal.SIGINT, _PREV_SIGINT)
+    signal.signal(signal.SIGTERM, _PREV_SIGTERM)
 
 
 def test_admin_close_stamps_trigger_ts_and_source_without_overwriting():

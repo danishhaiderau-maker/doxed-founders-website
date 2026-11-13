@@ -646,6 +646,7 @@ test_strategy_fixes_stage1.py
 test_strategy_lab_insights.py
 test_strategy_progress_watchdog.py
 test_streams_health_log_files.py
+test_study_http_transport.py
 test_system_health_alerts.py
 test_system_health_alerts_fly.py
 test_system_health_banner.py
@@ -683,6 +684,7 @@ test_trigger_measure.py
 test_trigger_receive_stamp.py
 test_trustworthy_v22_contracts.py
 test_two_tier_relay_gate.py
+test_twoyear_batch_view.py
 test_v22_boot_degrade.py
 test_v22_retired_r17.py
 test_v2_data_start_label.py
