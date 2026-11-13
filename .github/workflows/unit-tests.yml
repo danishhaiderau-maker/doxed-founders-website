@@ -77,6 +77,11 @@ jobs:
           if defects:
               raise SystemExit("tile registry defects: " + "; ".join(defects))
           PY
+      - name: Strategy package YAML JSON-schema validation (R47)
+        # Validates strategies/<id>.yaml via strategy_package_loader hard-refuses.
+        # Empty strategies/*.yaml is OK — packages are not activated by this PR.
+        working-directory: .
+        run: python scripts/validate-strategy-packages.py
       - name: R3 market_segment guards (RK #873) - 0 live reads, scoped strict xfail, shrink-only list
         # Fails the PR if a live market_segment read is reintroduced, if the legacy xfail list grows
         # (vs the base branch, and vs the CEILING constant), lists a forbidden-category test, or if the
