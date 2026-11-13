@@ -1,0 +1,1016 @@
+[
+  {
+    "id": "P8R4-12-ALLOW-ROW2",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "f86b42e350d90238bb966d375b59fb6e58a468007ded849c6206161315a7c1d1"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "ALLOWED_WARMUP_ONLY",
+          "read_allowed": true,
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "f86b42e350d90238bb966d375b59fb6e58a468007ded849c6206161315a7c1d1"
+          },
+          "state_may_advance": true,
+          "entries": false,
+          "trades": false,
+          "PnL": false,
+          "score": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-ALLOW-ROW3",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "ALLOWED_WARMUP_ONLY",
+          "read_allowed": true,
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          },
+          "state_may_advance": true,
+          "entries": false,
+          "trades": false,
+          "PnL": false,
+          "score": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-ALLOW-ROW4",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743551999,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            4,
+            4
+          ],
+          "rows_utf8": "4,1743551999,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              4,
+              4
+            ],
+            "sha256": "bdf4f342a8e804fedcd0690ede7d4ba03680e63599ac3506c9d59479dffdc9cd"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "ALLOWED_WARMUP_ONLY",
+          "read_allowed": true,
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              4,
+              4
+            ],
+            "sha256": "bdf4f342a8e804fedcd0690ede7d4ba03680e63599ac3506c9d59479dffdc9cd"
+          },
+          "state_may_advance": true,
+          "entries": false,
+          "trades": false,
+          "PnL": false,
+          "score": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-ALLOW-ROW5",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743552000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            5,
+            5
+          ],
+          "rows_utf8": "5,1743552000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              5,
+              5
+            ],
+            "sha256": "70ff1d8ed1327f6307b917c67dbf0cc6f936b8f98bfa5be64f3ff74cda590377"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "ALLOWED_WARMUP_ONLY",
+          "read_allowed": true,
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              5,
+              5
+            ],
+            "sha256": "70ff1d8ed1327f6307b917c67dbf0cc6f936b8f98bfa5be64f3ff74cda590377"
+          },
+          "state_may_advance": true,
+          "entries": false,
+          "trades": false,
+          "PnL": false,
+          "score": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-ALLOW-ROW6",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743724799,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            6,
+            6
+          ],
+          "rows_utf8": "6,1743724799,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              6,
+              6
+            ],
+            "sha256": "a66a78a5a953f8d917bb2e294d60c7b6cf9b9543e61cc77688d16929c08efdf7"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "ALLOWED_WARMUP_ONLY",
+          "read_allowed": true,
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              6,
+              6
+            ],
+            "sha256": "a66a78a5a953f8d917bb2e294d60c7b6cf9b9543e61cc77688d16929c08efdf7"
+          },
+          "state_may_advance": true,
+          "entries": false,
+          "trades": false,
+          "PnL": false,
+          "score": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-STOP-BEFORE",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743119999,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            1,
+            1
+          ],
+          "rows_utf8": "1,1743119999,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              1,
+              1
+            ],
+            "sha256": "43377448ecfd7ac07ba0ac2b540045aed1a8b1ba96eec39d0a82f7a4c94c76b1"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_SUFFIX",
+          "read_allowed": false,
+          "latched": true
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R4-12-STOP-UPPER-ROW7",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743724800,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            7,
+            7
+          ],
+          "rows_utf8": "7,1743724800,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              7,
+              7
+            ],
+            "sha256": "89df8168b08a00846c9db6fe5068b3720e4af87f984ba90a0354b6b982de186e"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_SUFFIX",
+          "read_allowed": false,
+          "latched": true,
+          "entries": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-STOP-UPPER-ROW8",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743724801,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            8,
+            8
+          ],
+          "rows_utf8": "8,1743724801,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              8,
+              8
+            ],
+            "sha256": "f04c21759f146b290dd4d14e9e79a4d911f8875b5e1f82be8aafbcd5183ace54"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_SUFFIX",
+          "read_allowed": false,
+          "latched": true,
+          "entries": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-LATCH-SURVIVES-RESTART",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743724800,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            7,
+            7
+          ],
+          "rows_utf8": "7,1743724800,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              7,
+              7
+            ],
+            "sha256": "89df8168b08a00846c9db6fe5068b3720e4af87f984ba90a0354b6b982de186e"
+          }
+        },
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "f86b42e350d90238bb966d375b59fb6e58a468007ded849c6206161315a7c1d1"
+          }
+        }
+      ],
+      "restart_at": [
+        1
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_SUFFIX",
+          "latched": true,
+          "read_allowed": false
+        },
+        {
+          "status": "STOP_LATCHED",
+          "latched": true,
+          "read_allowed": false,
+          "entries": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-ARTEFACT-B2_TRADE",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "B2_TRADE",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_OUTCOME_ARTEFACT",
+          "read_allowed": false,
+          "alarm": true,
+          "entries": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-ARTEFACT-B2_PNL",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "B2_PNL",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_OUTCOME_ARTEFACT",
+          "read_allowed": false,
+          "alarm": true,
+          "entries": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-ARTEFACT-B2_SCORE",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "B2_SCORE",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_OUTCOME_ARTEFACT",
+          "read_allowed": false,
+          "alarm": true,
+          "entries": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-RANGE-CROSSES-UPPER",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743724799,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            6,
+            7
+          ],
+          "rows_utf8": "6,1743724799,100\n7,1743724800,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              6,
+              7
+            ],
+            "sha256": "e1e78105eec3cd48bcf316a8a2e8368f21b3c29be31f9a3fd64d42b897117c0c"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_SUFFIX",
+          "read_allowed": false,
+          "latched": true
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R4-12-MISSING-LOG-file",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "f86b42e350d90238bb966d375b59fb6e58a468007ded849c6206161315a7c1d1"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R4-12-MISSING-LOG-row_range",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "sha256": "f86b42e350d90238bb966d375b59fb6e58a468007ded849c6206161315a7c1d1"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R4-12-MISSING-LOG-sha256",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-STOP-NO-LOG-MISSING",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": null
+        }
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE"
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-STOP-NO-LOG-UNREADABLE",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "f86b42e350d90238bb966d375b59fb6e58a468007ded849c6206161315a7c1d1"
+          },
+          "log_readable": false
+        }
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE"
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-STOP-NO-LOG-HASH-MISMATCH",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        }
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE"
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "Final GS single rule verified in P8r10/Pin7r7; full source hashes in BINDINGS.json. Realimplementation NOT TESTED."
+  },
+  {
+    "id": "P8R10-12-ARTEFACT-B2_FILL",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "B2_FILL",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_OUTCOME_ARTEFACT",
+          "read_allowed": false,
+          "alarm": true,
+          "entries": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R10-12-ARTEFACT-B2_RANKING",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "B2_RANKING",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP_OUTCOME_ARTEFACT",
+          "read_allowed": false,
+          "alarm": true,
+          "entries": false
+        }
+      ]
+    },
+    "family": "B3-suffix",
+    "evidence_status": "NOT_TESTED",
+    "notes": ""
+  },
+  {
+    "id": "P8R10-12-NOLOG-TERMINAL-NO-AUTORESUME",
+    "operation": "b3_guard",
+    "input": {
+      "events": [
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120000,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            2,
+            2
+          ],
+          "rows_utf8": "2,1743120000,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              2,
+              2
+            ],
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        },
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          },
+          "auto_restart_requested": true
+        },
+        {
+          "kind": "CANDLES",
+          "close_epoch_s": 1743120001,
+          "file": "tapes/b3-source.csv",
+          "row_range": [
+            3,
+            3
+          ],
+          "rows_utf8": "3,1743120001,100\n",
+          "log": {
+            "file": "tapes/b3-source.csv",
+            "row_range": [
+              3,
+              3
+            ],
+            "sha256": "c6dd36a02564dda63aad1dc8d44c925739dbd0d08b85cdac23ec9dc502b7b664"
+          },
+          "score_B3_requested": true
+        }
+      ],
+      "restart_at": [
+        1
+      ],
+      "warmup_state": "SYNTHETIC_EXISTING_STATE",
+      "new_dated_card_CLEAR": false,
+      "launch_ask_CLEAR": false
+    },
+    "expected": {
+      "trace": [
+        {
+          "status": "STOP",
+          "latched": true,
+          "alarm": true,
+          "read_allowed": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        },
+        {
+          "status": "STOP_LATCHED",
+          "latched": true,
+          "read_allowed": false,
+          "entries": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        },
+        {
+          "status": "STOP_LATCHED",
+          "latched": true,
+          "read_allowed": false,
+          "entries": false,
+          "warmup_state": "DISCARDED",
+          "B3_scored": false
+        }
+      ],
+      "latched": true,
+      "auto_resume": false,
+      "B3_scored": false
+    },
+    "family": "B3-suffix-P8r10",
+    "evidence_status": "NOT_TESTED",
+    "notes": "RKf66a708a39bf C1 / finalr10: terminal NOLOG latch survives restart/validlog; no auto-resume/rescore without NEW dated card or launchaskCLEAR."
+  }
+]

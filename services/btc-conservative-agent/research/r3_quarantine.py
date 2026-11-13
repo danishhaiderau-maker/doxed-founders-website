@@ -19,6 +19,10 @@ do exactly that until they are rebuilt on the shared ``paper_fill`` pricer and
 * EXIT_STUDY_1S    -- diagnostics/hypothesis-tiles-20261004/exit_study.py books exits with
                       fill_model.realistic_exit_margin on the 1s tape (HM #850 R3, 5th caller).
                       main() refuses with SOURCE_RETIRED_R17 (exit 4); replay() raises.
+* PIN_RESEARCH_1S  -- PR #1005 provisional 5b pin wrappers research/pin_fill_operations.py evaluate_fill and
+                      research/pin_scoring.py taker_entry_and_score call fill_model.taker_fill_rows /
+                      maker_fill_rows / realistic_exit_margin (1s tape).  Both guard() and raise; any output
+                      produced under a test-only ACTIVE monkeypatch is NON-EVIDENTIAL (R17), never cited.
 
 Until fixed the producers STOP writing their outputs, and every analyzer /
 dashboard / Strategist-facing reader refuses the named files (stale copies on
@@ -94,6 +98,14 @@ QUARANTINE: dict[str, dict[str, Any]] = {
         "price_source": "bitfinex_l1_tape_1s bid/ask via genome_grid_study paths + fill_model.realistic_exit_margin",
         "files": (),
     },
+    # RK triage ruling 2e5c08df822f (13 Nov 2026 AEDT): new key, not a reuse.  Offline wrappers with no output files;
+    # the wrappers themselves refuse (guard) -- the p8 adapter's field9_fill_model operation goes through the guard.
+    "PIN_RESEARCH_1S": {
+        "producer": "research/pin_fill_operations.py evaluate_fill + research/pin_scoring.py taker_entry_and_score",
+        "price_source": "market_microstructure_1s-shaped rows via fill_model.taker_fill_rows / maker_fill_rows / "
+                        "realistic_exit_margin",
+        "files": (),
+    },
 }
 
 RETIRED_LABEL = "source retired (R17)"
@@ -141,6 +153,8 @@ FILL_MODEL_ROW_CALLERS: dict[str, str] = {
     "research.genome_grid_study.realistic_exit_parity": "GENOME_GRID",
     "research.walk_forward_scorer.simulate_entry": "WALK_FORWARD_1S",
     "research.walk_forward_scorer.simulate_exit": "WALK_FORWARD_1S",
+    "research.pin_fill_operations.evaluate_fill": "PIN_RESEARCH_1S",
+    "research.pin_scoring.taker_entry_and_score": "PIN_RESEARCH_1S",
 }
 
 # HM #850 R3: repo-wide pin.  Every reference to a retired 1s-tape / ticker pricer anywhere in the repo (excluding
@@ -180,6 +194,9 @@ REPO_PRICER_REFERENCES: dict[str, str] = {
     _R + "genome_grid_study.py::canonical_parity_sample": "GENOME_GRID",  # string constant (parity rule label)
     _R + "walk_forward_scorer.py::simulate_entry": "WALK_FORWARD_1S",
     _R + "walk_forward_scorer.py::simulate_exit": "WALK_FORWARD_1S",
+    _R + "pin_fill_operations.py::evaluate_fill": "PIN_RESEARCH_1S",
+    _R + "pin_scoring.py::<module>": "PIN_RESEARCH_1S",  # from .fill_model import taker_fill_rows
+    _R + "pin_scoring.py::taker_entry_and_score": "PIN_RESEARCH_1S",
 }
 del _A, _R
 

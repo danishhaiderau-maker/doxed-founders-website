@@ -1,0 +1,50 @@
+{
+  "pin7": {
+    "source": "/workspace/boss-reviewed-cards/hm-5b-tapes-20261110/inputs/Pin7_r7.md",
+    "sha256": "dc0cc45f24f5afee9a69718fcc120fc27450f80b6e35de1058f0ed0e68eedf79"
+  },
+  "p8": {
+    "source": "/workspace/boss-reviewed-cards/hm-5b-tapes-20261110/inputs/P8_r10.md",
+    "sha256": "28315aeb4423e88d4e3dadcf3e42005b29ddbba1f2e054467aeab7827135641e"
+  },
+  "ct": {
+    "source": "/workspace/boss-reviewed-cards/b2-cT-table-20261110.csv",
+    "sha256": "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0"
+  },
+  "rules": {
+    "source": "/workspace/rules-keeper/RULES-R0-R61-20261110.md",
+    "sha256": "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2"
+  },
+  "hm_manifest": {
+    "sha256": "fbdfd1ca2b6c69cf977b176f11ad1b1e9fad2f7782aaa01c30a69f159ec04c3e",
+    "source": "/workspace/boss-reviewed-cards/hm-5b-tapes-20261110/MANIFEST.sha256",
+    "all_source_entries_verified": true
+  },
+  "copied_files": {
+    "CONVENTIONS.json": "09b33598a6bd9b8a2e170b954a6d129fc96120bdba05827f48793b011d1898f2",
+    "MANIFEST.sha256": "fbdfd1ca2b6c69cf977b176f11ad1b1e9fad2f7782aaa01c30a69f159ec04c3e",
+    "PROTOCOL.md": "4f9273187b544f3c2f2f442e9c5b13239a1dbcfe43261a6b2f84a1c6a107d76a",
+    "TAPES.schema.json": "c938dc6230a506bcbd3f6b5dcafe40ac5d4fefd6af1cdec73f075d75b19b5a2c",
+    "field9.json": "39a9e5efe92e3cea97658ab445673cfc9928f8adda8fb2ec80c5afeaa97f1bd2",
+    "inputs/ct_compute_code.py": "73f6a1b27987fa754189cc5f865003df06658f0a9112b39ac57d1e8860ac0f3d",
+    "inputs/ct_table.csv": "37603987e6dabdc42ce89aec9482a3366d881f14c5d7c53356307e890c7595f0",
+    "tapes/b3-source.csv": "008d6c2818dd6fef0a82b892d7bff1006a61aa099df5a311a4cebc3360590c02",
+    "tapes/b3.json": "d4d0b28ee5a262e504af132db96f6c7302f6717a5fe53ff6c6bd1563e6c024bb",
+    "tapes/classifier.json": "3a7191bcc87b0a89de85accd20993e7718019dbeb471fc131c89aa2098a6e313",
+    "tapes/ct.json": "32fdf6484e30c8cd733ccb38f6dc6edec1105dcd6bef592414b8658f32ad6ffd",
+    "tapes/field9.json": "7e42f3f641e85854bde4f4a1c70172cbe80f6df4a2044cd85ff1f228d131f915",
+    "tapes/index.json": "0c757d45b8c0507cae6587426ca925e86c9c7a0804f9ea034a1c4b60b7a72102",
+    "tapes/k3.json": "6cff7c55e94c09025c645b91e45b8b71881db2b66951ec20a860eb3d226a8343",
+    "tapes/pin15.json": "563e8e7f25c2c4e93de5b632ea572d6a7bec93d9c5f34ca5c1c1de0b8a61c228",
+    "tapes/pin16.json": "07f455822dec8e017902af84f9b721889f41310e2145078c40b43a7bfb620e5d"
+  },
+  "previous_hm_manifest": {
+    "sha256": "a023c98ca3811dd07953d7bd869ec18a58c41628b27acf3b87b90c18228507db",
+    "source": "/workspace/boss-reviewed-cards/hm-p8-tapes-20261110/MANIFEST.sha256",
+    "all_source_entries_verified": true
+  },
+  "fixture_card": {
+    "source": "/workspace/boss-reviewed-cards/hm-card-5b-fixture-run-20261110.md",
+    "sha256": "1dc08d9a36bc5feb433bd50e6e222157df1cf0cc0c7ffafec99859c9a24571dd"
+  }
+}
