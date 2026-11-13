@@ -1,7 +1,9 @@
 """BS tests (plan item C10): survivor alert + no-paper-tile-write proof (T-PT1..T-PT3).
 
 Binding: plan r3 33f3ec1e0e07 s7 C10; Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2;
-RK e1d778426447; HM R2 b88d1b1e0653; RULES c342ecf8ec9a; t2985u.
+residuals GO ad97fded1831; RK e1d778426447 / bb9b6d5ebedc; HM R2 b88d1b1e0653;
+RULES c342ecf8ec9a; t2985u.
+BS-R2 (arming-time open-fd check via /proc/self/fd) is NOT TESTED on Windows.
 The run guard is a process-wide audit hook with no disarm, so every guarded case runs in a CHILD
 python process (exit code 78 = refused). Scratch: <--basetemp>/bs-fixed/<sha12>/<test>/...
 (new per session basetemp; nothing is removed). No network is used: the guard refuses socket.*
@@ -259,6 +261,23 @@ _PATHLIKE = re.compile(r"([\\/]|^[A-Za-z]:)")
 _TILEPATH = re.compile(r"(paper|live|tile|order|ledger|services|bitfinex)", re.I)
 # Read-only root pinned in B0 pins.py (never a write target; B0 write guard refuses writes under it).
 _ALLOWED_PATH_LITERALS = {"C:\\DoxxedCrypto\\external"}
+# Explicit denylist (RK bb9b6d5ebedc BS-R1). These names include stdlib modules; the
+# stdlib/third-party allowlist alone would not fail them.
+_DENY_IMPORTS = frozenset({"ctypes", "_ctypes", "cffi", "sqlite3", "_sqlite3", "mmap"})
+_KNOWN_RESIDUALS_HEADING = "KNOWN RESIDUALS (RK bb9b6d5ebedc)"
+_KNOWN_RESIDUALS_BULLETS = "- ctypes (ctypes.CDLL / libc open, write, mkdir, system): stays open because a process-wide ctypes/dlopen block would also risk C extensions already loaded (numpy); the bundle does not import ctypes, and test_t_pt1's import allowlist would catch a new import. Coverage: static scan, plus this residual ruling.\n- sqlite3.connect: stays open because SQLite's C library can create or write a file without going through the hooked os.open; the bundle does not import sqlite3, and the same static allowlist would catch a new import. Coverage: static scan, plus this residual ruling.\n- Pre-armed file descriptors: an fd opened before install_run_guard can still be written with os.write, io.FileIO(fd), sendfile, copy_file_range, or mmap. Stays open because revoking inherited fds would break stdin/stdout/stderr and any fd the caller already holds; the hook applies to new opens only. Coverage: exclusive-create of the alert and STOP files, and the intended run does not open outside paths before arming.\n- Writes performed inside already-imported C extensions (numpy, etc.) that do not go through os.* or the audit hook: stays open for the same loaded-extension reason as ctypes. Coverage: the bundle's import allowlist, and no new non-stdlib I/O modules.\n- Path tricks that never pass a path to a hooked event (for example writing to an fd obtained via a pre-arm open of /proc/self/fd): same class as pre-armed fds. Coverage: same exclusive-create and pre-arm discipline.\n"
+
+
+def _assert_import_allowed(path, m):
+    """Fail on network, denied, or non-allowlisted imports (explicit denylist + stdlib/allowlist)."""
+    top = m.split(".")[0]
+    assert top not in _NETWORK, (path, m)
+    if top == PKG:
+        assert not _FORBID.search(m[len(PKG):]), (path, m)
+        return
+    assert top not in _DENY_IMPORTS, (path, "denied import %s" % m)
+    assert top in _STDLIB or top in _THIRD, (path, m)
+    assert not _FORBID.search(m), (path, m)
 
 
 def _bundle_files():
@@ -293,13 +312,7 @@ def test_t_pt1_bundle_static_scan():
             elif isinstance(node, ast.ImportFrom):
                 mods = [node.module or ""] + ["%s.%s" % (node.module, a.name) for a in node.names]
             for m in mods:
-                top = m.split(".")[0]
-                assert top not in _NETWORK, (path, m)
-                if top == PKG:
-                    assert not _FORBID.search(m[len(PKG):]), (path, m)
-                    continue
-                assert top in _STDLIB or top in _THIRD, (path, m)
-                assert not _FORBID.search(m), (path, m)
+                _assert_import_allowed(path, m)
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
                 v = node.value
                 if v in _ALLOWED_PATH_LITERALS:
@@ -434,3 +447,60 @@ def test_t_pt2_8_mkfifo_outside_refused(scratch):
     """ % target, scratch)
     assert rc == 78, txt
     assert not os.path.exists(target)
+
+
+
+# ---------------------------------------------------------------- BS-R1 / BS-R2 / BS-R3 (RK bb9b6d5ebedc)
+_LINUX_FD = sys.platform.startswith("linux") and os.path.isdir("/proc/self/fd")
+_SKIP_WIN_FD = pytest.mark.skipif(
+    not _LINUX_FD,
+    reason="NOT TESTED on Windows (BS-R2: Linux /proc/self/fd only)",
+)
+
+
+@pytest.mark.parametrize("mod", sorted(_DENY_IMPORTS) + ["h5py"])
+def test_t_pt1_denied_or_nonstdlib_io_import_is_caught(mod):
+    """Self-check of the allowlist: each named deny-import and a new non-stdlib I/O module fail."""
+    tree = ast.parse("import %s\n" % mod)
+    node = tree.body[0]
+    assert isinstance(node, ast.Import)
+    with pytest.raises(AssertionError):
+        _assert_import_allowed("<planted>", node.names[0].name)
+
+
+def test_bs_r3_known_residuals_verbatim_in_module_docstring():
+    doc = fa.__doc__ or ""
+    assert _KNOWN_RESIDUALS_HEADING in doc
+    assert _KNOWN_RESIDUALS_BULLETS in doc
+    idx = doc.index(_KNOWN_RESIDUALS_HEADING)
+    after = doc[idx + len(_KNOWN_RESIDUALS_HEADING):]
+    assert after.startswith("\n") and _KNOWN_RESIDUALS_BULLETS in after
+    assert "NOT TESTED" in doc
+
+
+@_SKIP_WIN_FD
+def test_bs_r2_arming_holds_only_stdio_plus_disclosed(scratch):
+    """At install_run_guard, Linux /proc/self/fd has only 0,1,2 plus DISCLOSED_ARMING_FDS."""
+    rc, out = _child("""
+        fa.install_run_guard(RUN)
+        allowed = set((0, 1, 2)) | set(fa.DISCLOSED_ARMING_FDS)
+        open_fds = fa._linux_open_fds()
+        extra = [fd for fd in open_fds if fd not in allowed]
+        print({"open": open_fds, "extra": extra, "disclosed": sorted(fa.DISCLOSED_ARMING_FDS)})
+        if extra:
+            raise SystemExit("unexpected fds after arming: %s" % extra)
+    """, scratch)
+    assert rc == 0, out
+
+
+@_SKIP_WIN_FD
+def test_bs_r2_prearmed_extra_fd_refused(scratch):
+    """An fd opened before install_run_guard must be refused at arming (exit 78)."""
+    rc, out = _child("""
+        extra = os.open(os.path.join(S, "prearm.bin"), os.O_WRONLY | os.O_CREAT)
+        try:
+            fa.install_run_guard(RUN)
+        finally:
+            os.close(extra)
+    """, scratch)
+    assert rc == 78, out

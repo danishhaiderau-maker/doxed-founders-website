@@ -1,9 +1,10 @@
 """C10 survivor alert + no-paper-tile path (batch BS) for the BTC full-N 480,522,240 search.
 
 Binding: plan r3 33f3ec1e0e07 s7 C10 / s12 BS; Boss GO r2 3656382c8a5c (BS = plan item C10, not the
-G24 stoptest); review-fix GO c65ece13d3b2; RK 22ee55488e0c / e1d778426447; HM R2 b88d1b1e0653
-(s3(b) flag table); RULES c342ecf8ec9a R66(g); Danish t2985u (nothing enters paper automatically;
-Danish picks). The alert payload still carries pins.RULES_SHA256 from B0 until that revision.
+G24 stoptest); review-fix GO c65ece13d3b2; residuals GO ad97fded1831; RK 22ee55488e0c / e1d778426447
+/ bb9b6d5ebedc; HM R2 b88d1b1e0653 (s3(b) flag table); RULES c342ecf8ec9a R66(g); Danish t2985u
+(nothing enters paper automatically; Danish picks). The alert payload still carries
+pins.RULES_SHA256 from B0 until that revision.
 
 - compute_alert(): pure. k = number of cells that pass the ONE frozen method AND all floors on
   W01-W12, counted over the FULL lattice (arrays of length N); confirmation alpha = 0.05 / k with
@@ -24,6 +25,16 @@ Danish picks). The alert payload still carries pins.RULES_SHA256 from B0 until t
   sqlite3, pre-armed fds) are listed for RK, not claimed as closed.
 - This module imports no repo service, tile, ledger, order, exchange or network module and holds
   no path literal for writing.
+
+KNOWN RESIDUALS (RK bb9b6d5ebedc)
+- ctypes (ctypes.CDLL / libc open, write, mkdir, system): stays open because a process-wide ctypes/dlopen block would also risk C extensions already loaded (numpy); the bundle does not import ctypes, and test_t_pt1's import allowlist would catch a new import. Coverage: static scan, plus this residual ruling.
+- sqlite3.connect: stays open because SQLite's C library can create or write a file without going through the hooked os.open; the bundle does not import sqlite3, and the same static allowlist would catch a new import. Coverage: static scan, plus this residual ruling.
+- Pre-armed file descriptors: an fd opened before install_run_guard can still be written with os.write, io.FileIO(fd), sendfile, copy_file_range, or mmap. Stays open because revoking inherited fds would break stdin/stdout/stderr and any fd the caller already holds; the hook applies to new opens only. Coverage: exclusive-create of the alert and STOP files, and the intended run does not open outside paths before arming.
+- Writes performed inside already-imported C extensions (numpy, etc.) that do not go through os.* or the audit hook: stays open for the same loaded-extension reason as ctypes. Coverage: the bundle's import allowlist, and no new non-stdlib I/O modules.
+- Path tricks that never pass a path to a hooked event (for example writing to an fd obtained via a pre-arm open of /proc/self/fd): same class as pre-armed fds. Coverage: same exclusive-create and pre-arm discipline.
+
+The BS-R2 arming-time open-fd check (Linux /proc/self/fd; allowed fds are 0, 1, 2 plus
+DISCLOSED_ARMING_FDS) is NOT TESTED on Windows.
 """
 import json
 import os
@@ -164,8 +175,47 @@ def _install_wrappers():
     _WRAP_DONE = True
 
 
+# stdin, stdout, stderr. No other fds are disclosed at arming on Linux.
+# The transient procfs fd-directory fd that appears in listdir is dropped
+# by the fstat still-open filter. Windows: the check is NOT TESTED (skipped).
+# Built from parts so T-PT1 does not see an absolute path literal.
+_PROC_SELF_FD = os.path.join(os.sep, "proc", "self", "fd")
+DISCLOSED_ARMING_FDS = frozenset()
+
+
+def _linux_open_fds():
+    """Still-open fds listed under the Linux procfs fd directory (excludes the transient listdir fd)."""
+    found = []
+    for name in os.listdir(_PROC_SELF_FD):
+        if not name.isdigit():
+            continue
+        fd = int(name)
+        try:
+            os.fstat(fd)
+        except OSError:
+            continue
+        found.append(fd)
+    return found
+
+
+def _assert_arming_fds():
+    """Refuse to arm if unexpected fds are already open. Linux only; Windows NOT TESTED."""
+    if not sys.platform.startswith("linux") or not os.path.isdir(_PROC_SELF_FD):
+        return
+    allowed = frozenset((0, 1, 2)) | DISCLOSED_ARMING_FDS
+    extra = sorted(fd for fd in _linux_open_fds() if fd not in allowed)
+    if extra:
+        raise ClosureViolation(
+            "arming fd check: unexpected open fds %s (allowed 0,1,2 plus disclosed %s)"
+            % (extra, sorted(DISCLOSED_ARMING_FDS)))
+
+
 def install_run_guard(run_dir):
-    """Arm the process-wide write/network/spawn/dir_fd/mkfifo guard for RUN_DIR. There is no disarm."""
+    """Arm the process-wide write/network/spawn/dir_fd/mkfifo guard for RUN_DIR. There is no disarm.
+
+    On Linux, arming also asserts that open fds are only 0, 1, 2 plus DISCLOSED_ARMING_FDS,
+    read from /proc/self/fd. On Windows this fd check is skipped and is NOT TESTED.
+    """
     root = _norm(run_dir)
     if not os.path.isdir(root):
         raise ClosureViolation("RUN_DIR does not exist")
@@ -173,6 +223,7 @@ def install_run_guard(run_dir):
         if _GUARD["run_dir"] != root:
             raise ClosureViolation("run guard already armed for another RUN_DIR")
         return
+    _assert_arming_fds()
     _GUARD["run_dir"] = root
     _GUARD["armed"] = True
     _install_wrappers()
