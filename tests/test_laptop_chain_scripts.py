@@ -191,7 +191,7 @@ def test_bot_allowlist_names_justified_or_dropped():
 
 
 def test_bot_auto_restart_does_not_relaunch_on_exit_79():
-    """HM HOLD 716511e8582d: exit 79 (BITFINEX env refusal) must break, not relaunch."""
+    """Static source contract (HM HOLD 716511e8582d). Behavioural proof is separate."""
     source = _source("bot-auto-restart.ps1")
     assert "BitfinexEnvRefusalExitCode" in source
     assert "bitfinex_env_refused" in source
@@ -732,6 +732,232 @@ def test_real_pwsh_file_launch_refuses_injected_key(chain, tmp_path, script_name
     assert "BITFINEX_ENV_NAME_COUNT count=1" in combined
     assert "REFUSED_BITFINEX_ENV_NAMES" in combined
     assert "fake-file-launch-key-not-real" not in combined
+
+
+_FILE_LAUNCH_LOG_NAMES = {
+    "run-analyzer-once.ps1": "analyzer-run",
+    "run-segment-analyzer-cycle.ps1": "segment-analyzer-cycle",
+    "laptop-chain-supervisor.ps1": "laptop-chain-supervisor",
+}
+
+
+def _pwsh_file_launch_argv(script_name: str, chain, tmp_path, extra_args=None) -> list[str]:
+    """Shared ``pwsh -File`` argv for the three supervisor-child entry scripts."""
+    args = [
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(SCRIPTS / script_name),
+        "-RepoRoot",
+        str(ROOT),
+        "-CanonicalRoot",
+        str(chain["canonical"]),
+        "-StateDir",
+        str(chain["state"]),
+    ]
+    if script_name == "run-segment-analyzer-cycle.ps1":
+        shadow = tmp_path / "shadow"
+        archive = tmp_path / "archive"
+        view = tmp_path / "view"
+        for p in (shadow, archive, view):
+            p.mkdir(parents=True, exist_ok=True)
+        args.extend(
+            [
+                "-ShadowRoot",
+                str(shadow),
+                "-ArchiveRoot",
+                str(archive),
+                "-ViewRoot",
+                str(view),
+            ]
+        )
+    elif extra_args:
+        args.extend(extra_args)
+    return args
+
+
+@windows_only
+@pytest.mark.parametrize(
+    "script_name,extra_args",
+    [
+        ("run-analyzer-once.ps1", []),
+        ("run-segment-analyzer-cycle.ps1", None),
+        ("laptop-chain-supervisor.ps1", []),
+    ],
+)
+def test_real_pwsh_file_launch_clean_env_does_not_refuse(chain, tmp_path, script_name, extra_args):
+    """RK follow-up: clean-env ``pwsh -File`` must pass Assert (count=0), never exit 79.
+
+    Complements ``test_real_pwsh_file_launch_refuses_injected_key`` (fake KEY → 79).
+    Kill after the gate proof so the analyzer/supervisor body cannot hang CI.
+    """
+    env = _clean_chain_env(chain)
+    env["BITFINEX_LIVE_ENABLED"] = "0"
+    env["BOT_ADMIN_TOKEN"] = "fixture-admin-token-for-cycle-assert"
+    env["DOXXED_LAPTOP_CHAIN_MUTEX_PREFIX"] = f"DoxxedFileClean{uuid.uuid4().hex[:10]}"
+    for key in list(env):
+        if str(key).upper().startswith("BITFINEX_") and str(key).upper() != "BITFINEX_LIVE_ENABLED":
+            env.pop(key, None)
+
+    args = _pwsh_file_launch_argv(script_name, chain, tmp_path, extra_args)
+    merged = {**dict(os.environ), **env}
+    for key in list(merged):
+        if str(key).upper().startswith("BITFINEX_") and str(key).upper() != "BITFINEX_LIVE_ENABLED":
+            merged.pop(key, None)
+    merged["BITFINEX_LIVE_ENABLED"] = "0"
+
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=merged,
+    )
+    log_name = _FILE_LAUNCH_LOG_NAMES[script_name]
+    log_path = chain["state"] / "logs" / f"{log_name}-{datetime.now(timezone.utc).strftime('%Y%m%d')}.log"
+    saw_count0 = False
+    try:
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if log_path.exists():
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                if "BITFINEX_ENV_NAME_COUNT count=0" in text:
+                    saw_count0 = True
+                    break
+                if "REFUSED_BITFINEX_ENV_NAMES" in text:
+                    break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        stdout, stderr = proc.communicate(timeout=30)
+
+    combined = stdout + stderr
+    if log_path.exists():
+        combined += log_path.read_text(encoding="utf-8", errors="replace")
+    assert saw_count0 or "BITFINEX_ENV_NAME_COUNT count=0" in combined, combined
+    assert proc.returncode != 79, combined
+    assert "REFUSED_BITFINEX_ENV_NAMES" not in combined
+    assert "BITFINEX_ENV_NAME_COUNT count=0" in combined
+
+
+def _bot_auto_restart_harness(tmp_path: Path) -> Path:
+    """Temp checkout copy without fly-canonical.lock so disaster-recovery opt-in can run.
+
+    Harness-only patch: after WaitForExit, honor ``DCF_TEST_FORCE_EXIT_CODE`` so the
+    real stand-down / relaunch decision runs with a known code. CI showed
+    ``Get-Process`` ``ExitCode`` can be empty for a watched child (log ``code=``),
+    which skips the exit-79 branch and falsely relaunches — that is a harness
+    observability gap, not a production soft-exclude.
+    """
+    harness = tmp_path / "restart-harness"
+    scripts = harness / "scripts"
+    scripts.mkdir(parents=True)
+    agent = harness / "services" / "btc-conservative-agent"
+    agent.mkdir(parents=True)
+    (harness / "logs").mkdir()
+    for name in ("home-stack-common.ps1", "laptop-chain-common.ps1"):
+        shutil.copy2(SCRIPTS / name, scripts / name)
+    src = (SCRIPTS / "bot-auto-restart.ps1").read_text(encoding="utf-8-sig")
+    needle = "$code = $p.ExitCode"
+    assert src.count(needle) == 1, "expected one ExitCode read for harness patch"
+    patched = src.replace(
+        needle,
+        (
+            "if (-not [string]::IsNullOrEmpty($env:DCF_TEST_FORCE_EXIT_CODE)) { "
+            "$code = [int]$env:DCF_TEST_FORCE_EXIT_CODE } else { $code = $p.ExitCode }"
+        ),
+        1,
+    )
+    (scripts / "bot-auto-restart.ps1").write_text(patched, encoding="utf-8")
+    (agent / "combo_pathway_config.py").write_text(
+        'RESEARCH_STACK_VERSION = "test-harness-no-restart-79"\n',
+        encoding="utf-8",
+    )
+    return harness
+
+
+def _run_bot_auto_restart_watching_exit(harness: Path, exit_code: int, timeout: int = 90):
+    """Run the harness monitor against a short-lived child; force the exit code under test."""
+    # Stay alive long enough for the monitor to attach and WaitForExit (not the
+    # gone-before-attach path that forces code=-1 and would relaunch). Python
+    # child avoids pwsh-on-pwsh ExitCode quirks; forced code still drives the
+    # decision branch after WaitForExit returns.
+    fake = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(4)"])
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not str(k).upper().startswith("BITFINEX_")
+    }
+    env["BITFINEX_LIVE_ENABLED"] = "0"
+    env["DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER"] = (
+        "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
+    )
+    env["DCF_TEST_FORCE_EXIT_CODE"] = str(int(exit_code))
+    # Missing vault → skip Import/Assert-LaptopMonitorReadToken (token path is #984).
+    missing_vault = harness / "missing-home-bot.env"
+    result = subprocess.run(
+        [
+            POWERSHELL,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness / "scripts" / "bot-auto-restart.ps1"),
+            "-BotPid",
+            str(fake.pid),
+            "-Port",
+            "17979",
+            "-VaultEnv",
+            str(missing_vault),
+            "-BaseCooldownSec",
+            "1",
+            "-MaxCooldownSec",
+            "1",
+            "-MaxRestartsPerHour",
+            "1",
+        ],
+        cwd=str(harness),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if fake.poll() is None:
+        fake.kill()
+        fake.wait(timeout=10)
+    log_path = harness / "logs" / "bot_restarts.log"
+    log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    return result, log_text
+
+
+@windows_only
+def test_bot_auto_restart_behavioural_does_not_relaunch_on_exit_79(tmp_path):
+    """Behavioural: monitor decision with code 79 must stand down (no relaunch)."""
+    harness = _bot_auto_restart_harness(tmp_path)
+    result, log_text = _run_bot_auto_restart_watching_exit(harness, exit_code=79, timeout=90)
+    combined = result.stdout + result.stderr + log_text
+    assert "bitfinex_env_refused" in combined, combined
+    assert "no_restart" in combined, combined
+    # Crash/relaunch path markers must be absent on the 79 stand-down.
+    assert "\trestarting" not in log_text
+    assert "restarted\t" not in log_text
+    assert "relaunch_failed" not in log_text
+
+
+@windows_only
+def test_bot_auto_restart_behavioural_nonzero_non79_takes_relaunch_path(tmp_path):
+    """Mutation contrast: forced exit 1 hits crashed/restarting (79 stand-down is special)."""
+    harness = _bot_auto_restart_harness(tmp_path)
+    result, log_text = _run_bot_auto_restart_watching_exit(harness, exit_code=1, timeout=120)
+    combined = result.stdout + result.stderr + log_text
+    assert "bitfinex_env_refused" not in combined, combined
+    assert "crashed" in log_text and "restarting" in log_text, log_text
 
 
 @windows_only
