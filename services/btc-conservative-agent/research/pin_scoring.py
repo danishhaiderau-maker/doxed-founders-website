@@ -79,13 +79,17 @@ def taker_entry_and_score(rows_by_ts, *, side, qty, decision_ts, latency_sec, ex
     """Invoke only shared fill_model.taker_fill_rows, read-only; no duplicate pricer."""
     if qty <= 0 or not math.isfinite(qty):
         raise ValueError("INVALID_QTY")
+    # R17 (RK 2e5c08df822f, HM e6c81ee1f128 G1): hard raise before the retired 1s-tape pricer; lazy import keeps
+    # the Part B judge's pinned import closure unchanged (Part B never calls this wrapper).
+    from . import r3_quarantine
+    r3_quarantine.guard("PIN_RESEARCH_1S", "fill_model 1s-tape row pricer taker_fill_rows")
     fill = taker_fill_rows(rows_by_ts, side=side, qty=qty, decision_ts=decision_ts, latency_sec=latency_sec)
     if fill["status"] != "FILLED":
         result = dict(category="NO_FILL", filled=False, capture=1, win=False, pnl_bp=None)
     else:
         result = score_pin15(side=side, entry=fill["fill_price"], entry_fresh=True, exit_fresh=exit_fresh,
                              exit_quote=exit_quote, exit_request_s=exit_request_s, bar_1s=bar_1s, holding_bars=holding_bars)
-    return dict(result, entry_fill=fill)
+    return dict(result, entry_fill=fill, evidence="NON_EVIDENTIAL_R17")
 
 
 def pin15_counts(rows):

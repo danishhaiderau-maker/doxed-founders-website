@@ -10,9 +10,14 @@ from . import fill_model
 
 
 def evaluate_fill(data):
+    # R17 (RK 2e5c08df822f, HM e6c81ee1f128 G1): hard raise at the price-source boundary, as
+    # genome_grid_study._tape_sources.  Lazy import keeps the Part B judge's pinned import closure (SOURCE_PATHS)
+    # unchanged; Part B never dispatches field9, and the judge's postflight _loaded_paths would fail closed if it did.
+    from . import r3_quarantine
     entrypoint = data["entrypoint"]
     kwargs = dict(data.get("kwargs", {}))
     if entrypoint in ("taker_fill_rows", "maker_fill_rows"):
+        r3_quarantine.guard("PIN_RESEARCH_1S", "fill_model 1s-tape row pricer " + entrypoint)
         rows = {row["bucket_ts"]: row for row in data["rows"]}
         if len(rows) != len(data["rows"]):
             raise ValueError("DUPLICATE_SYNTHETIC_SECOND")
@@ -28,6 +33,7 @@ def evaluate_fill(data):
     elif entrypoint == "size_walk":
         out = dict(realistic=dict(status="N/A_COMPONENT", size_walk=fill_model.size_walk(**kwargs)))
     elif entrypoint == "realistic_exit_margin":
+        r3_quarantine.guard("PIN_RESEARCH_1S", "fill_model 1s-tape row pricer realistic_exit_margin")
         margin, index = fill_model.realistic_exit_margin(**kwargs)
         out = dict(realistic=dict(margin_pct=margin, booked_idx=index))
     elif entrypoint == "fee_fields_pair":
@@ -36,6 +42,8 @@ def evaluate_fill(data):
         out = dict(realistic=dict(fee_maker=maker, fee_taker=taker, FEE_PROFILE_ID=maker["fee_profile_id"]))
     else:
         raise ValueError("UNSUPPORTED_FILL_ENTRYPOINT")
+    if entrypoint in ("taker_fill_rows", "maker_fill_rows", "realistic_exit_margin"):
+        out["evidence"] = "NON_EVIDENTIAL_R17"  # reachable only under a test-scoped ACTIVE monkeypatch
     if "tc" in data:
         out["tc"] = data["tc"]  # Metadata, never a revived historical cost gate.
     return out

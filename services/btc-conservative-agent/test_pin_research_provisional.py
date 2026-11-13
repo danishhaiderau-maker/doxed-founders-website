@@ -25,6 +25,32 @@ def synthetic_runroot(tmp_path, monkeypatch):
     monkeypatch.setenv("RUNROOT", str(tmp_path))
 
 
+R17_KEY = "PIN_RESEARCH_1S"
+# RK 2e5c08df822f addendum (3) + RK 4340ab310add (4): the 12 field9 row-pricer cases are SOURCE_RETIRED_R17.  They run
+# UNPATCHED and assert the R3QuarantinedSource raise; they are never compared to HM goldens under the monkeypatch.
+# C7-04 (size_walk), C7-14 (fee_fields_pair) and C7-15 (historical control) stay unpatched golden comparisons.
+R17_ROW_CASE_IDS = frozenset({
+    "C7-01-TAKER-LONG-TOP", "C7-02-TAKER-LONG-WALK", "C7-03-TAKER-SHORT-TOP", "C7-13-TAKER-STALE-TIMEOUT",
+    "C7-05-MAKER-TOUCH-NOFILL", "C7-06-MAKER-TRADE-THROUGH", "C7-07-MAKER-PARTIAL", "C7-08-MARKETABLE-AT-PLACEMENT",
+    "C7-09-EXIT-HS-TC-OFF", "C7-10-EXIT-REBOUND-NEVER-CHEAPER", "C7-11-EXIT-TP-TARGET", "C7-12-EXIT-HS-TC-ON-PAIR",
+})
+# HM 23a73c4c696b B3: the Part B judge's pinned import closure (pin_fixture_b_judge.SOURCE_PATHS minus the judge).
+PART_B_CLOSURE_MODULES = (
+    "bitfinex_cost_profile", "research.fill_model", "research.p8_fixture_adapter", "research.pin7_classifier",
+    "research.pin_fill_operations", "research.pin_k3", "research.pin_research_contracts", "research.pin_scoring",
+)
+
+
+@pytest.fixture
+def pin_research_1s_unquarantined(monkeypatch):
+    # Documented test-scoped ACTIVE monkeypatch (r3_quarantine.ACTIVE): fixture-local, undone by monkeypatch after
+    # the test; no env override, no conftest/global change.  Outputs under it are NON-EVIDENTIAL (R17), never cited.
+    # Wrapper-logic tests only (RK 2e5c08df822f (3), RK 4340ab310add (4)); never for field9 results.
+    from research import r3_quarantine
+    assert R17_KEY in r3_quarantine.ACTIVE
+    monkeypatch.setattr(r3_quarantine, "ACTIVE", set(r3_quarantine.ACTIVE) - {R17_KEY})
+
+
 
 @pytest.fixture(scope="module")
 def hash_verified_b_policy():
@@ -55,6 +81,12 @@ def test_hm_tape(case, approved_b_policy):
     reason = harness.pending_reason(case)
     if reason:
         pytest.skip(reason)
+    if case["id"] in R17_ROW_CASE_IDS:
+        # SOURCE_RETIRED_R17 (RK 4340ab310add (4)): unpatched positive refusal; no golden comparison.
+        from research import r3_quarantine
+        with pytest.raises(r3_quarantine.R3QuarantinedSource, match=R17_KEY):
+            harness.dispatch(case["operation"], case["input"])
+        return
     actual = harness.dispatch(case["operation"], case["input"])
     if case["operation"] in {"field9_fill_model", "field9_historical_control"}:
         assert not harness.subset_errors(case["expected"], actual)
@@ -164,7 +196,7 @@ def test_missing_entry_basis_open_interpretation_does_not_invent_fill_or_pnl():
     assert totals["a"] == 1 and totals["filled"] == 0 and totals["bad_share"] is None
 
 
-def test_pin15_adapter_calls_unchanged_fill_model():
+def test_pin15_adapter_calls_unchanged_fill_model(pin_research_1s_unquarantined):
     actual = s.taker_entry_and_score({1: dict(bid=99, ask=100, bid_qty=1, ask_qty=1, source_age_sec=0)},
         side="LONG", qty=.1, decision_ts=0, latency_sec=1, exit_request_s=10,
         bar_1s=dict(t=11, low=98, high=103))
@@ -172,6 +204,98 @@ def test_pin15_adapter_calls_unchanged_fill_model():
     assert actual["category"] == "EXIT_WORST_1S" and actual["exit"] == 98
     missing = s.taker_entry_and_score({}, side="LONG", qty=.1, decision_ts=0, latency_sec=1, exit_request_s=10)
     assert missing["category"] == "NO_FILL" and missing["capture"] == 1 and not missing["win"]
+    assert actual["evidence"] == missing["evidence"] == "NON_EVIDENTIAL_R17"
+
+
+def test_r17_pin_wrappers_refuse_while_quarantined():
+    """RK 2e5c08df822f: production default (key ACTIVE) stops both wrappers and the adapter's field9_fill_model."""
+    from research import r3_quarantine, pin_fill_operations as fills, p8_fixture_adapter as adapter
+    assert r3_quarantine.is_active(R17_KEY)
+    with pytest.raises(r3_quarantine.R3QuarantinedSource, match=R17_KEY):
+        s.taker_entry_and_score({}, side="LONG", qty=.1, decision_ts=0, latency_sec=1, exit_request_s=10)
+    row_cases = [case for case in CASES if case["operation"] == "field9_fill_model"
+                 and case["input"]["entrypoint"] in r3_quarantine.FILL_MODEL_ROW_PRICERS]
+    assert len(row_cases) == 12
+    assert {case["id"] for case in row_cases} == R17_ROW_CASE_IDS
+    for case in row_cases:
+        with pytest.raises(r3_quarantine.R3QuarantinedSource, match=R17_KEY):
+            adapter.evaluate(case["operation"], case["input"])
+    # size_walk / fee_fields_pair do not touch the row pricers (HM G1): not guarded.
+    assert "evidence" not in fills.evaluate_fill({"entrypoint": "fee_fields_pair", "notional_usd": 100})
+
+
+def test_r17_guard_raises_before_any_retired_pricer_call(monkeypatch):
+    """HM 23a73c4c696b B1 / RK 4340ab310add (B1): the guard raises BEFORE any retired pricer is entered.
+
+    The pricers (not ACTIVE) are replaced by call-recording stand-ins; the key stays ACTIVE (production default).
+    """
+    from research import r3_quarantine, fill_model, pin_fill_operations as fills, p8_fixture_adapter as adapter
+    assert r3_quarantine.is_active(R17_KEY)
+    calls = []
+
+    def stand_in(name, result):
+        def record(*args, **kwargs):
+            calls.append(name)
+            return copy.deepcopy(result)
+        return record
+
+    no_fill = dict(status="NO_FILL", fill_price=None, filled_qty=0, liquidity="TAKER", size_walk=[])
+    for name in ("taker_fill_rows", "maker_fill_rows", "optimistic_touch_rows"):
+        monkeypatch.setattr(fill_model, name, stand_in("fill_model." + name, no_fill))
+    monkeypatch.setattr(fill_model, "realistic_exit_margin", stand_in("fill_model.realistic_exit_margin", (0.0, 0)))
+    monkeypatch.setattr(s, "taker_fill_rows", stand_in("pin_scoring.taker_fill_rows", no_fill))
+    row_cases = [case for case in CASES if case["id"] in R17_ROW_CASE_IDS]
+    assert len(row_cases) == 12
+    assert {case["input"]["entrypoint"] for case in row_cases} == set(r3_quarantine.FILL_MODEL_ROW_PRICERS)
+    for case in row_cases:
+        with pytest.raises(r3_quarantine.R3QuarantinedSource, match=R17_KEY):
+            adapter.evaluate(case["operation"], case["input"])
+        assert calls == [], case["id"]
+        with pytest.raises(r3_quarantine.R3QuarantinedSource, match=R17_KEY):
+            fills.evaluate_fill(copy.deepcopy(case["input"]))
+        assert calls == [], case["id"]
+    with pytest.raises(r3_quarantine.R3QuarantinedSource, match=R17_KEY):
+        s.taker_entry_and_score({1: dict(bid=99, ask=100, bid_qty=1, ask_qty=1, source_age_sec=0)},
+            side="LONG", qty=.1, decision_ts=0, latency_sec=1, exit_request_s=10, bar_1s=dict(t=11, low=98, high=103))
+    assert calls == []
+
+
+def test_r17_part_b_dispatch_leaves_r3_quarantine_unloaded(tmp_path):
+    """RK 5e55e1f6849d (3) / RK 4340ab310add (3) / HM 23a73c4c696b B3, in a fresh interpreter (this CI process imports
+    r3_quarantine elsewhere): dispatching every non-field9 in-repo tape case (Part B, 218) loads only the 8 judge-closure
+    modules and never research.r3_quarantine."""
+    import os
+    import subprocess
+    import sys
+    script = r'''
+import json, sys
+from pathlib import Path
+from research import p8_fixture_adapter as adapter
+root = Path(adapter.__file__).with_name("pin_fixtures") / "tapes"
+index = json.loads((root / "index.json").read_text())
+cases = [case for name in index["files"] for case in json.loads((root / name).read_text())]
+part_b = [case for case in cases if case["operation"] not in ("field9_fill_model", "field9_historical_control")]
+seen = lambda: sorted(m for m in sys.modules if m == "bitfinex_cost_profile" or m.startswith("research."))
+after_import = seen()
+ok = sum(isinstance(adapter.evaluate(case["operation"], case["input"]), dict) for case in part_b)
+print(json.dumps(dict(part_b_count=index["Part_B_count"], dispatched=len(part_b), ok=ok, after_import=after_import,
+                      after_dispatch=seen(), r3_quarantine_loaded="research.r3_quarantine" in sys.modules)))
+'''
+    env = dict(os.environ, RUNROOT=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+    done = subprocess.run([sys.executable, "-B", "-c", script], cwd=str(Path(__file__).resolve().parent), env=env,
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stderr
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    assert result["part_b_count"] == result["dispatched"] == result["ok"] == 218
+    assert result["r3_quarantine_loaded"] is False
+    assert result["after_import"] == result["after_dispatch"] == sorted(PART_B_CLOSURE_MODULES)
+
+
+def test_r17_field9_output_is_non_evidential(pin_research_1s_unquarantined):
+    for case in CASES:
+        if case["operation"] == "field9_fill_model" and case["input"]["entrypoint"] != "size_walk" \
+                and case["input"]["entrypoint"] != "fee_fields_pair":
+            assert harness.dispatch(case["operation"], case["input"])["evidence"] == "NON_EVIDENTIAL_R17"
 
 
 def test_exit_fallback_requires_exact_1s_bar():
@@ -223,12 +347,21 @@ def test_asserted_subset_comparator_allows_extra_dict_fields_and_declared_float_
 
 
 def test_inputs_are_never_mutated():
+    # HM 23a73c4c696b C1: unpatched; the 12 SOURCE_RETIRED_R17 row cases must raise and still leave inputs unchanged.
+    from research import r3_quarantine
+    refused = set()
     for case in CASES:
         if harness.pending_reason(case):
             continue
         before = copy.deepcopy(case["input"])
-        harness.dispatch(case["operation"], case["input"])
+        if case["id"] in R17_ROW_CASE_IDS:
+            with pytest.raises(r3_quarantine.R3QuarantinedSource, match=R17_KEY):
+                harness.dispatch(case["operation"], case["input"])
+            refused.add(case["id"])
+        else:
+            harness.dispatch(case["operation"], case["input"])
         assert case["input"] == before
+    assert refused == R17_ROW_CASE_IDS
 
 
 @pytest.mark.parametrize("missing", ["bridge_present", "bridge_allowed", "checkpoint"])

@@ -159,6 +159,17 @@ def test_fill_model_row_pricer_callers_are_pinned_and_quarantined():
     for fn in ("simulate_entry", "simulate_exit", "simulate", "run"):
         assert getattr(walk_forward_scorer, fn).r3_retired_key == "WALK_FORWARD_1S", fn
     assert 'r3_quarantine.guard("GENOME_GRID"' in Path(genome_grid_study.__file__).read_text(encoding="utf-8")
+    # HM e6c81ee1f128 G3 / RK 2e5c08df822f: the PR #1005 pin wrappers are stopped by a runtime guard, not only listed.
+    import pytest
+    from research import pin_fill_operations, pin_scoring
+    assert r3_quarantine.is_active("PIN_RESEARCH_1S")
+    for module in (pin_fill_operations, pin_scoring):
+        assert 'r3_quarantine.guard("PIN_RESEARCH_1S"' in Path(module.__file__).read_text(encoding="utf-8"), module
+    for entrypoint in r3_quarantine.FILL_MODEL_ROW_PRICERS:
+        with pytest.raises(r3_quarantine.R3QuarantinedSource, match="PIN_RESEARCH_1S"):
+            pin_fill_operations.evaluate_fill({"entrypoint": entrypoint, "rows": [], "kwargs": {}})
+    with pytest.raises(r3_quarantine.R3QuarantinedSource, match="PIN_RESEARCH_1S"):
+        pin_scoring.taker_entry_and_score({}, side="LONG", qty=.1, decision_ts=0, latency_sec=1, exit_request_s=10)
 
 
 def test_walk_forward_scorer_retired_writes_nothing(tmp_path, capsys):
