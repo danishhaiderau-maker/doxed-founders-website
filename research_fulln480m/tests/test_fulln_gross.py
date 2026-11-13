@@ -1,8 +1,10 @@
 """B1 tests (C1 parts only): fulln_gross.py. Box synthetic micro only; no pinned module imported.
 
-Binding: plan r3 33f3ec1e0e07 s7 C1 / s12 B1; Boss GO r2 3656382c8a5c; RK 22ee55488e0c (B1 SPLIT:
-C7 micro builders + I1 encoding wait for plan r4; no code that sets exit returns to 0.0).
-No file is written by these tests.
+Binding: plan r3 33f3ec1e0e07 s7 C1 / s12 B1; Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2;
+RK 22ee55488e0c (B1 SPLIT: C7 micro builders + I1 encoding wait for plan r4; no code that sets
+exit returns to 0.0) / e1d778426447 / 53ccb5a6219f; HM R2 b88d1b1e0653; RULES c342ecf8ec9a.
+No file is written by these tests. This module has no clamp; the -50.0 / -49.99 boundary fixture
+belongs to BU/BR, not B1.
 """
 import ast
 import os
@@ -15,7 +17,9 @@ from research_fulln480m import fulln_closure as fc
 from research_fulln480m import fulln_gross as fg
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fulln_gross.py")
-LIQ = fg.LiqPolicy(liq_floor=-1.0e6, liq_fill=-1.0e6, ruling_sha="0123456789ab")  # TEST FIXTURE ONLY
+# Gross pin (RK 53ccb5a6219f). Distinct floor/fill so a swap is visible (HM H1a-c).
+LIQ = fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha="53ccb5a6219f")
+
 
 
 @pytest.fixture(autouse=True)
@@ -238,3 +242,88 @@ def test_t1_15_no_store_into_return_arrays():
                 assert sl.value not in fg.RETURN_KEYS, sl.value
         if isinstance(node, ast.Attribute):
             assert node.attr not in ("fill", "zeros_like", "nan_to_num", "full_like", "putmask", "copyto"), node.attr
+
+
+# ---------------------------------------------------------------- review-fix: distinct floor/fill + LiqPolicy refusals (HM B1-C1/C2, RK 53cc / e1d7)
+def test_t1_16_distinct_gross_floor_and_fill_keys():
+    """Each floor/fill key is asserted individually so a swap (H1a/H1b/H1c) is killed."""
+    out = fg.build_gross_micro(_base(), LIQ)
+    assert out["liq_floor"] == -50.0
+    assert out["liq_fill"] == -100.0
+    assert out["costs"]["liq_floor"] == -50.0
+    assert out["costs"]["liq_fill"] == -100.0
+    assert out["costs"]["p_liq_floor"] == -50.0
+    assert out["costs"]["p_liq_fill"] == -100.0
+    assert out["liq_ruling_sha"] == "53ccb5a6219f"
+    assert -43.5 not in (out["liq_floor"], out["liq_fill"],
+                         out["costs"]["liq_floor"], out["costs"]["liq_fill"],
+                         out["costs"]["p_liq_floor"], out["costs"]["p_liq_fill"])
+
+
+def test_t1_17_liq_policy_accepts_only_the_gross_pin():
+    ok = fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0,
+                      ruling_sha="53ccb5a6219f3c2ac2e5e17dc48de314bf2696d308b6b449fd663e1d123bd5da")
+    assert ok.liq_floor == -50.0 and ok.liq_fill == -100.0
+
+
+def test_t1_18_liq_policy_refuses_non_finite():
+    for floor, fill in ((float("inf"), -100.0), (-50.0, float("inf")),
+                        (float("-inf"), -100.0), (-50.0, float("-inf")),
+                        (float("nan"), -100.0), (-50.0, float("nan"))):
+        with pytest.raises(fc.ClosureViolation) as e:
+            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha="53ccb5a6219f")
+        assert "finite" in e.value.reason
+        fc._STATE["latch"] = None
+
+
+def test_t1_19_liq_policy_refuses_net_sensitivity_43_5():
+    for floor, fill in ((-43.5, -100.0), (-50.0, -43.5), (-43.5, -43.5)):
+        with pytest.raises(fc.ClosureViolation) as e:
+            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha="53ccb5a6219f")
+        assert "NET sensitivity" in e.value.reason
+        assert "-43.5" in e.value.reason
+        fc._STATE["latch"] = None
+
+
+def test_t1_20_liq_policy_refuses_inverted_or_fill_milder_than_floor():
+    with pytest.raises(fc.ClosureViolation) as e:
+        fg.LiqPolicy(liq_floor=-100.0, liq_fill=-50.0, ruling_sha="53ccb5a6219f")
+    assert "inverted" in e.value.reason or "milder" in e.value.reason
+    fc._STATE["latch"] = None
+    with pytest.raises(fc.ClosureViolation) as e:
+        fg.LiqPolicy(liq_floor=-100.0, liq_fill=-43.5, ruling_sha="53ccb5a6219f")
+    # -43.5 is caught first when it appears, which still refuses the inverted pair
+    assert "NET sensitivity" in e.value.reason or "inverted" in e.value.reason or "milder" in e.value.reason
+
+
+def test_t1_21_liq_policy_refuses_off_pin_values():
+    # Pairs that are off-pin but not inverted (fill still <= floor) and not -43.5,
+    # so the refusal reason is the pinned-literals guard.
+    for floor, fill in ((-50.0, -99.999), (-49.99, -100.0), (-50.1, -100.0),
+                        (0.0, -100.0), (43.5, -100.0), (-50.0, -100.1)):
+        with pytest.raises(fc.ClosureViolation) as e:
+            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha="53ccb5a6219f")
+        assert "pinned literals" in e.value.reason
+        fc._STATE["latch"] = None
+
+
+def test_t1_22_liq_policy_refuses_non_pinned_ruling_sha():
+    with pytest.raises(fc.ClosureViolation) as e:
+        fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha="0123456789ab")
+    assert "53ccb5a6219f" in e.value.reason
+    fc._STATE["latch"] = None
+    with pytest.raises(fc.ClosureViolation) as e:
+        fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha="3e105140afce")
+    assert "53ccb5a6219f" in e.value.reason
+
+
+def test_t1_23_no_clamp_and_no_zeroed_exit_returns_in_source():
+    """B1 must pin and refuse only; it must not add a clamp or write exit returns (RK e1d7 B1-5)."""
+    src = open(SRC, encoding="utf-8").read()
+    assert "PINNED_GROSS_LIQ_FLOOR = -50.0" in src
+    assert "PINNED_GROSS_LIQ_FILL = -100.0" in src
+    # The floor is a literal, never computed from leverage / fee.
+    assert "1/L" not in src and "liq_bp =" not in src
+    for node in ast.walk(_tree()):
+        if isinstance(node, ast.Attribute):
+            assert node.attr not in ("clip", "clip_", "clamp"), node.attr

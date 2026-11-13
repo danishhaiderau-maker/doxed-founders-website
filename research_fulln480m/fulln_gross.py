@@ -1,7 +1,8 @@
 """C1 GROSS micro builder for the BTC full-N 480,522,240 search (batch B1, C1 parts ONLY).
 
-Binding: plan r3 33f3ec1e0e07 s7 C1; Boss GO r2 3656382c8a5c; RK 2e6b9127bf3e + addendum
-22ee55488e0c (B1 SPLIT); HM consult 8b8ec9208448; RULES d8594afbb02e (R61 gross).
+Binding: plan r3 33f3ec1e0e07 s7 C1; Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2;
+RK 2e6b9127bf3e + addendum 22ee55488e0c (B1 SPLIT) / e1d778426447 / 53ccb5a6219f;
+HM R2 b88d1b1e0653; RULES c342ecf8ec9a (R61 gross).
 
 What this module does (C1):
 - build_gross_micro(base_micro, liq) returns a NEW dict whose cost terms are gross:
@@ -18,8 +19,11 @@ What this module does NOT do (C7 / I1 are OUT of scope until plan r4, RK 22ee554
   NOT IMPLEMENTED: every entry point for it raises R61cNotImplemented (exit 78).
 - Every micro built here is marked r61c_status = NOT_IMPLEMENTED_AWAITING_PLAN_R4 and
   assert_r61c_ready() refuses it (78), so no C1-only micro can reach a launch.
-- Liquidation floor/fill under gross is plan r3 Q3 (OPEN, GS/RK). No value is chosen here:
-  the caller must pass a LiqPolicy that cites a ruling sha; liq=None refuses (78).
+- Liquidation floor/fill under gross is plan r3 Q3, pinned by RK 53ccb5a6219f (supersedes
+  3e105140afce for gross): p_liq_floor is the literal -50.0 and p_liq_fill is -100.0.
+  This module supplies no default and does not compute the floor. The caller must pass a
+  LiqPolicy that cites that ruling; liq=None refuses (78). -43.5 is a labelled NET
+  sensitivity value only and cannot reach the gross path. There is no clamp in this module.
 """
 import math
 import re
@@ -46,6 +50,12 @@ REBUILT_KEYS = ("fund_off", "fund_rate", "cost_bp", "liq_floor", "liq_fill", "co
 # Cost-dict entries known from the pinned code (micro["costs"] from gpu_eval.realistic_costs and
 # the kernel launch args p_cost / p_liq_floor / p_liq_fill, gpu_kernel L1194 / L1213).
 COST_ZERO_KEYS = ("cost_bp", "p_cost")
+# RK 53ccb5a6219f: gross literals, never computed at runtime. No clamp lives in this module.
+PINNED_GROSS_LIQ_FLOOR = -50.0
+PINNED_GROSS_LIQ_FILL = -100.0
+PINNED_GROSS_LIQ_RULING_PREFIX = "53ccb5a6219f"
+# Labelled NET sensitivity only (superseded for the gross path). Must not reach LiqPolicy values.
+NET_SENSITIVITY_LIQ_FLOOR = -43.5
 COST_LIQ_KEYS = {"liq_floor": "liq_floor", "liq_fill": "liq_fill",
                  "p_liq_floor": "liq_floor", "p_liq_fill": "liq_fill"}
 _COSTLIKE = re.compile(r"(cost|fee|fund|slip|spread|commission)", re.IGNORECASE)
@@ -65,19 +75,40 @@ def _refuse_r61c(what):
 
 @dataclass(frozen=True)
 class LiqPolicy:
-    """Liquidation clamp values for the gross lattice. Plan r3 Q3 is OPEN: the values and the
-    ruling sha must come from a GS/RK pin; this module supplies no default."""
+    """Liquidation values for the gross lattice. Plan r3 Q3 is pinned by RK 53ccb5a6219f:
+    p_liq_floor = -50.0 (literal), p_liq_fill = -100.0. This module supplies no default
+    and does not compute or clamp. -43.5 may appear only as a labelled NET sensitivity
+    value and cannot reach the gross path."""
     liq_floor: float
     liq_fill: float
     ruling_sha: str
 
     def __post_init__(self):
         if not isinstance(self.ruling_sha, str) or not _HEX.match(self.ruling_sha):
-            raise ClosureViolation("LiqPolicy.ruling_sha must be 12-64 lowercase hex (Q3 pin)")
+            raise ClosureViolation("LiqPolicy.ruling_sha must be 12-64 lowercase hex (RK 53ccb5a6219f)")
+        if not self.ruling_sha.startswith(PINNED_GROSS_LIQ_RULING_PREFIX):
+            raise ClosureViolation(
+                "LiqPolicy.ruling_sha must cite RK 53ccb5a6219f (gross pin); got %r" % (self.ruling_sha,))
         for name in ("liq_floor", "liq_fill"):
             v = getattr(self, name)
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or math.isnan(float(v)):
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise ClosureViolation("LiqPolicy.%s must be a real number, got %r" % (name, v))
+            if not math.isfinite(float(v)):
+                raise ClosureViolation("LiqPolicy.%s must be finite, got %r" % (name, v))
+        floor = float(self.liq_floor)
+        fill = float(self.liq_fill)
+        if floor == NET_SENSITIVITY_LIQ_FLOOR or fill == NET_SENSITIVITY_LIQ_FLOOR:
+            raise ClosureViolation(
+                "LiqPolicy: -43.5 is a labelled NET sensitivity value only and cannot reach "
+                "the gross path (RK 53ccb5a6219f; gross floor is the literal -50.0)")
+        if fill > floor:
+            raise ClosureViolation(
+                "LiqPolicy: fill %r is milder than floor %r (inverted / fill-milder-than-floor "
+                "is not conforming, RK 53ccb5a6219f / 7bb8e29e1629)" % (fill, floor))
+        if floor != PINNED_GROSS_LIQ_FLOOR or fill != PINNED_GROSS_LIQ_FILL:
+            raise ClosureViolation(
+                "LiqPolicy: gross path accepts only the pinned literals liq_floor=-50.0 and "
+                "liq_fill=-100.0 (RK 53ccb5a6219f); got floor=%r fill=%r" % (floor, fill))
 
 
 def _n_bars(base):
@@ -95,8 +126,8 @@ def build_gross_micro(base_micro, liq=None):
     if not isinstance(base_micro, dict):
         raise ClosureViolation("base micro must be a dict")
     if liq is None:
-        raise ClosureViolation("liq_floor/liq_fill under gross is plan r3 Q3 (OPEN, GS/RK): "
-                               "no LiqPolicy given; refusing (78)")
+        raise ClosureViolation("liq_floor/liq_fill under gross is pinned by RK 53ccb5a6219f "
+                               "(plan r3 Q3): no LiqPolicy given; refusing (78)")
     if not isinstance(liq, LiqPolicy):
         raise ClosureViolation("liq must be a LiqPolicy")
     for key in base_micro:
