@@ -442,6 +442,8 @@ test_pathway_survival_funnel_dedupe.py
 test_pause_accounting.py
 test_pending_order_evidence_worker.py
 test_phantom_cancel_lane_gate.py
+test_pin_fixture_b_judge.py
+test_pin_research_provisional.py
 test_pipeline_completion_virtual_chase.py
 test_platform_health.py
 test_platform_relay_evidence_worker.py

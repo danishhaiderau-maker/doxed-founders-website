@@ -99,7 +99,19 @@ jobs:
         # path chosen). Alternate split plan (not executed here): move API tsx specs and/or
         # script-style runners and/or an allowlist shard into a parallel job so pytest stays under
         # the 75% threshold. Soft-ignoring >75% growth is forbidden (R26/R36).
+        env:
+          PIN_B_SUPPLEMENT: ${{ runner.temp }}/pin-b-supplement-7d843fbc7348.json
         run: |
+          # Export the committed policy blob, not an EOL-normalized working copy.
+          GIT_OPTIONAL_LOCKS=0 git -c core.hooksPath=/dev/null show \
+            HEAD:services/btc-conservative-agent/ci/pin_b_supplement_7d843fbc7348.json \
+            > "$PIN_B_SUPPLEMENT"
+          if ! printf '%s  %s\n' \
+            '7d843fbc7348f95aaa1bd1b6597505a773900f35ee0d783c1a7e0b8e085fa75e' \
+            "$PIN_B_SUPPLEMENT" | sha256sum --check --strict; then
+            echo "::error::PIN_B_SUPPLEMENT is missing or has the wrong SHA256"
+            exit 1
+          fi
           deselect=""
           while IFS='|' read -r node _; do
             node="$(echo "$node" | xargs)"

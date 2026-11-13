@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HM P8 language-neutral synthetic case array",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "id",
+      "operation",
+      "input",
+      "expected",
+      "family",
+      "evidence_status",
+      "notes"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "operation": {
+        "type": "string"
+      },
+      "input": {
+        "type": "object"
+      },
+      "expected": {},
+      "family": {
+        "type": "string"
+      },
+      "evidence_status": {
+        "enum": [
+          "ORACLE_SELF_CHECK",
+          "AMBIGUOUS_PENDING_GS"
+        ]
+      },
+      "notes": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  }
+}

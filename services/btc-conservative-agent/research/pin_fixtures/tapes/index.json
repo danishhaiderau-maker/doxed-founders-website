@@ -1,0 +1,23 @@
+{
+  "format": "HM-5B-synthetic-v2",
+  "count": 233,
+  "files": [
+    "pin15.json",
+    "pin16.json",
+    "k3.json",
+    "classifier.json",
+    "ct.json",
+    "b3.json",
+    "field9.json"
+  ],
+  "goldens": "Independent closed-form/manual fields; recursive subset comparison; unspecified actual fields are NOT asserted",
+  "production_reference": "NOT_TESTED; no new SUT/test/import; historical prior oracle results not acceptance",
+  "P8_authority": "28315aeb4423e88d4e3dadcf3e42005b29ddbba1f2e054467aeab7827135641e",
+  "classifier_authority": "dc0cc45f24f5afee9a69718fcc120fc27450f80b6e35de1058f0ed0e68eedf79",
+  "confirmation": "elapsed>=2h / 3 closes ONLY",
+  "calibration": "ONE prior-only720h C0; reused thresholds; C0.end calibration-only",
+  "previous_manifest": "a023c98ca3811dd07953d7bd869ec18a58c41628b27acf3b87b90c18228507db",
+  "Part_A_count": 15,
+  "Part_B_count": 218,
+  "rules": "4305f12a02d23f5cad689fd388387ffad3ecc50e02e614c883894d7ef3bf94f2"
+}

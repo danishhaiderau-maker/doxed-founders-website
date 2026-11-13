@@ -1,0 +1,648 @@
+{
+  "schema": "hm_c7_fill_never_cheaper_fixtures_v1",
+  "card": "HM-C7-FILL-NEVER-CHEAPER-FIXTURES-20261110-v1.md",
+  "written_aedt": "2026-11-10 ~09:30 AEDT",
+  "status": "DRAFT_CARD documentary; NOT a formal fixture acceptance run",
+  "tip_sha": "e991919658c16788e82601a73015d08cb91e417c",
+  "tolerance_freeze": {
+    "frozen_before_any_fixture_run": true,
+    "one_sided": true,
+    "residual_rule": "residual = mapped_net_cost - realistic_net_cost; PASS iff residual >= -tol on EVERY fixture",
+    "tol": {
+      "price": "max(1e-9, 1e-9*|price|)  # fill_model.PRICE_EPS / price_tol",
+      "qty": 1e-15,
+      "fee_usd_abs": 1e-12,
+      "bp": 1e-09,
+      "discrete": "exact"
+    },
+    "tol_justification": "Rounding granularity only: source PRICE_EPS=1e-9 and price_tol(); fee rates at tip are exact 0.0 floats. Tol must NEVER authorize mapped cheaper than REALISTIC (RK f7922f5f1ce2 P6#1).",
+    "path_A_equality": "When expected_mapped == expected_realistic (Path A / identity), continuous fields compared within tol; discrete exact.",
+    "path_B": "Mapped/off-bot may never be cheaper; residual >= -tol with tol only float/fee rounding."
+  },
+  "tip_blob_fingerprints_gh_api": {
+    "ref": "e991919658c16788e82601a73015d08cb91e417c",
+    "fill_model.py": {
+      "path": "services/btc-conservative-agent/research/fill_model.py",
+      "git_blob_sha": "c816d81511f018a85dc9fc1c16cc5535a98ad148",
+      "size": 22361,
+      "content_sha256": "3b6cfcac59ea46f0da073cb2ed883b46cc6d50d059b181545dba7f156769b3c7"
+    },
+    "bitfinex_cost_profile.py": {
+      "path": "services/btc-conservative-agent/bitfinex_cost_profile.py",
+      "git_blob_sha": "480d6bad04d31a5b0dbb835dac231c2cb601f0cc",
+      "size": 3175,
+      "content_sha256": "f032dc645a631b812d273cc70da9cd505a9e59cf33af3bb74dc554207af5360c"
+    },
+    "test_fill_model.py": {
+      "path": "services/btc-conservative-agent/test_fill_model.py",
+      "git_blob_sha": "bfcb3349cea4813441016f36c6e084cb187e64a3",
+      "size": 11117,
+      "content_sha256": "6e2cdae153d89b011bf9373cdfcafd0afb85c6eb2b1f90f9aaa0cf0272f46fcf",
+      "role": "dependency for known-good cases; not executed as CI here"
+    },
+    "fill_model_fingerprint_from_tip_blobs": "sha256:c38c12ae2188046e",
+    "note": "Fingerprint string equals GS box observation, but was recomputed here by importing tip blobs under /tmp \u2014 tip evidence is git_blob_sha + content_sha256 above."
+  },
+  "realistic_v1_source": {
+    "fill_model_path": "services/btc-conservative-agent/research/fill_model.py",
+    "cost_profile_path": "services/btc-conservative-agent/bitfinex_cost_profile.py",
+    "git_sha": "e991919658c16788e82601a73015d08cb91e417c",
+    "FILL_MODEL_VERSION": "REALISTIC_V1",
+    "fill_model_fingerprint": "sha256:c38c12ae2188046e",
+    "fee_profile_id": "BITFINEX_ZERO"
+  },
+  "fee_publish_verify": {
+    "fetched_aedt": "2026-11-10 09:28 AEDT",
+    "urls": [
+      "https://www.bitfinex.com/fees/",
+      "https://www.bitfinex.com/zero-fee-trading/",
+      "https://support.bitfinex.com/hc/en-us/articles/360035475374-Derivatives-Trading-on-Bitfinex"
+    ],
+    "quoted": "DERIVATIVES ORDER EXECUTION / Derivatives Trades: Maker fees Zero; Taker Fees Zero. Support note: Starting December 17th, 2025, no (Maker or Taker) fees apply for Derivatives trading.",
+    "repo_values": {
+      "MAKER_FEE_RATE": 0.0,
+      "TAKER_FEE_RATE": 0.0,
+      "FEE_EFFECTIVE_FROM": "2025-12-17",
+      "FEE_PROFILE_ID": "BITFINEX_ZERO"
+    },
+    "match": true,
+    "NOT_VERIFIED": "Account-specific fee overrides (if any) not readable without keys; funding rates are live market, not fees."
+  },
+  "support_rule": "Path A: tip REALISTIC_V1 on market_microstructure_1s_v1 L1 tape. Path B (off-bot L2 len25 truncate of len250): only after never-cheaper PASS on this pack; out-of-support/missing history \u2192 paper-only, no invented fills (RK f7922f5f1ce2 #2).",
+  "acceptance_receipt_sha": null,
+  "acceptance_receipt_sha_note": "OPEN until HM R2 formal fixture-run acceptance (this draft is documentary).",
+  "fixtures": [
+    {
+      "id": "C7-01-TAKER-LONG-TOP",
+      "kind": "entry_taker",
+      "tc": null,
+      "side": "LONG",
+      "size": 0.2,
+      "maker": false,
+      "latency_entry_s": 4.0,
+      "input_note": "rows 1000..1019 bid=100+t ask=101+t ask_qty=0.5",
+      "realistic": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1106.0,
+        "filled_qty": 0.2,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "fees": {
+        "fee_profile_id": "BITFINEX_ZERO",
+        "maker_fee_rate": 0.0,
+        "taker_fee_rate": 0.0,
+        "liquidity": "TAKER",
+        "fee_usd": 0.0
+      },
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1106.0,
+        "filled_qty": 0.2,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "expected_mapped": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1106.0,
+        "filled_qty": 0.2,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-02-TAKER-LONG-WALK",
+      "kind": "entry_taker_partial_depth",
+      "tc": null,
+      "side": "LONG",
+      "size": 1.25,
+      "maker": false,
+      "latency_entry_s": 4.0,
+      "input_note": "same tape; qty>top \u21d2 NO_L2_SPREAD_STEP_PROXY",
+      "realistic": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1106.8,
+        "filled_qty": 1.25,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "size_walk": {
+        "vwap": 1106.8,
+        "levels": 3,
+        "binding": true,
+        "walk_bp": 7.233273056057455,
+        "top_qty": 0.5,
+        "basis": "NO_L2_SPREAD_STEP_PROXY"
+      },
+      "fees": {
+        "fee_profile_id": "BITFINEX_ZERO",
+        "maker_fee_rate": 0.0,
+        "taker_fee_rate": 0.0,
+        "liquidity": "TAKER",
+        "fee_usd": 0.0
+      },
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1106.8,
+        "filled_qty": 1.25,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "expected_mapped": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1106.8,
+        "filled_qty": 1.25,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-03-TAKER-SHORT-TOP",
+      "kind": "entry_taker",
+      "tc": null,
+      "side": "SHORT",
+      "size": 0.2,
+      "maker": false,
+      "latency_entry_s": 4.0,
+      "input_note": "sell at bid; mirror of C7-01",
+      "realistic": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1105.0,
+        "filled_qty": 0.2,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "fees": {
+        "fee_profile_id": "BITFINEX_ZERO",
+        "maker_fee_rate": 0.0,
+        "taker_fee_rate": 0.0,
+        "liquidity": "TAKER",
+        "fee_usd": 0.0
+      },
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1105.0,
+        "filled_qty": 0.2,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "expected_mapped": {
+        "status": "FILLED",
+        "fill_ts": 1005,
+        "fill_price": 1105.0,
+        "filled_qty": 0.2,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_OPPOSITE_BBO"
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-04-ZERO-SIZE-WALK",
+      "kind": "zero_size",
+      "tc": null,
+      "side": "LONG",
+      "size": 0.0,
+      "maker": false,
+      "input_note": "size_walk qty=0 \u2192 TOP_OF_BOOK non-binding",
+      "realistic": {
+        "status": "N/A_COMPONENT",
+        "size_walk": {
+          "vwap": 1106.0,
+          "levels": 1,
+          "binding": false,
+          "walk_bp": 0.0,
+          "top_qty": 0.5,
+          "basis": "TOP_OF_BOOK"
+        }
+      },
+      "fees": null,
+      "never_cheaper_residual": 0.0,
+      "note": "Component fixture; taker_fill_rows with qty=0 not a production intent",
+      "expected_realistic": {
+        "status": "N/A_COMPONENT",
+        "size_walk": {
+          "vwap": 1106.0,
+          "levels": 1,
+          "binding": false,
+          "walk_bp": 0.0,
+          "top_qty": 0.5,
+          "basis": "TOP_OF_BOOK"
+        }
+      },
+      "expected_mapped": {
+        "status": "N/A_COMPONENT",
+        "size_walk": {
+          "vwap": 1106.0,
+          "levels": 1,
+          "binding": false,
+          "walk_bp": 0.0,
+          "top_qty": 0.5,
+          "basis": "TOP_OF_BOOK"
+        }
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-05-MAKER-TOUCH-NOFILL",
+      "kind": "entry_maker",
+      "tc": null,
+      "side": "LONG",
+      "size": 0.1,
+      "maker": true,
+      "input_note": "touch+at-limit volume insufficient vs queue",
+      "realistic": {
+        "status": "NO_FILL",
+        "diagnostics": {
+          "bbo_cross_without_print_sec": 0,
+          "at_limit_ambiguous_sec": 0,
+          "missing_sec": 0
+        }
+      },
+      "optimistic_shadow": {
+        "status": "FILLED",
+        "fill_ts": 3,
+        "fill_price": 99.0,
+        "model": "OPTIMISTIC_TOUCH_V1"
+      },
+      "fees": null,
+      "never_cheaper_residual": 0.0,
+      "rule": "OPTIMISTIC_TOUCH_V1 FILLED must never replace REALISTIC NO_FILL as headline",
+      "expected_realistic": {
+        "status": "NO_FILL",
+        "diagnostics": {
+          "bbo_cross_without_print_sec": 0,
+          "at_limit_ambiguous_sec": 0,
+          "missing_sec": 0
+        }
+      },
+      "expected_mapped": {
+        "status": "NO_FILL",
+        "diagnostics": {
+          "bbo_cross_without_print_sec": 0,
+          "at_limit_ambiguous_sec": 0,
+          "missing_sec": 0
+        }
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-06-MAKER-TRADE-THROUGH",
+      "kind": "entry_maker",
+      "tc": null,
+      "side": "LONG",
+      "size": 0.1,
+      "maker": true,
+      "realistic": {
+        "status": "FILLED",
+        "fill_ts": 7,
+        "fill_price": 99.0,
+        "filled_qty": 0.1,
+        "liquidity": "MAKER",
+        "basis": "TRADE_THROUGH"
+      },
+      "fees": {
+        "fee_profile_id": "BITFINEX_ZERO",
+        "maker_fee_rate": 0.0,
+        "taker_fee_rate": 0.0,
+        "liquidity": "MAKER",
+        "fee_usd": 0.0
+      },
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "status": "FILLED",
+        "fill_ts": 7,
+        "fill_price": 99.0,
+        "filled_qty": 0.1,
+        "liquidity": "MAKER",
+        "basis": "TRADE_THROUGH"
+      },
+      "expected_mapped": {
+        "status": "FILLED",
+        "fill_ts": 7,
+        "fill_price": 99.0,
+        "filled_qty": 0.1,
+        "liquidity": "MAKER",
+        "basis": "TRADE_THROUGH"
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-07-MAKER-PARTIAL",
+      "kind": "partial_fill",
+      "tc": null,
+      "side": "LONG",
+      "size": 0.1,
+      "maker": true,
+      "realistic": {
+        "status": "PARTIAL",
+        "fill_ts": 2,
+        "fill_price": 99.00000000000001,
+        "filled_qty": 0.04999999999999999,
+        "filled_fraction": 0.4999999999999999,
+        "liquidity": "MAKER",
+        "basis": "QUEUE_CONSUMED_AT_LIMIT_PARTIAL"
+      },
+      "fees": {
+        "fee_profile_id": "BITFINEX_ZERO",
+        "maker_fee_rate": 0.0,
+        "taker_fee_rate": 0.0,
+        "liquidity": "MAKER",
+        "fee_usd": 0.0
+      },
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "status": "PARTIAL",
+        "fill_ts": 2,
+        "fill_price": 99.00000000000001,
+        "filled_qty": 0.04999999999999999,
+        "filled_fraction": 0.4999999999999999,
+        "liquidity": "MAKER",
+        "basis": "QUEUE_CONSUMED_AT_LIMIT_PARTIAL"
+      },
+      "expected_mapped": {
+        "status": "PARTIAL",
+        "fill_ts": 2,
+        "fill_price": 99.00000000000001,
+        "filled_qty": 0.04999999999999999,
+        "filled_fraction": 0.4999999999999999,
+        "liquidity": "MAKER",
+        "basis": "QUEUE_CONSUMED_AT_LIMIT_PARTIAL"
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-08-MARKETABLE-AT-PLACEMENT",
+      "kind": "fee_tier_boundary_maker_to_taker",
+      "tc": null,
+      "side": "LONG",
+      "size": 0.1,
+      "maker": false,
+      "realistic": {
+        "status": "FILLED",
+        "fill_ts": 0,
+        "fill_price": 98.8,
+        "filled_qty": 0.1,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_AT_PLACEMENT"
+      },
+      "fees": {
+        "fee_profile_id": "BITFINEX_ZERO",
+        "maker_fee_rate": 0.0,
+        "taker_fee_rate": 0.0,
+        "liquidity": "TAKER",
+        "fee_usd": 0.0
+      },
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "status": "FILLED",
+        "fill_ts": 0,
+        "fill_price": 98.8,
+        "filled_qty": 0.1,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_AT_PLACEMENT"
+      },
+      "expected_mapped": {
+        "status": "FILLED",
+        "fill_ts": 0,
+        "fill_price": 98.8,
+        "filled_qty": 0.1,
+        "liquidity": "TAKER",
+        "basis": "MARKETABLE_AT_PLACEMENT"
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-09-EXIT-HS-TC-OFF",
+      "kind": "exit_stop",
+      "tc": "off",
+      "side": "LONG",
+      "size": null,
+      "maker": false,
+      "latency_exit_s": 1.0,
+      "reason": "PHYSICAL_HARD_STOP",
+      "realistic": {
+        "margin_pct": -45.0,
+        "booked_idx": 5
+      },
+      "never_cheaper_residual": 0.0,
+      "rule": "TC=off: thesis-cut absent; HS marketable worse(trigger,delayed)",
+      "expected_realistic": {
+        "margin_pct": -45.0,
+        "booked_idx": 5
+      },
+      "expected_mapped": {
+        "margin_pct": -45.0,
+        "booked_idx": 5
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-10-EXIT-REBOUND-NEVER-CHEAPER",
+      "kind": "exit_stop_conservatism",
+      "tc": "off",
+      "side": "LONG",
+      "maker": false,
+      "latency_exit_s": 1.0,
+      "reason": "PHYSICAL_HARD_STOP",
+      "realistic": {
+        "margin_pct": -45.0,
+        "booked_idx": 4
+      },
+      "forbidden_optimistic": {
+        "margin_pct": -40.0,
+        "booked_idx": 5
+      },
+      "never_cheaper_residual": 0.0,
+      "rule": "mapped/delayed rebound -40 must NOT replace trigger -45; residual mapped-realistic for PnL must be >= -tol (here mapped worse or equal)",
+      "expected_realistic": {
+        "margin_pct": -45.0,
+        "booked_idx": 4
+      },
+      "expected_mapped": {
+        "margin_pct": -45.0,
+        "booked_idx": 4
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-11-EXIT-TP-TARGET",
+      "kind": "exit_tp",
+      "tc": "off",
+      "side": "LONG",
+      "maker": true,
+      "reason": "ATR_TAKE_PROFIT",
+      "realistic": {
+        "margin_pct": 2.5,
+        "booked_idx": 3
+      },
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "margin_pct": 2.5,
+        "booked_idx": 3
+      },
+      "expected_mapped": {
+        "margin_pct": 2.5,
+        "booked_idx": 3
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-12-EXIT-HS-TC-ON-PAIR",
+      "kind": "exit_stop",
+      "tc": "on",
+      "side": "LONG",
+      "maker": false,
+      "latency_exit_s": 1.0,
+      "reason": "PHYSICAL_HARD_STOP",
+      "realistic": {
+        "margin_pct": -45.0,
+        "booked_idx": 5
+      },
+      "pair_with": "C7-09-EXIT-HS-TC-OFF",
+      "never_cheaper_residual": 0.0,
+      "note": "TC flag must be carried on intents; HS booking identical when TC does not fire before HS. Pair satisfies P6 TC on/off coverage for exit path.",
+      "expected_realistic": {
+        "margin_pct": -45.0,
+        "booked_idx": 5
+      },
+      "expected_mapped": {
+        "margin_pct": -45.0,
+        "booked_idx": 5
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-13-TAKER-STALE-TIMEOUT",
+      "kind": "nonfill_timeout",
+      "tc": null,
+      "side": "LONG",
+      "size": 0.2,
+      "maker": false,
+      "latency_entry_s": 4.0,
+      "realistic": {
+        "status": "NO_FRESH_BBO",
+        "arrival_ts": 1004.3,
+        "latency_sec": 4.0
+      },
+      "fees": null,
+      "never_cheaper_residual": 0.0,
+      "expected_realistic": {
+        "status": "NO_FRESH_BBO",
+        "arrival_ts": 1004.3,
+        "latency_sec": 4.0
+      },
+      "expected_mapped": {
+        "status": "NO_FRESH_BBO",
+        "arrival_ts": 1004.3,
+        "latency_sec": 4.0
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-14-FEE-ZERO-TIER",
+      "kind": "fee_tier_boundary",
+      "tc": null,
+      "side": null,
+      "size": null,
+      "maker": null,
+      "realistic": {
+        "fee_maker": {
+          "fee_profile_id": "BITFINEX_ZERO",
+          "maker_fee_rate": 0.0,
+          "taker_fee_rate": 0.0,
+          "liquidity": "MAKER",
+          "fee_usd": 0.0
+        },
+        "fee_taker": {
+          "fee_profile_id": "BITFINEX_ZERO",
+          "maker_fee_rate": 0.0,
+          "taker_fee_rate": 0.0,
+          "liquidity": "TAKER",
+          "fee_usd": 0.0
+        },
+        "FEE_PROFILE_ID": "BITFINEX_ZERO"
+      },
+      "never_cheaper_residual": 0.0,
+      "note": "BITFINEX_ZERO: maker=taker=0; non-fee costs still modelled. A future non-zero fee tier needs new fixtures before freeze.",
+      "expected_realistic": {
+        "fee_maker": {
+          "fee_profile_id": "BITFINEX_ZERO",
+          "maker_fee_rate": 0.0,
+          "taker_fee_rate": 0.0,
+          "liquidity": "MAKER",
+          "fee_usd": 0.0
+        },
+        "fee_taker": {
+          "fee_profile_id": "BITFINEX_ZERO",
+          "maker_fee_rate": 0.0,
+          "taker_fee_rate": 0.0,
+          "liquidity": "TAKER",
+          "fee_usd": 0.0
+        },
+        "FEE_PROFILE_ID": "BITFINEX_ZERO"
+      },
+      "expected_mapped": {
+        "fee_maker": {
+          "fee_profile_id": "BITFINEX_ZERO",
+          "maker_fee_rate": 0.0,
+          "taker_fee_rate": 0.0,
+          "liquidity": "MAKER",
+          "fee_usd": 0.0
+        },
+        "fee_taker": {
+          "fee_profile_id": "BITFINEX_ZERO",
+          "maker_fee_rate": 0.0,
+          "taker_fee_rate": 0.0,
+          "liquidity": "TAKER",
+          "fee_usd": 0.0
+        },
+        "FEE_PROFILE_ID": "BITFINEX_ZERO"
+      },
+      "residual_mapped_minus_realistic": 0.0,
+      "pass_never_cheaper": true
+    },
+    {
+      "id": "C7-15-NEVER-CHEAPER-FAIL-EXAMPLE",
+      "kind": "rule_negative",
+      "tc": null,
+      "expected_realistic_cost_bp": 10.0,
+      "expected_mapped_cost_bp": 7.0,
+      "residual_mapped_minus_realistic": -3.0,
+      "pass": false,
+      "rule": "FAIL: residual < -tol \u21d2 STOP (never-cheaper violated)",
+      "expected_realistic": {
+        "net_cost_bp": 10.0
+      },
+      "expected_mapped": {
+        "net_cost_bp": 7.0
+      },
+      "pass_never_cheaper": false
+    }
+  ]
+}
