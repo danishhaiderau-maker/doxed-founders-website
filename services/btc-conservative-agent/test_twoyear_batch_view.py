@@ -5,6 +5,7 @@ import io
 import json
 import multiprocessing
 import os
+import signal
 import socket
 import threading
 import time
@@ -199,6 +200,7 @@ def test_caps_before_parse_huge_and_growing(tmp_path,monkeypatch):
 
 
 def _blocked_child(connection):
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)  # HM c3b9f820cfe9, RK dfdd73862d40, HM C3
     connection.recv_bytes()
     threading.Event().wait(10)
 
@@ -208,11 +210,13 @@ def test_real_blocked_loader_terminated_reaped_and_global_slot(store,monkeypatch
     context=multiprocessing.get_context("fork" if os.name!="nt" else "spawn")
     parent,child=context.Pipe()
     process=context.Process(target=_blocked_child,args=(child,))
-    process.start()
-    child.close()
-    monkeypatch.setattr(L,"_LAST_ATTEMPT",None)
-    adapter=L.SupervisorCacheAdapter(process,parent,tmp_path,cache,platform_verified=True)
+    # C4: non-exiting parent handler so the fork inherits a leak regardless of CI order (HM 5757b40486b3 / 1066e0fcff07).
+    prev = signal.signal(signal.SIGTERM, lambda s, f: None)
     try:
+        process.start()
+        child.close()
+        monkeypatch.setattr(L,"_LAST_ATTEMPT",None)
+        adapter=L.SupervisorCacheAdapter(process,parent,tmp_path,cache,platform_verified=True)
         start=time.monotonic()
         assert not adapter.tick()
         elapsed=time.monotonic()-start
@@ -225,6 +229,7 @@ def test_real_blocked_loader_terminated_reaped_and_global_slot(store,monkeypatch
         assert elapsed<WATCHDOG_S+JOIN_S+SLACK_S
         process.join(JOIN_S+SLACK_S)
         assert not process.is_alive()
+        assert process.exitcode == -signal.SIGTERM
         assert adapter.latched
         assert not adapter.tick()
         assert adapter.stopped_and_reaped is True
@@ -232,6 +237,7 @@ def test_real_blocked_loader_terminated_reaped_and_global_slot(store,monkeypatch
         if process.is_alive(): process.terminate()
         process.join(.1)
         parent.close()
+        signal.signal(signal.SIGTERM, prev)
 
 
 def test_requests_never_refresh_under_concurrent_expiry(store,monkeypatch):
