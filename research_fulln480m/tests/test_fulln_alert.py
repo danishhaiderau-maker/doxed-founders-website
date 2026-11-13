@@ -1,6 +1,7 @@
 """BS tests (plan item C10): survivor alert + no-paper-tile-write proof (T-PT1..T-PT3).
 
-Binding: plan r3 33f3ec1e0e07 s7 C10; Boss GO r2 3656382c8a5c; HM 8b8ec9208448 s3(b); t2985u.
+Binding: plan r3 33f3ec1e0e07 s7 C10; Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2;
+RK e1d778426447; HM R2 b88d1b1e0653; RULES c342ecf8ec9a; t2985u.
 The run guard is a process-wide audit hook with no disarm, so every guarded case runs in a CHILD
 python process (exit code 78 = refused). Scratch: <--basetemp>/bs-fixed/<sha12>/<test>/...
 (new per session basetemp; nothing is removed). No network is used: the guard refuses socket.*
@@ -196,7 +197,9 @@ def test_t_pt2_2_planted_paper_tile_path_refused(scratch):
     "shutil.copyfile(INSIDE, OUT)",
     "os.remove(EXIST)",
 ])
-def test_t_pt2_3_every_write_route_outside_run_dir_refused(scratch, op):
+def test_t_pt2_3_listed_write_routes_outside_run_dir_refused(scratch, op):
+    """Covered routes only; subprocess/os.system/posix_spawn/dir_fd/mkfifo have their own tests."""
+
     out_dir = os.path.join(scratch, "outside")
     os.makedirs(out_dir, exist_ok=True)
     exist = os.path.join(out_dir, "exists.txt")
@@ -319,3 +322,115 @@ def test_t_pt1_scan_catches_planted_writer(scratch):
     hits = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
             and _PATHLIKE.search(n.value) and _TILEPATH.search(n.value)]
     assert hits
+
+
+# ---------------------------------------------------------------- review-fix: BS-1 / BS-2 / k>50 (RK e1d7, HM b88d)
+def test_c10_9_alpha_uses_full_k_above_50():
+    ids = tuple(range(51))
+    a = fa.compute_alert(status(), *arrays(ids), n_cells=N)
+    assert a["k"] == 51
+    assert a["confirmation_alpha"] == pytest.approx(0.05 / 51, rel=0, abs=0)
+
+
+@pytest.mark.parametrize("bit,name", [
+    (fa.FLAG_KC_INELIGIBLE, "KC_INELIGIBLE"),
+    (fa.FLAG_N_LT_2, "N_LT_2"),
+    (fa.FLAG_V_ZERO, "V_ZERO"),
+    (fa.FLAG_BLOCK_NOT_COMPUTED, "BLOCK_NOT_COMPUTED"),
+])
+def test_c10_10_ineligible_or_bit3_survivor_stops(bit, name):
+    rej, flp, fl = arrays((1, 2))
+    fl[2] |= np.uint8(bit)
+    with pytest.raises(fa.IneligibleSurvivor) as e:
+        fa.compute_alert(status(), rej, flp, fl, n_cells=N)
+    assert e.value.exit_code == 78
+    assert e.value.count == 1
+    assert any(t["name"] == name and t["count"] == 1 for t in e.value.trips)
+
+
+def test_c10_11_method_a_bit3_survivor_stops():
+    rej, flp, fl = arrays((7,))
+    fl[7] |= np.uint8(fa.FLAG_BLOCK_NOT_COMPUTED)
+    with pytest.raises(fa.IneligibleSurvivor) as e:
+        fa.compute_alert(status(method_frozen="A", method_run="A", a_audit="PASS"),
+                         rej, flp, fl, n_cells=N)
+    assert e.value.exit_code == 78
+    assert any(t["name"] == "BLOCK_NOT_COMPUTED" for t in e.value.trips)
+
+
+def test_c10_12_data_thin_on_a_survivor_is_allowed():
+    rej, flp, fl = arrays((1,))
+    fl[1] |= np.uint8(fa.FLAG_DATA_THIN_ANY)
+    a = fa.compute_alert(status(), rej, flp, fl, n_cells=N)
+    assert a["k"] == 1 and a["survivor_cells"] == [1]
+
+
+WRITE_INELIGIBLE = """
+fa.install_run_guard(RUN)
+rej = np.zeros(64, bool); flp = np.zeros(64, bool); fl = np.full(64, 128, np.uint8)
+for i in (3, 9):
+    rej[i] = True; flp[i] = True; fl[i] = 0
+fl[9] |= 16  # KC_INELIGIBLE
+st = {"state": "COMPLETE", "latched": False, "partial": False, "method_frozen": "B",
+      "method_run": "B", "a_audit": "NOT_APPLICABLE", "freeze_sha256": "ab" * 32}
+fa.write_survivor_alert(RUN, st, rej, flp, fl, n_cells=64)
+"""
+
+
+def test_c10_13_ineligible_write_discloses_failure_record_and_exits_78(scratch):
+    rc, out = _child(WRITE_INELIGIBLE, scratch)
+    assert rc == 78, out
+    res = os.path.join(scratch, "RUN_DIR", "results")
+    assert sorted(os.listdir(res)) == ["SURVIVOR-STOP.json", "SURVIVOR-STOP.txt"]
+    rec = json.load(open(os.path.join(res, "SURVIVOR-STOP.json")))
+    assert rec["result"] == "STOP" and rec["count"] == 1
+    assert any(t["name"] == "KC_INELIGIBLE" and t["count"] == 1 for t in rec["trips"])
+    assert "STOP" in open(os.path.join(res, "SURVIVOR-STOP.txt")).read()
+    assert not os.path.exists(os.path.join(res, "SURVIVOR-ALERT.json"))
+
+
+@pytest.mark.parametrize("op,label", [
+    ("subprocess.run(['/bin/sh', '-c', 'echo pwned > ' + OUT], check=False)", "subprocess"),
+    ("os.system('echo pwned > ' + OUT)", "os.system"),
+    ("os.posix_spawn('/bin/true', ['/bin/true'], os.environ)", "posix_spawn"),
+])
+def test_t_pt2_6_process_spawn_refused(scratch, op, label):
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "pwned.txt")
+    rc, txt = _child("""
+        import subprocess
+        OUT = %r
+        fa.install_run_guard(RUN)
+        %s
+    """ % (target, op), scratch)
+    assert rc == 78, (label, txt)
+    assert not os.path.exists(target)
+
+
+def test_t_pt2_7_os_open_dir_fd_write_refused(scratch):
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "via-dirfd.bin")
+    rc, txt = _child("""
+        OUTDIR = %r
+        fa.install_run_guard(RUN)
+        os.chdir(RUN)
+        fd = os.open(OUTDIR, os.O_RDONLY)
+        os.close(os.open('via-dirfd.bin', os.O_WRONLY | os.O_CREAT, dir_fd=fd))
+    """ % out_dir, scratch)
+    assert rc == 78, txt
+    assert not os.path.exists(target)
+
+
+def test_t_pt2_8_mkfifo_outside_refused(scratch):
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "x.fifo")
+    rc, txt = _child("""
+        OUT = %r
+        fa.install_run_guard(RUN)
+        os.mkfifo(OUT)
+    """ % target, scratch)
+    assert rc == 78, txt
+    assert not os.path.exists(target)
