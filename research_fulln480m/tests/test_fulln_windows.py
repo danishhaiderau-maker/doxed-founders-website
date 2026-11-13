@@ -251,3 +251,27 @@ def test_t3_18_deny_is_realpath_safe(tmp_path):
 def test_t3_19_deny_list_cannot_be_weakened():
     with pytest.raises(ClosureViolation):
         fw.AllowlistGate({}, deny_prefixes=("C:\\other",))
+
+
+def test_t3_20_deny_requires_exact_or_separator():
+    """HM R2 1e293c804a56 / RK 42575c84c73e: deny = exact match OR prefix+separator.
+
+    Look-alike siblings (-r1-copy, r10) are allowed; the exact prefix and a
+    child path under it are denied.
+    """
+    r2c = "C:\\DoxxedCrypto\\data\\binance-spot-1s-20260913-20261112-r1"
+    tool = "C:\\DoxxedCrypto\\tools\\binance_spot_1s_dl_r2b.py"
+    assert fw.DENY_PREFIXES == (r2c, tool)
+    allowed = (
+        "C:\\DoxxedCrypto\\data\\binance-spot-1s-20260913-20261112-r1-copy\\file.zip",
+        "C:\\DoxxedCrypto\\data\\binance-spot-1s-20260913-20261112-r10\\file.zip",
+    )
+    denied = (
+        r2c,
+        r2c + "\\file.zip",
+    )
+    for path in allowed:
+        fw.AllowlistGate({path: (1, "0" * 64)})
+    for path in denied:
+        with pytest.raises(ClosureViolation):
+            fw.AllowlistGate({path: (1, "0" * 64)})

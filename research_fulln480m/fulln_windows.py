@@ -249,10 +249,48 @@ def norm_path(p):
     return os.path.normpath(p).casefold()
 
 
+def _deny_sep(norm):
+    """Separator consistent with how norm_path encoded this form.
+
+    Windows-style forms (drive letter or backslash, via ntpath) use ntpath.sep
+    even when this module is imported on a POSIX host. POSIX forms use os.sep.
+    """
+    if _is_windows_style(norm):
+        return ntpath.sep
+    return os.sep
+
+
+def _strip_trailing_sep(norm):
+    """Strip trailing separators, leaving a drive root ('c:\\') or '/' intact."""
+    sep = _deny_sep(norm)
+    alt = ntpath.altsep if _is_windows_style(norm) else (os.altsep or "")
+    while len(norm) > 1:
+        is_drive_root = (
+            _is_windows_style(norm)
+            and len(norm) == 3
+            and norm[1] == ":"
+            and (norm.endswith(sep) or (alt and norm.endswith(alt)))
+        )
+        if is_drive_root:
+            break
+        if norm.endswith(sep) or (alt and norm.endswith(alt)):
+            norm = norm[:-1]
+            continue
+        break
+    return norm
+
+
 def _denied(norm, deny_norms):
-    # Plain prefix match on the normalised form: refuses the literal paths and anything that starts
-    # with them (conservative: also refuses look-alike siblings such as '...-r1-copy').
-    return any(norm.startswith(d) for d in deny_norms)
+    # Deny only on exact match or a child path (startswith prefix + separator).
+    # Trailing separators are stripped first. Look-alike siblings such as
+    # '...-r1-copy' or '...\\r10' are not denied (HM 1e293c804a56).
+    n = _strip_trailing_sep(norm)
+    for d0 in deny_norms:
+        d = _strip_trailing_sep(d0)
+        sep = _deny_sep(d)
+        if n == d or n.startswith(d + sep):
+            return True
+    return False
 
 
 class AllowlistGate(object):
