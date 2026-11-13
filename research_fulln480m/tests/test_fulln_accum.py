@@ -1,6 +1,8 @@
 """B4 tests: fulln_accum.py (C4 accumulator). Box tiny 'test' layouts only - no 480M allocation.
 
-Binding: plan r3 33f3ec1e0e07 s7 C4 / s12 B4; HM 8b8ec9208448 s3(b) flag bits; Boss GO r2 3656382c8a5c.
+Binding: plan r3 33f3ec1e0e07 s7 C4 / s12 B4; HM 8b8ec9208448 s3(b) / R2 b88d1b1e0653;
+Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2; RK e1d778426447; RULES c342ecf8ec9a.
+B0 interface revision (FLAG 32 / s3 bits / s4 signatures) is OUT OF SCOPE here.
 Scratch: <--basetemp>/b4-fixed/<sha12 of nodeid+file>/<test>/RUN_DIR/accum (pytest's tmp machinery is not used when
 --basetemp is given, so nothing is removed); every file is new per session basetemp.
 """
@@ -448,3 +450,118 @@ def test_t4_27_n_lt_2_bit_is_computed_from_n_trades():
     spurious = _mut(good, flags=_orv(5, fa.FLAG_N_LT_2), v_block_bp2=_setv(5, np.nan), t_block=_setv(5, np.nan))
     with pytest.raises(fc.ClosureViolation):
         fa.validate_record(spurious, T, "A")
+
+
+# ---------------------------------------------------------------- review-fix: H4g/h/k/l/m/n + >65535 / 2^32-1 (RK e1d7 B4-1)
+def test_t4_28_u32_counts_roundtrip_no_saturation(accdir):
+    """n_trades and n_unpriced above 65,535 and at 2^32-1 must round-trip unclipped (H4k)."""
+    acc = _create(accdir)
+    r = rec(21)
+    r.n_trades[5] = 65536
+    r.n_trades[6] = 0xFFFFFFFF
+    r.n_unpriced[5] = 65536
+    r.n_unpriced[6] = 0xFFFFFFFF
+    # cells 5/6 already have n >= 2 in rec(); flags and defined V/t stay consistent
+    assert (r.flags[5] & fa.FLAG_N_LT_2) == 0 and (r.flags[6] & fa.FLAG_N_LT_2) == 0
+    fa.validate_record(r, T, "B")
+    acc.write_tile(0, r, SRCS)
+    back = acc.read_tile(0)
+    assert int(back.n_trades[5]) == 65536 and int(back.n_trades[6]) == 0xFFFFFFFF
+    assert int(back.n_unpriced[5]) == 65536 and int(back.n_unpriced[6]) == 0xFFFFFFFF
+    assert int(back.n_trades[5]) != 65535 and int(back.n_unpriced[5]) != 65535
+    assert back.n_trades.dtype == np.dtype("<u4") and back.n_unpriced.dtype == np.dtype("<u4")
+
+
+def test_t4_29_write_refuses_when_readback_differs(accdir):
+    """Kill H4g: the post-write tile hash must be checked against the bytes written."""
+    acc = _create(accdir)
+    real = acc._tile_hashes
+    def bad(tile):
+        return {name: "00" * 32 for name in fa.COLUMN_NAMES}
+    acc._tile_hashes = bad
+    with pytest.raises(fc.ClosureViolation) as e:
+        acc.write_tile(0, rec(1), SRCS)
+    assert "read-back" in e.value.reason
+
+
+def test_t4_30_open_checks_header_rules_sha(accdir):
+    """Kill H4h: open() refuses a header whose rules_sha256 != pins.RULES_SHA256,
+    even when the create-line header sha is updated to match the tampered header."""
+    acc = _create(accdir)
+    p = _path(accdir)
+    with open(p, "rb") as f:
+        raw = f.read(4096)
+    hdr = fa.decode_header(raw)
+    hdr["rules_sha256"] = "ff" * 32
+    new_raw = fa.encode_header(hdr)
+    assert len(new_raw) == 4096
+    with open(p, "r+b") as f:
+        f.write(new_raw)
+    cp = os.path.join(accdir, "commit.jsonl")
+    entries = [json.loads(x) for x in open(cp).read().splitlines()]
+    entries[0]["header_sha256"] = fa._sha(new_raw)
+    prev, out = None, []
+    for i, d in enumerate(entries):
+        d = dict(d, seq=i, prev_sha256=prev)
+        line = json.dumps(d, sort_keys=True, separators=(",", ":"))
+        prev = fa._line_sha(line)
+        out.append(line)
+    with open(cp, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(out) + "\n")
+    with pytest.raises(fc.ClosureViolation) as e:
+        fa.Accumulator.open(p, LAY)
+    assert "rules" in e.value.reason.lower()
+
+
+def test_t4_31_real_layout_refuses_wrong_n_or_tile(accdir):
+    """Kill H4l: label 'real' with a size that is not N_CELLS x TILE_CELLS must STOP.
+    Arithmetic only; no 24.5 GB allocation."""
+    n = pins.TILE_CELLS * 2
+    assert n != pins.N_CELLS and n % pins.TILE_CELLS == 0
+    with pytest.raises(fc.ClosureViolation) as e:
+        fa.Layout(n_cells=n, tile_cells=pins.TILE_CELLS, label="real")
+    assert "real layout" in e.value.reason
+    fc._STATE["latch"] = None
+    assert pins.N_CELLS % (pins.TILE_CELLS * 2) == 0
+    with pytest.raises(fc.ClosureViolation) as e:
+        fa.Layout(n_cells=pins.N_CELLS, tile_cells=pins.TILE_CELLS * 2, label="real")
+    assert "real layout" in e.value.reason
+
+
+def test_t4_32_header_padding_must_be_zero(accdir):
+    """Kill H4m: a single non-zero padding byte is refused by decode_header."""
+    _create(accdir)
+    with open(_path(accdir), "rb") as f:
+        raw = f.read(4096)
+    assert raw[-1] == 0
+    assert fa.decode_header(raw)["n_cells"] == 24
+    dirty = raw[:-1] + b"\x01"
+    with pytest.raises(fc.ClosureViolation) as e:
+        fa.decode_header(dirty)
+    assert "padding" in e.value.reason
+
+
+def test_t4_33_resume_refuses_method_mismatch_after_rechain(accdir):
+    """Kill H4n: a commit-line method that disagrees with the header is VOID,
+    even when the hash chain is rewritten so a chain break cannot hide it."""
+    acc = _create(accdir)
+    acc.write_tile(0, rec(3), SRCS)
+    cp = os.path.join(accdir, "commit.jsonl")
+    entries = [json.loads(x) for x in open(cp).read().splitlines()]
+    changed = 0
+    for d in entries:
+        if d.get("event") in ("begin_tile", "commit_tile"):
+            d["method"] = "A"
+            changed += 1
+    assert changed >= 1
+    prev, out = None, []
+    for i, d in enumerate(entries):
+        d = dict(d, seq=i, prev_sha256=prev)
+        line = json.dumps(d, sort_keys=True, separators=(",", ":"))
+        prev = fa._line_sha(line)
+        out.append(line)
+    with open(cp, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(out) + "\n")
+    with pytest.raises(fc.ClosureViolation) as e:
+        fa.Accumulator.open(_path(accdir), LAY)
+    assert "method" in e.value.reason.lower()

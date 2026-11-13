@@ -2,7 +2,7 @@
 
 Binding: plan r3 33f3ec1e0e07 s7 C4 / s9 / s12 B4; interfaces.md (B0 a6fc2d873f24) s3/s4 B4;
 HM consult 8b8ec9208448 s3(b) flag-bit table (H-8); RK 2e6b9127bf3e item 3 + addendum 22ee55488e0c;
-Boss GO r2 3656382c8a5c; RULES d8594afbb02e; RK c07fa806dfad item 5 (A per-window commit lines).
+Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2; RK e1d778426447; HM R2 b88d1b1e0653; RULES c342ecf8ec9a (header still records pins.RULES_SHA256 from B0 until the B0 interfaces revision); RK c07fa806dfad item 5 (A per-window commit lines).
 
 File RUN_DIR/accum/pooled-stats.bin: a 4,096 B header + 9 struct-of-arrays columns, 51 B per cell,
 exactly 4,096 + 51 N bytes (24,506,638,336 B for N = 480,522,240); any other size = STOP 78.
