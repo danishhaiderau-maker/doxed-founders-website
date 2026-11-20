@@ -3,6 +3,8 @@
 Binding: plan r3 33f3ec1e0e07 s7 C1; Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2;
 RK 2e6b9127bf3e + addendum 22ee55488e0c (B1 SPLIT) / e1d778426447 / 53ccb5a6219f;
 HM R2 b88d1b1e0653; RULES c342ecf8ec9a (R61 gross).
+Review-fix C6-C8: Boss GO 0c56ad477150; RK 4f5676ff068c; HM R2b ba0b2b5766f9 (ruling sha is an
+exact full 64-hex compare, no prefix; floor/fill are single literal assignments).
 
 What this module does (C1):
 - build_gross_micro(base_micro, liq) returns a NEW dict whose cost terms are gross:
@@ -53,7 +55,8 @@ COST_ZERO_KEYS = ("cost_bp", "p_cost")
 # RK 53ccb5a6219f: gross literals, never computed at runtime. No clamp lives in this module.
 PINNED_GROSS_LIQ_FLOOR = -50.0
 PINNED_GROSS_LIQ_FILL = -100.0
-PINNED_GROSS_LIQ_RULING_PREFIX = "53ccb5a6219f"
+# RK 4f5676ff068c C6: exact full 64-hex sha of the RK 53cc ruling file. No prefix, no case-fold.
+PINNED_GROSS_LIQ_RULING_SHA = "53ccb5a6219f3c2ac2e5e17dc48de314bf2696d308b6b449fd663e1d123bd5da"
 # Labelled NET sensitivity only (superseded for the gross path). Must not reach LiqPolicy values.
 NET_SENSITIVITY_LIQ_FLOOR = -43.5
 COST_LIQ_KEYS = {"liq_floor": "liq_floor", "liq_fill": "liq_fill",
@@ -86,9 +89,10 @@ class LiqPolicy:
     def __post_init__(self):
         if not isinstance(self.ruling_sha, str) or not _HEX.match(self.ruling_sha):
             raise ClosureViolation("LiqPolicy.ruling_sha must be 12-64 lowercase hex (RK 53ccb5a6219f)")
-        if not self.ruling_sha.startswith(PINNED_GROSS_LIQ_RULING_PREFIX):
+        if self.ruling_sha != PINNED_GROSS_LIQ_RULING_SHA:
             raise ClosureViolation(
-                "LiqPolicy.ruling_sha must cite RK 53ccb5a6219f (gross pin); got %r" % (self.ruling_sha,))
+                "LiqPolicy.ruling_sha must be exactly the full 64-hex sha of RK 53ccb5a6219f "
+                "(gross pin, no prefix); got %r" % (self.ruling_sha,))
         for name in ("liq_floor", "liq_fill"):
             v = getattr(self, name)
             if isinstance(v, bool) or not isinstance(v, (int, float)):

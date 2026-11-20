@@ -3,10 +3,12 @@
 Binding: plan r3 33f3ec1e0e07 s7 C1 / s12 B1; Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2;
 RK 22ee55488e0c (B1 SPLIT: C7 micro builders + I1 encoding wait for plan r4; no code that sets
 exit returns to 0.0) / e1d778426447 / 53ccb5a6219f; HM R2 b88d1b1e0653; RULES c342ecf8ec9a.
+Review-fix C6-C8: Boss GO 0c56ad477150; RK 4f5676ff068c; HM R2b ba0b2b5766f9.
 No file is written by these tests. This module has no clamp; the -50.0 / -49.99 boundary fixture
 belongs to BU/BR, not B1.
 """
 import ast
+import math
 import os
 import sys
 
@@ -18,7 +20,9 @@ from research_fulln480m import fulln_gross as fg
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fulln_gross.py")
 # Gross pin (RK 53ccb5a6219f). Distinct floor/fill so a swap is visible (HM H1a-c).
-LIQ = fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha="53ccb5a6219f")
+# C6: ruling_sha is the exact full 64-hex sha, not a prefix (RK 4f5676ff068c).
+PINNED_RULING_SHA = "53ccb5a6219f3c2ac2e5e17dc48de314bf2696d308b6b449fd663e1d123bd5da"
+LIQ = fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha=PINNED_RULING_SHA)
 
 
 
@@ -254,15 +258,14 @@ def test_t1_16_distinct_gross_floor_and_fill_keys():
     assert out["costs"]["liq_fill"] == -100.0
     assert out["costs"]["p_liq_floor"] == -50.0
     assert out["costs"]["p_liq_fill"] == -100.0
-    assert out["liq_ruling_sha"] == "53ccb5a6219f"
+    assert out["liq_ruling_sha"] == PINNED_RULING_SHA
     assert -43.5 not in (out["liq_floor"], out["liq_fill"],
                          out["costs"]["liq_floor"], out["costs"]["liq_fill"],
                          out["costs"]["p_liq_floor"], out["costs"]["p_liq_fill"])
 
 
 def test_t1_17_liq_policy_accepts_only_the_gross_pin():
-    ok = fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0,
-                      ruling_sha="53ccb5a6219f3c2ac2e5e17dc48de314bf2696d308b6b449fd663e1d123bd5da")
+    ok = fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha=PINNED_RULING_SHA)
     assert ok.liq_floor == -50.0 and ok.liq_fill == -100.0
 
 
@@ -271,7 +274,7 @@ def test_t1_18_liq_policy_refuses_non_finite():
                         (float("-inf"), -100.0), (-50.0, float("-inf")),
                         (float("nan"), -100.0), (-50.0, float("nan"))):
         with pytest.raises(fc.ClosureViolation) as e:
-            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha="53ccb5a6219f")
+            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha=PINNED_RULING_SHA)
         assert "finite" in e.value.reason
         fc._STATE["latch"] = None
 
@@ -279,7 +282,7 @@ def test_t1_18_liq_policy_refuses_non_finite():
 def test_t1_19_liq_policy_refuses_net_sensitivity_43_5():
     for floor, fill in ((-43.5, -100.0), (-50.0, -43.5), (-43.5, -43.5)):
         with pytest.raises(fc.ClosureViolation) as e:
-            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha="53ccb5a6219f")
+            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha=PINNED_RULING_SHA)
         assert "NET sensitivity" in e.value.reason
         assert "-43.5" in e.value.reason
         fc._STATE["latch"] = None
@@ -287,11 +290,11 @@ def test_t1_19_liq_policy_refuses_net_sensitivity_43_5():
 
 def test_t1_20_liq_policy_refuses_inverted_or_fill_milder_than_floor():
     with pytest.raises(fc.ClosureViolation) as e:
-        fg.LiqPolicy(liq_floor=-100.0, liq_fill=-50.0, ruling_sha="53ccb5a6219f")
+        fg.LiqPolicy(liq_floor=-100.0, liq_fill=-50.0, ruling_sha=PINNED_RULING_SHA)
     assert "inverted" in e.value.reason or "milder" in e.value.reason
     fc._STATE["latch"] = None
     with pytest.raises(fc.ClosureViolation) as e:
-        fg.LiqPolicy(liq_floor=-100.0, liq_fill=-43.5, ruling_sha="53ccb5a6219f")
+        fg.LiqPolicy(liq_floor=-100.0, liq_fill=-43.5, ruling_sha=PINNED_RULING_SHA)
     # -43.5 is caught first when it appears, which still refuses the inverted pair
     assert "NET sensitivity" in e.value.reason or "inverted" in e.value.reason or "milder" in e.value.reason
 
@@ -302,7 +305,7 @@ def test_t1_21_liq_policy_refuses_off_pin_values():
     for floor, fill in ((-50.0, -99.999), (-49.99, -100.0), (-50.1, -100.0),
                         (0.0, -100.0), (43.5, -100.0), (-50.0, -100.1)):
         with pytest.raises(fc.ClosureViolation) as e:
-            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha="53ccb5a6219f")
+            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha=PINNED_RULING_SHA)
         assert "pinned literals" in e.value.reason
         fc._STATE["latch"] = None
 
@@ -327,3 +330,82 @@ def test_t1_23_no_clamp_and_no_zeroed_exit_returns_in_source():
     for node in ast.walk(_tree()):
         if isinstance(node, ast.Attribute):
             assert node.attr not in ("clip", "clip_", "clamp"), node.attr
+
+
+def _numeric_literal_value(node):
+    """A numeric constant, or a unary minus of one. No computation."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _numeric_literal_value(node.operand)
+        return None if inner is None else -inner
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return float(node.value)
+    return None
+
+
+def _assignments_of(tree, name):
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    found.append(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name and node.value is not None:
+                found.append(node.value)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                found.append(node.value)
+    return found
+
+
+def test_t1_24_pinned_floor_and_fill_are_single_numeric_literals():
+    """C7: PINNED_GROSS_LIQ_FLOOR / _FILL are each one assignment of a numeric literal (HB1b)."""
+    tree = _tree()
+    expected = {"PINNED_GROSS_LIQ_FLOOR": -50.0, "PINNED_GROSS_LIQ_FILL": -100.0}
+    for name, want in expected.items():
+        found = _assignments_of(tree, name)
+        assert len(found) == 1, "%s must be assigned exactly once, got %d" % (name, len(found))
+        got = _numeric_literal_value(found[0])
+        assert got is not None, "%s must be a numeric literal with no computation, got %s" % (
+            name, ast.dump(found[0]))
+        assert got == want
+
+
+def test_t1_25_liq_policy_refuses_prefix_plus_wrong_tail_ruling_sha():
+    """C6: a 53cc prefix plus a junk hex tail is REFUSED (exact 64-hex compare; kills HB1c)."""
+    # 12-char prefix alone, 12-char prefix + short junk (HM P1-04), and prefix padded to 64 (P1-03).
+    tails = (
+        "53ccb5a6219f",
+        "53ccb5a6219fdead",
+        "53ccb5a6219f" + ("0" * (64 - 12)),
+    )
+    for sha in tails:
+        assert sha != PINNED_RULING_SHA
+        with pytest.raises(fc.ClosureViolation) as e:
+            fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha=sha)
+        assert "exactly the full 64-hex" in e.value.reason or "no prefix" in e.value.reason
+        assert "53ccb5a6219f" in e.value.reason
+        fc._STATE["latch"] = None
+
+
+def test_t1_26_liq_policy_refuses_nextafter_either_side_of_pins():
+    """C8: nextafter both sides of -50.0 and -100.0 must be refused (kills HB1a)."""
+    cases = (
+        (math.nextafter(-50.0, float("-inf")), -100.0),
+        (math.nextafter(-50.0, float("inf")), -100.0),
+        (-50.0, math.nextafter(-100.0, float("-inf"))),
+        (-50.0, math.nextafter(-100.0, float("inf"))),
+    )
+    for floor, fill in cases:
+        assert floor != -50.0 or fill != -100.0
+        with pytest.raises(fc.ClosureViolation) as e:
+            fg.LiqPolicy(liq_floor=floor, liq_fill=fill, ruling_sha=PINNED_RULING_SHA)
+        assert "pinned literals" in e.value.reason
+        fc._STATE["latch"] = None
+
+
+def test_t1_27_liq_policy_refuses_20x_minus250_minus500_on_btc_path():
+    """C8: -250/-500 is refused on the BTC gross path (kills HB1d). No per-pair logic."""
+    with pytest.raises(fc.ClosureViolation) as e:
+        fg.LiqPolicy(liq_floor=-250.0, liq_fill=-500.0, ruling_sha=PINNED_RULING_SHA)
+    assert "pinned literals" in e.value.reason
