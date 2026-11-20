@@ -359,6 +359,18 @@ def _assignments_of(tree, name):
     return found
 
 
+_FORBIDDEN_REBIND_CALLS = ("exec", "eval", "globals", "vars", "setattr", "__import__")
+
+
+def _called_basename(func):
+    """Basename of a Call func: Name.id or Attribute.attr, else None."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
 def test_t1_24_pinned_floor_and_fill_are_single_numeric_literals():
     """C7: PINNED_GROSS_LIQ_FLOOR / _FILL are each one assignment of a numeric literal (HB1b).
 
@@ -396,6 +408,33 @@ def test_t1_24_pinned_floor_and_fill_are_single_numeric_literals():
             isinstance(n, ast.Constant) and n.value == name
             for n in ast.walk(tree)
         ), "%s must not appear as a name-string constant (globals()/setattr/vars())" % name
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            called = _called_basename(node.func)
+            assert called not in _FORBIDDEN_REBIND_CALLS, (
+                "t1_24 refuses any Call to exec, eval, globals, vars, setattr or "
+                "__import__ (HM R2d cheap close N13/N18); got %s at line %s"
+                % (called, getattr(node, "lineno", "?"))
+            )
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name in names:
+            assert False, (
+                "t1_24 refuses a match-statement capture or star pattern named %s "
+                "(HM R2d cheap close N14) at line %s"
+                % (node.name, getattr(node, "lineno", "?"))
+            )
+    _ext_names = ("exec", "eval", "globals", "vars", "setattr", "__import__", "locals", "compile", "__builtins__")
+    _ext_attrs = ("__globals__", "__dict__", "__setattr__", "__builtins__", "__code__")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            assert node.id not in _ext_names, "HM ext: name %s refused at line %s" % (node.id, node.lineno)
+        if isinstance(node, ast.Attribute):
+            assert node.attr not in _ext_attrs, "HM ext: attribute %s refused at line %s" % (node.attr, node.lineno)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            assert node.name not in names, "HM ext: def/class named %s" % node.name
+        if isinstance(node, ast.MatchMapping):
+            assert node.rest not in names, "HM ext: mapping rest named %s" % node.rest
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr":
+            assert len(node.args) >= 2 and isinstance(node.args[1], ast.Name), "HM ext: getattr name must be a variable"
 
 
 def test_t1_25_liq_policy_refuses_prefix_plus_wrong_tail_ruling_sha():
