@@ -4,7 +4,9 @@ Binding: plan r3 33f3ec1e0e07 s7 C10 / s12 BS; Boss GO r2 3656382c8a5c (BS = pla
 G24 stoptest); review-fix GO c65ece13d3b2; residuals GO ad97fded1831; RK 22ee55488e0c / e1d778426447
 / bb9b6d5ebedc; HM R2 b88d1b1e0653 (s3(b) flag table); RULES c342ecf8ec9a R66(g); Danish t2985u
 (nothing enters paper automatically; Danish picks). The alert payload still carries
-pins.RULES_SHA256 from B0 until that revision.
+pins.RULES_SHA256 from B0 until that revision. Combined bypass close/disclose: Boss GO
+18b5834de6a4 (proposal r2.1 ba7ce094c98b, final list 429cfff3b75e); RK 45d668eaa8fc /
+1fdecbce8d45 / 1caad8ad3e31 / 0d9ffda558c4; HM acadb9beb47b / 61db17ddd428.
 
 - compute_alert(): pure. k = number of cells that pass the ONE frozen method AND all floors on
   W01-W12, counted over the FULL lattice (arrays of length N); confirmation alpha = 0.05 / k with
@@ -21,20 +23,49 @@ pins.RULES_SHA256 from B0 until that revision.
 - install_run_guard(): process audit hook plus wrappers (no uninstall API). Refuses: write-open,
   create, rename, delete, copy or chmod outside RUN_DIR; any socket.* event; subprocess.Popen,
   os.system, os.exec*, os.posix_spawn*, os.fork / os.forkpty; any hooked path/open event that
-  carries a dir_fd; os.mkfifo / os.mknod outside RUN_DIR. Residual unhooked routes (ctypes,
-  sqlite3, pre-armed fds) are listed for RK, not claimed as closed.
+  carries a dir_fd; os.mkfifo / os.mknod outside RUN_DIR. The same wrappers are applied to the
+  posix module when it is present (sys.modules only, no new import), so posix.open with dir_fd
+  and posix.mkfifo / posix.mknod outside RUN_DIR are refused the same way. os.startfile is
+  refused while armed when the attribute exists (NOT TESTED: absent on Linux; it is still listed
+  under KNOWN RESIDUALS). On Linux a missing /proc/self/fd refuses arming (78). Residual
+  unhooked routes (ctypes, sqlite3, pre-armed fds, C-extension writes, procfs fd tricks, direct
+  _posixsubprocess.fork_exec, multiprocessing spawn, pre-bound os.open / _ORIG, the _GUARD
+  module-state disarm, Windows _winapi.CreateProcess, os.startfile, dbm / shelve, nt) are
+  listed under KNOWN RESIDUALS for RK, not claimed as closed.
 - This module imports no repo service, tile, ledger, order, exchange or network module and holds
   no path literal for writing.
 
-KNOWN RESIDUALS (RK bb9b6d5ebedc)
-- ctypes (ctypes.CDLL / libc open, write, mkdir, system): stays open because a process-wide ctypes/dlopen block would also risk C extensions already loaded (numpy); the bundle does not import ctypes, and test_t_pt1's import allowlist would catch a new import. Coverage: static scan, plus this residual ruling.
+KNOWN RESIDUALS (RK 45d668eaa8fc)
+
+- ctypes (ctypes.CDLL / libc open, write, mkdir, system): stays open because a process-wide ctypes/dlopen block would also risk C extensions already loaded (numpy); the bundle does not import ctypes, and test_t_pt1's import allowlist would catch a new import. Coverage: static scan, plus this residual ruling. `from numpy import ctypeslib` is the same class (ctypes reachable through an allowlisted package); the static scan also rejects a ctypeslib import.
+
 - sqlite3.connect: stays open because SQLite's C library can create or write a file without going through the hooked os.open; the bundle does not import sqlite3, and the same static allowlist would catch a new import. Coverage: static scan, plus this residual ruling.
-- Pre-armed file descriptors: an fd opened before install_run_guard can still be written with os.write, io.FileIO(fd), sendfile, copy_file_range, or mmap. Stays open because revoking inherited fds would break stdin/stdout/stderr and any fd the caller already holds; the hook applies to new opens only. Coverage: exclusive-create of the alert and STOP files, and the intended run does not open outside paths before arming.
+
+- Pre-armed file descriptors: an fd opened before install_run_guard can still be written with os.write, io.FileIO(fd), sendfile, copy_file_range, or mmap. Stays open because revoking inherited fds would break stdin/stdout/stderr and any fd the caller already holds; the hook applies to new opens only. Coverage: exclusive-create of the alert and STOP files, and the intended run does not open outside paths before arming. BS-R2 checks fd numbers, not targets; stdio redirected to a file before arming is not detected.
+
 - Writes performed inside already-imported C extensions (numpy, etc.) that do not go through os.* or the audit hook: stays open for the same loaded-extension reason as ctypes. Coverage: the bundle's import allowlist, and no new non-stdlib I/O modules.
+
 - Path tricks that never pass a path to a hooked event (for example writing to an fd obtained via a pre-arm open of /proc/self/fd): same class as pre-armed fds. Coverage: same exclusive-create and pre-arm discipline.
 
+- `_posixsubprocess.fork_exec` called directly (plain import and importlib) - spawns /bin/sh with no audit event. Stays open because a reliable process wrap would have to import `_posixsubprocess` at arming, and that import is not added here (it would need a denylist exemption this proposal does not invent); the bundle does not import `_posixsubprocess`. Coverage: `_posixsubprocess` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.
+
+- `multiprocessing` 'spawn' context Process: a fresh interpreter with NO guard runs the target. `multiprocessing.util.spawnv_passfds` (same fork_exec route). Stays open for the same reason as `_posixsubprocess.fork_exec`; the bundle does not import `multiprocessing`. fork and forkserver contexts are already blocked (exit 78). Coverage: `multiprocessing` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.
+
+- an `os.open` reference bound before arming, or `fulln_alert._ORIG['open']`, called with dir_fd. Stays open because already-bound function objects cannot be revoked without walking every binding in the process; the hook applies to new wraps only (same infeasibility as pre-armed fds). A pre-arm dir fd is now refused at arming (BS-R2). Coverage: static T-PT1 no-touch check that no bundle module references `_GUARD` or `_ORIG` outside fulln_alert's own guard code, plus this residual ruling.
+
+- `fulln_alert._GUARD['armed'] = False`, then a normal open() outside (module-state disarm; "no disarm" claim is API-only). Stays open because any in-process caller can mutate the module dict; under the bb9b accidental-write threat model a deliberate in-process flip may stay a disclosed residual if a test proves the pinned code never touches it. Coverage: the same static no-touch test, plus this residual ruling.
+
+- Windows `_winapi.CreateProcess`: neither this nor the Windows default multiprocessing 'spawn' path is hooked by name. NOT TESTED on Linux. Stays open pending a Windows runtime test this box cannot run; the bundle does not import `_winapi`. Coverage: `_winapi` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.
+
+- `os.startfile`: NOT TESTED (attribute absent on this Linux box; no ruled Windows run exists). A code CLOSE when the attribute is present is allowed (refuse while armed), but this is listed as a residual until a ruled Windows run exists (RK 1caad8ad3e31 Q8, 0d9ffda558c4 K2, HM check K2). Coverage: refuse when present and armed; proposed test `test_t_pt2_6d_os_startfile_refused` is skipped when the attribute is absent, plus this residual ruling.
+
+- `import dbm` / `import shelve` (stdlib file writers). Stdlib I/O passes the allowlist. RK's wording says "non-stdlib", so this is a disclosure, not a breach. Both names are added to `_DENY_IMPORTS`, each with a KILLED mutant (RK 1caad8ad3e31 Q2 and 0d9ffda558c4 K1: a tightening of the guard, fail-closed and inside the accidental-write model, not a search narrowing). Coverage: `dbm` and `shelve` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.
+
+- `nt` (the Windows analogue of `posix`, class 3): direct `nt.*` calls (for example nt.open) skip the os.* wrappers; the runtime `nt` route is NOT TESTED (Windows). Stays open pending a ruled Windows run this box cannot run; this proposal does not wrap `nt`; the bundle does not import `nt`. Coverage: `nt` on `_DENY_IMPORTS`, a KILLED mutant, the static scan, plus this residual ruling.
+
 The BS-R2 arming-time open-fd check (Linux /proc/self/fd; allowed fds are 0, 1, 2 plus
-DISCLOSED_ARMING_FDS) is NOT TESTED on Windows.
+DISCLOSED_ARMING_FDS) is NOT TESTED on Windows. On Linux, a missing /proc/self/fd fails
+closed (78) instead of skipping the check.
 """
 import json
 import os
@@ -78,7 +109,7 @@ _ORIG = {}
 _DIRFD_KW = ("dir_fd", "src_dir_fd", "dst_dir_fd")
 _SPAWN_EVENTS = {
     "os.system", "os.exec", "os.posix_spawn", "os.posix_spawnp",
-    "os.fork", "os.forkpty", "subprocess.Popen", "os.popen",
+    "os.fork", "os.forkpty", "subprocess.Popen", "os.popen", "os.startfile",
 }
 
 
@@ -145,33 +176,44 @@ def _hook(event, args):
 
 
 def _install_wrappers():
-    """Wrap os.* functions that take dir_fd, plus mkfifo/mknod (no audit event on this Python)."""
+    """Wrap os.* functions that take dir_fd, plus mkfifo/mknod (no audit event on this Python) and
+    os.startfile when present (refused while armed; NOT TESTED on Linux). The same wrappers are
+    applied to the posix module when it is already loaded (sys.modules only; no new import).
+    nt is not wrapped (KNOWN RESIDUALS)."""
     global _WRAP_DONE
     if _WRAP_DONE:
         return
     names = ("open", "mkdir", "rmdir", "remove", "unlink", "rename", "replace",
              "link", "symlink", "truncate", "chmod", "chown", "utime",
-             "mkfifo", "mknod", "removexattr", "setxattr")
-    for name in names:
-        fn = getattr(os, name, None)
-        if fn is None:
-            continue
-        _ORIG[name] = fn
+             "mkfifo", "mknod", "removexattr", "setxattr", "startfile")
 
-        def _make(n, orig):
-            def wrapped(*args, **kwargs):
-                if _GUARD["armed"] and any(kwargs.get(k) is not None for k in _DIRFD_KW):
-                    raise ClosureViolation("%s with dir_fd refused" % n)
-                if _GUARD["armed"] and n in ("mkfifo", "mknod"):
-                    path = args[0] if args else kwargs.get("path")
-                    if _is_path(path) and not _inside(path, _GUARD["run_dir"]):
-                        raise ClosureViolation("%s outside RUN_DIR refused: %r" % (n, path))
-                return orig(*args, **kwargs)
-            wrapped.__name__ = n
-            wrapped.__qualname__ = n
-            return wrapped
+    def _make(n, orig):
+        def wrapped(*args, **kwargs):
+            if _GUARD["armed"] and n == "startfile":
+                raise ClosureViolation("os.startfile refused while armed (spawn class; NOT TESTED on Linux)")
+            if _GUARD["armed"] and any(kwargs.get(k) is not None for k in _DIRFD_KW):
+                raise ClosureViolation("%s with dir_fd refused" % n)
+            if _GUARD["armed"] and n in ("mkfifo", "mknod"):
+                path = args[0] if args else kwargs.get("path")
+                if _is_path(path) and not _inside(path, _GUARD["run_dir"]):
+                    raise ClosureViolation("%s outside RUN_DIR refused: %r" % (n, path))
+            return orig(*args, **kwargs)
+        wrapped.__name__ = n
+        wrapped.__qualname__ = n
+        return wrapped
 
-        setattr(os, name, _make(name, fn))
+    mods = [os]
+    px = sys.modules.get("posix")
+    if px is not None and px is not os:
+        mods.append(px)
+    for mod in mods:
+        for name in names:
+            fn = getattr(mod, name, None)
+            if fn is None:
+                continue
+            if mod is os:
+                _ORIG[name] = fn
+            setattr(mod, name, _make(name, fn))
     _WRAP_DONE = True
 
 
@@ -199,9 +241,12 @@ def _linux_open_fds():
 
 
 def _assert_arming_fds():
-    """Refuse to arm if unexpected fds are already open. Linux only; Windows NOT TESTED."""
-    if not sys.platform.startswith("linux") or not os.path.isdir(_PROC_SELF_FD):
+    """Refuse to arm if unexpected fds are already open. Linux only; Windows NOT TESTED.
+    On Linux a missing procfs fd directory fails closed (78); it is never skipped."""
+    if not sys.platform.startswith("linux"):
         return
+    if not os.path.isdir(_PROC_SELF_FD):
+        raise ClosureViolation("arming fd check: procfs fd directory missing on Linux (fail closed)")
     allowed = frozenset((0, 1, 2)) | DISCLOSED_ARMING_FDS
     extra = sorted(fd for fd in _linux_open_fds() if fd not in allowed)
     if extra:
@@ -214,7 +259,8 @@ def install_run_guard(run_dir):
     """Arm the process-wide write/network/spawn/dir_fd/mkfifo guard for RUN_DIR. There is no disarm.
 
     On Linux, arming also asserts that open fds are only 0, 1, 2 plus DISCLOSED_ARMING_FDS,
-    read from /proc/self/fd. On Windows this fd check is skipped and is NOT TESTED.
+    read from /proc/self/fd; a missing /proc/self/fd on Linux refuses arming (78). On Windows
+    this fd check is skipped and is NOT TESTED.
     """
     root = _norm(run_dir)
     if not os.path.isdir(root):

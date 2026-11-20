@@ -2,7 +2,8 @@
 
 Binding: plan r3 33f3ec1e0e07 s7 C10; Boss GO r2 3656382c8a5c; review-fix GO c65ece13d3b2;
 residuals GO ad97fded1831; RK e1d778426447 / bb9b6d5ebedc; HM R2 b88d1b1e0653;
-RULES c342ecf8ec9a; t2985u.
+RULES c342ecf8ec9a; t2985u. Combined bypass close/disclose: Boss GO 18b5834de6a4 (proposal r2.1
+ba7ce094c98b, final list 429cfff3b75e); RK 45d668eaa8fc / 1fdecbce8d45 / 1caad8ad3e31 / 0d9ffda558c4.
 BS-R2 (arming-time open-fd check via /proc/self/fd) is NOT TESTED on Windows.
 The run guard is a process-wide audit hook with no disarm, so every guarded case runs in a CHILD
 python process (exit code 78 = refused). Scratch: <--basetemp>/bs-fixed/<sha12>/<test>/...
@@ -261,17 +262,27 @@ _PATHLIKE = re.compile(r"([\\/]|^[A-Za-z]:)")
 _TILEPATH = re.compile(r"(paper|live|tile|order|ledger|services|bitfinex)", re.I)
 # Read-only root pinned in B0 pins.py (never a write target; B0 write guard refuses writes under it).
 _ALLOWED_PATH_LITERALS = {"C:\\DoxxedCrypto\\external"}
-# Explicit denylist (RK bb9b6d5ebedc BS-R1). These names include stdlib modules; the
-# stdlib/third-party allowlist alone would not fail them.
-_DENY_IMPORTS = frozenset({"ctypes", "_ctypes", "cffi", "sqlite3", "_sqlite3", "mmap"})
-_KNOWN_RESIDUALS_HEADING = "KNOWN RESIDUALS (RK bb9b6d5ebedc)"
-_KNOWN_RESIDUALS_BULLETS = "- ctypes (ctypes.CDLL / libc open, write, mkdir, system): stays open because a process-wide ctypes/dlopen block would also risk C extensions already loaded (numpy); the bundle does not import ctypes, and test_t_pt1's import allowlist would catch a new import. Coverage: static scan, plus this residual ruling.\n- sqlite3.connect: stays open because SQLite's C library can create or write a file without going through the hooked os.open; the bundle does not import sqlite3, and the same static allowlist would catch a new import. Coverage: static scan, plus this residual ruling.\n- Pre-armed file descriptors: an fd opened before install_run_guard can still be written with os.write, io.FileIO(fd), sendfile, copy_file_range, or mmap. Stays open because revoking inherited fds would break stdin/stdout/stderr and any fd the caller already holds; the hook applies to new opens only. Coverage: exclusive-create of the alert and STOP files, and the intended run does not open outside paths before arming.\n- Writes performed inside already-imported C extensions (numpy, etc.) that do not go through os.* or the audit hook: stays open for the same loaded-extension reason as ctypes. Coverage: the bundle's import allowlist, and no new non-stdlib I/O modules.\n- Path tricks that never pass a path to a hooked event (for example writing to an fd obtained via a pre-arm open of /proc/self/fd): same class as pre-armed fds. Coverage: same exclusive-create and pre-arm discipline.\n"
+# Explicit denylist (RK bb9b6d5ebedc BS-R1; extended per RK 1caad8ad3e31 Q2/Q5 and 4f5676ff068c).
+# These names include stdlib modules; the stdlib/third-party allowlist alone would not fail them.
+_DENY_IMPORTS = frozenset({"ctypes", "_ctypes", "cffi", "sqlite3", "_sqlite3", "mmap",
+                           "_posixsubprocess", "multiprocessing", "posix", "_winapi",
+                           "dbm", "shelve", "nt"})
+# Hard-coded ruled names (C6 / T01): the self-check must not shrink with _DENY_IMPORTS.
+_RULED_DENY_IMPORTS = ("ctypes", "_ctypes", "cffi", "sqlite3", "_sqlite3", "mmap",
+                       "_posixsubprocess", "multiprocessing", "posix", "_winapi",
+                       "dbm", "shelve", "nt")
+# String-form import calls (S01 / S02) and the ctypes-through-numpy route (S13).
+_STRING_IMPORT_CALLS = ("import_module", "__import__")
+_DENY_SUBMODULES = ("ctypeslib",)
+_KNOWN_RESIDUALS_HEADING = "KNOWN RESIDUALS (RK 45d668eaa8fc)"
+_KNOWN_RESIDUALS_BULLETS = "\n- ctypes (ctypes.CDLL / libc open, write, mkdir, system): stays open because a process-wide ctypes/dlopen block would also risk C extensions already loaded (numpy); the bundle does not import ctypes, and test_t_pt1's import allowlist would catch a new import. Coverage: static scan, plus this residual ruling. `from numpy import ctypeslib` is the same class (ctypes reachable through an allowlisted package); the static scan also rejects a ctypeslib import.\n\n- sqlite3.connect: stays open because SQLite's C library can create or write a file without going through the hooked os.open; the bundle does not import sqlite3, and the same static allowlist would catch a new import. Coverage: static scan, plus this residual ruling.\n\n- Pre-armed file descriptors: an fd opened before install_run_guard can still be written with os.write, io.FileIO(fd), sendfile, copy_file_range, or mmap. Stays open because revoking inherited fds would break stdin/stdout/stderr and any fd the caller already holds; the hook applies to new opens only. Coverage: exclusive-create of the alert and STOP files, and the intended run does not open outside paths before arming. BS-R2 checks fd numbers, not targets; stdio redirected to a file before arming is not detected.\n\n- Writes performed inside already-imported C extensions (numpy, etc.) that do not go through os.* or the audit hook: stays open for the same loaded-extension reason as ctypes. Coverage: the bundle's import allowlist, and no new non-stdlib I/O modules.\n\n- Path tricks that never pass a path to a hooked event (for example writing to an fd obtained via a pre-arm open of /proc/self/fd): same class as pre-armed fds. Coverage: same exclusive-create and pre-arm discipline.\n\n- `_posixsubprocess.fork_exec` called directly (plain import and importlib) - spawns /bin/sh with no audit event. Stays open because a reliable process wrap would have to import `_posixsubprocess` at arming, and that import is not added here (it would need a denylist exemption this proposal does not invent); the bundle does not import `_posixsubprocess`. Coverage: `_posixsubprocess` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.\n\n- `multiprocessing` 'spawn' context Process: a fresh interpreter with NO guard runs the target. `multiprocessing.util.spawnv_passfds` (same fork_exec route). Stays open for the same reason as `_posixsubprocess.fork_exec`; the bundle does not import `multiprocessing`. fork and forkserver contexts are already blocked (exit 78). Coverage: `multiprocessing` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.\n\n- an `os.open` reference bound before arming, or `fulln_alert._ORIG['open']`, called with dir_fd. Stays open because already-bound function objects cannot be revoked without walking every binding in the process; the hook applies to new wraps only (same infeasibility as pre-armed fds). A pre-arm dir fd is now refused at arming (BS-R2). Coverage: static T-PT1 no-touch check that no bundle module references `_GUARD` or `_ORIG` outside fulln_alert's own guard code, plus this residual ruling.\n\n- `fulln_alert._GUARD['armed'] = False`, then a normal open() outside (module-state disarm; \"no disarm\" claim is API-only). Stays open because any in-process caller can mutate the module dict; under the bb9b accidental-write threat model a deliberate in-process flip may stay a disclosed residual if a test proves the pinned code never touches it. Coverage: the same static no-touch test, plus this residual ruling.\n\n- Windows `_winapi.CreateProcess`: neither this nor the Windows default multiprocessing 'spawn' path is hooked by name. NOT TESTED on Linux. Stays open pending a Windows runtime test this box cannot run; the bundle does not import `_winapi`. Coverage: `_winapi` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.\n\n- `os.startfile`: NOT TESTED (attribute absent on this Linux box; no ruled Windows run exists). A code CLOSE when the attribute is present is allowed (refuse while armed), but this is listed as a residual until a ruled Windows run exists (RK 1caad8ad3e31 Q8, 0d9ffda558c4 K2, HM check K2). Coverage: refuse when present and armed; proposed test `test_t_pt2_6d_os_startfile_refused` is skipped when the attribute is absent, plus this residual ruling.\n\n- `import dbm` / `import shelve` (stdlib file writers). Stdlib I/O passes the allowlist. RK's wording says \"non-stdlib\", so this is a disclosure, not a breach. Both names are added to `_DENY_IMPORTS`, each with a KILLED mutant (RK 1caad8ad3e31 Q2 and 0d9ffda558c4 K1: a tightening of the guard, fail-closed and inside the accidental-write model, not a search narrowing). Coverage: `dbm` and `shelve` on `_DENY_IMPORTS`, the static scan, plus this residual ruling.\n\n- `nt` (the Windows analogue of `posix`, class 3): direct `nt.*` calls (for example nt.open) skip the os.* wrappers; the runtime `nt` route is NOT TESTED (Windows). Stays open pending a ruled Windows run this box cannot run; this proposal does not wrap `nt`; the bundle does not import `nt`. Coverage: `nt` on `_DENY_IMPORTS`, a KILLED mutant, the static scan, plus this residual ruling.\n\n"
 
 
 def _assert_import_allowed(path, m):
     """Fail on network, denied, or non-allowlisted imports (explicit denylist + stdlib/allowlist)."""
     top = m.split(".")[0]
     assert top not in _NETWORK, (path, m)
+    assert not set(m.split(".")) & set(_DENY_SUBMODULES), (path, "denied import %s" % m)
     if top == PKG:
         assert not _FORBID.search(m[len(PKG):]), (path, m)
         return
@@ -286,6 +297,27 @@ def _bundle_files():
         if name.endswith(".py"):
             out.append(os.path.join(PKG_DIR, name))
     return out
+
+
+def _import_names(node):
+    """Module names an Import / ImportFrom node brings in (same rule as the T-PT1 scan)."""
+    if isinstance(node, ast.Import):
+        return [a.name for a in node.names]
+    if isinstance(node, ast.ImportFrom):
+        return [node.module or ""] + ["%s.%s" % (node.module, a.name) for a in node.names]
+    return []
+
+
+def _string_form_imports(tree):
+    """Calls to importlib.import_module / import_module / __import__ (S01 / S02)."""
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
+            if name in _STRING_IMPORT_CALLS:
+                hits.append((getattr(node, "lineno", 0), name))
+    return hits
 
 
 def _docstring_nodes(tree):
@@ -305,12 +337,9 @@ def test_t_pt1_bundle_static_scan():
         with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read(), path)
         docs = _docstring_nodes(tree)
+        assert not _string_form_imports(tree), (path, "string-form import call", _string_form_imports(tree))
         for node in ast.walk(tree):
-            mods = []
-            if isinstance(node, ast.Import):
-                mods = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                mods = [node.module or ""] + ["%s.%s" % (node.module, a.name) for a in node.names]
+            mods = _import_names(node)
             for m in mods:
                 _assert_import_allowed(path, m)
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
@@ -458,9 +487,12 @@ _SKIP_WIN_FD = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("mod", sorted(_DENY_IMPORTS) + ["h5py"])
+@pytest.mark.parametrize("mod", list(_RULED_DENY_IMPORTS) + ["h5py"])
 def test_t_pt1_denied_or_nonstdlib_io_import_is_caught(mod):
-    """Self-check of the allowlist: each named deny-import and a new non-stdlib I/O module fail."""
+    """Self-check of the allowlist: each named deny-import and a new non-stdlib I/O module fail.
+    The list is hard-coded (C6 / T01), and _DENY_IMPORTS must equal the ruled thirteen names."""
+    assert _DENY_IMPORTS == frozenset(_RULED_DENY_IMPORTS)
+    assert len(_RULED_DENY_IMPORTS) == 13
     tree = ast.parse("import %s\n" % mod)
     node = tree.body[0]
     assert isinstance(node, ast.Import)
@@ -504,3 +536,320 @@ def test_bs_r2_prearmed_extra_fd_refused(scratch):
             os.close(extra)
     """, scratch)
     assert rc == 78, out
+
+
+
+# ---------------------------------------------------------------- combined bypass close/disclose (GO 18b5834de6a4)
+@pytest.mark.parametrize("mod", list(_RULED_DENY_IMPORTS))
+def test_t_pt1_string_form_import_is_caught(mod):
+    """S01 / S02: importlib.import_module("x") and __import__("x") are caught; the live bundle has none."""
+    for planted in ("import importlib\nimportlib.import_module(%r)\n" % mod,
+                    "from importlib import import_module\nimport_module(%r)\n" % mod,
+                    "__import__(%r)\n" % mod):
+        assert _string_form_imports(ast.parse(planted)), planted
+    for path in _bundle_files():
+        with open(path, encoding="utf-8") as f:
+            assert not _string_form_imports(ast.parse(f.read(), path)), path
+
+
+@pytest.mark.parametrize("planted", ["from numpy import ctypeslib\n", "import numpy.ctypeslib\n",
+                                     "from numpy.ctypeslib import load_library\n"])
+def test_t_pt1_numpy_ctypeslib_is_caught(planted):
+    """S13: ctypes reachable through an allowlisted package (numpy.ctypeslib) is refused."""
+    node = ast.parse(planted).body[0]
+    with pytest.raises(AssertionError):
+        for m in _import_names(node):
+            _assert_import_allowed("<planted>", m)
+
+
+def _guard_touches(path, tree, is_alert):
+    """S14 / S15: references to _GUARD / _ORIG outside fulln_alert's own guard code."""
+    bad = []
+    for node in ast.walk(tree):
+        ln = getattr(node, "lineno", 0)
+        if not is_alert:
+            if isinstance(node, ast.Name) and node.id in ("_GUARD", "_ORIG"):
+                bad.append((path, ln, node.id))
+            if isinstance(node, ast.Attribute) and node.attr in ("_GUARD", "_ORIG"):
+                bad.append((path, ln, node.attr))
+            continue
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Subscript) and isinstance(fn.value, ast.Name) and fn.value.id == "_ORIG":
+                bad.append((path, ln, "call through _ORIG[...]"))
+            if (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name)
+                    and fn.value.id in ("_GUARD", "_ORIG") and fn.attr != "get"):
+                bad.append((path, ln, "%s.%s()" % (fn.value.id, fn.attr)))
+            if (isinstance(fn, ast.Attribute) and fn.attr == "get" and isinstance(fn.value, ast.Name)
+                    and fn.value.id == "_ORIG"):
+                bad.append((path, ln, "_ORIG.get()"))
+        if isinstance(node, ast.Delete):
+            for tg in node.targets:
+                if isinstance(tg, ast.Subscript) and isinstance(tg.value, ast.Name) and tg.value.id in ("_GUARD", "_ORIG"):
+                    bad.append((path, ln, "del %s[...]" % tg.value.id))
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            for tg in targets:
+                if isinstance(tg, ast.Name) and tg.id in ("_GUARD", "_ORIG"):
+                    if not (isinstance(node, ast.Assign) and isinstance(value, ast.Dict)):
+                        bad.append((path, ln, "rebind %s" % tg.id))
+                if not (isinstance(tg, ast.Subscript) and isinstance(tg.value, ast.Name)):
+                    continue
+                key = tg.slice.value if isinstance(tg.slice, ast.Constant) else None
+                plain = isinstance(node, ast.Assign)
+                if tg.value.id == "_GUARD":
+                    if key == "armed" and plain and isinstance(value, ast.Constant) and value.value is True:
+                        continue
+                    if key == "run_dir" and plain and isinstance(value, ast.Name) and value.id == "root":
+                        continue
+                    bad.append((path, ln, "_GUARD[%r] write" % (key,)))
+                elif tg.value.id == "_ORIG":
+                    if (plain and isinstance(tg.slice, ast.Name) and tg.slice.id == "name"
+                            and isinstance(value, ast.Name) and value.id == "fn"):
+                        continue
+                    bad.append((path, ln, "_ORIG[...] write"))
+    return bad
+
+
+def test_t_pt1_no_touch_guard_or_orig_outside_guard_code():
+    """Classes 4 / 5 (S14 / S15): no bundle code disarms _GUARD or calls through _ORIG.
+    Allowed: the definitions, _GUARD["run_dir"] = root, _GUARD["armed"] = True, _ORIG[name] = fn."""
+    bad = []
+    for path in _bundle_files():
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), path)
+        bad += _guard_touches(path, tree, os.path.basename(path) == "fulln_alert.py")
+    assert not bad, bad
+    planted = ('_GUARD = {"armed": False, "run_dir": None}\n_ORIG = {}\n'
+               'def f():\n    _GUARD["armed"] = False\n'
+               'def g(p):\n    return _ORIG["open"](p, 0)\n')
+    hits = _guard_touches("<planted>", ast.parse(planted), True)
+    assert len(hits) == 2, hits
+    assert _guard_touches("<planted>", ast.parse("import x\nx._GUARD['armed'] = 0\n"), False)
+
+
+def test_bs_r2_disclosed_arming_fds_is_empty():
+    """M02: nothing is disclosed at arming beyond stdio."""
+    assert fa.DISCLOSED_ARMING_FDS == frozenset()
+
+
+@_SKIP_WIN_FD
+@pytest.mark.parametrize("target", [5, 10])
+def test_bs_r2_prearmed_high_fd_refused(scratch, target):
+    """M10: a pre-arm fd moved to a higher number (5, inside 4-9; and 10) is refused at arming."""
+    rc, out = _child("""
+        fd = os.open(os.path.join(S, "prearm-hi-%d.bin"), os.O_WRONLY | os.O_CREAT)
+        os.dup2(fd, %d)
+        os.close(fd)
+        try:
+            fa.install_run_guard(RUN)
+        finally:
+            os.close(%d)
+    """ % (target, target, target), scratch)
+    assert rc == 78, out
+
+
+@_SKIP_WIN_FD
+def test_bs_r2_refused_arming_leaves_guard_unarmed(scratch):
+    """M13: a refused arming (extra fd) leaves _GUARD["armed"] False (no half-armed state)."""
+    rc, out = _child("""
+        extra = os.open(os.path.join(S, "prearm-m13.bin"), os.O_WRONLY | os.O_CREAT)
+        try:
+            fa.install_run_guard(RUN)
+        except fc.ClosureViolation:
+            print("ARMED_AFTER_REFUSAL=%r" % (fa._GUARD["armed"],))
+            raise
+        finally:
+            os.close(extra)
+    """, scratch)
+    assert rc == 78, out
+    assert "ARMED_AFTER_REFUSAL=False" in out, out
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="NOT TESTED on Windows (BS-R2 C5: Linux only)")
+def test_bs_r2_missing_proc_self_fd_fails_closed(scratch):
+    """C5: on Linux, a missing procfs fd directory refuses arming (78); it is not skipped."""
+    rc, out = _child("""
+        fa._PROC_SELF_FD = os.path.join(S, "missing-proc-self-fd")
+        try:
+            fa.install_run_guard(RUN)
+        except fc.ClosureViolation as e:
+            print("ARMED_AFTER_REFUSAL=%r" % (fa._GUARD["armed"],))
+            print("REASON=%s" % e.reason)
+            raise
+    """, scratch)
+    assert rc == 78, out
+    assert "ARMED_AFTER_REFUSAL=False" in out and "fail closed" in out, out
+    assert not os.path.exists(os.path.join(scratch, "missing-proc-self-fd"))
+
+
+@pytest.mark.parametrize("op", ["os.fork()", "os.forkpty()"])
+def test_t_pt2_6b_fork_and_forkpty_refused(scratch, op):
+    """HBSa: os.fork / os.forkpty are refused after arming."""
+    rc, txt = _child("""
+        fa.install_run_guard(RUN)
+        r = %s
+        pid = r if isinstance(r, int) else r[0]
+        if pid == 0:
+            os._exit(0)
+        os.waitpid(pid, 0)
+        print("FORKED")
+    """ % op, scratch)
+    assert rc == 78, txt
+    assert "FORKED" not in txt
+
+
+def test_t_pt2_6c_exec_refused(scratch):
+    """HBSb: os.exec* is refused after arming; no outside file."""
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "pwned-exec.txt")
+    rc, txt = _child("""
+        OUT = %r
+        fa.install_run_guard(RUN)
+        os.execv('/bin/sh', ['/bin/sh', '-c', 'echo pwned > ' + OUT])
+    """ % target, scratch)
+    assert rc == 78, txt
+    assert not os.path.exists(target)
+
+
+@pytest.mark.skipif(getattr(os, "startfile", None) is None, reason="NOT TESTED on Linux (os.startfile absent)")
+def test_t_pt2_6d_os_startfile_refused(scratch):
+    """Class 6b: os.startfile is refused while armed. NOT TESTED on Linux (attribute absent)."""
+    rc, txt = _child("""
+        fa.install_run_guard(RUN)
+        os.startfile(os.path.join(S, "x.txt"))
+    """, scratch)
+    assert rc == 78, txt
+
+
+@pytest.mark.parametrize("op,made", [
+    ("os.rename('exists.txt', 'renamed.txt', src_dir_fd=fd, dst_dir_fd=fd)", "renamed.txt"),
+    ("os.symlink('exists.txt', 'link.txt', dir_fd=fd)", "link.txt"),
+    ("os.unlink('exists.txt', dir_fd=fd)", None),
+    ("os.mkfifo('x.fifo', dir_fd=fd)", "x.fifo"),
+])
+def test_t_pt2_7b_dir_fd_on_rename_symlink_unlink_mkfifo_refused(scratch, op, made):
+    """HBSc: dir_fd is refused on rename / symlink / unlink / mkfifo, not only on os.open."""
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    exist = os.path.join(out_dir, "exists.txt")
+    if not os.path.exists(exist):
+        with open(exist, "x") as f:
+            f.write("x")
+    rc, txt = _child("""
+        OUTDIR = %r
+        fa.install_run_guard(RUN)
+        os.chdir(RUN)
+        fd = os.open(OUTDIR, os.O_RDONLY)
+        %s
+    """ % (out_dir, op), scratch)
+    assert rc == 78, txt
+    assert os.path.exists(exist)
+    if made:
+        assert not os.path.lexists(os.path.join(out_dir, made))
+
+
+def test_t_pt2_8b_os_mknod_outside_refused(scratch):
+    """HBSg: os.mknod outside RUN_DIR is refused (wrapper check; no audit event)."""
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "x.node")
+    rc, txt = _child("""
+        OUT = %r
+        fa.install_run_guard(RUN)
+        os.mknod(OUT)
+    """ % target, scratch)
+    assert rc == 78, txt
+    assert not os.path.lexists(target)
+
+
+_SKIP_NO_POSIX = pytest.mark.skipif(os.name != "posix", reason="posix module absent (Windows): NOT TESTED")
+
+
+@_SKIP_NO_POSIX
+def test_t_pt2_9_posix_open_dir_fd_refused(scratch):
+    """Class 3 (PB-18b): posix.open with dir_fd is refused (wrappers also on the posix module)."""
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "via-posix-dirfd.bin")
+    rc, txt = _child("""
+        import posix
+        OUTDIR = %r
+        fa.install_run_guard(RUN)
+        os.chdir(RUN)
+        fd = os.open(OUTDIR, os.O_RDONLY)
+        os.close(posix.open('via-posix-dirfd.bin', os.O_WRONLY | os.O_CREAT, dir_fd=fd))
+    """ % out_dir, scratch)
+    assert rc == 78, txt
+    assert not os.path.lexists(target)
+
+
+@_SKIP_NO_POSIX
+def test_t_pt2_10_posix_mkfifo_outside_refused(scratch):
+    """Class 3 (PB-21): posix.mkfifo outside RUN_DIR is refused."""
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "posix.fifo")
+    rc, txt = _child("""
+        import posix
+        OUT = %r
+        fa.install_run_guard(RUN)
+        posix.mkfifo(OUT)
+    """ % target, scratch)
+    assert rc == 78, txt
+    assert not os.path.lexists(target)
+
+
+@_SKIP_NO_POSIX
+def test_t_pt2_11_posix_mknod_outside_refused(scratch):
+    """Class 3 (PB-23): posix.mknod outside RUN_DIR is refused."""
+    out_dir = os.path.join(scratch, "outside")
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, "posix.node")
+    rc, txt = _child("""
+        import posix
+        OUT = %r
+        fa.install_run_guard(RUN)
+        posix.mknod(OUT)
+    """ % target, scratch)
+    assert rc == 78, txt
+    assert not os.path.lexists(target)
+
+
+def test_c10_14_failure_count_is_cells_not_trip_kinds():
+    """HBSd: the STOP count is the number of survivor cells, not the number of trip kinds."""
+    rej, flp, fl = arrays((1, 2, 3))
+    fl[2] |= np.uint8(fa.FLAG_KC_INELIGIBLE)
+    fl[3] |= np.uint8(fa.FLAG_KC_INELIGIBLE)
+    with pytest.raises(fa.IneligibleSurvivor) as e:
+        fa.compute_alert(status(), rej, flp, fl, n_cells=N)
+    assert e.value.exit_code == 78
+    assert e.value.count == 2
+    assert len(e.value.trips) == 1 and e.value.trips[0]["count"] == 2
+
+
+@pytest.mark.parametrize("pre", ["SURVIVOR-STOP.json", "SURVIVOR-STOP.txt", "second-write"])
+def test_c10_15_failure_record_exclusive_create(scratch, pre):
+    """HBSe: a pre-existing STOP record (or a second ineligible write) exits 78 with no overwrite."""
+    res = os.path.join(scratch, "RUN_DIR", "results")
+    if pre == "second-write":
+        rc0, out0 = _child(WRITE_INELIGIBLE, scratch)
+        assert rc0 == 78, out0
+        before = {n: hashlib.sha256(open(os.path.join(res, n), "rb").read()).hexdigest()
+                  for n in sorted(os.listdir(res))}
+        rc, out = _child(WRITE_INELIGIBLE, scratch)
+        assert rc == 78, out
+        after = {n: hashlib.sha256(open(os.path.join(res, n), "rb").read()).hexdigest()
+                 for n in sorted(os.listdir(res))}
+        assert after == before and sorted(after) == ["SURVIVOR-STOP.json", "SURVIVOR-STOP.txt"]
+        return
+    os.makedirs(res, exist_ok=True)
+    pre_path = os.path.join(res, pre)
+    with open(pre_path, "x") as f:
+        f.write("PRE-EXISTING\n")
+    rc, out = _child(WRITE_INELIGIBLE, scratch)
+    assert rc == 78, out
+    assert open(pre_path).read() == "PRE-EXISTING\n"
+    assert sorted(os.listdir(res)) == [pre]
