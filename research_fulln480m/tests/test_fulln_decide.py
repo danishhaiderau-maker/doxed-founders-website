@@ -736,6 +736,30 @@ def test_F_A9_UTCALIGN_day_aligned_zero_over_embargo(h, d):
     assert sum(r["counts"][k] for k in fd.LABELS) == len(Ts)
 
 
+@pytest.mark.parametrize("d", F.DIRECTIONS)
+def test_F_A9_UTCALIGN_decide_guarded_exit_code_78_subprocess(d):
+    """EM6 through decide_guarded: mid-day window end exits 78; day-aligned does not.
+
+    run_guarded exits silently (sys.exit(78) with no print), so the reason text is
+    not asserted (Boss addendum bf1c disclosure). The skip-check_utc_alignment
+    mutant is what shows the 78 comes from EM6.
+    """
+    assert "decide_guarded" in vars(fd)
+    setup = ("import numpy as np\n"
+             "from research_fulln480m import fulln_decide as fd\n"
+             "S = 2*86400; has = np.zeros(S, bool); has[[3570, 3601]] = True\n"
+             "lt = np.maximum.accumulate(np.where(has, np.arange(S), -1))\n"
+             "valid = np.ones(S, bool)\n")
+    mid = setup + ("fd.decide_guarded(has, lt, valid, [3600], 60, "
+                   "window_ends=(86400 + 3600,), direction=%d)\n" % d)
+    aligned = setup + ("fd.decide_guarded(has, lt, valid, [3600], 60, "
+                       "window_ends=(86400 - 1,), direction=%d)\n" % d)
+    r_mid = _sub(mid)
+    assert r_mid.returncode == 78, (r_mid.stdout, r_mid.stderr)
+    r_ok = _sub(aligned)
+    assert r_ok.returncode == 0, (r_ok.stdout, r_ok.stderr)
+
+
 # ------------------------------------------------------------------ counts, folds, denominator
 @pytest.mark.parametrize("h,d", HD, ids=HD_IDS)
 def test_counts_denominator_and_folds(h, d):
