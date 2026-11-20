@@ -4,6 +4,7 @@ Binding: plan r3 33f3ec1e0e07 s7 C1 / s12 B1; Boss GO r2 3656382c8a5c; review-fi
 RK 22ee55488e0c (B1 SPLIT: C7 micro builders + I1 encoding wait for plan r4; no code that sets
 exit returns to 0.0) / e1d778426447 / 53ccb5a6219f; HM R2 b88d1b1e0653; RULES c342ecf8ec9a.
 Review-fix C6-C8: Boss GO 0c56ad477150; RK 4f5676ff068c; HM R2b ba0b2b5766f9.
+RC1/RC2 test-only: Boss GO 9e795fd62e81; RK b5ac805f26a5; HM R2c 35adafacdf5d; rules c342ecf8ec9a.
 No file is written by these tests. This module has no clamp; the -50.0 / -49.99 boundary fixture
 belongs to BU/BR, not B1.
 """
@@ -359,7 +360,13 @@ def _assignments_of(tree, name):
 
 
 def test_t1_24_pinned_floor_and_fill_are_single_numeric_literals():
-    """C7: PINNED_GROSS_LIQ_FLOOR / _FILL are each one assignment of a numeric literal (HB1b)."""
+    """C7: PINNED_GROSS_LIQ_FLOOR / _FILL are each one assignment of a numeric literal (HB1b).
+
+    RC1: every Store-context Name binding of FLOOR, FILL and RULING_SHA is counted
+    (tuple-unpack, walrus, for-target included). global/nonlocal, import aliases
+    and name-string constants (globals()/setattr/vars()) are forbidden. Kills
+    N5, N6, N7 and N10; keeps HB1b, N8 and N9 killed.
+    """
     tree = _tree()
     expected = {"PINNED_GROSS_LIQ_FLOOR": -50.0, "PINNED_GROSS_LIQ_FILL": -100.0}
     for name, want in expected.items():
@@ -369,6 +376,26 @@ def test_t1_24_pinned_floor_and_fill_are_single_numeric_literals():
         assert got is not None, "%s must be a numeric literal with no computation, got %s" % (
             name, ast.dump(found[0]))
         assert got == want
+    names = ("PINNED_GROSS_LIQ_FLOOR", "PINNED_GROSS_LIQ_FILL", "PINNED_GROSS_LIQ_RULING_SHA")
+    for name in names:
+        stores = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
+        ]
+        assert len(stores) == 1, "%s must have exactly one Store-context Name, got %d" % (
+            name, len(stores))
+        assert not any(
+            isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names
+            for n in ast.walk(tree)
+        ), "%s must not be declared global or nonlocal" % name
+        assert not any(
+            isinstance(n, ast.alias) and (n.asname or n.name) == name
+            for n in ast.walk(tree)
+        ), "%s must not be an import alias" % name
+        assert not any(
+            isinstance(n, ast.Constant) and n.value == name
+            for n in ast.walk(tree)
+        ), "%s must not appear as a name-string constant (globals()/setattr/vars())" % name
 
 
 def test_t1_25_liq_policy_refuses_prefix_plus_wrong_tail_ruling_sha():
@@ -409,3 +436,21 @@ def test_t1_27_liq_policy_refuses_20x_minus250_minus500_on_btc_path():
     with pytest.raises(fc.ClosureViolation) as e:
         fg.LiqPolicy(liq_floor=-250.0, liq_fill=-500.0, ruling_sha=PINNED_RULING_SHA)
     assert "pinned literals" in e.value.reason
+
+
+def test_t1_28_liq_policy_refuses_near_pin_ruling_sha():
+    """C6/RC2: PIN+'\n', PIN[:63], and PIN with its last char flipped are REFUSED (kills S2, S5)."""
+    pin = PINNED_RULING_SHA
+    flipped = pin[:63] + ("0" if pin[-1] != "0" else "1")
+    near = (
+        pin + "\n",
+        pin[:63],
+        flipped,
+        pin.upper(),
+        " " + pin,
+    )
+    for sha in near:
+        assert sha != pin
+        with pytest.raises(fc.ClosureViolation):
+            fg.LiqPolicy(liq_floor=-50.0, liq_fill=-100.0, ruling_sha=sha)
+        fc._STATE["latch"] = None
