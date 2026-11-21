@@ -228,8 +228,27 @@ def check_cp1(m, px=None, has=None):
     return None
 
 
+def micro_derived_valid(n, offset, S):
+    """S-12 (RK 1548ba71c8aa item 5): the valid mask implied by a built micro axis of length S
+    placed at decide-axis offset. True on every second of the micro axis, False on every other
+    second of a length-n decide axis, including leading and trailing pads.
+    """
+    if not _is_int(n) or not _is_int(offset) or not _is_int(S):
+        _stop("S-10", "micro_derived_valid arguments must be integers")
+    n, offset, S = int(n), int(offset), int(S)
+    if n < 0 or S < 0 or offset < 0 or offset + S > n:
+        _stop("S-12", "micro span [%d, %d) is outside a decide axis of length %d" % (offset, offset + S, n))
+    derived = np.zeros(n, dtype=bool)
+    derived[offset:offset + S] = True
+    return derived
+
+
 def cross_check_decide(m, has, px, valid, offset=0):
-    """S-12: micro row r is decide-axis second offset + r; checked over every second of the span."""
+    """S-12: for every second of the decide arrays, micro-derived valid equals the valid
+    array fed to decide_core, element for element, including False seconds (RK 1548ba71c8aa
+    item 5; card L1194). Micro row r is decide-axis second offset + r; count > 0 equals has,
+    and LAST equals px, on the micro axis.
+    """
     if not _is_int(offset):
         _stop("S-10", "offset %r is not an integer" % (offset,))
     offset = int(offset)
@@ -242,11 +261,10 @@ def cross_check_decide(m, has, px, valid, offset=0):
     if has.dtype != bool or valid.dtype != bool or px.dtype != np.float64:
         _stop("S-12", "has / valid must be bool and px float64")
     S = len(m.count)
-    if offset < 0 or offset + S > n:
-        _stop("S-12", "micro span [%d, %d) is outside the decide arrays of length %d" % (offset, offset + S, n))
+    derived = micro_derived_valid(n, offset, S)
+    if not np.array_equal(derived, valid):
+        _stop("S-12", "valid differs from the micro-derived valid mask")
     seg = slice(offset, offset + S)
-    if not np.all(valid[seg]):
-        _stop("S-12", "valid is False inside the micro span")
     if not np.array_equal(np.asarray(m.count) > 0, has[seg]):
         _stop("S-12", "count > 0 differs from has")
     if not bits_equal(m.last, px[seg]):

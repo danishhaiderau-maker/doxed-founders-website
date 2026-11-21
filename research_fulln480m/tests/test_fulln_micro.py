@@ -493,6 +493,16 @@ def test_F_M_S12_cross_check():
     assert "S-12:" in stop(fm.cross_check_decide, m, H, p3, V, offset=off).reason
     v2 = V.copy(); v2[off + DAY] = False
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P, v2, offset=off).reason
+    # RK 1548ba71c8aa item 5: valid=False seconds on the pads are part of the comparison.
+    assert int((~V).sum()) == 100 and int(V.sum()) == S
+    assert np.array_equal(V, fm.micro_derived_valid(S + 100, off, S))
+    # injected mismatch: a False pad flipped to True must STOP (the all-True-inside check missed this)
+    v_pad = V.copy(); v_pad[off - 1] = True
+    assert "S-12:" in stop(fm.cross_check_decide, m, H, P, v_pad, offset=off).reason
+    v_tail = V.copy(); v_tail[off + S] = True
+    assert "S-12:" in stop(fm.cross_check_decide, m, H, P, v_tail, offset=off).reason
+    v_all = np.ones(S + 100, dtype=bool)
+    assert "S-12:" in stop(fm.cross_check_decide, m, H, P, v_all, offset=off).reason
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P, V, offset=off + 51).reason
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P, V, offset=-1).reason
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P[:-1], V, offset=off).reason
