@@ -5,6 +5,7 @@ missing module is a per-test ERROR (RED) rather than a collection failure. The o
 imported or edited. Stage B / TIERET / F-H-* price fixtures are skipped with reason.
 """
 import hashlib
+import textwrap
 import sys
 from pathlib import Path
 
@@ -120,17 +121,15 @@ def test_F_E_PARITY_METHOD():
 
 
 def test_F_E_REFSRC():
-    text = (HERE / "ref_ext2_exit_path.py").read_text()
-    begin = "# ---- BEGIN VERBATIM ext2 L1087-L1104"
-    end = "# ---- END VERBATIM ext2 L1087-L1104 ----"
-    i = text.index(begin)
-    j = text.index(end)
-    block = text[i:j].splitlines()[1:]  # drop the BEGIN marker line
-    # 18 source lines, hash as joined by LF, no trailing LF (card convention).
-    assert len(block) == 18, len(block)
-    q = "\n".join(block).encode()
-    got = hashlib.sha256(q).hexdigest()
-    assert got == REF_SHA, got
+    from research_fulln480m.tests import ref_ext2_exit_path as ref
+    q = ref.EXT2_L1087_L1104
+    assert q.count("\n") == 17  # 18 lines, no trailing LF
+    assert hashlib.sha256(q.encode()).hexdigest() == ref.QUOTED_BYTES_SHA256
+    assert ref.QUOTED_BYTES_SHA256 == REF_SHA
+    # F2: 8-space strip / textwrap.dedent; pin the dedented bytes too.
+    d = ref.dedented_source()
+    assert hashlib.sha256(d.encode()).hexdigest() == ref.DEDENTED_BYTES_SHA256
+    assert d == textwrap.dedent(q)
 
 
 # --------------------------------------------------------------------------- G.2 LIQ / NET435 / edge
@@ -644,29 +643,35 @@ def test_m9_combiner_unreachable_and_ties():
 
 # --------------------------------------------------------------------------- F-E-EXT2PARITY (limited, allowed diffs enumerated)
 def _ext2_first_hit(px, e0, H, d, S, p0_inj):
-    """Run the verbatim L1087-L1104 block on one entry (no forced-close cap; p0 injected)."""
+    """Run the verbatim L1087-L1104 block on one entry (no forced-close cap; p0 injected).
+
+    F3: exec is inside ref.run_verbatim, in an explicit namespace that supplies only
+    np, H, e0, end, px, S, d, p0, T, R, a, m, TP_BP, SL_BP, TR_BP. T and R are read
+    only after exec returns.
+    """
     import numpy as np
     from research_fulln480m.tests import ref_ext2_exit_path as ref
-    text = Path(ref.__file__).read_text()
-    begin = "# ---- BEGIN VERBATIM ext2 L1087-L1104"
-    end = "# ---- END VERBATIM ext2 L1087-L1104 ----"
-    body = "\n".join(text[text.index(begin):text.index(end)].splitlines()[1:])
-    T = np.full((1, 17), H + 1, np.int32)
+    T = np.full((1, 17), int(H) + 1, np.int32)
     R = np.zeros((1, 17), np.float32)
-    a = 0
-    m = 1
-    e0 = np.asarray([int(e0)], dtype=np.int64)
-    end = np.asarray([min(int(e0[0]) + int(H), int(S) - 1)], dtype=np.int64)
-    p0 = np.asarray([np.float64(p0_inj)])
-    px = np.asarray(px, dtype=np.float64)
-    d = np.float64(d)
-    S = int(S)
-    H = int(H)
-    loc = {"np": np, "T": T, "R": R, "a": a, "m": m, "e0": e0, "end": end, "p0": p0,
-           "px": px, "d": d, "S": S, "H": H, "TP_BP": ref.TP_BP, "SL_BP": ref.SL_BP,
-           "TR_BP": ref.TR_BP}
-    exec(body, loc, loc)  # noqa: S102  — test-only wrapper of the verbatim copy
-    return loc["T"][0], loc["R"][0]
+    ns = {
+        "np": np,
+        "H": int(H),
+        "e0": np.asarray([int(e0)], dtype=np.int64),
+        "end": np.asarray([min(int(e0) + int(H), int(S) - 1)], dtype=np.int64),
+        "px": np.asarray(px, dtype=np.float64),
+        "S": int(S),
+        "d": np.float64(d),
+        "p0": np.asarray([np.float64(p0_inj)]),
+        "T": T,
+        "R": R,
+        "a": 0,
+        "m": 1,
+        "TP_BP": ref.TP_BP,
+        "SL_BP": ref.SL_BP,
+        "TR_BP": ref.TR_BP,
+    }
+    ref.run_verbatim(ns)
+    return ns["T"][0], ns["R"][0]
 
 
 @pytest.mark.parametrize("direction", DIRS)
