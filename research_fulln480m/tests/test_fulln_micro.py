@@ -507,6 +507,38 @@ def test_F_M_S12_cross_check():
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P, V, offset=-1).reason
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P[:-1], V, offset=off).reason
 
+
+# ------------------------------------------------------------------ F-M-S12 N3 pads (RK db4f52971905 A3; card B-R63X-N3 r1)
+def _s12_pad_fixture():
+    """Same decide axis as test_F_M_S12_cross_check: a 50 s lead pad and a 50 s tail pad around a 2-day micro."""
+    days = gen_span(8, n_days=2)
+    m = fm.build_micro(days)
+    px, has = ext2_px_has(days)
+    S = 2 * DAY
+    off = 50
+    H = np.zeros(S + 100, dtype=bool); H[off:off + S] = has
+    P = np.full(S + 100, np.nan); P[off:off + S] = px
+    V = np.zeros(S + 100, dtype=bool); V[off:off + S] = True
+    return m, H, P, V, off, S
+
+
+@pytest.mark.parametrize("field,where", [("has", "lead"), ("has", "tail"), ("px", "lead"), ("px", "tail")],
+                         ids=["has-lead", "has-tail", "px-lead", "px-tail"])
+def test_F_M_S12_N3_pad_inject(field, where):
+    """A3 / HM N3: has must be False and px NaN on every pad second; one injected STOP for each."""
+    m, H, P, V, off, S = _s12_pad_fixture()
+    assert fm.cross_check_decide(m, H, P, V, offset=off) is None          # valid data stays silent
+    s = off - 1 if where == "lead" else off + S                           # first pad second on that side
+    assert not V[s] and not H[s] and np.isnan(P[s])
+    if field == "has":
+        h = H.copy(); h[s] = True
+        e = stop(fm.cross_check_decide, m, h, P, V, offset=off)
+        assert "S-12:" in e.reason and "has is True on a pad second" in e.reason
+    else:
+        p = P.copy(); p[s] = 100.0
+        e = stop(fm.cross_check_decide, m, H, p, V, offset=off)
+        assert "S-12:" in e.reason and "px is not NaN on a pad second" in e.reason
+
 # ------------------------------------------------------------------ oracle comparison (s7.1 / OPEN-X-5 point 6)
 # The oracle (tests/oracle_micro_spec.py, function oracle_micro) is TEST-ONLY and was written
 # by a different executor (P-8). Compared fields are count, OPEN, LOW, HIGH (card A-2 / R-C2);

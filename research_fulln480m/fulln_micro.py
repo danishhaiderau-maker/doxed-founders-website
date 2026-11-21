@@ -269,6 +269,11 @@ def cross_check_decide(m, has, px, valid, offset=0):
         _stop("S-12", "count > 0 differs from has")
     if not bits_equal(m.last, px[seg]):
         _stop("S-12", "LAST differs from px")
+    pad = ~derived
+    if np.any(has[pad]):
+        _stop("S-12", "has is True on a pad second")
+    if not np.all(np.isnan(px[pad])):
+        _stop("S-12", "px is not NaN on a pad second")
     return None
 
 
