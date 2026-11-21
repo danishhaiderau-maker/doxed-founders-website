@@ -58,22 +58,56 @@ def _stop_or_raise(exc):
     return msg
 
 
+def _first_mismatch(name, got, expect, *, equal_nan=False):
+    """Short first-mismatch text (RK b3bf (7)); no 768-wide list diff."""
+    if got.shape != expect.shape:
+        return "%s shape got=%r expect=%r" % (name, got.shape, expect.shape)
+    if equal_nan:
+        mism = ~((got == expect) | (np.isnan(got) & np.isnan(expect)))
+    else:
+        mism = np.asarray(got != expect)
+    if not np.any(mism):
+        return "%s differ (no index located)" % name
+    i = int(np.flatnonzero(mism)[0])
+    return "%s first mismatch at %d: got=%r expect=%r" % (name, i, got[i], expect[i])
+
+
+def _assert_exact(name, got, expect, dtype, *, equal_nan=False):
+    """Exact compare: dtype checked, np.array_equal, NaN explicit, no tolerance."""
+    assert got.dtype == dtype, "%s dtype got=%r expect=%r" % (name, got.dtype, dtype)
+    assert got.shape == expect.shape, "%s shape got=%r expect=%r" % (name, got.shape, expect.shape)
+    if not np.array_equal(got, expect, equal_nan=equal_nan):
+        msg = _first_mismatch(name, got, expect, equal_nan=equal_nan)
+        print(msg)
+        assert False, msg
+
+
 def _all_liq(out, k_expect):
     assert out["label"].shape == (N_EXITS,)
-    assert list(out["label"]) == ["LIQ"] * N_EXITS
-    assert out["k"].shape == (N_EXITS,) and out["k"].dtype == np.int32
-    assert np.all(out["k"] == np.int32(k_expect))
-    assert out["g"].dtype == np.float64
-    assert np.all(out["g"] == LIQ_FILL_BP)
+    expect_lab = np.empty(N_EXITS, dtype=object)
+    expect_lab[:] = "LIQ"
+    _assert_exact("label", out["label"], expect_lab, object)
+    expect_k = np.full(N_EXITS, np.int32(k_expect), dtype=np.int32)
+    _assert_exact("k", out["k"], expect_k, np.int32)
+    expect_g = np.full(N_EXITS, np.float64(LIQ_FILL_BP), dtype=np.float64)
+    _assert_exact("g", out["g"], expect_g, np.float64)
     assert int(out["liq_count"]) == N_EXITS
     assert "exit_valid_mask" not in out
 
 
 def _all_time(out, h):
-    assert list(out["label"]) == ["TIME"] * N_EXITS
-    assert np.all(out["k"] == np.int32(h - 1))
+    expect_lab = np.empty(N_EXITS, dtype=object)
+    expect_lab[:] = "TIME"
+    _assert_exact("label", out["label"], expect_lab, object)
+    expect_k = np.full(N_EXITS, np.int32(h - 1), dtype=np.int32)
+    _assert_exact("k", out["k"], expect_k, np.int32)
     assert out["g"].dtype == np.float64
-    assert np.all(np.isnan(out["g"]))
+    # NaN handled explicitly (every booked TIME g is NaN, never 0.0); no tolerance.
+    if not np.all(np.isnan(out["g"])):
+        expect_g = np.full(N_EXITS, np.nan, dtype=np.float64)
+        msg = _first_mismatch("g", out["g"], expect_g, equal_nan=True)
+        print(msg)
+        assert False, msg
     assert not np.any(out["g"] == 0.0)
     assert int(out["liq_count"]) == 0
 
@@ -617,8 +651,7 @@ def test_m9_combiner_unreachable_and_ties():
     k_sl[0] = 3
     g_sl[0] = np.float64(-5.0)
     out = ex.combine_from_k(k_tp, g_tp, k_sl, g_sl, k_tr, g_tr, k_th, k_liq=3, k_time=h - 1, h=h)
-    assert list(out["label"]) == ["LIQ"] * N_EXITS
-    assert np.all(out["g"] == LIQ_FILL_BP)
+    _all_liq(out, 3)
     # Same-k TP vs TR, no LIQ/SL: TP wins (G3_ORDER).
     k_sl[0] = sent
     k_tp[0] = 4
