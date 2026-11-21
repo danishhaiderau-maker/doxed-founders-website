@@ -128,5 +128,85 @@ def two_day_axis(base_s=0):
     return empty_micro(2 * DAY_S, base_s=base_s)
 
 
+
+
+# RK 5482 / GO-2 ADDENDUM-3 6a, 6d: nextafter/ulp search on EXT. The only hand-typed
+# near-literal allowed in the search is the floor -50.0. Production formula is copied
+# here (fulln_exit.first_hit_tables L219) so the fixture does not import production.
+_LIQ_FLOOR_F64 = np.float64(-50.0)
+
+
+def production_g_adv(ext, direction, p0):
+    """g_adv = d * (EXT/p0 - 1.0) * 1e4, float64 (same as fulln_exit L219)."""
+    return np.float64(direction) * (np.float64(ext) / np.float64(p0) - np.float64(1.0)) * np.float64(1e4)
+
+
+def _ext_search_bound(p0, direction, floor=_LIQ_FLOOR_F64):
+    """Walk EXT by ulp from the closed-form plant at `floor`.
+
+    Returns (ext_fire, g_fire, ext_noliq, g_noliq) where g_fire is the greatest
+    representable g_adv <= floor and g_noliq is the first representable g_adv > floor
+    (one favorable ulp from the fire EXT).
+    """
+    p0 = np.float64(p0)
+    d = np.float64(direction)
+    floor = np.float64(floor)
+    ext = p0 * (np.float64(1.0) + d * floor / np.float64(1e4))
+    g = production_g_adv(ext, d, p0)
+    adverse = -np.inf if int(direction) == 1 else np.inf
+    favorable = np.inf if int(direction) == 1 else -np.inf
+    n = 0
+    while g > floor:
+        ext = np.nextafter(ext, adverse)
+        g = production_g_adv(ext, d, p0)
+        n += 1
+        if n > 100000:
+            raise RuntimeError("ext search could not reach g_adv <= floor")
+    while True:
+        nxt = np.nextafter(ext, favorable)
+        g2 = production_g_adv(nxt, d, p0)
+        if g2 <= floor:
+            ext, g = nxt, g2
+            n += 1
+            if n > 100000:
+                raise RuntimeError("ext search diverged while maximising g <= floor")
+        else:
+            return ext, g, nxt, g2
+
+
+def ext_fire_greatest_le_floor(p0, direction, floor=_LIQ_FLOOR_F64):
+    """EXT and g_adv for the 6a FIRE row (greatest representable g_adv <= -50.0)."""
+    ext, g, _noliq_ext, _noliq_g = _ext_search_bound(p0, direction, floor)
+    return ext, g
+
+
+def ext_noliq_least_gt_floor(p0, direction, floor=_LIQ_FLOOR_F64):
+    """EXT and g_adv for the 6a NO-LIQ row (first representable g_adv > -50.0)."""
+    _ext, _g, noliq_ext, noliq_g = _ext_search_bound(p0, direction, floor)
+    return noliq_ext, noliq_g
+
+
+def poke_ext_value(m, s, direction, ext, p0=None):
+    """Write a searched EXT onto row s (LOW long / HIGH short) without a closed-form invert."""
+    s = int(s)
+    if p0 is None:
+        p0 = m.open[s]
+    p0 = np.float64(p0)
+    ext = np.float64(ext)
+    last = m.last[s]
+    if not np.isfinite(last):
+        last = p0
+    if int(direction) == 1:
+        set_bar(m, s, p0=p0, last=last, low=ext,
+                high=max(m.high[s] if np.isfinite(m.high[s]) else p0, p0, last, ext))
+        stored = m.low[s]
+    else:
+        set_bar(m, s, p0=p0, last=last,
+                low=min(m.low[s] if np.isfinite(m.low[s]) else p0, p0, last, ext), high=ext)
+        stored = m.high[s]
+    if stored != ext:
+        raise RuntimeError("poke_ext_value did not store the searched EXT: got %r want %r" % (stored, ext))
+    return m
+
 # Width pin used by tests (S-14 / F-X-768).
 assert N_EXITS == 768

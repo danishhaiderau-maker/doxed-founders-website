@@ -22,9 +22,10 @@ from research_fulln480m.fulln_exit_pins import (
     R63H_ADOPTED_SHA256, DECIDE_SHA256, DECIDE_PINS_SHA256, CLOSURE_SHA256,
 )
 from research_fulln480m.tests.exit_fixtures import (
-    DAY_S, DIRS, HD, HORIZONS, copy_micro, empty_micro, ext_for_g, flat_window,
-    k_max_i12, last_for_r, legal_Tprimes, legal_ks, poke_ext, poke_last, set_bar,
-    two_day_axis,
+    DAY_S, DIRS, HD, HORIZONS, copy_micro, empty_micro, ext_for_g,
+    ext_fire_greatest_le_floor, ext_noliq_least_gt_floor, flat_window,
+    k_max_i12, last_for_r, legal_Tprimes, legal_ks, poke_ext, poke_ext_value,
+    poke_last, set_bar, two_day_axis,
 )
 from research_fulln480m.tests.ref_ext2_exit_path import PARITY_LIQ_METHOD
 
@@ -180,14 +181,44 @@ def test_F_G_LIQ_SLNONE(h, direction):
 
 @pytest.mark.parametrize("h,direction", HD)
 def test_F_G_LIQ_EDGE50(h, direction):
+    """6a FIRE: greatest representable g_adv <= -50.0 on the production g path; LIQ fires.
+
+    EXT is derived by nextafter/ulp search (6d). Expected reprs are the RK 5482 neighbours,
+    used only as an assertion pin, not as a search seed. 6b PENDING seam ruling: no production
+    function takes g_adv; no MG-LIQ-STRICT in this run.
+    """
     m, p0 = flat_window(h, t_e=0, p0=P0)
-    poke_ext(m, 0, direction, -50.0, p0=p0)
+    ext, _g_search = ext_fire_greatest_le_floor(p0, direction)
+    poke_ext_value(m, 0, direction, ext, p0=p0)
+    tables = _ex().first_hit_tables(m, 0, direction, h)
+    got = np.float64(tables["g_adv"][0])
+    print("EDGE50 FIRE h=%s d=%s g_adv=%r k_liq=%s" % (h, direction, got, tables["k_liq"]))
+    expect = "-50.00000000000004" if int(direction) == 1 else "-50.00000000000115"
+    assert repr(got) == "np.float64(%s)" % expect, (repr(got), expect)
+    assert got <= np.float64(-50.0)
     out = _core(m, 0, direction, h)
     _all_liq(out, 0)
-    m2, p02 = flat_window(h, t_e=0, p0=P0)
-    poke_ext(m2, 0, direction, -49.99, p0=p02)
-    out2 = _core(m2, 0, direction, h)
-    _all_time(out2, h)
+    assert int(tables["k_liq"]) == 0
+
+
+@pytest.mark.parametrize("h,direction", HD)
+def test_F_G_LIQ_EDGE50_noliq(h, direction):
+    """6a NO-LIQ: first representable g_adv > -50.0, both sides; LIQ must not fire.
+
+    Derived by nextafter/ulp search (6d), not a hand-typed EXT. This is also the
+    MG-LIQ-F32CMP / BC-4 killer value on the formula path.
+    """
+    m, p0 = flat_window(h, t_e=0, p0=P0)
+    ext, _g_search = ext_noliq_least_gt_floor(p0, direction)
+    poke_ext_value(m, 0, direction, ext, p0=p0)
+    tables = _ex().first_hit_tables(m, 0, direction, h)
+    got = np.float64(tables["g_adv"][0])
+    print("EDGE50 NOLIQ h=%s d=%s g_adv=%r k_liq=%s" % (h, direction, got, tables["k_liq"]))
+    assert repr(got) == "np.float64(-49.999999999998934)", repr(got)
+    assert got > np.float64(-50.0)
+    out = _core(m, 0, direction, h)
+    _all_time(out, h)
+    assert int(tables["k_liq"]) == int(h)
 
 
 @pytest.mark.parametrize("h,direction", HD)
