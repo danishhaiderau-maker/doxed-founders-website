@@ -5,6 +5,8 @@ missing module is a per-test ERROR (RED) rather than a collection failure. The o
 imported or edited. Stage B / TIERET / F-H-* price fixtures are skipped with reason.
 """
 import hashlib
+import os
+import subprocess
 import textwrap
 import sys
 from pathlib import Path
@@ -24,8 +26,8 @@ from research_fulln480m.fulln_exit_pins import (
 from research_fulln480m.tests.exit_fixtures import (
     DAY_S, DIRS, HD, HORIZONS, copy_micro, empty_micro, ext_for_g,
     ext_fire_greatest_le_floor, ext_noliq_least_gt_floor, flat_window,
-    k_max_i12, last_for_r, legal_Tprimes, legal_ks, poke_ext, poke_ext_value,
-    poke_last, set_bar, two_day_axis,
+    k_max_i12, last_for_r, last_meeting_r, legal_Tprimes, legal_ks, poke_ext, poke_ext_value,
+    poke_last, poke_last_value, production_r, set_bar, two_day_axis,
 )
 from research_fulln480m.tests.ref_ext2_exit_path import PARITY_LIQ_METHOD
 
@@ -115,6 +117,50 @@ def _all_time(out, h):
 
 def _core(m, t_e, direction, h, **kw):
     return _ex().exit_core(m, int(t_e), int(direction), int(h), **kw)
+
+
+# TESTFIX r1: realised-r reprs at p0=100 (production expression, float64). The ulp walk lands on
+# r = +/-5.00000000000167 (smallest meeting LAST) and its one-ulp neighbour on +/-4.999999999999449.
+R5_HIT = "5.00000000000167"
+R5_MISS = "4.999999999999449"
+R5_SL_HIT = "-5.00000000000167"
+R5_SL_MISS = "-4.999999999999449"
+R10_TR_HIT = "9.999999999998899"   # card L599 (realised TR hit r at h60 XDAY)
+P0OPEN_RWRONG = {1: "1.9994001799461536", -1: "2.000600180055434"}  # r if p0 were LAST[t_e] (+3 bp)
+
+
+def _repr(x):
+    return repr(float(x))
+
+
+def _walk_checked(direction, thr, hit_repr, miss_repr):
+    """Walk the plant and assert (and print) the realised hit and neighbour reprs."""
+    last_hit, r_hit, last_miss, r_miss = last_meeting_r(P0, direction, thr)
+    print("walk d=%s thr=%r last_hit=%s r_hit=%s last_miss=%s r_miss=%s" % (
+        direction, thr, _repr(last_hit), _repr(r_hit), _repr(last_miss), _repr(r_miss)))
+    assert r_hit.dtype == np.float64 and r_miss.dtype == np.float64
+    assert _repr(r_hit) == hit_repr, _repr(r_hit)
+    assert _repr(r_miss) == miss_repr, _repr(r_miss)
+    return last_hit, r_hit, last_miss, r_miss
+
+
+def _assert_g_is(out, x, r_hit, hit_repr):
+    """Booked g at column x is exactly the realised r (dtype checked, repr printed and asserted)."""
+    assert out["g"].dtype == np.float64
+    g = out["g"][x]
+    print("col %d booked g repr=%s" % (x, _repr(g)))
+    assert _repr(g) == hit_repr, _repr(g)
+    assert g == r_hit
+
+
+def _assert_neighbour_all_time(base, s, direction, last_miss, r_miss, miss_repr, t_e, h):
+    """One-ulp miss-side LAST on a fresh copy: realised r repr asserted, nothing fires (all TIME)."""
+    m2 = copy_micro(base)
+    poke_last_value(m2, s, direction, last_miss, p0=P0)
+    r_back = production_r(m2.last[s], direction, m2.open[t_e])
+    assert _repr(r_back) == miss_repr, _repr(r_back)
+    assert r_back == r_miss
+    _all_time(_core(m2, t_e, direction, h), h)
 
 
 # --------------------------------------------------------------------------- pins / isolation / S-8
@@ -282,19 +328,30 @@ def test_F_G_LIQEDGE_g64_short(h):
 # --------------------------------------------------------------------------- G.1 window, p0, 768, NaN
 @pytest.mark.parametrize("h,direction", HD)
 def test_F_G_W0_entry_row_can_trigger(h, direction):
+    """W0: the entry row itself can trigger. LAST is the ulp-walked smallest meeting plant, so the
+    realised r is 5.00000000000167 (not the 5.0 literal). Each column asserts the label its
+    realised r implies: tp_i == 1 (TP 5) books TP at k=0 with g == realised r; the others cannot
+    fire and book TIME with g NaN. A one-ulp miss-side neighbour fires nothing."""
     m, p0 = flat_window(h, t_e=0, p0=P0)
-    poke_last(m, 0, direction, 5.0, p0=p0)
+    base = copy_micro(m)
+    last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, 5.0, R5_HIT, R5_MISS)
+    poke_last_value(m, 0, direction, last_hit, p0=p0)
     out = _core(m, 0, direction, h)
-    # TP=5 columns (tp_i>=1) hit at k=0; SL/TR/thesis-none with tp_i=0 stay TIME unless...
-    # decode: tp = x // 96, tp_i>=1 => x>=96. Those book TP at k=0, g=5.
+    n_tp = 0
     for x in range(N_EXITS):
         tp_i = x // 96
-        if tp_i >= 1:
+        fires = tp_i >= 1 and r_hit >= np.float64(TP_BP[tp_i])
+        if fires:
+            assert tp_i == 1
             assert out["label"][x] == "TP" and out["k"][x] == 0
-            assert out["g"][x] == np.float64(5.0)
+            assert out["g"][x] == r_hit
+            n_tp += 1
         else:
             assert out["label"][x] == "TIME" and out["k"][x] == h - 1
             assert np.isnan(out["g"][x])
+    assert n_tp == 96
+    _assert_g_is(out, 96, r_hit, R5_HIT)
+    _assert_neighbour_all_time(base, 0, direction, last_miss, r_miss, R5_MISS, 0, h)
 
 
 @pytest.mark.parametrize("h,direction", HD)
@@ -321,37 +378,41 @@ def test_F_G_WEND_no_row_at_or_after_tx(h, direction):
 
 @pytest.mark.parametrize("h,direction", HD)
 def test_F_X_P0OPEN(h, direction):
-    """p0 is OPEN of row t_e, not LAST of t_e."""
-    t_e = 0
-    m, p0 = flat_window(h, t_e=t_e, p0=P0)
-    # LAST at t_e is far from OPEN, so a wrong p0=LAST would miss a 5 bp TP at k=min(1,h-1).
-    poke_last(m, 0, direction, 50.0, p0=P0)  # last != open; r=50 if p0=OPEN
-    # Wait: r=50 at k=0 would itself fire TP. Use a last that is not a TP if p0=OPEN,
-    # but would change p0 if mis-read. last at t_e with r=0 must stay at OPEN.
-    # Reset k=0 to flat, and only mis-set... we need OPEN != a LAST that is not used as p0.
-    # Construction: OPEN=100, LAST[t_e]=100 (r=0). That's no difference.
-    # Construction: OPEN=100, LAST[t_e]=100, and we also write a dummy? 
-    # Better: OPEN=100, LAST[t_e]=200-equivalent would violate if we also need LOW/HIGH.
-    # Use OPEN=100, LAST[t_e]=100.00 (flat), and set OPEN only... they start equal.
-    # Use set_bar with p0=100 (OPEN), last=100, then change nothing at t_e.
-    # To distinguish: OPEN=100, LAST[t_e]=99.99 (r small, no SL=5), and at k* a last that
-    # is +5 vs OPEN=100 (LAST=100.05 long) which is NOT +5 vs wrong p0=99.99.
-    m, p0 = flat_window(h, t_e=0, p0=P0)
-    poke_last(m, 0, direction, -1.0, p0=P0)  # LAST != OPEN, |r|=1 < 5
-    k_hit = 0 if h == 1 else 1
+    """p0 is OPEN of row t_e, not LAST of t_e. h > 1: LAST[t_e] is a favourable +3 bp, and a
+    walked 5 bp plant at k=1 meets TP vs OPEN. With p0=LAST[t_e] the same print is only ~2.0 bp,
+    so MX-P0-LAST misses TP and is killed by value. At h=1 there is no later row: stays all TIME
+    (MX-P0-LAST is not killable at h=1 by this row)."""
     if h == 1:
-        # at h=1 the only row is t_e; cannot plant a later TP. Skip plant; just assert p0 used
-        # by checking no SL fire from r=-1, TIME wins (or at h=1 TIME at 0).
-        out = _core(m, 0, direction, h)
-        _all_time(out, h)
+        m, _ = flat_window(h, t_e=0, p0=P0)
+        poke_last(m, 0, direction, -1.0, p0=P0)  # LAST != OPEN, |r| = 1 < 5
+        _all_time(_core(m, 0, direction, h), h)
         return
-    poke_last(m, k_hit, direction, 5.0, p0=P0)  # r=5 vs OPEN
+    m, _ = flat_window(h, t_e=0, p0=P0)
+    poke_last(m, 0, direction, 3.0, p0=P0)  # favourable +3 bp at t_e (< 5: no TP at k=0)
+    base = copy_micro(m)
+    last0 = m.last[0]
+    last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, 5.0, R5_HIT, R5_MISS)
+    poke_last_value(m, 1, direction, last_hit, p0=P0)
+    r_wrong = production_r(last_hit, direction, last0)
+    print("P0OPEN d=%s h=%s r_wrong(p0=LAST[t_e]=%s)=%s" % (direction, h, _repr(last0), _repr(r_wrong)))
+    assert _repr(r_wrong) == P0OPEN_RWRONG[direction], _repr(r_wrong)
+    assert r_wrong < np.float64(5.0)
     out = _core(m, 0, direction, h)
+    n_tp = 0
     for x in range(N_EXITS):
         tp_i = x // 96
-        if tp_i == 1:  # TP_BP 5
-            assert out["label"][x] == "TP" and out["k"][x] == k_hit
-            assert out["g"][x] == np.float64(5.0)
+        fires = tp_i >= 1 and r_hit >= np.float64(TP_BP[tp_i])
+        if fires:
+            assert tp_i == 1
+            assert out["label"][x] == "TP" and out["k"][x] == 1
+            assert out["g"][x] == r_hit
+            n_tp += 1
+        else:
+            assert out["label"][x] == "TIME" and out["k"][x] == h - 1
+            assert np.isnan(out["g"][x])
+    assert n_tp == 96
+    _assert_g_is(out, 96, r_hit, R5_HIT)
+    _assert_neighbour_all_time(base, 1, direction, last_miss, r_miss, R5_MISS, 0, h)
 
 
 @pytest.mark.parametrize("h,direction", HD)
@@ -531,52 +592,52 @@ def test_F_X_TXCHECK():
 
 # --------------------------------------------------------------------------- compose / n_a / only-filled
 def test_F_X_ONLYFILLED_COMPOSE_and_n_a():
-    """Decide then exit only on FILLED; n_a = NO_FILL + UNFRESH (EMBARGO/BLOCKED excluded)."""
-    # Axis long enough for h=5, several minute-aligned decisions.
-    n = 120
+    """Decide then exit only on FILLED; n_a = NO_FILL + UNFRESH (EMBARGO/BLOCKED excluded).
+
+    TESTFIX r1 F-T3 / H1 / C3: decisions [0, 60, 120] give [UNFRESH, FILLED, NO_FILL]. T=0 is
+    UNFRESH by adopted R63-F.6 (deci = T-1 < 0); T=60 fills at t_e=61; has/bars are cleared on
+    121..125 only, so T=120 is NO_FILL."""
+    n = 200
     m = empty_micro(n, base_s=0)
-    # Fresh last_tr / has / valid for decide_core.
     valid = np.ones(n, dtype=bool)
     has = np.zeros(n, dtype=bool)
     last_tr = np.full(n, -1, dtype=np.int64)
-    # Fill some seconds so a decision at T=0 can fill at t_e=1 (ENTRY_WINDOW 1..5).
     for s in range(n):
         set_bar(m, s, p0=P0)
         has[s] = True
         last_tr[s] = s
-    # A later block of no has in an entry window -> NO_FILL. Decision T=60: clear has 61..65.
-    for s in range(61, 66):
+    for s in range(121, 126):
         m.count[s] = 0
         m.open[s] = m.last[s] = m.low[s] = m.high[s] = np.nan
         has[s] = False
-    # UNFRESH: decision T=90, last_tr far behind (STALE_S=600 is long; use last_tr=-1 on a
-    # gap). Easier: set last_tr to -1 for s>=90 and has[90]=True, valid[90]=True, but last_tr
-    # stale. STALE_S=600, so need last_tr < T-600. Use a larger axis instead? For this unit
-    # we also pass a short stale via... production stale is 600. Count UNFRESH only if we
-    # can produce one. We'll produce FILLED + NO_FILL and assert n_a includes NO_FILL;
-    # add an UNFRESH by temporarily using a custom config? decide_core uses config STALE_S.
     cfg = pins_config()
     assert cfg["STALE_S"] == 600
-    rows_out = decide_core(has, last_tr, valid, [0, 60], 5, cfg, direction=1)
+    rows_out = decide_core(has, last_tr, valid, [0, 60, 120], 5, cfg, direction=1)
     labels = [r[1] for r in rows_out["rows"]]
-    assert FILLED in labels
-    assert NO_FILL in labels
+    assert labels == [UNFRESH, FILLED, NO_FILL], labels
+    assert rows_out["rows"][0][0] == 0 and rows_out["rows"][1][0] == 60 and rows_out["rows"][2][0] == 120
     ex = _ex()
     n_a = ex.count_n_a(rows_out["rows"])
     expected = sum(1 for lab in labels if lab in (NO_FILL, UNFRESH))
-    assert n_a == expected and n_a >= 1
+    assert n_a == expected == 2
+    n_filled = 0
     for T, lab, t_e, t_x in rows_out["rows"]:
         if lab != FILLED:
             continue
-        assert t_x == t_e + 5
+        n_filled += 1
+        assert t_e == 61 and t_x == t_e + 5
         out = ex.exit(m, t_e, 1, 5, t_x=t_x)
         _all_time(out, 5)
+    assert n_filled == 1
 
 
 # --------------------------------------------------------------------------- F-M-XDAY exit labels
 @pytest.mark.parametrize("kind", ("TP", "SL", "LIQ", "TR"))
 def test_F_M_XDAY_exit_labels_h60(kind):
-    """T=86340, t_e=T+1, h=60: last window row is 86400, first second of the next day."""
+    """T=86340, t_e=T+1, h=60: last window row is 86400, first second of the next day.
+
+    TESTFIX r1: TP / SL plants are ulp-walked (booked g == realised r, repr asserted) with a
+    one-ulp no-fire neighbour; the TR hit books the realised r 9.999999999998899 (card L599)."""
     T = 86_340
     t_e = T + 1  # 86341
     h = 60
@@ -586,24 +647,31 @@ def test_F_M_XDAY_exit_labels_h60(kind):
     # Flat traded bars on the whole window, p0 at t_e.
     for s in range(t_e, last_row + 1):
         set_bar(m, s, p0=P0)
+    base = copy_micro(m)
     direction = 1
     # Plant the event on the first next-day second; establish trail peak before midnight for TR.
     if kind == "TP":
-        poke_last(m, last_row, direction, 5.0, p0=P0)
+        last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, 5.0, R5_HIT, R5_MISS)
+        poke_last_value(m, last_row, direction, last_hit, p0=P0)
         out = _core(m, t_e, direction, h)
         for x in range(N_EXITS):
             if x // 96 == 1:
                 assert out["label"][x] == "TP" and out["k"][x] == last_row - t_e
-                assert out["g"][x] == np.float64(5.0)
+                assert out["g"][x] == r_hit
+        _assert_g_is(out, 96, r_hit, R5_HIT)
+        _assert_neighbour_all_time(base, last_row, direction, last_miss, r_miss, R5_MISS, t_e, h)
     elif kind == "SL":
-        poke_last(m, last_row, direction, -5.0, p0=P0)
+        last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, -5.0, R5_SL_HIT, R5_SL_MISS)
+        poke_last_value(m, last_row, direction, last_hit, p0=P0)
         out = _core(m, t_e, direction, h)
         for x in range(N_EXITS):
             sl_i = (x // 12) % 8
             tp_i = x // 96
             if sl_i == 1 and tp_i == 0:
                 assert out["label"][x] == "SL" and out["k"][x] == last_row - t_e
-                assert out["g"][x] == np.float64(-5.0)
+                assert out["g"][x] == r_hit
+        _assert_g_is(out, 12, r_hit, R5_SL_HIT)
+        _assert_neighbour_all_time(base, last_row, direction, last_miss, r_miss, R5_SL_MISS, t_e, h)
     elif kind == "LIQ":
         poke_ext(m, last_row, direction, -60.0, p0=P0)
         out = _core(m, t_e, direction, h)
@@ -617,12 +685,20 @@ def test_F_M_XDAY_exit_labels_h60(kind):
         poke_last(m, last_row, direction, 10.0, p0=P0)
         out = _core(m, t_e, direction, h)
         # tr_i = (x // 3) % 4; tr_i==1 is TR_BP 10. tp=0, sl=0 so they don't steal.
+        # The booked g is the realised r at the hit row (card L599), not the literal 10.0.
+        r_tr = production_r(m.last[last_row], direction, P0)
+        assert r_tr.dtype == np.float64
+        assert _repr(r_tr) == R10_TR_HIT, _repr(r_tr)
         hit = False
         for x in range(N_EXITS):
             tp_i, sl_i, tr_i = x // 96, (x // 12) % 8, (x // 3) % 4
             if tp_i == 0 and sl_i == 0 and tr_i == 1:
                 assert out["label"][x] == "TR" and out["k"][x] == last_row - t_e
-                assert out["g"][x] == np.float64(10.0)
+                assert out["g"].dtype == np.float64
+                print("col %d TR booked g repr=%s" % (x, _repr(out["g"][x])))
+                assert out["g"][x] == np.float64(9.999999999998899)
+                assert _repr(out["g"][x]) == R10_TR_HIT
+                assert out["g"][x] == r_tr
                 hit = True
         assert hit
 
@@ -636,13 +712,18 @@ def test_F_M_XDAY_longer_horizons(h, kind):
     m = empty_micro(t_e + h + 1, base_s=0)
     for s in range(t_e, last_row + 1):
         set_bar(m, s, p0=P0)
+    base = copy_micro(m)
     direction = 1
     if kind == "TP":
-        poke_last(m, 86_400, direction, 5.0, p0=P0)
+        last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, 5.0, R5_HIT, R5_MISS)
+        poke_last_value(m, 86_400, direction, last_hit, p0=P0)
         out = _core(m, t_e, direction, h)
         for x in range(N_EXITS):
             if x // 96 == 1:
                 assert out["label"][x] == "TP" and out["k"][x] == 86_400 - t_e
+                assert out["g"][x] == r_hit
+        _assert_g_is(out, 96, r_hit, R5_HIT)
+        _assert_neighbour_all_time(base, 86_400, direction, last_miss, r_miss, R5_MISS, t_e, h)
     else:
         poke_ext(m, 86_400, direction, -60.0, p0=P0)
         out = _core(m, t_e, direction, h)
@@ -658,11 +739,16 @@ def test_F_M_XDAY_h30_no_crossing():
     m = empty_micro(DAY_S, base_s=0)
     for s in range(t_e, last_row + 1):
         set_bar(m, s, p0=P0)
-    poke_last(m, last_row, 1, 5.0, p0=P0)
+    base = copy_micro(m)
+    last_hit, r_hit, last_miss, r_miss = _walk_checked(1, 5.0, R5_HIT, R5_MISS)
+    poke_last_value(m, last_row, 1, last_hit, p0=P0)
     out = _core(m, t_e, 1, h)
     for x in range(N_EXITS):
         if x // 96 == 1:
             assert out["label"][x] == "TP" and out["k"][x] == last_row - t_e
+            assert out["g"][x] == r_hit
+    _assert_g_is(out, 96, r_hit, R5_HIT)
+    _assert_neighbour_all_time(base, last_row, 1, last_miss, r_miss, R5_MISS, t_e, h)
 
 
 # --------------------------------------------------------------------------- m-9 combiner ties (injected k)
@@ -807,7 +893,38 @@ def test_StageB_deferred(name):
     pytest.skip("%s: %s" % (name, STAGE_B_SKIP))
 
 
-def test_exit_guarded_is_run_guarded():
-    m, _ = flat_window(1, t_e=0, p0=P0)
-    out = _ex().exit_guarded(m, 0, 1, 1)
-    _all_time(out, 1)
+_GUARDED_HAPPY_SCRIPT = textwrap.dedent("""\
+    import sys
+    import numpy as np
+    from research_fulln480m.tests.exit_fixtures import flat_window
+    from research_fulln480m import fulln_exit
+    m, _ = flat_window(1, t_e=0, p0=np.float64(100.0))
+    out = fulln_exit.exit_guarded(m, 0, 1, 1)
+    labs = sorted(set(out["label"].tolist()))
+    ks = sorted(set(int(k) for k in out["k"]))
+    n_nan = int(np.isnan(out["g"]).sum())
+    print("LABELS=%r KS=%r NNAN=%d GDTYPE=%s" % (labs, ks, n_nan, out["g"].dtype))
+    sys.exit(0)
+""")
+
+
+def test_exit_guarded_is_run_guarded(tmp_path):
+    """exit_guarded happy path in a FRESH process (TESTFIX r1 F-T4 / RK C4).
+
+    An earlier pytest.raises(ClosureViolation) latches the in-process violation latch by design
+    (fulln_closure; no unlatch API), so an in-process exit_guarded would sys.exit(78). The happy
+    path therefore runs in a fresh subprocess: sys.executable -B, PYTHONDONTWRITEBYTECODE=1, cwd
+    and files only inside tmp_path, no network. Happy path ONLY; latching is unchanged."""
+    script = tmp_path / "exit_guarded_happy.py"
+    script.write_text(_GUARDED_HAPPY_SCRIPT)
+    env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PKG.parent)}
+    for key in ("PATH", "SYSTEMROOT", "LANG", "LC_ALL"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    argv = [sys.executable, "-B", str(script)]
+    (tmp_path / "exit_guarded_happy.argv.txt").write_text(repr(argv) + "\n")
+    print("exit_guarded subprocess argv=%r cwd=%s" % (argv, tmp_path))
+    proc = subprocess.run(argv, cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=120)
+    print("rc=%d stdout=%r stderr=%r" % (proc.returncode, proc.stdout, proc.stderr))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "LABELS=['TIME'] KS=[0] NNAN=%d GDTYPE=float64" % N_EXITS

@@ -208,5 +208,75 @@ def poke_ext_value(m, s, direction, ext, p0=None):
         raise RuntimeError("poke_ext_value did not store the searched EXT: got %r want %r" % (stored, ext))
     return m
 
+# TESTFIX r1 (3640 / RK da22 C1 / fe5e H2 / CLARIFY-1): ulp-walk LAST plants for TP / SL rows.
+# The closed-form inverse last_for_r realises r = 4.999999999999449 at p0=100 (< 5), so a TP / SL
+# threshold plant must be searched on the production r expression (copied, not imported).
+LAST_WALK_BOUND = 1000
+
+
+def production_r(last, direction, p0):
+    """r = d * (LAST/p0 - 1.0) * 1e4, float64 (same expression as fulln_exit L218)."""
+    return np.float64(direction) * (np.float64(last) / np.float64(p0) - np.float64(1.0)) * np.float64(1e4)
+
+
+def _r_meets(r, thr):
+    """TP (thr > 0): r >= thr. SL (thr < 0): r <= thr. Same comparators as fulln_exit."""
+    thr = np.float64(thr)
+    if thr >= 0:
+        return bool(r >= thr)
+    return bool(r <= thr)
+
+
+def last_meeting_r(p0, direction, thr):
+    """Smallest-magnitude LAST whose production r meets thr, plus the one-ulp no-fire neighbour.
+
+    Start from the closed-form seed, walk LAST by np.nextafter until production r meets thr,
+    then step back while the previous LAST still meets. Fixed bound LAST_WALK_BOUND per phase;
+    on non-convergence this RAISES (the test fails; it never skips).
+    Returns (last_meet, r_meet, last_miss, r_miss), all float64.
+    """
+    p0 = np.float64(p0)
+    d = int(direction)
+    thr = np.float64(thr)
+    sign = 1 if thr >= 0 else -1
+    last = last_for_r(p0, d, thr)
+    toward = np.inf if d * sign > 0 else -np.inf   # LAST direction that raises |r| toward meeting
+    away = -toward
+    n = 0
+    while not _r_meets(production_r(last, d, p0), thr):
+        last = np.nextafter(last, toward)
+        n += 1
+        if n > LAST_WALK_BOUND:
+            raise RuntimeError("last_meeting_r did not meet thr=%r within %d steps" % (thr, LAST_WALK_BOUND))
+    n = 0
+    while _r_meets(production_r(np.nextafter(last, away), d, p0), thr):
+        last = np.nextafter(last, away)
+        n += 1
+        if n > LAST_WALK_BOUND:
+            raise RuntimeError("last_meeting_r step-back did not stop within %d steps" % LAST_WALK_BOUND)
+    last = np.float64(last)
+    miss = np.float64(np.nextafter(last, away))
+    r_meet = production_r(last, d, p0)
+    r_miss = production_r(miss, d, p0)
+    if not _r_meets(r_meet, thr) or _r_meets(r_miss, thr):
+        raise RuntimeError("last_meeting_r invariant broken: meet=%r miss=%r thr=%r" % (r_meet, r_miss, thr))
+    return last, r_meet, miss, r_miss
+
+
+def poke_last_value(m, s, direction, last, p0=None):
+    """Write a searched LAST onto row s (widening LOW/HIGH to stay legal) without a closed-form invert."""
+    s = int(s)
+    if p0 is None:
+        p0 = m.open[s]
+    p0 = np.float64(p0)
+    last = np.float64(last)
+    low = m.low[s] if np.isfinite(m.low[s]) else min(p0, last)
+    high = m.high[s] if np.isfinite(m.high[s]) else max(p0, last)
+    set_bar(m, s, p0=p0, last=last, low=min(low, last, p0), high=max(high, last, p0))
+    if m.last[s] != last:
+        raise RuntimeError("poke_last_value did not store the searched LAST: got %r want %r" % (m.last[s], last))
+    return m
+
+
 # Width pin used by tests (S-14 / F-X-768).
 assert N_EXITS == 768
