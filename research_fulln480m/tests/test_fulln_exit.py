@@ -27,7 +27,8 @@ from research_fulln480m.tests.exit_fixtures import (
     DAY_S, DIRS, HD, HORIZONS, copy_micro, empty_micro, ext_for_g,
     ext_fire_greatest_le_floor, ext_noliq_least_gt_floor, flat_window,
     k_max_i12, last_for_r, last_meeting_r, legal_Tprimes, legal_ks, poke_ext, poke_ext_value,
-    poke_last, poke_last_value, production_r, set_bar, two_day_axis,
+    poke_last, poke_last_value, production_r, production_g_adv, set_bar, two_day_axis,
+    ulp_neighbourhood, repr_walk_micro, H5_TR_WITNESSES,
 )
 from research_fulln480m.tests.ref_ext2_exit_path import PARITY_LIQ_METHOD
 
@@ -230,8 +231,9 @@ def test_F_G_LIQ_EDGE50(h, direction):
     """6a FIRE: greatest representable g_adv <= -50.0 on the production g path; LIQ fires.
 
     EXT is derived by nextafter/ulp search (6d). Expected reprs are the RK 5482 neighbours,
-    used only as an assertion pin, not as a search seed. 6b PENDING seam ruling: no production
-    function takes g_adv; no MG-LIQ-STRICT in this run.
+    used only as an assertion pin, not as a search seed. Ruled state (RK c9b1 / ADD-4): no
+    production seam; MG-LIQ-STRICT is EQUIVALENT, not KILLED, detected only by source pin.
+    The 6b' monotone ulp walks and source pins below bind that equivalence.
     """
     m, p0 = flat_window(h, t_e=0, p0=P0)
     ext, _g_search = ext_fire_greatest_le_floor(p0, direction)
@@ -877,6 +879,200 @@ def test_F_E_EXT2PARITY_planted_tp_sl_tr(direction):
         else:
             assert ext == k + 1
             assert R2[14 + i] == np.float32(t2["g_tr"][i])
+
+
+
+# --------------------------------------------------------------------------- ADD-6: 6b' + H5 (s8 only)
+# IEEE binary64 RN per operation, no FMA or extended precision: ASSUMED on this box.
+# The all-x proof covers ANY finite p0 the code accepts; production checks finite, not p0 > 0.
+# NaN/inf compare the same under strict/inclusive. This equivalence concerns the f64 path only.
+# MG-* names canonical, MX-TP/SL/TR-STRICT are historical aliases.
+_H5_LINE_SHAS = {218: '136cf92cf7b15d69d6cac6548f3e7e844ca4156d4b9a92d88b95fced939ce9c7', 219: '87fdec9cb6cfe4f29ffa3feed8c5f8a77867ae9f15195f31ae88dae9160d9809', 225: '50bb1fa6aed19c3070379795019648f80ff3c4b5d7128c4fb4a2881c7d5c5ea1', 228: '3ecd4c4dfb475d9a95bbfbdc60ca1dcf5c9b19fcf0809648f1ffa66bf6d0747f', 229: 'b14e54f52664e49c30fe5039c3e56bd4f09379246cb9db92e75cf723eec326ee', 235: '48d9d4ccaed25e7ad2e84836055d3f4d7b67158fbfebebbfcb36c0f03133d0a3', 236: '8a6a300e91140cff67ad474e62ff616a8e1276b660f1fca52b99197c82dc8b95', 241: 'd7e8f613d957d6d45d7d0c1b78e0daefbc9b5edaa86f24801a3c606a1146a777', 242: '63bdd9c0f4359b6eea3c551f59c7770457c6b340a44370e2b68f7f134967e815', 246: '46722dd8afee7f4afa5b8320d75e364475b89b6c1905c7a8360e895715fff1fc', 247: '6425ceb5e39bd4c835321cd506f4641f665ed7368ce83d308da9ebf5d8a2e868', 248: '56be09bd558c0167c8c5c7c9ad94860db8bb3182ec8886f4b9b8e3a1b62ea6ac'}
+_TPSL_STRADDLE = {('TP', 5, 1.0, 1): ('4.999999999999449', '5.00000000000167'), ('TP', 5, 1.0, -1): ('4.999999999999449', '5.0000000000005596'), ('TP', 10, 1.0, 1): ('9.999999999998899', '10.000000000001119'), ('TP', 10, 1.0, -1): ('9.999999999998899', '10.000000000000009'), ('TP', 15, 1.0, 1): ('14.999999999998348', '15.000000000000568'), ('TP', 15, 1.0, -1): ('14.999999999999458', '15.000000000000568'), ('TP', 20, 1.0, 1): ('19.999999999997797', '20.000000000000018'), ('TP', 20, 1.0, -1): ('19.999999999998906', '20.000000000000018'), ('TP', 30, 1.0, 1): ('29.999999999998916', '30.000000000001137'), ('TP', 30, 1.0, -1): ('29.999999999998916', '30.00000000000003'), ('TP', 50, 1.0, 1): ('49.999999999998934', '50.00000000000115'), ('TP', 50, 1.0, -1): ('49.999999999998934', '50.00000000000004'), ('TP', 100, 1.0, 1): ('99.99999999999787', '100.00000000000009'), ('TP', 100, 1.0, -1): ('99.99999999999898', '100.00000000000009'), ('SL', 5, 1.0, 1): ('-5.0000000000005596', '-4.999999999999449'), ('SL', 5, 1.0, -1): ('-5.00000000000167', '-4.999999999999449'), ('SL', 10, 1.0, 1): ('-10.000000000000009', '-9.999999999998899'), ('SL', 10, 1.0, -1): ('-10.000000000001119', '-9.999999999998899'), ('SL', 15, 1.0, 1): ('-15.000000000000568', '-14.999999999999458'), ('SL', 15, 1.0, -1): ('-15.000000000000568', '-14.999999999998348'), ('SL', 20, 1.0, 1): ('-20.000000000000018', '-19.999999999998906'), ('SL', 20, 1.0, -1): ('-20.000000000000018', '-19.999999999997797'), ('SL', 30, 1.0, 1): ('-30.00000000000003', '-29.999999999998916'), ('SL', 30, 1.0, -1): ('-30.000000000001137', '-29.999999999998916'), ('SL', 50, 1.0, 1): ('-50.00000000000004', '-49.999999999998934'), ('SL', 50, 1.0, -1): ('-50.00000000000115', '-49.999999999998934'), ('SL', 100, 1.0, 1): ('-100.00000000000009', '-99.99999999999898'), ('SL', 100, 1.0, -1): ('-100.00000000000009', '-99.99999999999787'), ('TP', 5, 100.0, 1): ('4.999999999999449', '5.00000000000167'), ('TP', 5, 100.0, -1): ('4.999999999999449', '5.00000000000167'), ('TP', 10, 100.0, 1): ('9.999999999998899', '10.000000000001119'), ('TP', 10, 100.0, -1): ('9.999999999998899', '10.000000000001119'), ('TP', 15, 100.0, 1): ('14.999999999998348', '15.000000000000568'), ('TP', 15, 100.0, -1): ('14.999999999999458', '15.000000000000568'), ('TP', 20, 100.0, 1): ('19.999999999997797', '20.000000000000018'), ('TP', 20, 100.0, -1): ('19.999999999998906', '20.000000000000018'), ('TP', 30, 100.0, 1): ('29.999999999998916', '30.000000000001137'), ('TP', 30, 100.0, -1): ('29.999999999997804', '30.00000000000003'), ('TP', 50, 100.0, 1): ('49.999999999998934', '50.00000000000115'), ('TP', 50, 100.0, -1): ('49.999999999998934', '50.00000000000004'), ('TP', 100, 100.0, 1): ('99.99999999999787', '100.00000000000009'), ('TP', 100, 100.0, -1): ('99.99999999999898', '100.00000000000009'), ('SL', 5, 100.0, 1): ('-5.00000000000167', '-4.999999999999449'), ('SL', 5, 100.0, -1): ('-5.00000000000167', '-4.999999999999449'), ('SL', 10, 100.0, 1): ('-10.000000000001119', '-9.999999999998899'), ('SL', 10, 100.0, -1): ('-10.000000000001119', '-9.999999999998899'), ('SL', 15, 100.0, 1): ('-15.000000000000568', '-14.999999999999458'), ('SL', 15, 100.0, -1): ('-15.000000000000568', '-14.999999999998348'), ('SL', 20, 100.0, 1): ('-20.000000000000018', '-19.999999999998906'), ('SL', 20, 100.0, -1): ('-20.000000000000018', '-19.999999999997797'), ('SL', 30, 100.0, 1): ('-30.00000000000003', '-29.999999999997804'), ('SL', 30, 100.0, -1): ('-30.000000000001137', '-29.999999999998916'), ('SL', 50, 100.0, 1): ('-50.00000000000004', '-49.999999999998934'), ('SL', 50, 100.0, -1): ('-50.00000000000115', '-49.999999999998934'), ('SL', 100, 100.0, 1): ('-100.00000000000009', '-99.99999999999898'), ('SL', 100, 100.0, -1): ('-100.00000000000009', '-99.99999999999787')}
+
+
+def _source_pin(lines):
+    source = Path(_ex().__file__).read_text().splitlines()
+    for n in lines:
+        text = source[n - 1]
+        got = hashlib.sha256(text.encode()).hexdigest()
+        assert got == _H5_LINE_SHAS[n], (n, text, got)
+
+
+def test_P_6b_LIQ_source_pin():
+    """6b'.3: MG-LIQ-STRICT is EQUIVALENT, not KILLED. Detected ONLY by this pin."""
+    _source_pin((219, 225))
+    assert type(LIQ_FLOOR_BP) is float and LIQ_FLOOR_BP == -50.0
+    assert _ex().LIQ_FLOOR_BP == -50.0
+
+
+def test_P_H5_TPSL():
+    """MG-TP-STRICT / MG-SL-STRICT: EQUIVALENT, not KILLED; pin binds the all-f64 proof."""
+    _source_pin((218, 228, 229, 235, 236))
+    assert _ex().TP_BP == _ex().SL_BP == TP_BP == SL_BP == (None, 5, 10, 15, 20, 30, 50, 100)
+
+
+def test_P_H5_TR():
+    """P-H5-TR (2176 V3): TR text plus TR_BP. Changed text voids the witness card."""
+    _source_pin((241, 242, 246, 247, 248))
+    assert _ex().TR_BP == TR_BP == (None, 10, 20, 50)
+
+
+@pytest.mark.parametrize("direction", DIRS)
+@pytest.mark.parametrize("p0", (100.0, 80000.0))
+def test_F_6b_LIQ_EQUIV(direction, p0):
+    """c9b1 6b'.2 / cc0c D1-D2: >=1000 ulps each side, no g_adv == -50.0.
+    Exact L219 expression plus runtime PRODUCTION g_adv; adjacent straddle repr is p0-specific."""
+    seed = ext_for_g(p0, direction, -50.0)
+    xs = ulp_neighbourhood(seed, np.inf if direction == 1 else -np.inf)
+    m = repr_walk_micro(p0, xs, direction, kind="ext")
+    g = _ex().first_hit_tables(m, 0, direction, 3600)["g_adv"][1:2002]
+    literal = production_g_adv(xs, direction, p0)
+    assert g.dtype == np.float64 and np.array_equal(g, literal)
+    assert len(xs) == 2001 and np.all(np.diff(g) >= 0)
+    assert not np.any(g == np.float64(-50.0))
+    i = int(np.flatnonzero(g > -50.0)[0])
+    assert 0 < i < len(xs)
+    assert np.nextafter(xs[i-1], np.inf if direction == 1 else -np.inf) == xs[i]
+    fire, miss = _repr(g[i-1]), _repr(g[i])
+    want_fire = "-50.00000000000004" if direction == 1 else "-50.00000000000115"
+    want_miss = "-49.999999999997826" if p0 == 80000.0 and direction == 1 else "-49.999999999998934"
+    print("LIQ straddle p0=%r d=%r fire=%s noLIQ=%s" % (p0, direction, fire, miss))
+    assert (fire, miss) == (want_fire, want_miss)
+    assert g[i-1] < -50.0 < g[i]
+
+
+@pytest.mark.parametrize("kind,v,p0,direction", list(_TPSL_STRADDLE))
+def test_F_H5_TPSL_EQUIV(kind, v, p0, direction):
+    """Runtime model check via PRODUCTION first_hit_tables, not a test copy of r.
+    Monotone 1000-ulp walk on both sides, no equality. Proof: 5043 s3 + 2176 (not a grid proof)."""
+    V = np.float64(v if kind == "TP" else -v)
+    xs = ulp_neighbourhood(last_for_r(p0, direction, V), np.inf if direction == 1 else -np.inf)
+    m = repr_walk_micro(p0, xs, direction)
+    r = _ex().first_hit_tables(m, 0, direction, 3600)["r"][1:2002]
+    assert r.dtype == np.float64 and len(r) == 2001
+    assert np.all(np.diff(r) >= 0) and not np.any(r == V)
+    i = int(np.flatnonzero(r > V)[0])
+    assert 0 < i < len(xs)
+    assert np.nextafter(xs[i-1], np.inf if direction == 1 else -np.inf) == xs[i]
+    pair = (_repr(r[i-1]), _repr(r[i]))
+    print("TPSL straddle %s%r p0=%r d=%r below=%s above=%s" % (kind, v, p0, direction, *pair))
+    assert pair == _TPSL_STRADDLE[(kind, v, p0, direction)]
+    assert r[i-1] < V < r[i]
+    assert np.array_equal(r >= V, r > V) and np.array_equal(r <= V, r < V)
+
+
+def _h5_tr_micro(witness, last_b=None):
+    tr, d, lp, lb, rp, rb, steps, lnb, rnb, ddnb = witness
+    m, p0 = flat_window(5, p0=P0)
+    set_bar(m, 1, p0=p0, last=np.float64(lp))
+    set_bar(m, 2, p0=p0, last=np.float64(lb) if last_b is None else last_b)
+    return m
+
+
+@pytest.mark.parametrize("witness", H5_TR_WITNESSES, ids=["TR%d-%s" % (w[0], "long" if w[1]==1 else "short") for w in H5_TR_WITNESSES])
+def test_F_H5_TR_STRICT_KILL(witness):
+    """All six repr-literal rows KILL MG-TR-STRICT by value, not merely a source pin."""
+    tr, d, lp, lb, rp, rb, steps, lnb, rnb, ddnb = witness
+    m = _h5_tr_micro(witness)
+    tables = _ex().first_hit_tables(m, 0, d, 5)
+    r = tables["r"]
+    dd = max(r[1], np.float64(0.0)) - r[2]
+    assert (_repr(r[1]), _repr(r[2]), _repr(dd)) == (rp, rb, _repr(tr))
+    assert dd == np.float64(tr) and tables["k_liq"] == 5
+    tri = TR_BP.index(tr)
+    x = 3 * tri
+    assert _ex().exit_decode(x) == (0, 0, tri, 0)
+    out = _core(m, 0, d, 5)
+    result = (str(out["label"][x]), int(out["k"][x]), _repr(out["g"][x]))
+    print("TR witness tr=%s d=%s LAST=%s peak=%s r=%s dd=%s result=%r" % (tr, d, lb, rp, rb, _repr(dd), result))
+    assert out["g"].dtype == np.float64
+    assert result == ("TR", 2, rb)
+
+
+@pytest.mark.parametrize("witness", H5_TR_WITNESSES, ids=["TR%d-%s" % (w[0], "long" if w[1]==1 else "short") for w in H5_TR_WITNESSES])
+def test_F_H5_TR_NB(witness):
+    """Walk toward the peak, max 64 steps; FAIL, never skip, if no no-fire-at-k2 neighbour.
+    RUN through production exit_core (V4), including the TR20-long 2-ulp row."""
+    tr, d, lp, lb, rp, rb, steps, lnb, rnb, ddnb = witness
+    last_b = np.float64(lb)
+    for n in range(1, 65):
+        last_b = np.nextafter(last_b, np.float64(lp))
+        m = _h5_tr_micro(witness, last_b)
+        tables = _ex().first_hit_tables(m, 0, d, 5)
+        r = tables["r"]
+        dd = max(r[1], np.float64(0.0)) - r[2]
+        if dd < np.float64(tr):
+            break
+    else:
+        pytest.fail("F-H5-TR-NB: no neighbour within 64 ulps")
+    assert n == steps
+    assert (_repr(last_b), _repr(r[2]), _repr(dd)) == (lnb, rnb, ddnb)
+    x = 3 * TR_BP.index(tr)
+    out = _core(m, 0, d, 5)
+    result = (str(out["label"][x]), int(out["k"][x]), float(out["g"][x]))
+    print("TR NB tr=%s d=%s steps=%s LAST=%s drawdown=%s result=%r" % (tr, d, n, _repr(last_b), _repr(dd), result))
+    assert result[:2] == ("TR", 3)
+    assert _repr(out["g"][x]) == ("0.0" if d == 1 else "-0.0")
+    assert out["g"].dtype == np.float64
+    if tr == 20 and d == 1:
+        assert _repr(last_b) == "101.08000000000013"
+        assert _repr(dd) == "19.999999999997783"
+        assert result == ("TR", 3, 0.0)
+
+
+@pytest.mark.parametrize("direction", DIRS)
+def test_F_G_TR_FLOOR(direction):
+    """1959: first-row r ~ -10.5, SL=None TR=10, fires ONLY because peak is floored at 0.
+    No-fire neighbour is the 10 bp miss-side adjacent LAST (drawdown < 10), run through production."""
+    m, p0 = flat_window(5, p0=P0)
+    poke_last(m, 0, direction, -10.5, p0=p0)
+    tables = _ex().first_hit_tables(m, 0, direction, 5)
+    r0 = tables["r"][0]
+    dd = np.float64(0.0) - r0
+    assert _repr(r0) == "-10.499999999999954" and _repr(dd) == "10.499999999999954"
+    assert tables["k_liq"] == 5
+    out = _core(m, 0, direction, 5)
+    assert _ex().exit_decode(3) == (0, 0, 1, 0)
+    result = (str(out["label"][3]), int(out["k"][3]), _repr(out["g"][3]))
+    print("TR FLOOR d=%s dd=%s result=%r" % (direction, _repr(dd), result))
+    assert result == ("TR", 0, "-10.499999999999954")
+    # The smallest-magnitude meeting SL -10 plant and its one-ulp miss neighbour.
+    _last_hit, _r_hit, last_nb, r_nb = last_meeting_r(p0, direction, -10.0)
+    nb, _ = flat_window(5, p0=p0)
+    poke_last_value(nb, 0, direction, last_nb, p0=p0)
+    tnb = _ex().first_hit_tables(nb, 0, direction, 5)
+    nb_dd = np.float64(0.0) - tnb["r"][0]
+    print("TR FLOOR NB d=%s LAST=%s r=%s dd=%s" % (direction, _repr(last_nb), _repr(tnb["r"][0]), _repr(nb_dd)))
+    assert _repr(nb_dd) == "9.999999999998899" and nb_dd < np.float64(10.0)
+    assert _repr(tnb["r"][0]) == "-9.999999999998899"
+    nbo = _core(nb, 0, direction, 5)
+    n_sl_none = 0
+    for x in range(N_EXITS):
+        if _ex().exit_decode(x)[1] == 0:  # SL=None: only TR could fire; drawdown < 10 -> TIME
+            n_sl_none += 1
+            assert str(nbo["label"][x]) == "TIME" and int(nbo["k"][x]) == 4, (x, nbo["label"][x])
+            assert np.isnan(nbo["g"][x])
+    assert n_sl_none == 96
+
+
+def test_F_m9_injected_SL_TP_priority():
+    """1959: unreachable end-to-end SL/TP tie MUST be killed at combine_from_k, card m-9."""
+    ex = _ex()
+    h = 30
+    ktp = np.full(7, h, dtype=np.int32); ksl = ktp.copy()
+    gtp = np.zeros(7, dtype=np.float64); gsl = gtp.copy()
+    ktr = np.full(3, h, dtype=np.int32); gtr = np.zeros(3, dtype=np.float64)
+    kth = np.full(2, h, dtype=np.int32)
+    ktp[0] = ksl[0] = 4
+    gtp[0] = np.float64(5.0); gsl[0] = np.float64(-5.0)
+    out = ex.combine_from_k(ktp, gtp, ksl, gsl, ktr, gtr, kth, h, h-1, h)
+    x = 96 + 12  # tp_i=sl_i=1, no TR/thesis
+    assert ex.exit_decode(x) == (1, 1, 0, 0)
+    result = (str(out["label"][x]), int(out["k"][x]), float(out["g"][x]))
+    print("combiner injected k_sl=k_tp=4 x=108 result=%r" % (result,))
+    assert result == ("SL", 4, -5.0)
+    assert out["g"].dtype == np.float64
 
 
 # --------------------------------------------------------------------------- skips (Stage B / TIERET / blocked)
