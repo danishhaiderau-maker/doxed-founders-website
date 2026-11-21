@@ -892,11 +892,17 @@ _TPSL_STRADDLE = {('TP', 5, 1.0, 1): ('4.999999999999449', '5.00000000000167'), 
 
 
 def _source_pin(lines):
+    """Locate pinned lines by content (sha256 of the exact source line). Line numbers are secondary."""
     source = Path(_ex().__file__).read_text().splitlines()
+    by_sha = {}
+    for i, line in enumerate(source):
+        by_sha.setdefault(hashlib.sha256(line.encode()).hexdigest(), []).append((i + 1, line))
     for n in lines:
-        text = source[n - 1]
-        got = hashlib.sha256(text.encode()).hexdigest()
-        assert got == _H5_LINE_SHAS[n], (n, text, got)
+        expect = _H5_LINE_SHAS[n]
+        found = by_sha.get(expect)
+        here = source[n - 1] if 0 <= n - 1 < len(source) else "<oob>"
+        assert found, "pinned content for historical L%s missing (sha=%s); L%s now %r" % (
+            n, expect, n, here)
 
 
 def test_P_6b_LIQ_source_pin():
@@ -1124,3 +1130,283 @@ def test_exit_guarded_is_run_guarded(tmp_path):
     print("rc=%d stdout=%r stderr=%r" % (proc.returncode, proc.stdout, proc.stderr))
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "LABELS=['TIME'] KS=[0] NNAN=%d GDTYPE=float64" % N_EXITS
+
+
+def _empty_bar(m, s):
+    """Mark index s empty (count 0, OHLC NaN). S-4 applies only to traded rows."""
+    s = int(s)
+    m.count[s] = 0
+    m.open[s] = m.last[s] = m.low[s] = m.high[s] = np.nan
+
+
+# --------------------------------------------------------------------------- ADD-7: survivor-fix value rows (print/bind: run-86)
+# Reprs bound from mut/r63x-run-86/scratch_print_bind.out (START inodes 415561).
+# PLUS1 r[h-1] and ANCHOR g / p0 printed then bound to the existing R5_* / "100.0" literals.
+
+
+@pytest.mark.parametrize("h,direction", HD)
+def test_F_G_WEND_tp_only_at_k_h_minus_1(h, direction):
+    """PLUS1 kill: extra>=1 and a traded bar at t_e+h; len(r)==len(g_adv)==h (the kill).
+
+    Card WEND k=h-1 booking is kept. The r[h-1] repr is anti-regression only (run-86: all 24
+    cases printed 5.00000000000167, equal to R5_HIT). Existing
+    test_F_G_WEND_no_row_at_or_after_tx is unchanged and is not claimed as a PLUS1 kill.
+    """
+    t_e = 0
+    m, p0 = flat_window(h, t_e=t_e, extra=1, p0=P0)
+    set_bar(m, t_e + h, p0=p0)
+    assert int(m.count[t_e + h]) >= 1
+    assert np.isfinite(m.open[t_e + h]) and np.isfinite(m.last[t_e + h])
+    base = copy_micro(m)
+    last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, 5.0, R5_HIT, R5_MISS)
+    poke_last_value(m, t_e + h - 1, direction, last_hit, p0=p0)
+    tables = _ex().first_hit_tables(m, t_e, direction, h)
+    assert len(tables["r"]) == h
+    assert len(tables["g_adv"]) == h
+    print("PLUS1 r[h-1] h=%s d=%s repr=%s" % (h, direction, _repr(tables["r"][h - 1])))
+    assert _repr(tables["r"][h - 1]) == R5_HIT
+    assert tables["r"][h - 1] == r_hit
+    out = _core(m, t_e, direction, h)
+    n_tp = 0
+    for x in range(N_EXITS):
+        tp_i = x // 96
+        fires = tp_i >= 1 and r_hit >= np.float64(TP_BP[tp_i])
+        if fires:
+            assert tp_i == 1
+            assert out["label"][x] == "TP" and out["k"][x] == h - 1
+            assert out["g"][x] == r_hit
+            n_tp += 1
+        else:
+            assert out["label"][x] == "TIME" and out["k"][x] == h - 1
+            assert np.isnan(out["g"][x])
+    assert n_tp == 96
+    _assert_g_is(out, 96, r_hit, R5_HIT)
+    _assert_neighbour_all_time(base, t_e + h - 1, direction, last_miss, r_miss, R5_MISS, t_e, h)
+
+
+@pytest.mark.parametrize("h,direction", HD)
+def test_F_G_ANCHOR_te_is_Tplus2(h, direction):
+    """ANCHOR kill: t_e=T+2, plain calls (no try/except), label/k/g asserted on plants A and B.
+
+    Production must not raise S-7 on either plant. p0 and booked g reprs were printed in run-86
+    (p0=100.0, plant A g=R5_HIT, plant B g=R5_SL_HIT) and are bound here.
+    """
+    T = 0
+    t_e = T + 2
+    m, p0 = flat_window(h, t_e=t_e, extra=0, p0=P0)
+    _empty_bar(m, T + 1)
+    last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, 5.0, R5_HIT, R5_MISS)
+    poke_last_value(m, t_e + h - 1, direction, last_hit, p0=p0)
+    tables = _ex().first_hit_tables(m, t_e, direction, h)
+    print("ANCHOR p0 h=%s d=%s repr=%s" % (h, direction, _repr(tables["p0"])))
+    assert _repr(tables["p0"]) == "100.0"
+    assert tables["p0"] == m.open[t_e]
+    out = _core(m, t_e, direction, h, T=T)
+    n_tp = 0
+    for x in range(N_EXITS):
+        tp_i = x // 96
+        fires = tp_i >= 1 and r_hit >= np.float64(TP_BP[tp_i])
+        if fires:
+            assert tp_i == 1
+            assert out["label"][x] == "TP" and out["k"][x] == h - 1
+            assert out["g"][x] == r_hit
+            n_tp += 1
+        else:
+            assert out["label"][x] == "TIME" and out["k"][x] == h - 1
+            assert np.isnan(out["g"][x])
+    assert n_tp == 96
+    _assert_g_is(out, 96, r_hit, R5_HIT)
+
+    mb, p0b = flat_window(h, t_e=t_e, extra=0, p0=P0)
+    _empty_bar(mb, T + 1)
+    sl_hit, r_sl, sl_miss, r_sl_miss = _walk_checked(direction, -5.0, R5_SL_HIT, R5_SL_MISS)
+    poke_last_value(mb, t_e, direction, sl_hit, p0=p0b)
+    outb = _core(mb, t_e, direction, h, T=T)
+    n_sl = 0
+    for x in range(N_EXITS):
+        sl_i = (x // 12) % 8
+        fires = sl_i >= 1 and r_sl <= np.float64(-SL_BP[sl_i])
+        if fires:
+            assert sl_i == 1
+            assert outb["label"][x] == "SL" and outb["k"][x] == 0
+            assert outb["g"][x] == r_sl
+            n_sl += 1
+        else:
+            assert outb["label"][x] == "TIME" and outb["k"][x] == h - 1
+            assert np.isnan(outb["g"][x])
+    assert n_sl == 96
+    _assert_g_is(outb, 12, r_sl, R5_SL_HIT)
+
+
+_PROD_DERIVE_SCRIPT = textwrap.dedent("""\
+    import sys
+    import numpy as np
+    from research_fulln480m.tests.exit_fixtures import flat_window
+    from research_fulln480m import fulln_exit
+    m, _ = flat_window(120, t_e=1, p0=np.float64(100.0))
+    fulln_exit.exit_guarded(m, 1, 1, 120, T=0, thesis_Tprime=60)
+    print("UNEXPECTED_RETURN")
+    sys.exit(0)
+""")
+
+
+def test_MI_PROD_DERIVE_thesis_kind_stop78_subprocess(tmp_path):
+    """Subprocess production exit_guarded with a thesis kind, legal T'=T+60, h=120.
+
+    GREEN (run-86): rc==78, stdout empty, stderr empty. TIERET and I.11 stay locked.
+    No assertion on stderr content beyond emptiness (ADDENDUM-1 Q2 / RK 5ea4).
+    """
+    script = tmp_path / "prod_derive_sub.py"
+    script.write_text(_PROD_DERIVE_SCRIPT)
+    env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PKG.parent)}
+    for key in ("PATH", "SYSTEMROOT", "LANG", "LC_ALL"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    argv = [sys.executable, "-B", str(script)]
+    (tmp_path / "prod_derive_sub.argv.txt").write_text(repr(argv) + "\n")
+    print("PROD-DERIVE argv=%r cwd=%s" % (argv, tmp_path))
+    proc = subprocess.run(argv, cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=120)
+    print("rc=%d stdout=%r stderr=%r" % (proc.returncode, proc.stdout, proc.stderr))
+    assert proc.returncode == 78, proc.stderr
+    assert proc.stderr == ""
+    assert proc.stdout == ""
+
+
+def test_MI_PROD_DERIVE_inprocess_S9_sibling():
+    """In-process sibling: km>=1, same legal T'=T+60, ClosureViolation message contains S-9."""
+    T = 0
+    t_e = 1
+    h = 120
+    direction = 1
+    assert k_max_i12(T, t_e, h) >= 1
+    m, _ = flat_window(h, t_e=t_e, p0=P0)
+    with pytest.raises(ClosureViolation) as ei:
+        _ex().exit(m, t_e, direction, h, T=T, thesis_Tprime=T + 60)
+    assert "S-9" in str(ei.value)
+
+
+@pytest.mark.parametrize("h,direction", [(h, d) for h in HORIZONS if h >= 5 for d in DIRS])
+def test_F_G_PAST_EMPTYEND(h, direction):
+    """NXT value row: empty last window row, TP-5 last only at t_e+h. Production all TIME."""
+    t_e = 0
+    m, p0 = flat_window(h, t_e=t_e, extra=1, p0=P0)
+    _empty_bar(m, t_e + h - 1)
+    last_hit, r_hit, last_miss, r_miss = _walk_checked(direction, 5.0, R5_HIT, R5_MISS)
+    set_bar(m, t_e + h, p0=p0)
+    poke_last_value(m, t_e + h, direction, last_hit, p0=p0)
+    out = _core(m, t_e, direction, h)
+    _all_time(out, h)
+
+
+@pytest.mark.parametrize("h,direction", HD)
+def test_F_G_LIQBAR60(h, direction):
+    """BAR60 value rows: LIQ extreme only at t_e+h in the same UTC minute as t_e+h-1 (row 1);
+    LIQ only at T sharing a UTC minute with t_e in T+1..T+5 (row 2). Production all TIME.
+    """
+    base_s = 1
+    t_e = 0
+    abs_last = int(base_s) + t_e + h - 1
+    abs_extra = int(base_s) + t_e + h
+    assert (abs_last // 60) == (abs_extra // 60), (abs_last, abs_extra)
+    m, p0 = flat_window(h, t_e=t_e, extra=1, base_s=base_s, p0=P0)
+    set_bar(m, t_e + h, p0=p0)
+    ext_fire, g_fire = ext_fire_greatest_le_floor(p0, direction)
+    poke_ext_value(m, t_e + h, direction, ext_fire, p0=p0)
+    out = _core(m, t_e, direction, h)
+    _all_time(out, h)
+
+    T = 0
+    t_e2 = 2
+    base2 = 0
+    assert ((base2 + T) // 60) == ((base2 + t_e2) // 60)
+    assert 1 <= (t_e2 - T) <= 5
+    m2, p02 = flat_window(h, t_e=t_e2, extra=0, base_s=base2, p0=P0)
+    ext2, g2 = ext_fire_greatest_le_floor(p02, direction)
+    poke_ext_value(m2, T, direction, ext2, p0=p02)
+    out2 = _core(m2, t_e2, direction, h, T=T)
+    _all_time(out2, h)
+
+
+@pytest.mark.parametrize("h,direction", [(h, d) for h in HORIZONS if h >= 5 for d in DIRS])
+def test_F_G_LIQEMPTY_END(h, direction):
+    """NEXTFILL value row: empty last window row, LIQ extreme only at t_e+h. Production all TIME."""
+    t_e = 0
+    m, p0 = flat_window(h, t_e=t_e, extra=1, p0=P0)
+    _empty_bar(m, t_e + h - 1)
+    set_bar(m, t_e + h, p0=p0)
+    ext_fire, g_fire = ext_fire_greatest_le_floor(p0, direction)
+    poke_ext_value(m, t_e + h, direction, ext_fire, p0=p0)
+    out = _core(m, t_e, direction, h)
+    _all_time(out, h)
+
+
+def test_F_X_ONLYFILLED_EMBARGO_BLOCKED_and_n_a():
+    """F-X-ONLYFILLED extension: [FILLED, EMBARGO, BLOCKED] at 3600/7000/7060.
+
+    n=8000, h=60, all traded, valid[6900:7300]=False. Cursor asserts per R4; exit() once;
+    direct count_n_a(rows)==0. Production tuples printed in run-86 and bound here.
+    Written from the binding spec; HM's file was not copied.
+    """
+    n = 8000
+    h = 60
+    m = empty_micro(n, base_s=0)
+    valid = np.ones(n, dtype=bool)
+    has = np.zeros(n, dtype=bool)
+    last_tr = np.full(n, -1, dtype=np.int64)
+    for s in range(n):
+        set_bar(m, s, p0=P0)
+        has[s] = True
+        last_tr[s] = s
+    valid[6900:7300] = False
+    cfg = pins_config()
+    rows_out = decide_core(has, last_tr, valid, [3600, 7000, 7060], h, cfg, direction=1)
+    rows = rows_out["rows"]
+    labels = [r[1] for r in rows]
+    print("ONLYFILLED rows=%r" % (rows,))
+    assert labels == [FILLED, EMBARGO, BLOCKED], labels
+    T0, lab0, te0, tx0 = rows[0]
+    T1, lab1, te1, tx1 = rows[1]
+    T2, lab2, te2, tx2 = rows[2]
+    assert T0 == 3600 and lab0 == FILLED
+    assert te0 == 3601 and tx0 == te0 + h and tx0 == 3661
+    assert T1 == 7000 and lab1 == EMBARGO
+    assert te1 == NO_TE and tx1 == T1 + 5 + h and tx1 == 7065
+    assert T2 == 7060 and lab2 == BLOCKED
+    assert te2 == NO_TE and tx2 == tx1 and tx2 == 7065
+    n_a = _ex().count_n_a(rows)
+    print("count_n_a=%s" % n_a)
+    assert n_a == 0
+    n_exit = 0
+    for T, lab, t_e, t_x in rows:
+        if lab != FILLED:
+            continue
+        n_exit += 1
+        out = _ex().exit(m, t_e, 1, h, t_x=t_x)
+        _all_time(out, h)
+    assert n_exit == 1
+
+
+@pytest.mark.parametrize(
+    "pair,want",
+    [
+        ([3600, 3660], [(3600, FILLED, 3601, 3661), (3660, BLOCKED, NO_TE, 3661)]),
+        ([3600, 3661], [(3600, FILLED, 3601, 3661), (3661, FILLED, 3662, 3722)]),
+        ([3600, 3662], [(3600, FILLED, 3601, 3661), (3662, FILLED, 3663, 3723)]),
+    ],
+    ids=["tx-1", "tx", "tx+1"],
+)
+def test_F_X_cursor_admits_boundary_pairs(pair, want):
+    """HM C1 / RK a525 E1: three SEPARATE pairs vs the original FILLED t_x=3661, via decide_core.
+
+    Values printed in run-86 and bound here. No four-row compose.
+    """
+    n = 4000
+    h = 60
+    valid = np.ones(n, dtype=bool)
+    has = np.ones(n, dtype=bool)
+    last_tr = np.arange(n, dtype=np.int64)
+    cfg = pins_config()
+    rows = decide_core(has, last_tr, valid, list(pair), h, cfg, direction=1)["rows"]
+    print("BOUNDARY pair=%s rows=%r" % (list(pair), rows))
+    assert rows == want, (pair, rows)
+    assert rows[0][3] == 3661
