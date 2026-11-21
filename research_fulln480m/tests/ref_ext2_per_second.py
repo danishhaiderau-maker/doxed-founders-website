@@ -3,7 +3,7 @@
 Source: ext2_search.py sha256 6b5956fdc19f4fbc8061a20ed65e7b04e6b65d2039ed202c72535a15cc09cd61
 (119,529 B), lines L702-L710 inclusive (incl. the final `return out`; the GS quote L702-L709 omits
 it). Call site of the "last" path: ext2 L752 (RK N-2), `px_d = per_second(sec, base, S, t[:, 3], "last")`
-after bfx_day's lexsort by (ts, id) (EXT2-SORT, ext2 L608).
+after bfx_day's lexsort by (ts, id) (EXT2-SORT, ext2 L610).
 Box copy read for this file: /workspace/hm-480m-launch/hm-C6-1-ext2-LIQ-SLNONE-evidence/ext2_search_COPY.py
 (same sha256). Quoted-bytes sha256 of L702-L710 (lines joined by LF, no trailing LF):
 b181c7c0ed787d5055432b31c0338ef4ebbd7a49b43b26f2a6e97df9cdcb0867 (Coder-computed; HM byte-diff
