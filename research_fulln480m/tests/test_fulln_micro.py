@@ -6,10 +6,11 @@ Fixtures: F-M-PARITY, F-M-OHLC (= F-G-OHLC), F-M-EMPTY, F-M-SORT, F-M-SAMEMS (SB
 (R-C1), F-M-STOP (S-1..S-4), F-M-S11 (a..e), F-M-S12, plus the OPEN-X-5 source-hash and isolation
 tests for tests/ref_ext2_per_second.py.
 
-TODO (STAGE 3, card s4.1 / P-8 / OPEN-X-5 point 6): the from-spec ORACLE comparison for
-OPEN / LOW / HIGH / count against tests/oracle_micro_spec.py is NOT in this file yet. It is
-written by an executor other than this builder's author and added in stage 3. This builder's
-author did not write and has not seen that oracle.
+Oracle comparison for OPEN / LOW / HIGH / count against tests/oracle_micro_spec.py is
+in this file (s7.1 / OPEN-X-5 point 6 / P-8). The oracle was written by a different executor
+(commit 4d4801dbe5c8, sha 09ebca04c93f) and is imported read-only; this file never edits it.
+A separate tests/test_fulln_micro_oracle.py is NOT added: card s8 L1326 collects only
+tests/test_fulln_micro.py and tests/test_fulln_exit.py.
 
 Floats are compared by int64 bit view, NaN-equal (OPEN-X-5 point 7), never by ==.
 The micro builder is direction-free and horizon-free; the window accessor is exercised at all 12
@@ -495,3 +496,40 @@ def test_F_M_S12_cross_check():
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P, V, offset=off + 51).reason
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P, V, offset=-1).reason
     assert "S-12:" in stop(fm.cross_check_decide, m, H, P[:-1], V, offset=off).reason
+
+# ------------------------------------------------------------------ oracle comparison (s7.1 / OPEN-X-5 point 6)
+# The oracle (tests/oracle_micro_spec.py, function oracle_micro) is TEST-ONLY and was written
+# by a different executor (P-8). Compared fields are count, OPEN, LOW, HIGH (card A-2 / R-C2);
+# LAST is recorded too, but ext2 remains the LAST reference (F-M-PARITY). Bit view, NaN-equal.
+from research_fulln480m.tests.oracle_micro_spec import oracle_micro
+
+
+def _assert_oracle(days):
+    m = fm.build_micro(days)
+    o = oracle_micro(days)
+    assert m.base_s == o["base_s"]
+    assert np.array_equal(m.count, o["count"])
+    for name, got in (("open", m.open), ("low", m.low), ("high", m.high)):
+        assert bits_equal(got, o[name]), name
+    assert np.array_equal(np.isnan(m.open), np.isnan(o["open"]))
+    assert np.array_equal(np.isnan(m.low), np.isnan(o["low"]))
+    assert np.array_equal(np.isnan(m.high), np.isnan(o["high"]))
+    return m, o
+
+
+def test_F_M_ORACLE_hand_fixtures():
+    _assert_oracle(ohlc_days())
+    _assert_oracle(xday_days())
+    _assert_oracle([(D0, arr([trade(D0, 20, 900, 30, 200.0), trade(D0, 20, 100, 31, 210.0)]))])
+    _assert_oracle([(D0, arr([
+        trade(D0, 40, 500, 10, 1000.0), trade(D0, 40, 500, 11, 1001.0), trade(D0, 40, 500, 12, 1002.0),
+        trade(D0, 41, 500, 22, 2002.0), trade(D0, 41, 500, 21, 2001.0), trade(D0, 41, 500, 20, 2000.0),
+        trade(D0, 42, 500, 71, 3071.0), trade(D0, 42, 500, 700, 3700.0), trade(D0, 42, 500, 7, 3007.0),
+        trade(D0, 42, 500, 70, 3070.0),
+    ]))])
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4, 5, 6, 7])
+def test_F_M_ORACLE_random_multiday(seed):
+    """Fixed seeds; two-day spans; same-ms ties and ms 0/999 are in gen_day; spans midnight."""
+    _assert_oracle(gen_span(seed, n_days=2))
