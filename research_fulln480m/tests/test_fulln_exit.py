@@ -822,6 +822,10 @@ def _ext2_first_hit(px, e0, H, d, S, p0_inj):
         "SL_BP": ref.SL_BP,
         "TR_BP": ref.TR_BP,
     }
+    # HM F2: first ndarray.any(axis) in a process lazily imports via
+    # the frame's __builtins__['__import__']. The restricted exec has none.
+    # Warm once outside the exec (HM probe: np.zeros((1,2),bool).any(1)).
+    np.zeros((1, 2), bool).any(1)
     ref.run_verbatim(ns)
     return ns["T"][0], ns["R"][0]
 
@@ -901,8 +905,9 @@ def _source_pin(lines):
         expect = _H5_LINE_SHAS[n]
         found = by_sha.get(expect)
         here = source[n - 1] if 0 <= n - 1 < len(source) else "<oob>"
-        assert found, "pinned content for historical L%s missing (sha=%s); L%s now %r" % (
-            n, expect, n, here)
+        n_found = 0 if found is None else len(found)
+        assert n_found == 1, "pinned content for historical L%s expected exactly one match (sha=%s, n_matches=%s); L%s now %r" % (
+            n, expect, n_found, n, here)
 
 
 def test_P_6b_LIQ_source_pin():
